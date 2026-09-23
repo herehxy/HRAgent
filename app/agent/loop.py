@@ -364,7 +364,6 @@ def _rule_answer(question: str, ctx: ToolCtx, reason: str = "",
     if not handled:
         lines.append("\n我可以直接回答这些问题（无需模型）：")
         lines.append("- 人才库有多少人？各档位分布如何？（统计）")
-        lines.append("- 帮我找做过真空熔铸、会 XRD 的候选人（技能召回）")
         lines.append("- 现在招聘管道各阶段有多少、有没有积压（管道）")
         lines.append("- 邮箱收了多少封简历、有没有没处理的（收信台账）")
         lines.append("- 有哪些待确认的提案 / 最近谁改了什么（提案与审计）")
