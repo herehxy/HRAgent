@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "provider": "openai_compatible",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "model": "qwen2.5:14b",
+  "api_key": "ollama",
+  "max_tool_rounds": 4,
+  "temperature": 0,
+  "timeout": 180,
+  "_presets": {
+    "ollama_14b": { "base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:14b", "api_key": "ollama" },
+    "ollama_8b":  { "base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:7b",  "api_key": "ollama" },
+    "deepseek":   { "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat", "api_key_env": "DEEPSEEK_API_KEY" }
+  },
+  "_note": "环境变量优先于本文件：LLM_BASE_URL / LLM_MODEL / LLM_API_KEY。Ollama 的 api_key 可任意填写。"
+}

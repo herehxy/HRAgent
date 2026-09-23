@@ -1,0 +1,8 @@
+{
+  // 虚拟环境建好后（python3 -m venv .venv），VSCode 会自动选中这里的解释器
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "files.exclude": {
+    "__pycache__": true
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "enabled": true,
+  "provider": "openai_compatible",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "model": "embeddinggemma:latest",
+  "timeout": 60,
+  "batch": 16,
+  "_presets": {
+    "ollama_gemma": { "base_url": "http://127.0.0.1:11434/v1", "model": "embeddinggemma:latest" },
+    "ollama_nomic": { "base_url": "http://127.0.0.1:11434/v1", "model": "nomic-embed-text" },
+    "bge_m3": { "base_url": "http://127.0.0.1:11434/v1", "model": "bge-m3" }
+  },
+  "_note": [
+    "环境变量优先：TP_EMBED_BASE_URL / TP_EMBED_MODEL / TP_EMBED_API_KEY。",
+    "向量只存在本机 SQLite，不外传；候选人文档不出内网。",
+    "模型不可用时自动退化为确定性哈希向量（结构相似性弱于语义，但不影响功能可用）。"
+  ]
+}

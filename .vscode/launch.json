@@ -1,0 +1,33 @@
+{
+  // 人才库智能体：VSCode 调试配置
+  // 用法：先建虚拟环境并在右下角选中 .venv 解释器，然后 F5 选下面的配置
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "启动工作台 (serve :8765)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/cli.py",
+      "args": ["serve", "--host", "127.0.0.1", "--port", "8765"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "跑端到端自检 (selftest)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/cli.py",
+      "args": ["selftest"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "导入本地文件夹 (ingest)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/cli.py",
+      "args": ["ingest"],
+      "console": "integratedTerminal"
+    }
+  ]
+}

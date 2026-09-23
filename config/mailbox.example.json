@@ -1,0 +1,35 @@
+{
+  "mode": "imap",
+  "eml_dir": "data/mail_in",
+  "folder_dir": "/Users/hxy/Desktop/HR_test1",
+  "archive_dir": "data/archive",
+  "attachment_ext": [
+    ".pdf",
+    ".docx",
+    ".doc",
+    ".txt",
+    ".md"
+  ],
+  "max_attachment_mb": 20,
+  "imap": {
+    "host": "imap.qq.com",
+    "port": 993,
+    "ssl": true,
+    "user": "",
+    "password_env": "TP_IMAP_PASSWORD",
+    "password_file": "config/imap.secret",
+    "folder": "INBOX",
+    "readonly": true
+  },
+  "dedup": {
+    "same_job_reapply_days": 30
+  },
+  "_说明": [
+    "mode=eml：读取 data/mail_in 下的 .eml 邮件，用于离线验证或内网隔离环境；",
+    "mode=imap：连企业邮箱的专用招聘收件箱，只读增量拉取（不删信、不改已读）；",
+    "mode=off：关闭抓取，只用手工放文件夹。",
+    "IMAP 口令只从环境变量 TP_IMAP_PASSWORD 或 config/imap.secret 读取，不进代码、不进日志。",
+    "same_job_reapply_days：同一人同一岗位在该天数内重复投递，按『新版本简历』归档而不新建投递；",
+    "若 HR 已确认过档位，新版本不会覆盖 HR 结论。"
+  ]
+}

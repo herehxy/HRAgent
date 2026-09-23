@@ -1,0 +1,28 @@
+{
+  "name": "财务",
+  "version": "1.0",
+  "description": "财务 / 会计方向常用技能。导入后财务岗即可用本体内的技能项做方向判定，不必把学科名硬填进「必需技能」。",
+  "skills": [
+    { "canonical": "会计核算", "category": "管理", "aliases": ["账务处理", "记账", "财务会计", "会计处理"] },
+    { "canonical": "财务报表", "category": "管理", "aliases": ["报表编制", "三大报表", "资产负债表", "利润表"] },
+    { "canonical": "财务分析", "category": "管理", "aliases": ["财务指标分析", "经营分析", "财务指标"] },
+    { "canonical": "成本核算", "category": "管理", "aliases": ["品种法", "分步法", "分批法"] },
+    { "canonical": "全成本核算", "category": "管理", "aliases": ["全成本管理"] },
+    { "canonical": "预算管理", "category": "管理", "aliases": ["全面预算", "预算编制", "预算控制"] },
+    { "canonical": "资金管理", "category": "管理", "aliases": ["资金计划", "资金调度", "资金池"] },
+    { "canonical": "税务申报", "category": "管理", "aliases": ["纳税申报", "报税", "税务筹划", "发票认证"] },
+    { "canonical": "用友", "category": "管理", "aliases": ["用友U8", "用友NC", "U8", "NC财务"] },
+    { "canonical": "金蝶", "category": "管理", "aliases": ["金蝶K3", "金蝶云", "K3"] },
+    { "canonical": "财务共享", "category": "管理", "aliases": ["财务共享中心", "FSSC"] },
+    { "canonical": "内控合规", "category": "管理", "aliases": ["内部控制", "内控体系", "内控评价"] },
+    { "canonical": "内部审计", "category": "管理", "aliases": ["审计底稿", "内审"] },
+    { "canonical": "合并报表", "category": "管理", "aliases": ["集团合并报表"] },
+    { "canonical": "固定资产管理", "category": "管理", "aliases": ["固定资产核算", "资产盘点"] },
+    { "canonical": "存货核算", "category": "管理", "aliases": ["存货管理", "库存核算"] },
+    { "canonical": "往来对账", "category": "管理", "aliases": ["应收账款管理", "应付账款管理", "对账"] },
+    { "canonical": "财务建模", "category": "管理", "aliases": ["财务模型", "测算模型"] },
+    { "canonical": "管理会计", "category": "管理", "aliases": ["管理会计报告", "经营决策支持"] },
+    { "canonical": "会计信息化", "category": "管理", "aliases": ["财务系统实施", "财务信息化", "ERP财务模块"] },
+    { "canonical": "研发费用归集", "category": "管理", "aliases": ["研发费用加计扣除", "高企研发费用"] }
+  ]
+}

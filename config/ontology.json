@@ -1,0 +1,2253 @@
+{
+  "version": "1.4",
+  "note": "技能本体：同一技能的不同写法归一到 canonical 名。围绕稀有金属材料（钛/难熔/高温合金）研发-小试-生产-表征-质量全链条编制，可按岗位族继续扩充。category 用于分组统计与界面呈现；v1.6 增补通用软件开发技能（Java/Spring Boot/Redis/微服务等），原「软件」类仅覆盖工程仿真软件，无法支撑软件开发岗的专业大类匹配。\n[2026-09-23 14:28] 导入领域包「财务」：新增 21 条、合并 0 条、别名迁移 1 条。\n[2026-09-23 14:28] 导入领域包「数字化」：新增 31 条、合并 7 条、别名迁移 3 条。\n[2026-09-23 14:28] 导入领域包「检验检测」：新增 11 条、合并 3 条、别名迁移 2 条。",
+  "categories": [
+    "材料",
+    "工艺",
+    "表征",
+    "软件",
+    "管理",
+    "其他"
+  ],
+  "skills": [
+    {
+      "canonical": "钛合金",
+      "aliases": [
+        "Ti合金",
+        "钛材",
+        "钛及钛合金"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "工业纯钛",
+      "aliases": [
+        "纯钛",
+        "TA1",
+        "TA2"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "海绵钛",
+      "aliases": [],
+      "category": "材料"
+    },
+    {
+      "canonical": "钛基复合材料",
+      "aliases": [
+        "TMC"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "钛铝金属间化合物",
+      "aliases": [
+        "TiAl",
+        "钛铝合金",
+        "γ-TiAl"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "高熵合金",
+      "aliases": [
+        "HEA",
+        "多主元合金",
+        "高熵材料"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "难熔高熵合金",
+      "aliases": [
+        "RHEA",
+        "难熔多主元合金"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "高温合金",
+      "aliases": [
+        "超合金",
+        "耐热合金",
+        "superalloy"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "镍基高温合金",
+      "aliases": [
+        "镍基合金",
+        "GH4169",
+        "Inconel"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "钴基合金",
+      "aliases": [
+        "钴基高温合金"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "钨合金",
+      "aliases": [
+        "钨钼合金",
+        "W合金"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "钼合金",
+      "aliases": [
+        "Mo合金"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "钽铌合金",
+      "aliases": [
+        "钽合金",
+        "铌合金",
+        "Ta-Nb"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "锆合金",
+      "aliases": [
+        "Zr合金",
+        "锆材"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "铍材",
+      "aliases": [
+        "铍合金"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "铝合金",
+      "aliases": [
+        "Al合金",
+        "铝锂合金"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "镁合金",
+      "aliases": [
+        "Mg合金"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "铜合金",
+      "aliases": [
+        "铜铬锆",
+        "CuCrZr"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "不锈钢",
+      "aliases": [
+        "奥氏体不锈钢",
+        "马氏体不锈钢"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "形状记忆合金",
+      "aliases": [
+        "记忆合金",
+        "NiTi"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "储氢合金",
+      "aliases": [],
+      "category": "材料"
+    },
+    {
+      "canonical": "溅射靶材",
+      "aliases": [
+        "靶材",
+        "靶材制备"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "中间合金",
+      "aliases": [
+        "母合金",
+        "铝钼中间合金"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "金属粉末",
+      "aliases": [
+        "球形粉末",
+        "钛粉",
+        "合金粉"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "稀土材料",
+      "aliases": [
+        "稀土功能材料"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "硬质合金",
+      "aliases": [
+        "WC-Co"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "多孔金属",
+      "aliases": [
+        "泡沫金属",
+        "金属泡沫"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "金属基复合材料",
+      "aliases": [
+        "MMC"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "单晶合金",
+      "aliases": [
+        "单晶叶片材料"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "定向凝固合金",
+      "aliases": [
+        "定向凝固材料"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "医用金属材料",
+      "aliases": [
+        "生物医用钛",
+        "医用钛合金"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "材料成型",
+      "aliases": [
+        "材料成形",
+        "塑性成型",
+        "成型工艺",
+        "成形工艺",
+        "压力加工",
+        "塑性加工"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "热加工",
+      "aliases": [
+        "热加工工艺"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "真空技术",
+      "aliases": [
+        "真空系统",
+        "真空设备",
+        "真空获得"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "机械设计",
+      "aliases": [
+        "机械结构设计",
+        "机械制图"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "技术报告编写",
+      "aliases": [
+        "技术报告",
+        "研究报告编写",
+        "科技报告"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "真空熔铸",
+      "aliases": [
+        "真空铸造",
+        "真空浇铸"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "真空电弧熔炼",
+      "aliases": [
+        "VAR",
+        "真空自耗电弧熔炼",
+        "电弧熔炼"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "电子束熔炼",
+      "aliases": [
+        "EB熔炼",
+        "EBM熔炼"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "等离子熔炼",
+      "aliases": [
+        "等离子弧熔炼",
+        "PAM"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "真空感应熔炼",
+      "aliases": [
+        "VIM",
+        "感应熔炼"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "电渣熔炼",
+      "aliases": [
+        "ESR",
+        "电渣重熔"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "悬浮熔炼",
+      "aliases": [
+        "磁悬浮熔炼",
+        "冷坩埚熔炼"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "铸造",
+      "aliases": [
+        "铸造成型",
+        "浇注"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "精密铸造",
+      "aliases": [
+        "熔模铸造",
+        "精铸"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "定向凝固",
+      "aliases": [
+        "定向凝固工艺"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "单晶制备",
+      "aliases": [
+        "单晶生长",
+        "单晶工艺"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "锻造",
+      "aliases": [
+        "锻造成型"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "自由锻",
+      "aliases": [
+        "自由锻造"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "模锻",
+      "aliases": [
+        "等温锻",
+        "等温锻造",
+        "模锻成型"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "轧制",
+      "aliases": [
+        "轧制成型",
+        "板材轧制"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "热轧",
+      "aliases": [
+        "热轧工艺"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "冷轧",
+      "aliases": [
+        "冷轧工艺"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "挤压",
+      "aliases": [
+        "挤压成型",
+        "挤压工艺"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "拉拔",
+      "aliases": [
+        "拉拔成型",
+        "拉丝"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "旋压",
+      "aliases": [
+        "旋压成型"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "冲压",
+      "aliases": [
+        "冲压成型"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "焊接",
+      "aliases": [
+        "焊接工艺"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "电子束焊",
+      "aliases": [
+        "EBW"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "激光焊",
+      "aliases": [
+        "激光焊接"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "扩散焊",
+      "aliases": [
+        "扩散连接",
+        "DB"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "摩擦焊",
+      "aliases": [
+        "搅拌摩擦焊",
+        "FSW"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "钎焊",
+      "aliases": [
+        "真空钎焊"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "热处理",
+      "aliases": [
+        "热处理工艺"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "退火",
+      "aliases": [
+        "真空退火",
+        "去应力退火"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "固溶处理",
+      "aliases": [
+        "固溶",
+        "固溶时效"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "时效处理",
+      "aliases": [
+        "时效",
+        "人工时效"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "淬火",
+      "aliases": [
+        "淬火工艺"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "回火",
+      "aliases": [
+        "回火工艺"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "表面处理",
+      "aliases": [
+        "表面改性",
+        "表面工程"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "阳极氧化",
+      "aliases": [
+        "微弧氧化",
+        "MAO"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "喷丸强化",
+      "aliases": [
+        "喷丸",
+        "表面强化"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "化学铣削",
+      "aliases": [
+        "化铣"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "机加工",
+      "aliases": [
+        "机械加工",
+        "数控加工",
+        "CNC"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "车削",
+      "aliases": [
+        "车加工"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "铣削",
+      "aliases": [
+        "铣加工"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "磨削",
+      "aliases": [
+        "磨加工"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "线切割",
+      "aliases": [
+        "电火花线切割",
+        "WEDM"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "电火花加工",
+      "aliases": [
+        "EDM",
+        "电火花"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "增材制造",
+      "aliases": [
+        "3D打印",
+        "3D 打印",
+        "AM"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "激光选区熔化",
+      "aliases": [
+        "SLM",
+        "选区激光熔化"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "电子束熔化",
+      "aliases": [
+        "EBM",
+        "电子束选区熔化"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "激光熔覆",
+      "aliases": [
+        "激光熔覆沉积",
+        "LMD"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "粉末冶金",
+      "aliases": [
+        "PM",
+        "粉冶"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "热等静压",
+      "aliases": [
+        "HIP",
+        "热等静压致密化"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "冷等静压",
+      "aliases": [
+        "CIP"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "烧结",
+      "aliases": [
+        "真空烧结",
+        "烧结工艺"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "放电等离子烧结",
+      "aliases": [
+        "SPS",
+        "等离子烧结"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "气雾化制粉",
+      "aliases": [
+        "气雾化",
+        "EIGA",
+        "PREP"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "球磨",
+      "aliases": [
+        "机械球磨",
+        "高能球磨"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "机械合金化",
+      "aliases": [
+        "MA",
+        "机械合金化法"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "注射成型",
+      "aliases": [
+        "MIM",
+        "金属注射成型"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "连铸",
+      "aliases": [
+        "连续铸造"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "真空脱气",
+      "aliases": [
+        "脱气处理",
+        "除气"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "电子束冷床熔炼",
+      "aliases": [
+        "EBCHM",
+        "冷床熔炼"
+      ],
+      "category": "工艺"
+    },
+    {
+      "canonical": "金相分析",
+      "aliases": [
+        "金相",
+        "金相组织分析",
+        "OM"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "扫描电镜",
+      "aliases": [
+        "SEM",
+        "扫描电子显微镜"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "透射电镜",
+      "aliases": [
+        "TEM",
+        "透射电子显微镜"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "高分辨透射电镜",
+      "aliases": [
+        "HRTEM"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "X射线衍射",
+      "aliases": [
+        "XRD",
+        "X 射线衍射",
+        "X射线衍射分析"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "电子探针",
+      "aliases": [
+        "EPMA",
+        "电子探针分析"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "能谱分析",
+      "aliases": [
+        "EDS",
+        "EDX",
+        "能谱"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "电子背散射衍射",
+      "aliases": [
+        "EBSD",
+        "背散射衍射"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "差示扫描量热",
+      "aliases": [
+        "DSC",
+        "差热分析",
+        "DTA"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "热重分析",
+      "aliases": [
+        "TGA",
+        "热重"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "力学性能测试",
+      "aliases": [
+        "力学性能试验",
+        "力学性能"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "拉伸试验",
+      "aliases": [
+        "拉伸性能",
+        "常温拉伸",
+        "高温拉伸"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "压缩试验",
+      "aliases": [
+        "压缩性能"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "冲击试验",
+      "aliases": [
+        "冲击韧性",
+        "夏比冲击"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "硬度测试",
+      "aliases": [
+        "洛氏硬度",
+        "维氏硬度",
+        "布氏硬度",
+        "HV",
+        "HRC"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "疲劳试验",
+      "aliases": [
+        "高周疲劳",
+        "低周疲劳",
+        "疲劳性能"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "断裂韧性",
+      "aliases": [
+        "KIC",
+        "断裂力学"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "蠕变试验",
+      "aliases": [
+        "高温蠕变",
+        "蠕变性能",
+        "持久强度"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "无损检测",
+      "aliases": [
+        "NDT",
+        "无损探伤"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "超声检测",
+      "aliases": [
+        "超声探伤",
+        "UT",
+        "超声波检测"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "X射线检测",
+      "aliases": [
+        "X光检测"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "工业CT",
+      "aliases": [
+        "CT检测",
+        "工业断层扫描"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "渗透检测",
+      "aliases": [
+        "PT",
+        "荧光渗透",
+        "着色检测"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "磁粉检测",
+      "aliases": [
+        "MT",
+        "磁粉探伤"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "成分分析",
+      "aliases": [
+        "化学成分分析",
+        "化学分析"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "光谱分析",
+      "aliases": [
+        "ICP",
+        "ICP-MS",
+        "直读光谱"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "氧氮氢分析",
+      "aliases": [
+        "氧氮氢",
+        "ONH分析"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "碳硫分析",
+      "aliases": [
+        "CS分析"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "密度测定",
+      "aliases": [
+        "密度测试",
+        "阿基米德法"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "腐蚀试验",
+      "aliases": [
+        "盐雾试验",
+        "电化学腐蚀",
+        "耐蚀性评价"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "高温氧化试验",
+      "aliases": [
+        "抗氧化性能",
+        "氧化增重"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "失效分析",
+      "aliases": [
+        "断裂分析",
+        "失效原因分析"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "组织分析",
+      "aliases": [
+        "显微组织分析",
+        "微观组织"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "热处理工艺试验",
+      "aliases": [
+        "工艺试验",
+        "热处理试验"
+      ],
+      "category": "表征"
+    },
+    {
+      "canonical": "ANSYS",
+      "aliases": [
+        "ANSYS Workbench"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "ABAQUS",
+      "aliases": [
+        "Abaqus"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "DEFORM",
+      "aliases": [
+        "Deform",
+        "DEFORM-3D"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "ProCAST",
+      "aliases": [
+        "Procast"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "MAGMA",
+      "aliases": [
+        "MAGMAsoft"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "JMatPro",
+      "aliases": [
+        "Jmatpro"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Thermo-Calc",
+      "aliases": [
+        "ThermoCalc",
+        "thermocalc"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Pandat",
+      "aliases": [],
+      "category": "软件"
+    },
+    {
+      "canonical": "Materials Studio",
+      "aliases": [
+        "MS模拟"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "VASP",
+      "aliases": [
+        "第一性原理计算",
+        "DFT"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "LAMMPS",
+      "aliases": [
+        "分子动力学",
+        "MD模拟"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "CATIA",
+      "aliases": [],
+      "category": "软件"
+    },
+    {
+      "canonical": "SolidWorks",
+      "aliases": [
+        "SW"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "UG NX",
+      "aliases": [
+        "UG",
+        "NX"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "AutoCAD",
+      "aliases": [
+        "CAD",
+        "CAD制图"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Origin",
+      "aliases": [
+        "Origin作图"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "MATLAB",
+      "aliases": [
+        "Matlab"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Python",
+      "aliases": [
+        "Python开发",
+        "python"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "SQL",
+      "aliases": [
+        "数据库",
+        "MySQL",
+        "PostgreSQL"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "MES",
+      "aliases": [
+        "制造执行系统"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "ERP",
+      "aliases": [
+        "企业资源计划"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "PLM",
+      "aliases": [
+        "产品生命周期管理"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "LIMS",
+      "aliases": [
+        "实验室信息管理系统"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Power BI",
+      "aliases": [
+        "PowerBI",
+        "Tableau",
+        "BI报表"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Minitab",
+      "aliases": [
+        "数据分析工具"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "质量管理",
+      "aliases": [
+        "质量管理体系",
+        "质量管控"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "GJB9001",
+      "aliases": [
+        "GJB9001C",
+        "国军标质量管理体系"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "ISO9001",
+      "aliases": [
+        "ISO 9001"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "AS9100",
+      "aliases": [
+        "航空航天质量管理体系"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "六西格玛",
+      "aliases": [
+        "6Sigma",
+        "Six Sigma"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "精益生产",
+      "aliases": [
+        "精益管理",
+        "Lean"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "5S管理",
+      "aliases": [
+        "5S",
+        "现场管理"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "APQP",
+      "aliases": [
+        "先期产品质量策划"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "FMEA",
+      "aliases": [
+        "失效模式分析"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "SPC",
+      "aliases": [
+        "统计过程控制"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "MSA",
+      "aliases": [
+        "测量系统分析"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "8D报告",
+      "aliases": [
+        "8D",
+        "纠正措施报告"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "QC七大手法",
+      "aliases": [
+        "QC七工具",
+        "质量工具"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "计量管理",
+      "aliases": [
+        "计量器具管理",
+        "计量确认"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "计量校准",
+      "aliases": [
+        "校准",
+        "检定",
+        "检定规程"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "内审员",
+      "aliases": [
+        "内部审核",
+        "体系内审"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "项目管理",
+      "aliases": [
+        "项目负责",
+        "课题管理"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "研发管理",
+      "aliases": [
+        "科研管理",
+        "技术管理"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "工艺文件编制",
+      "aliases": [
+        "工艺规程编制",
+        "工艺文件"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "技术标准编制",
+      "aliases": [
+        "标准编制",
+        "企业标准"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "专利撰写",
+      "aliases": [
+        "发明专利",
+        "专利"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "科技论文写作",
+      "aliases": [
+        "论文发表",
+        "SCI论文"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "项目申报",
+      "aliases": [
+        "课题申报",
+        "科技项目申报"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "保密管理",
+      "aliases": [
+        "涉密管理",
+        "保密资格"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "生产计划",
+      "aliases": [
+        "生产调度",
+        "排产"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "设备管理",
+      "aliases": [
+        "设备维护",
+        "点检"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "安全生产",
+      "aliases": [
+        "安全环保",
+        "EHS"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "供应链管理",
+      "aliases": [
+        "采购管理",
+        "供应商管理"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "成本控制",
+      "aliases": [
+        "降本"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "工程师职称",
+      "aliases": [
+        "中级职称",
+        "高级职称",
+        "正高级职称",
+        "助理工程师",
+        "高级工程师"
+      ],
+      "category": "管理"
+    },
+    {
+      "canonical": "Java",
+      "aliases": [
+        "Java SE",
+        "Java EE",
+        "Java开发"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Spring Boot",
+      "aliases": [
+        "SpringBoot",
+        "Springboot",
+        "Spring Boot框架"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Spring Cloud",
+      "aliases": [
+        "SpringCloud"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "MyBatis",
+      "aliases": [
+        "MyBatis-Plus",
+        "Mybatis"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Redis",
+      "aliases": [
+        "Redis缓存"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "MySQL",
+      "aliases": [
+        "MySQL数据库"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "PostgreSQL",
+      "aliases": [
+        "PGSQL",
+        "Postgres"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "MongoDB",
+      "aliases": [
+        "Mongo"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Elasticsearch",
+      "aliases": [
+        "ElasticSearch"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Kafka",
+      "aliases": [
+        "Kafka消息队列"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "RabbitMQ",
+      "aliases": [
+        "Rabbit MQ"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "消息队列",
+      "aliases": [
+        "MQ中间件",
+        "消息中间件",
+        "Kafka",
+        "RabbitMQ",
+        "RocketMQ"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "微服务",
+      "aliases": [
+        "微服务架构",
+        "服务治理"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "分布式",
+      "aliases": [
+        "分布式系统",
+        "分布式架构",
+        "集群"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "RESTful API",
+      "aliases": [
+        "REST API",
+        "RESTful",
+        "接口设计"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Docker",
+      "aliases": [
+        "容器技术"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Kubernetes",
+      "aliases": [
+        "K8s",
+        "容器编排"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Linux",
+      "aliases": [
+        "Linux系统",
+        "CentOS",
+        "Ubuntu",
+        "麒麟Linux",
+        "服务器操作系统"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Git",
+      "aliases": [
+        "Git版本控制",
+        "版本控制",
+        "GitLab",
+        "代码版本管理",
+        "SVN"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "CI/CD",
+      "aliases": [
+        "持续交付",
+        "CICD"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Jenkins",
+      "aliases": [
+        "Jenkins流水线"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Nginx",
+      "aliases": [
+        "Nginx反向代理",
+        "负载均衡",
+        "反向代理"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "JVM",
+      "aliases": [
+        "Java虚拟机",
+        "JVM调优"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "并发编程",
+      "aliases": [
+        "多线程",
+        "并发控制"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "设计模式",
+      "aliases": [
+        "设计模式应用"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "单元测试",
+      "aliases": [
+        "单元测试框架",
+        "JUnit",
+        "测试用例设计"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "Vue",
+      "aliases": [
+        "Vue.js",
+        "Vue3",
+        "Vue2"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "TypeScript",
+      "aliases": [
+        "TS语言"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "JavaScript",
+      "aliases": [
+        "JS语言"
+      ],
+      "category": "软件"
+    },
+    {
+      "canonical": "难熔合金",
+      "aliases": [
+        "难熔金属",
+        "难熔金属材料"
+      ],
+      "category": "材料"
+    },
+    {
+      "canonical": "会计核算",
+      "category": "管理",
+      "aliases": [
+        "账务处理",
+        "记账",
+        "财务会计",
+        "会计处理"
+      ]
+    },
+    {
+      "canonical": "财务报表",
+      "category": "管理",
+      "aliases": [
+        "报表编制",
+        "三大报表",
+        "资产负债表",
+        "利润表"
+      ]
+    },
+    {
+      "canonical": "财务分析",
+      "category": "管理",
+      "aliases": [
+        "财务指标分析",
+        "经营分析",
+        "财务指标"
+      ]
+    },
+    {
+      "canonical": "成本核算",
+      "category": "管理",
+      "aliases": [
+        "品种法",
+        "分步法",
+        "分批法"
+      ]
+    },
+    {
+      "canonical": "全成本核算",
+      "category": "管理",
+      "aliases": [
+        "全成本管理"
+      ]
+    },
+    {
+      "canonical": "预算管理",
+      "category": "管理",
+      "aliases": [
+        "全面预算",
+        "预算编制",
+        "预算控制"
+      ]
+    },
+    {
+      "canonical": "资金管理",
+      "category": "管理",
+      "aliases": [
+        "资金计划",
+        "资金调度",
+        "资金池"
+      ]
+    },
+    {
+      "canonical": "税务申报",
+      "category": "管理",
+      "aliases": [
+        "纳税申报",
+        "报税",
+        "税务筹划",
+        "发票认证"
+      ]
+    },
+    {
+      "canonical": "用友",
+      "category": "管理",
+      "aliases": [
+        "用友U8",
+        "用友NC",
+        "U8",
+        "NC财务"
+      ]
+    },
+    {
+      "canonical": "金蝶",
+      "category": "管理",
+      "aliases": [
+        "金蝶K3",
+        "金蝶云",
+        "K3"
+      ]
+    },
+    {
+      "canonical": "财务共享",
+      "category": "管理",
+      "aliases": [
+        "财务共享中心",
+        "FSSC"
+      ]
+    },
+    {
+      "canonical": "内控合规",
+      "category": "管理",
+      "aliases": [
+        "内部控制",
+        "内控体系",
+        "内控评价"
+      ]
+    },
+    {
+      "canonical": "内部审计",
+      "category": "管理",
+      "aliases": [
+        "审计底稿",
+        "内审"
+      ]
+    },
+    {
+      "canonical": "合并报表",
+      "category": "管理",
+      "aliases": [
+        "集团合并报表"
+      ]
+    },
+    {
+      "canonical": "固定资产管理",
+      "category": "管理",
+      "aliases": [
+        "固定资产核算",
+        "资产盘点"
+      ]
+    },
+    {
+      "canonical": "存货核算",
+      "category": "管理",
+      "aliases": [
+        "存货管理",
+        "库存核算"
+      ]
+    },
+    {
+      "canonical": "往来对账",
+      "category": "管理",
+      "aliases": [
+        "应收账款管理",
+        "应付账款管理",
+        "对账"
+      ]
+    },
+    {
+      "canonical": "财务建模",
+      "category": "管理",
+      "aliases": [
+        "财务模型",
+        "测算模型"
+      ]
+    },
+    {
+      "canonical": "管理会计",
+      "category": "管理",
+      "aliases": [
+        "管理会计报告",
+        "经营决策支持"
+      ]
+    },
+    {
+      "canonical": "会计信息化",
+      "category": "管理",
+      "aliases": [
+        "财务系统实施",
+        "财务信息化",
+        "ERP财务模块"
+      ]
+    },
+    {
+      "canonical": "研发费用归集",
+      "category": "管理",
+      "aliases": [
+        "研发费用加计扣除",
+        "高企研发费用"
+      ]
+    },
+    {
+      "canonical": "网络安全",
+      "category": "软件",
+      "aliases": [
+        "信息安全",
+        "网络与信息安全",
+        "安全防护"
+      ]
+    },
+    {
+      "canonical": "等级保护",
+      "category": "软件",
+      "aliases": [
+        "等保",
+        "等保2.0",
+        "等级保护测评",
+        "等保测评"
+      ]
+    },
+    {
+      "canonical": "渗透测试",
+      "category": "软件",
+      "aliases": [
+        "漏洞挖掘",
+        "安全测试"
+      ]
+    },
+    {
+      "canonical": "漏洞扫描",
+      "category": "软件",
+      "aliases": [
+        "安全扫描",
+        "漏洞管理"
+      ]
+    },
+    {
+      "canonical": "防火墙",
+      "category": "软件",
+      "aliases": [
+        "下一代防火墙",
+        "安全域划分"
+      ]
+    },
+    {
+      "canonical": "VPN",
+      "category": "软件",
+      "aliases": [
+        "专线接入",
+        "远程接入"
+      ]
+    },
+    {
+      "canonical": "堡垒机",
+      "category": "软件",
+      "aliases": [
+        "运维审计"
+      ]
+    },
+    {
+      "canonical": "日志审计",
+      "category": "软件",
+      "aliases": [
+        "安全审计",
+        "日志管理"
+      ]
+    },
+    {
+      "canonical": "数据安全",
+      "category": "软件",
+      "aliases": [
+        "数据分级分类",
+        "数据脱敏",
+        "数据加密"
+      ]
+    },
+    {
+      "canonical": "网络运维",
+      "category": "软件",
+      "aliases": [
+        "网络管理",
+        "网络规划"
+      ]
+    },
+    {
+      "canonical": "系统运维",
+      "category": "软件",
+      "aliases": [
+        "服务器运维",
+        "运维管理",
+        "机房管理"
+      ]
+    },
+    {
+      "canonical": "信创适配",
+      "category": "软件",
+      "aliases": [
+        "信创",
+        "国产化适配",
+        "国产化替代",
+        "信创改造"
+      ]
+    },
+    {
+      "canonical": "达梦数据库",
+      "category": "软件",
+      "aliases": [
+        "DM8",
+        "达梦"
+      ]
+    },
+    {
+      "canonical": "人大金仓",
+      "category": "软件",
+      "aliases": [
+        "KingbaseES",
+        "金仓数据库"
+      ]
+    },
+    {
+      "canonical": "麒麟操作系统",
+      "category": "软件",
+      "aliases": [
+        "银河麒麟",
+        "统信UOS",
+        "国产操作系统"
+      ]
+    },
+    {
+      "canonical": "容器",
+      "category": "软件",
+      "aliases": [
+        "Docker",
+        "容器化"
+      ]
+    },
+    {
+      "canonical": "Shell",
+      "category": "软件",
+      "aliases": [
+        "Shell脚本",
+        "Bash",
+        "运维脚本"
+      ]
+    },
+    {
+      "canonical": "持续集成",
+      "category": "软件",
+      "aliases": [
+        "CI/CD",
+        "Jenkins",
+        "流水线",
+        "自动化部署"
+      ]
+    },
+    {
+      "canonical": "接口测试",
+      "category": "软件",
+      "aliases": [
+        "Postman",
+        "自动化测试",
+        "联调测试"
+      ]
+    },
+    {
+      "canonical": "前端开发",
+      "category": "软件",
+      "aliases": [
+        "Vue",
+        "React",
+        "JavaScript",
+        "TypeScript",
+        "HTML",
+        "CSS"
+      ]
+    },
+    {
+      "canonical": "Node.js",
+      "category": "软件",
+      "aliases": [
+        "NodeJS",
+        "Express"
+      ]
+    },
+    {
+      "canonical": "微信小程序",
+      "category": "软件",
+      "aliases": [
+        "小程序开发",
+        "移动端开发"
+      ]
+    },
+    {
+      "canonical": "需求分析",
+      "category": "软件",
+      "aliases": [
+        "业务需求分析",
+        "需求调研",
+        "需求管理"
+      ]
+    },
+    {
+      "canonical": "系统设计",
+      "category": "软件",
+      "aliases": [
+        "架构设计",
+        "概要设计",
+        "详细设计",
+        "技术方案"
+      ]
+    },
+    {
+      "canonical": "数据治理",
+      "category": "软件",
+      "aliases": [
+        "数据标准",
+        "数据质量",
+        "主数据管理"
+      ]
+    },
+    {
+      "canonical": "数据仓库",
+      "category": "软件",
+      "aliases": [
+        "数仓",
+        "数据集市"
+      ]
+    },
+    {
+      "canonical": "数据中台",
+      "category": "软件",
+      "aliases": [
+        "数据平台",
+        "业务中台"
+      ]
+    },
+    {
+      "canonical": "ETL",
+      "category": "软件",
+      "aliases": [
+        "数据抽取",
+        "数据集成",
+        "数据清洗"
+      ]
+    },
+    {
+      "canonical": "数据可视化",
+      "category": "软件",
+      "aliases": [
+        "报表开发",
+        "大屏设计",
+        "BI开发"
+      ]
+    },
+    {
+      "canonical": "机器学习",
+      "category": "软件",
+      "aliases": [
+        "深度学习",
+        "AI算法",
+        "模型训练"
+      ]
+    },
+    {
+      "canonical": "研发项目管理",
+      "category": "软件",
+      "aliases": [
+        "Jira",
+        "TAPD",
+        "禅道",
+        "敏捷开发"
+      ]
+    },
+    {
+      "canonical": "相控阵超声检测",
+      "category": "表征",
+      "aliases": [
+        "相控阵",
+        "PAUT",
+        "相控阵超声"
+      ]
+    },
+    {
+      "canonical": "涡流检测",
+      "category": "表征",
+      "aliases": [
+        "ET",
+        "涡流"
+      ]
+    },
+    {
+      "canonical": "声发射检测",
+      "category": "表征",
+      "aliases": [
+        "声发射",
+        "AE检测"
+      ]
+    },
+    {
+      "canonical": "泄漏检测",
+      "category": "表征",
+      "aliases": [
+        "气密性检测",
+        "氦质谱检漏"
+      ]
+    },
+    {
+      "canonical": "射线检测",
+      "category": "表征",
+      "aliases": [
+        "RT",
+        "射线探伤",
+        "胶片射线检测"
+      ]
+    },
+    {
+      "canonical": "无损检测工艺编制",
+      "category": "工艺",
+      "aliases": [
+        "无损检测方案",
+        "检测工艺卡",
+        "检测规程"
+      ]
+    },
+    {
+      "canonical": "无损检测标准",
+      "category": "管理",
+      "aliases": [
+        "NB/T 47013",
+        "GB/T 11345",
+        "GJB 1580",
+        "检测标准"
+      ]
+    },
+    {
+      "canonical": "无损检测资质",
+      "category": "管理",
+      "aliases": [
+        "UT二级",
+        "RT二级",
+        "无损检测证书",
+        "特种设备检测资格"
+      ]
+    },
+    {
+      "canonical": "仪器设备校准",
+      "category": "管理",
+      "aliases": [
+        "设备检定",
+        "仪器校验",
+        "量值溯源"
+      ]
+    },
+    {
+      "canonical": "检测报告编制",
+      "category": "管理",
+      "aliases": [
+        "检验报告",
+        "检测记录"
+      ]
+    },
+    {
+      "canonical": "实验室质量体系",
+      "category": "管理",
+      "aliases": [
+        "CNAS",
+        "CMA",
+        "实验室认可",
+        "ISO/IEC 17025"
+      ]
+    }
+  ]
+}

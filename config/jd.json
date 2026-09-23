@@ -1,0 +1,40 @@
+{
+  "role": "默认岗位",
+  "department": "",
+  "must": {
+    "education_min": "本科",
+    "years_min": 3,
+    "skills_required": [
+      "钛合金",
+      "真空熔铸",
+      "材料成型"
+    ]
+  },
+  "preferred": {
+    "skills": [
+      "难熔合金",
+      "粉末冶金",
+      "热加工",
+      "锻造",
+      "热处理",
+      "金相分析",
+      "ANSYS",
+      "增材制造"
+    ],
+    "certificates": [
+      "中级职称",
+      "计量员证"
+    ]
+  },
+  "mailbox": {
+    "note": "P1 阶段接入：专用招聘收件箱 + IMAP 只读（不删不改已读），凭据走环境变量",
+    "imap_host": "",
+    "imap_port": 993,
+    "folder": "INBOX",
+    "attachment_ext": [
+      ".pdf",
+      ".docx",
+      ".doc"
+    ]
+  }
+}

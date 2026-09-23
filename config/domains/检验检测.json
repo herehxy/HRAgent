@@ -1,0 +1,21 @@
+{
+  "name": "检验检测",
+  "version": "1.0",
+  "description": "检验检测 / 无损检测方向常用技能。补齐本体在检测方法、检测标准与检测资质上的空白，供检验检测类岗位使用。",
+  "skills": [
+    { "canonical": "相控阵超声检测", "category": "表征", "aliases": ["相控阵", "PAUT", "相控阵超声"] },
+    { "canonical": "涡流检测", "category": "表征", "aliases": ["ET", "涡流"] },
+    { "canonical": "声发射检测", "category": "表征", "aliases": ["声发射", "AE检测"] },
+    { "canonical": "泄漏检测", "category": "表征", "aliases": ["气密性检测", "氦质谱检漏"] },
+    { "canonical": "射线检测", "category": "表征", "aliases": ["RT", "射线探伤", "胶片射线检测"] },
+    { "canonical": "超声检测", "category": "表征", "aliases": ["UT", "超声波检测", "超声探伤"] },
+    { "canonical": "磁粉检测", "category": "表征", "aliases": ["MT", "磁粉探伤"] },
+    { "canonical": "渗透检测", "category": "表征", "aliases": ["PT", "着色检测", "荧光渗透"] },
+    { "canonical": "无损检测工艺编制", "category": "工艺", "aliases": ["无损检测方案", "检测工艺卡", "检测规程"] },
+    { "canonical": "无损检测标准", "category": "管理", "aliases": ["NB/T 47013", "GB/T 11345", "GJB 1580", "检测标准"] },
+    { "canonical": "无损检测资质", "category": "管理", "aliases": ["UT二级", "RT二级", "无损检测证书", "特种设备检测资格"] },
+    { "canonical": "仪器设备校准", "category": "管理", "aliases": ["设备检定", "仪器校验", "量值溯源"] },
+    { "canonical": "检测报告编制", "category": "管理", "aliases": ["检验报告", "检测记录"] },
+    { "canonical": "实验室质量体系", "category": "管理", "aliases": ["CNAS", "CMA", "实验室认可", "ISO/IEC 17025"] }
+  ]
+}
