@@ -4,11 +4,11 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "启动工作台 (serve :8765)",
+      "name": "启动工作台 (serve :8756)",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/cli.py",
-      "args": ["serve", "--host", "127.0.0.1", "--port", "8765"],
+      "args": ["serve", "--host", "127.0.0.1", "--port", "8756"],
       "console": "integratedTerminal",
       "justMyCode": false
     },
