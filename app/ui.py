@@ -1,6 +1,6 @@
 """工作台界面：单页应用（HTML + 原生 JS，无构建步骤、无外部 CDN）。
 
-十个视图：人才库 / 投递管道 / 归档 / 智能助手 / 导入与来源 / 岗位管理 /
+九个视图：人才库（顶部内嵌投递管道折叠条） / 归档 / 智能助手 / 导入与来源 / 岗位管理 /
 提案与审计 / 检索 / 邮箱配置 / 系统说明（红线承诺集中展示在「系统说明」页）。
 
 产品定位（v2）：**只给 HR 使用**，单角色、无盲筛、无角色切换。
@@ -179,8 +179,9 @@ let GENDER = '';
 // 人才库分页（v1.7.1）：每页 10 人。切档位 / 搜索 / 清空都会把页码拨回第 1 页——
 // 否则"在第 3 页改了搜索词"会落在一个不存在的页上（后端会兜底夹到末页，但那不是用户想要的）。
 // 导出 CSV 不分页：另发一次不带 page 参数的请求拿全量，见 exportCsv。
-let POOL_PAGE = 1;
-const POOL_SIZE = 10;
+let POOL_PAGE = 1;const POOL_SIZE = 10;
+// 投递管道折叠条（嵌入人才库）：记录展开/收起状态，翻页/刷新后保持原状
+let PIPE_OPEN = false;
 function poolPageReset(){ POOL_PAGE = 1; }
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
@@ -303,7 +304,7 @@ async function boot(){
   await refresh();
 }
 
-const VIEWS = [['pool','人才库'],['pipe','投递管道'],['archive','归档'],['chat','智能助手'],
+const VIEWS = [['pool','人才库'],['archive','归档'],['chat','智能助手'],
                ['import','导入与来源'],['org','岗位管理'],['props','提案与审计'],
                ['search','检索'],['mailcfg','邮箱配置'],['sys','系统说明']];
 // 侧栏导航图标：内联 SVG（stroke 跟随文字色），不引外部图标库
@@ -311,7 +312,6 @@ const _I = p => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stro
   stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
 const NAV_ICONS = {
   pool:    _I('<path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"/><circle cx="10" cy="7" r="4"/><path d="M21 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
-  pipe:    _I('<rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="10" rx="1"/><rect x="17" y="4" width="4" height="13" rx="1"/>'),
   archive: _I('<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/>'),
   chat:    _I('<path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z"/>'),
   import:  _I('<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>'),
@@ -342,7 +342,6 @@ async function refresh(){
   const st = await api('/api/stats');
   renderStats(st);
   if (VIEW==='pool') await viewPool();
-  else if (VIEW==='pipe') await viewPipe();
   else if (VIEW==='archive') await viewArchive();
   else if (VIEW==='chat') await viewChat();
   else if (VIEW==='import') await viewImport();
@@ -368,9 +367,14 @@ function card(k,v,c){ return `<div class="stat"><div class="k">${k}</div><div cl
 
 /* ------------------------------ 人才库 ------------------------------ */
 async function viewPool(){
-  const c = await api('/api/candidates?tier=' + encodeURIComponent(TAB)
-    + '&kw=' + encodeURIComponent(KW) + '&gender=' + encodeURIComponent(GENDER)
-    + '&page=' + POOL_PAGE + '&page_size=' + POOL_SIZE);
+  // 管道条与人选列表各取一份：/api/pipeline 提供各阶段人数与明细（嵌入本页顶部），
+  // /api/candidates 提供当前筛选 + 分页的候选人卡片，两者互不影响。
+  const [c, p] = await Promise.all([
+    api('/api/candidates?tier=' + encodeURIComponent(TAB)
+      + '&kw=' + encodeURIComponent(KW) + '&gender=' + encodeURIComponent(GENDER)
+      + '&page=' + POOL_PAGE + '&page_size=' + POOL_SIZE),
+    api('/api/pipeline')
+  ]);
   ITEMS = c.items || [];
   const pg = c.paging || null;              // 后端算好的页码/总数（页大小不影响统计口径）
   const gf = c.gender_filter || {}, gfOn = !!gf.enabled;
@@ -416,6 +420,7 @@ async function viewPool(){
       ${tabs.map(([k,l])=>`<div class="tab ${TAB===k?'on':''}" onclick="TAB='${k}';poolPageReset();refresh()">${l}${k==='ALL'?(' '+n.ALL):''}</div>`).join('')}
     </div>
   </div>
+  ${pipeCardHtml(p)}
   ${ITEMS.length ? ITEMS.map(cardHtml).join('') : '<div class="card">没有符合条件的候选人。到「导入与来源」收一次简历试试。</div>'}
   ${pgBar(pg)}`;
 }
@@ -725,23 +730,60 @@ async function exportCsv(){
   toast(`已导出 CSV（${rows.length} 人，姓名/联系方式/技能概要 + 对应岗位）`,'ok');
 }
 
-/* ------------------------------ 投递管道 ------------------------------ */
-async function viewPipe(){
-  const p = await api('/api/pipeline');
-  const st = p.stages || {};
-  document.getElementById('view').innerHTML = `
-  <div class="panel"><h2>招聘管道</h2>
-    <div class="note">在流程中 ${p.open_total||0} 条；来源分布：${esc(JSON.stringify(p.channels||{}))}。
-      停留超过 15 天的条目会被单独标出，便于跟进。</div></div>
-  <div class="cols">${(p.stage_order||STAGES).map(s=>{
+/* --------------------- 投递管道（嵌入人才库，v1.7.2） ---------------------
+   原独立「投递管道」导航页整体退出（VIEWS 已移除，#pipe 旧链接自动落回人才库），
+   改为人才库列表上方的一条可折叠管道条：
+   · 收起（默认）：只看各阶段人数，超期红字提醒；
+   · 展开：按阶段列出人，点姓名直接打开该人的完整档案。
+   数据仍是 /api/pipeline 一份，不新开接口；展开状态记在 PIPE_OPEN，
+   翻页 / 搜索 / 改档位等 refresh 重渲染后不丢。 */
+function pipeToggle(){
+  PIPE_OPEN = !PIPE_OPEN;
+  const b = document.getElementById('pipeBody');
+  if (b) b.style.display = PIPE_OPEN ? '' : 'none';
+  const a = document.getElementById('pipeArrow');
+  if (a) a.textContent = PIPE_OPEN ? '收起 ▲' : '展开 ▼';
+}
+function pipeCardHtml(p){
+  const order = (p && p.stage_order) || STAGES;
+  const st = (p && p.stages) || {};
+  const openTotal = (p && p.open_total) || 0;
+  // 收起态的一行阶段人数：没人的阶段不摆出来，有超期的红字
+  const chips = order.map(s=>{
+    const v = st[s] || {count:0, overdue:0};
+    if (!v.count) return '';
+    return `<span class="chip" style="color:${v.overdue?'#f53f3f':'#1d5fd8'};background:${v.overdue?'#ffece8':'#e8f0ff'}"
+      title="${esc(s)}：${v.count} 人，点击展开看人">${esc(s)} ${v.count}${v.overdue?('（超期 '+v.overdue+'）'):''}</span>`;
+  }).join('');
+  // 展开态：按阶段列出人（后端每阶段最多回 20 条，多了给条提示），点姓名开完整档案
+  const body = order.map(s=>{
     const v = st[s] || {count:0, items:[], overdue:0};
-    return `<div class="pcol"><div class="h"><span>${esc(s)}</span>
-      <span style="color:${v.overdue?'#f53f3f':'#86909c'}">${v.count}${v.overdue?(' / 超期'+v.overdue):''}</span></div>
-      ${(v.items||[]).map(i=>`<div class="it">${esc(i.candidate_name||'未识别')}
-        ${i.job_title?(' · '+esc(i.job_title)):''}
-        <br>${esc(i.applied_at||'').slice(0,10)} 起 ${i.days} 天
-        ${i.days>=15?'<span style="color:#f53f3f">超期</span>':''}</div>`).join('')||'<div class="it">—</div>'}
-      </div>`;}).join('')}</div>`;
+    if (!v.count) return '';
+    const rows = (v.items||[]).map(i=>`
+      <div style="padding:3px 0;cursor:pointer;color:#1d5fd8" title="点击打开完整档案"
+           onclick="showDetail(${i.candidate_id})">
+        ${esc(i.candidate_name||'未识别')}${i.job_title?(' · '+esc(i.job_title)):''}
+        <span class="small" style="color:#86909c">${esc((i.applied_at||'').slice(0,10))} 起 ${i.days} 天
+        ${i.days>=15?'<span style="color:#f53f3f">超期</span>':''}</span>
+      </div>`).join('');
+    const more = v.count > (v.items||[]).length
+      ? `<div class="small" style="color:#86909c">该阶段共 ${v.count} 人，此处最多列 20 人（完整名单见对应阶段筛选）</div>` : '';
+    return `<div style="margin-top:8px"><b>${esc(s)}</b>
+      <span class="small" style="color:${v.overdue?'#f53f3f':'#86909c'}">${v.count} 人${v.overdue?(' · 超期 '+v.overdue):''}</span>
+      <div style="margin-top:2px">${rows}${more}</div></div>`;
+  }).join('') || '<div class="small" style="color:#86909c">暂无在流程中的投递。</div>';
+  return `<div class="card" style="margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none" onclick="pipeToggle()">
+      <b>投递管道</b>
+      <span class="small" style="color:#4e5969">在流程中 ${openTotal} 条（已入职 / 已结束不计）</span>
+      <span style="flex:1"></span>
+      <span id="pipeArrow" class="small" style="color:#1d5fd8">${PIPE_OPEN?'收起 ▲':'展开 ▼'}</span>
+    </div>
+    <div class="bar" style="margin-top:8px;cursor:pointer" onclick="pipeToggle()">
+      ${chips || '<span class="small" style="color:#86909c">各阶段暂无人</span>'}
+    </div>
+    <div id="pipeBody" style="display:${PIPE_OPEN?'':'none'}">${body}</div>
+  </div>`;
 }
 
 /* ------------------------------ 归档 ------------------------------ */

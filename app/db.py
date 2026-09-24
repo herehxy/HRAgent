@@ -2155,8 +2155,8 @@ def pool_stats(conn: sqlite3.Connection) -> dict:
 def pipeline_stats(conn: sqlite3.Connection) -> dict:
     """招聘管道视图：各阶段数量 + 停留天数 + 来源分布。"""
     rows = conn.execute(
-        """SELECT a.stage, a.channel, a.applied_at, a.id, c.name AS candidate_name,
-                  j.title AS job_title
+        """SELECT a.stage, a.channel, a.applied_at, a.id, a.candidate_id,
+                  c.name AS candidate_name, j.title AS job_title
            FROM applications a LEFT JOIN candidates c ON c.id = a.candidate_id
            LEFT JOIN jobs j ON j.id = a.job_id
            WHERE a.candidate_id IS NOT NULL
@@ -2174,7 +2174,8 @@ def pipeline_stats(conn: sqlite3.Connection) -> dict:
                 days = max(0, (d1 - d0).days)
             except ValueError:
                 days = 0
-        item = {"application_id": r["id"], "candidate_name": r["candidate_name"],
+        item = {"application_id": r["id"], "candidate_id": r["candidate_id"],
+                "candidate_name": r["candidate_name"],
                 "job_title": r["job_title"], "days": days, "applied_at": r["applied_at"],
                 "channel": r["channel"]}
         stages.setdefault(st, []).append(item)

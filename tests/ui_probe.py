@@ -568,6 +568,40 @@ def main() -> int:
         c.shot(os.path.join(args.out, "18e-人才库-分页.png"))
         c.shot(os.path.join(args.out, "18c-人才库-批量归档与建议岗位.png"))
 
+        # ⑦c-e 投递管道嵌入人才库（v1.7.2）：原独立导航页退出，改为人才库列表上方
+        # 的折叠条——默认收起只看各阶段人数，展开后按阶段列人、点人打开完整档案。
+        c.goto(f"{args.url}/#pool")
+        time.sleep(1.8)
+        pool3 = c.eval("(document.getElementById('view').innerHTML||'')") or ""
+        has_pipe_card = ("投递管道" in pool3) and ("pipeBody" in pool3)
+        nav_pipe_gone = c.eval("!document.getElementById('tabs').innerHTML.includes(\"go('pipe')\")")
+        collapsed = c.eval("(document.getElementById('pipeBody')||{style:{display:''}}).style.display==='none'")
+        has_counts = "在流程中" in pool3
+        c.eval("pipeToggle()")
+        time.sleep(0.3)
+        opened = c.eval("(document.getElementById('pipeBody')||{style:{display:'none'}}).style.display===''")
+        body = c.eval("(document.getElementById('pipeBody')||{}).innerHTML") or ""
+        rows_clickable = "showDetail(" in body
+        # 点人 → 完整档案弹层真的打开（取管道里有 candidate_id 的第一条）
+        pid = c.eval(
+            "(async()=>{const r=await api('/api/pipeline');"
+            "for (const s of Object.values(r.stages||{}))"
+            "  for (const it of (s.items||[])) if (it.candidate_id) return it.candidate_id;"
+            "return null;})()", await_promise=True)
+        modal_ok = False
+        if pid:
+            c.eval(f"showDetail({pid});")
+            time.sleep(0.8)
+            modal_ok = c.eval(
+                "(document.getElementById('mTitle')||{textContent:''}).textContent.includes('完整档案')")
+            c.eval("closeModal();")
+        print(f"  投递管道嵌入人才库：卡片 {bool(has_pipe_card)}；独立导航页已撤 {bool(nav_pipe_gone)}；"
+              f"默认收起 {bool(collapsed)}；收起态含阶段人数 {bool(has_counts)}；"
+              f"展开 {bool(opened)}；人员条目可点 {bool(rows_clickable)}；点人弹完整档案 {bool(modal_ok)}")
+        ok = ok and bool(has_pipe_card) and bool(nav_pipe_gone) and bool(collapsed) \
+            and bool(has_counts) and bool(opened) and bool(rows_clickable) and bool(modal_ok)
+        c.shot(os.path.join(args.out, "18f-人才库-投递管道折叠条.png"))
+
         # 归档页：勾选框 + 批量取消 + 满 30 天彻底删除的口径说明。
         # 归档页有没有人是"使用状态"而非验收输入，所以先保证有人再看细则：
         # 没人就临时归档一位（验完立刻取消），把"剩余天数"这条口径真正看到一遍。
