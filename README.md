@@ -29,8 +29,7 @@
 ```bash
 PY=/Users/hxy/.workbuddy/binaries/python/envs/default/bin/python
 
-$PY tools/make_sample_pdfs.py       # 生成 3 份 PDF 简历样例 → data/resumes/（中文可提取）
-$PY cli.py init                     # 建库、写入岗位尺子、创建 HR 账号
+$PY cli.py init                     # 建库、写入岗位尺子、创建 HR 账号（内置样例简历在 data/resumes/，无需脚本生成）
 $PY cli.py fixtures                 # 生成 8 封测试邮件（覆盖重复/无附件/损坏附件等）
 $PY cli.py ingest --folder data/resumes   # 手工导入简历目录（只分析、不自动归岗）
 $PY cli.py mail                     # 邮箱收简历（eml 演练 / imap 实收）
@@ -92,7 +91,7 @@ resume-workbench/
 ├── tools/                       make_sample_pdfs（生成中文 PDF 简历样例） / seed_2026_jobs（2026 招聘公告岗位录入） / verify_chat_history（对话历史与软清空验证）
 ├── out/                         ui-screenshots（界面截图验收留档） / pdf-samples（样例首页渲染图）
 └── data/
-    ├── resumes/                 简历来源目录（内置 7 份样例：4 文本 + 3 PDF）
+    ├── resumes/                 简历来源目录（内置 9 份样例，均为 txt）
     ├── mail_in/                 eml 演练邮箱目录
     ├── archive/                 原件区（按年月分目录，只增不改）
     ├── removed/                 来源文件回收目录（按年月分目录；移入而非删除，可原样恢复）
@@ -102,27 +101,14 @@ resume-workbench/
 
 ---
 
-## 三之二、PDF 简历样例
+## 三之二、样例简历
 
-学生投递以 PDF 为主，仓库内置 3 份可用的中文 PDF 样例（`data/resumes/005~007*.pdf`），
-覆盖三种典型判定结果，便于验收分级逻辑：
+仓库内置 9 份 txt 样例简历（`data/resumes/001~009`），覆盖 A/B/C/D 档 × 对口/部分对口/
+无法判定/跨行业，便于验收分级逻辑（各人画像与判定结果见「版本记录 v1.7.1」一节）。
 
-| 文件 | 画像 | 预期判定 |
-|---|---|---|
-| `005_林一诺_工艺工程师.pdf` | 硕士 / 4 年 / 钛合金·真空熔铸·材料成型全中 | **A 档**（必备三条全命中） |
-| `006_周子墨_数智化工程师.pdf` | 本科 / 3 年 / Python·SQL·数据治理 | **D 档**（必备技能未命中） |
-| `007_苏沐白_材料成型.pdf` | 本科 / 应届 / 材料成型·金相分析 | **D 档**（年限不足风险项） |
-
-重新生成或校验：
-
-```bash
-$PY tools/make_sample_pdfs.py            # 生成到 data/resumes/
-$PY tools/make_sample_pdfs.py --verify   # 只校验已有 PDF 的文本可提取性
-```
-
-**为什么用无头 Chrome 打印而不是直接写 PDF**：PyMuPDF 内置字体只带字形子集，
-写进去的中文能看、但 `get_text()` 取不回正确 Unicode（实测提取出乱码），
-而整条链路（解析 → 抽字段 → 分级）恰恰依赖文本可提取。
+> **关于 PDF 样例**：历史上曾内置 3 份中文 PDF 样例，后来统一改为 txt。经验教训——
+> PyMuPDF 内置字体只带字形子集，直接写出的中文"能看不能取"（`get_text()` 提取乱码），
+> 若要程序生成 PDF 必须用无头 Chrome 打印。真实 PDF 投递走 ingest 解析链路，不受此影响。
 改用 Chrome 把 HTML 打成 PDF，字体与 Unicode 映射由 Chrome 保证，实测姓名/电话/邮箱/技能全部可提取。
 
 ---
@@ -823,7 +809,7 @@ v1.7 起结论不再是一句「对口/错配」，而是**渠道 + 置信度 + 
   每次都会把已停用的旧岗位"复活"，且 `ingest` 会造出第 5 个幻影岗位——均已修）。
   `jobs.dept_id` / `departments` 表与 `/api/departments` 接口**为兼容旧库保留**，
   新建库为空表，不参与任何评分/路由。
-- **全量清空重造样例**（`tools/reset_demo.py`，先备份到 `data/backup/` 再清）：
+- **全量清空重造样例**（已删除重建脚本；样例数据保留在 `data/resumes/` 与人才库中；清空前先备份到 `data/backup/`）：
   4 个岗位（科学研究 / 工艺技术 / 检验检测 / 数字化工程师，均无部门）+
   **9 名候选人**（`tools/make_sample_resumes.py`），覆盖 A/B/C/D 档 × 对口/部分对口/
   无法判定/跨行业：陈砚舟 A/1.0、林一诺 A/0.98、白思远 A/0.96、周正阳 A/1.0、
@@ -860,7 +846,7 @@ v1.7 起结论不再是一句「对口/错配」，而是**渠道 + 置信度 + 
   合计 **74 条技能**并入本体；本体 214 → **277 条标准名**，索引 397 → **838 键**；
   导入各留一份本体备份（`data/backup/ontology-*.json`），并报告别名迁移——
   典型一条：`成本控制 → 成本核算`（`成本核算` 提升为独立条目）。
-- **四个 2026 岗位已录入、两个旧岗位已停用**（`tools/seed_2026_jobs.py`，默认预演；
+- **四个 2026 岗位已录入、两个旧岗位已停用**（岗位经 UI/CLI 录入；
   2026-09 改版后岗位只写名称 + JD，不再挂部门）：
   | 岗位 | 学历 | 专业需求 | 必需技能 |
   |---|---|---|---|
