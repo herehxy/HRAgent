@@ -568,20 +568,20 @@ def main() -> int:
         c.shot(os.path.join(args.out, "18e-人才库-分页.png"))
         c.shot(os.path.join(args.out, "18c-人才库-批量归档与建议岗位.png"))
 
-        # ⑦c-e 投递管道嵌入人才库（v1.7.2）：原独立导航页退出，改为人才库列表上方
-        # 的折叠条——默认收起只看各阶段人数，展开后按阶段列人、点人打开完整档案。
+        # ⑦c-e 投递管道嵌入人才库（v1.7.2 下拉 → v1.7.4 常驻完整看板）：
+        # 独立导航页退出；看板**所有阶段列全展示**、每阶段人员全部列出（无截断）、
+        # 行内带阶段推进下拉（被删页面的流程操作不丢）、点姓名打开完整档案。
         c.goto(f"{args.url}/#pool")
         time.sleep(1.8)
         pool3 = c.eval("(document.getElementById('view').innerHTML||'')") or ""
-        has_pipe_card = ("投递管道" in pool3) and ("pipeBody" in pool3)
+        has_pipe_card = ("投递管道" in pool3) and ('class="cols"' in pool3)
         nav_pipe_gone = c.eval("!document.getElementById('tabs').innerHTML.includes(\"go('pipe')\")")
-        collapsed = c.eval("(document.getElementById('pipeBody')||{style:{display:''}}).style.display==='none'")
-        has_counts = "在流程中" in pool3
-        c.eval("pipeToggle()")
-        time.sleep(0.3)
-        opened = c.eval("(document.getElementById('pipeBody')||{style:{display:'none'}}).style.display===''")
-        body = c.eval("(document.getElementById('pipeBody')||{}).innerHTML") or ""
-        rows_clickable = "showDetail(" in body
+        col_cnt = c.eval("document.querySelectorAll('#view .pcol').length") or 0
+        all_stages = int(col_cnt) == 7          # STAGES 全部 7 列，含空阶段
+        item_cnt = c.eval("document.querySelectorAll('#view .pcol .it').length") or 0
+        rows_clickable = "showDetail(" in pool3
+        stage_sel_cnt = c.eval(
+            "document.querySelectorAll('#view .pcol .it select').length") or 0
         # 点人 → 完整档案弹层真的打开（取管道里有 candidate_id 的第一条）
         pid = c.eval(
             "(async()=>{const r=await api('/api/pipeline');"
@@ -595,12 +595,22 @@ def main() -> int:
             modal_ok = c.eval(
                 "(document.getElementById('mTitle')||{textContent:''}).textContent.includes('完整档案')")
             c.eval("closeModal();")
-        print(f"  投递管道嵌入人才库：卡片 {bool(has_pipe_card)}；独立导航页已撤 {bool(nav_pipe_gone)}；"
-              f"默认收起 {bool(collapsed)}；收起态含阶段人数 {bool(has_counts)}；"
-              f"展开 {bool(opened)}；人员条目可点 {bool(rows_clickable)}；点人弹完整档案 {bool(modal_ok)}")
-        ok = ok and bool(has_pipe_card) and bool(nav_pipe_gone) and bool(collapsed) \
-            and bool(has_counts) and bool(opened) and bool(rows_clickable) and bool(modal_ok)
-        c.shot(os.path.join(args.out, "18f-人才库-投递管道折叠条.png"))
+        # 全部展示：接口各阶段 items 数与列内条目数一致（无 20 条截断）
+        cap_ok = c.eval(
+            "(async()=>{const r=await api('/api/pipeline');"
+            "const dom=document.querySelectorAll('#view .pcol');"
+            "const order=r.stage_order||[];"
+            "return order.every((s,i)=>{const v=r.stages[s]||{items:[]};"
+            "const col=dom[i]; if(!col) return false;"
+            "const n=col.querySelectorAll('.it').length;"
+            "return n===Math.max(1,(v.items||[]).length);});})()",
+            await_promise=True)
+        print(f"  投递管道看板嵌入人才库：卡片 {bool(has_pipe_card)}；独立导航页已撤 {bool(nav_pipe_gone)}；"
+              f"阶段列 {col_cnt}/7 全展示 {all_stages}；人员条目 {item_cnt} 个与接口一致 {bool(cap_ok)}；"
+              f"行内推进下拉 {stage_sel_cnt} 个；条目可点 {bool(rows_clickable)}；点人弹完整档案 {bool(modal_ok)}")
+        ok = ok and bool(has_pipe_card) and bool(nav_pipe_gone) and all_stages \
+            and bool(cap_ok) and bool(rows_clickable) and bool(modal_ok)
+        c.shot(os.path.join(args.out, "18f-人才库-投递管道看板.png"))
 
         # ⑦c-f 初筛下拉（v1.7.3）：学历 ≥ 门槛 + 院校层次 985/211 + 卡片标签。
         # 数字对不上是最常见的坏法（下拉写 4、筛出来 3），所以每步都与接口 count 对账。

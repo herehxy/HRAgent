@@ -1,6 +1,6 @@
 """工作台界面：单页应用（HTML + 原生 JS，无构建步骤、无外部 CDN）。
 
-九个视图：人才库（顶部内嵌投递管道折叠条） / 归档 / 智能助手 / 导入与来源 / 岗位管理 /
+九个视图：人才库（顶部内嵌投递管道完整看板） / 归档 / 智能助手 / 导入与来源 / 岗位管理 /
 提案与审计 / 检索 / 邮箱配置 / 系统说明（红线承诺集中展示在「系统说明」页）。
 
 产品定位（v2）：**只给 HR 使用**，单角色、无盲筛、无角色切换。
@@ -183,8 +183,6 @@ let EDU_MIN = '', UNIV = '';
 // 否则"在第 3 页改了搜索词"会落在一个不存在的页上（后端会兜底夹到末页，但那不是用户想要的）。
 // 导出 CSV 不分页：另发一次不带 page 参数的请求拿全量，见 exportCsv。
 let POOL_PAGE = 1;const POOL_SIZE = 10;
-// 投递管道折叠条（嵌入人才库）：记录展开/收起状态，翻页/刷新后保持原状
-let PIPE_OPEN = false;
 function poolPageReset(){ POOL_PAGE = 1; }
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
@@ -445,7 +443,7 @@ async function viewPool(){
       ${tabs.map(([k,l])=>`<div class="tab ${TAB===k?'on':''}" onclick="TAB='${k}';poolPageReset();refresh()">${l}${k==='ALL'?(' '+n.ALL):''}</div>`).join('')}
     </div>
   </div>
-  ${pipeCardHtml(p)}
+  ${pipeBoardHtml(p)}
   ${ITEMS.length ? ITEMS.map(cardHtml).join('') : '<div class="card">没有符合条件的候选人。到「导入与来源」收一次简历试试。</div>'}
   ${pgBar(pg)}`;
 }
@@ -763,59 +761,47 @@ async function exportCsv(){
   toast(`已导出 CSV（${rows.length} 人，姓名/联系方式/技能概要 + 对应岗位）`,'ok');
 }
 
-/* --------------------- 投递管道（嵌入人才库，v1.7.2） ---------------------
-   原独立「投递管道」导航页整体退出（VIEWS 已移除，#pipe 旧链接自动落回人才库），
-   改为人才库列表上方的一条可折叠管道条：
-   · 收起（默认）：只看各阶段人数，超期红字提醒；
-   · 展开：按阶段列出人，点姓名直接打开该人的完整档案。
-   数据仍是 /api/pipeline 一份，不新开接口；展开状态记在 PIPE_OPEN，
-   翻页 / 搜索 / 改档位等 refresh 重渲染后不丢。 */
-function pipeToggle(){
-  PIPE_OPEN = !PIPE_OPEN;
-  const b = document.getElementById('pipeBody');
-  if (b) b.style.display = PIPE_OPEN ? '' : 'none';
-  const a = document.getElementById('pipeArrow');
-  if (a) a.textContent = PIPE_OPEN ? '收起 ▲' : '展开 ▼';
-}
-function pipeCardHtml(p){
+/* --------------------- 投递管道（嵌入人才库，v1.7.2 / v1.7.4 常驻看板） ---------------------
+   独立「投递管道」导航页整体退出（VIEWS 已移除，#pipe 旧链接自动落回人才库）。
+   按试用反馈（v1.7.4）从"折叠下拉"改回**常驻完整看板**：所有阶段列全展示、
+   每阶段人员全部列出（后端已去 20 条截断）、行内带**阶段推进下拉**（原页的
+   流程操作不因页面退出而丢失），点姓名直接打开该人的完整档案。
+   数据仍是 /api/pipeline 一份；翻页 / 搜索 / 改档位等 refresh 重渲染后照常重画。 */
+function pipeBoardHtml(p){
   const order = (p && p.stage_order) || STAGES;
   const st = (p && p.stages) || {};
   const openTotal = (p && p.open_total) || 0;
-  // 收起态的一行阶段人数：没人的阶段不摆出来，有超期的红字
-  const chips = order.map(s=>{
-    const v = st[s] || {count:0, overdue:0};
-    if (!v.count) return '';
-    return `<span class="chip" style="color:${v.overdue?'#f53f3f':'#1d5fd8'};background:${v.overdue?'#ffece8':'#e8f0ff'}"
-      title="${esc(s)}：${v.count} 人，点击展开看人">${esc(s)} ${v.count}${v.overdue?('（超期 '+v.overdue+'）'):''}</span>`;
-  }).join('');
-  // 展开态：按阶段列出人（后端每阶段最多回 20 条，多了给条提示），点姓名开完整档案
-  const body = order.map(s=>{
+  const chans = Object.entries((p && p.channels) || {})
+    .sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${esc(k)} ${v}`).join(' · ');
+  const cols = order.map(s=>{
     const v = st[s] || {count:0, items:[], overdue:0};
-    if (!v.count) return '';
+    // 每条：姓名（点开完整档案）· 岗位 · 投递天数 · 超期红字 · 行内推进阶段下拉
     const rows = (v.items||[]).map(i=>`
-      <div style="padding:3px 0;cursor:pointer;color:#1d5fd8" title="点击打开完整档案"
-           onclick="showDetail(${i.candidate_id})">
-        ${esc(i.candidate_name||'未识别')}${i.job_title?(' · '+esc(i.job_title)):''}
-        <span class="small" style="color:#86909c">${esc((i.applied_at||'').slice(0,10))} 起 ${i.days} 天
-        ${i.days>=15?'<span style="color:#f53f3f">超期</span>':''}</span>
-      </div>`).join('');
-    const more = v.count > (v.items||[]).length
-      ? `<div class="small" style="color:#86909c">该阶段共 ${v.count} 人，此处最多列 20 人（完整名单见对应阶段筛选）</div>` : '';
-    return `<div style="margin-top:8px"><b>${esc(s)}</b>
-      <span class="small" style="color:${v.overdue?'#f53f3f':'#86909c'}">${v.count} 人${v.overdue?(' · 超期 '+v.overdue):''}</span>
-      <div style="margin-top:2px">${rows}${more}</div></div>`;
-  }).join('') || '<div class="small" style="color:#86909c">暂无在流程中的投递。</div>';
+      <div class="it" style="color:#4e5969">
+        <span style="cursor:pointer;color:#1d5fd8" title="点击打开完整档案"
+              onclick="showDetail(${i.candidate_id})">${esc(i.candidate_name||'未识别')}</span>
+        ${i.job_title?(' · '+esc(i.job_title)):''}
+        <br>${esc((i.applied_at||'').slice(0,10))} 起 ${i.days} 天
+        ${i.days>=15?'<span style="color:#f53f3f">超期</span>':''}
+        ${i.application_id?`<br><select onchange="setStage(${i.application_id},this.value)"
+          title="把这条投递推进到所选阶段（与卡片上的阶段下拉是同一个接口，写入审计）"
+          style="margin-top:2px;max-width:110px">
+          ${STAGES.map(k=>`<option value="${k}" ${k===s?'selected':''}>${k}</option>`).join('')}
+        </select>`:''}
+      </div>`).join('') || '<div class="it">—</div>';
+    return `<div class="pcol"><div class="h"><span>${esc(s)}</span>
+      <span style="color:${v.overdue?'#f53f3f':'#86909c'}">${v.count}${v.overdue?(' / 超期'+v.overdue):''}</span></div>
+      ${rows}</div>`;
+  }).join('');
   return `<div class="card" style="margin-bottom:12px">
-    <div style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none" onclick="pipeToggle()">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <b>投递管道</b>
       <span class="small" style="color:#4e5969">在流程中 ${openTotal} 条（已入职 / 已结束不计）</span>
       <span style="flex:1"></span>
-      <span id="pipeArrow" class="small" style="color:#1d5fd8">${PIPE_OPEN?'收起 ▲':'展开 ▼'}</span>
+      <span class="small" style="color:#86909c">来源分布：${chans||'—'}</span>
     </div>
-    <div class="bar" style="margin-top:8px;cursor:pointer" onclick="pipeToggle()">
-      ${chips || '<span class="small" style="color:#86909c">各阶段暂无人</span>'}
-    </div>
-    <div id="pipeBody" style="display:${PIPE_OPEN?'':'none'}">${body}</div>
+    <div class="cols" style="margin-top:10px">${cols}</div>
+    <div class="small" style="color:#86909c;margin-top:8px">点姓名打开完整档案；行内下拉可直接推进阶段（写审计）。停留超过 15 天的条目红字标出。</div>
   </div>`;
 }
 

@@ -2190,7 +2190,9 @@ def pipeline_stats(conn: sqlite3.Connection) -> dict:
         stages.setdefault(st, []).append(item)
         channels[r["channel"] or "未知"] = channels.get(r["channel"] or "未知", 0) + 1
     return {
-        "stages": {s: {"count": len(v), "items": v[:20],
+        # v1.7.4：管道看板嵌入人才库后要**全部展示**，不再截断每阶段前 20 条
+        # （本地单 HR 场景量级小；此前下拉形态截断是为省那一屏）。
+        "stages": {s: {"count": len(v), "items": v,
                        "overdue": sum(1 for i in v if i["days"] >= 15)}
                    for s, v in stages.items()},
         "channels": channels,
