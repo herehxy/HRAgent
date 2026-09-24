@@ -176,6 +176,9 @@ let TOKEN = localStorage.getItem('tp_token') || '';
 let VIEW = 'pool', TAB = 'ALL', KW = '', CHAT = [], ITEMS = [], CUR = null, LAST_INGEST = null;
 // 性别筛选：**默认不筛**（空串）。开关在设置里默认关闭，关着时后端也会忽略这个参数。
 let GENDER = '';
+// 初筛下拉（v1.7.3）：最低学历（≥门槛）与院校层次（985/211）。
+// 都是岗位相关的硬条件，与性别筛选不同，不需要开关约束。
+let EDU_MIN = '', UNIV = '';
 // 人才库分页（v1.7.1）：每页 10 人。切档位 / 搜索 / 清空都会把页码拨回第 1 页——
 // 否则"在第 3 页改了搜索词"会落在一个不存在的页上（后端会兜底夹到末页，但那不是用户想要的）。
 // 导出 CSV 不分页：另发一次不带 page 参数的请求拿全量，见 exportCsv。
@@ -372,6 +375,8 @@ async function viewPool(){
   const [c, p] = await Promise.all([
     api('/api/candidates?tier=' + encodeURIComponent(TAB)
       + '&kw=' + encodeURIComponent(KW) + '&gender=' + encodeURIComponent(GENDER)
+      + '&education=' + encodeURIComponent(EDU_MIN)
+      + '&univ=' + encodeURIComponent(UNIV)
       + '&page=' + POOL_PAGE + '&page_size=' + POOL_SIZE),
     api('/api/pipeline')
   ]);
@@ -389,8 +394,27 @@ async function viewPool(){
       <option value="">不限</option>
       ${['男','女','未标注'].map(g=>`<option value="${g}" ${GENDER===g?'selected':''}>${g}（${facets[g]==null?0:facets[g]}）</option>`).join('')}
     </select>`;
+  // 初筛（v1.7.3）：最低学历（≥门槛，"无法判定"不命中但下方会提示人数）
+  // 与院校层次（985 ⊂ 211，选 211 时 985 也算；下拉人数是筛选前口径，对得上共 N 人）。
+  // 两者都是岗位相关硬条件，与性别不同，不需要开关约束。
+  const uniF = c.uni_facets || {};
+  const eduSel = `<span class="small" style="margin-left:6px">学历</span>
+    <select onchange="EDU_MIN=this.value;poolPageReset();refresh()">
+      ${[['','不限'],['大专','大专及以上'],['本科','本科及以上'],['硕士','硕士及以上'],['博士','博士']]
+        .map(([v,l])=>`<option value="${v}" ${EDU_MIN===v?'selected':''}>${l}</option>`).join('')}
+    </select>`;
+  const uniSel = `<span class="small" style="margin-left:6px">院校</span>
+    <select onchange="UNIV=this.value;poolPageReset();refresh()">
+      <option value="">不限</option>
+      <option value="985" ${UNIV==='985'?'selected':''}>985（${uniF['985']==null?0:uniF['985']}）</option>
+      <option value="211" ${UNIV==='211'?'selected':''}>211（${uniF['211']==null?0:uniF['211']}，含 985）</option>
+    </select>`;
   const gtip = (!gfOn && gf.requested)
     ? `<div class="warn" style="margin-top:8px">性别筛选未生效：${esc(gf.why||'')}</div>` : '';
+  // 学历"无法判定"的人被门槛挡下时必须说出来，不能让人静默消失
+  const ef = c.edu_filter || {};
+  const eduWarn = (ef.applied && ef.hidden_unknown > 0)
+    ? `<div class="warn" style="margin-top:8px">有 <b>${ef.hidden_unknown}</b> 人学历无法判定，未计入「${esc(ef.min)}及以上」筛选结果；选「不限」可看到全部。</div>` : '';
   host.innerHTML = `
   <div class="panel">
     <div class="flexbetween">
@@ -398,8 +422,8 @@ async function viewPool(){
         <input id="kwBox" placeholder="搜索姓名 / 院校 / 专业 / 技能" style="width:280px" value="${esc(KW)}"
                onkeydown="if(event.key==='Enter'){KW=this.value;poolPageReset();refresh()}">
         <button class="btn-primary" onclick="KW=document.getElementById('kwBox').value;poolPageReset();refresh()">搜索</button>
-        <button onclick="KW='';GENDER='';poolPageReset();refresh()">清空</button>
-        ${gsel}
+        <button onclick="KW='';GENDER='';EDU_MIN='';UNIV='';poolPageReset();refresh()">清空</button>
+        ${gsel}${eduSel}${uniSel}
       </div>
       <div class="bar">
         <button class="btn-primary" onclick="go('import')">收简历 / 看来源</button>
@@ -416,6 +440,7 @@ async function viewPool(){
       <span class="small">归档的人进「归档」页，满 30 天自动彻底删除，期间可随时取消</span>
     </div>
     ${gtip}
+    ${eduWarn}
     <div class="tabs" style="margin-bottom:0">
       ${tabs.map(([k,l])=>`<div class="tab ${TAB===k?'on':''}" onclick="TAB='${k}';poolPageReset();refresh()">${l}${k==='ALL'?(' '+n.ALL):''}</div>`).join('')}
     </div>
@@ -452,6 +477,13 @@ function jumpPoolPage(){
   if (!n || n < 1){ toast('请输入要跳转的页码','warn'); return; }
   POOL_PAGE = n;
   refresh();
+}
+// 院校层次标签（v1.7.3）：来自 config/universities.json 名单匹配，只展示不参与评分；
+// 985/211 筛选用同一个字段（uni_tier），标签与筛选口径天然一致。
+function uniTag(t){
+  if (!t) return '';
+  return `<span class="chip" style="color:#a45a00;background:#fff7e8"
+    title="按教育部 985/211 名单匹配院校名（含常见简称与校区后缀），仅展示标签，不参与评分">${esc(t)}</span>`;
 }
 function cardHtml(x){
   const t = x.tier_effective || 'D';
@@ -495,7 +527,7 @@ function cardHtml(x){
       <div style="flex:1;min-width:0">
         <div class="nm">${esc(x.name||'未识别')} ${rev} ${genderTag} ${jobTag}</div>
         <div class="meta">${esc(x.edu_level||'—')} · ${x.years_exp==null?'—':x.years_exp+' 年'} ·
-          ${esc(x.school||'—')} · 匹配 ${(x.score==null?'—':x.score)} · 阶段 ${esc(stage)} ·
+          ${esc(x.school||'—')}${uniTag(x.uni_tier)} · 匹配 ${(x.score==null?'—':x.score)} · 阶段 ${esc(stage)} ·
           来源 ${esc(x.channel||'—')} · 投递 ${esc((x.applied_at||'').slice(0,10))}</div>
         <div class="meta" style="margin-top:2px"><b>联系方式</b>：${contact}</div>
       </div>
@@ -710,7 +742,8 @@ async function exportCsv(){
   // 另发一次不带 page 参数的请求（接口默认返回全量，兼容口径保留着），
   // 筛选条件（档位/关键词/性别）与当前列表保持一致。
   const full = await api('/api/candidates?tier=' + encodeURIComponent(TAB)
-    + '&kw=' + encodeURIComponent(KW) + '&gender=' + encodeURIComponent(GENDER));
+    + '&kw=' + encodeURIComponent(KW) + '&gender=' + encodeURIComponent(GENDER)
+    + '&education=' + encodeURIComponent(EDU_MIN) + '&univ=' + encodeURIComponent(UNIV));
   const list = (full && full.items) || ITEMS;
   const head = ['姓名','性别','学历','工作年限','院校','专业','专业方向/技能概要','手机','邮箱',
                 '对应岗位','投递渠道','投递时间'];

@@ -23,6 +23,8 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 
+from . import univ as univ_mod  # noqa: PLC0415 — 院校层次识别（985/211 标签）
+
 SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -965,6 +967,10 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
         sql += f" LIMIT {int(limit)}"
 
     items = [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
+    # 院校层次标签（v1.7.3）：每条都挂上（不限筛选时卡片也要显示 985/211 标签）；
+    # 985/211 的**筛选**在 server 层做（ facets 口径与性别筛选一致）。
+    for _i in items:
+        _i["uni_tier"] = univ_mod.uni_tier(_i.get("school") or "")
 
     if tier and tier != "ALL":
         if tier == "REVIEW":
@@ -1009,6 +1015,9 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
 
 
 _EDU_RANK = {"大专": 1, "专科": 1, "本科": 2, "学士": 2, "研究生": 3, "硕士": 3, "博士": 4}
+# 公开别名：server 层做「最低学历」筛选与"无法判定人数"统计时复用同一把尺子，
+# 避免两处各写一份阶梯、将来口径漂移。
+EDU_RANK = _EDU_RANK
 
 # 性别分组（含"未标注"）。**只用于展示与筛选，绝不进入 `tier.grade()`**。
 # “未标注”是一个真实分组：简历没写性别的档案不能因为筛选而凭空消失。

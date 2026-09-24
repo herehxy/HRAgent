@@ -254,6 +254,7 @@ def api_meta(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
 @app.get("/api/candidates")
 def api_candidates(tier: str | None = None, kw: str | None = None,
                    stage: str | None = None, education: str | None = None,
+                   univ: str | None = None,
                    min_years: int | None = None, gender: str | None = None,
                    archived: str | None = None,
                    page: int = 0, page_size: int = 0,
@@ -265,6 +266,16 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
     即使传了 `gender` 也按"未筛选"处理，并在响应里说明为什么——
     静默忽略与静默生效一样危险，后者会让 HR 误以为筛出来的就是全部。
 
+    最低学历（v1.7.3）：`education=硕士` 即"硕士及以上"，尺子是 `db.EDU_RANK`
+    （博士>硕士>本科>大专）。学历"无法判定"的人不命中任何具体层次——
+    但**不能静默消失**：被隐藏的人数放进 `edu_filter.hidden_unknown`，界面出提示。
+
+    院校层次（v1.7.3）：`univ=985 / 211`。985 学校全部同时是 211，
+    所以选"211"时 985 也算；识别用 `config/universities.json` 名单
+    （精确匹配全名/别名 + 校区后缀归一，独立学院不会误标），
+    匹配结果同时以 `uni_tier` 字段随每条下发（卡片标签用）。
+    学历与院校都是**岗位相关硬条件**，与性别筛选不同，不需要开关约束。
+
     归档（v1.4）：默认只回未归档；`?archived=1` 只回已归档（「归档」页用）。
     归档是软隐藏不是删除，档案/投递/附件原样保留。
 
@@ -273,7 +284,7 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
     探针、智能体工具、导出等程序化消费方依赖"一次拿全"，不应被迫翻页；
     分页只是人才库界面的阅读方式，不是接口的默认行为。
     翻页在**全部筛选与建议岗位补齐之后**做，所以 `total` 是筛后总数，
-    `gender_facets` 也是全量口径——页大小不会影响任何统计数字。
+    `gender_facets` / `uni_facets` 也是全量口径——页大小不会影响任何统计数字。
     """
     s = _session(x_tp_token, x_tp_role)
     require(s, "read")
@@ -283,9 +294,30 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
         allowed = bool(cfg.get("gender_filter_enabled"))
         want = (gender or "").strip() if allowed else ""
         want_archived = (archived or "").strip() in ("1", "true", "yes")
+        want_edu = (education or "").strip() or None
+        want_univ = (univ or "").strip()
         items = db.list_candidates(conn, tier=tier, keyword=kw, stage=stage,
-                                   education=education, min_years=min_years,
+                                   min_years=min_years,
                                    archived=True if want_archived else False)
+        # 最低学历：在 server 层做而不是塞进 list_candidates——
+        # "无法判定被隐藏的人数"要数的是**除学历外其他条件都命中**的人，
+        # 这个集合只有在这里拿得到。
+        hidden_unknown = 0
+        if want_edu:
+            rank = db.EDU_RANK.get(want_edu, 0)
+            hidden_unknown = sum(1 for i in items
+                                 if db.EDU_RANK.get(i.get("edu_level") or "", 0) == 0)
+            items = [i for i in items
+                     if db.EDU_RANK.get(i.get("edu_level") or "", 0) >= rank]
+        # 院校层次 facets：在自身筛选生效前统计（与性别 facets 同一套口径），
+        # 这样下拉里写的人数不会因当前选项而缩水，对得上"共 N 人"。
+        _c985 = sum(1 for i in items if i.get("uni_tier") == "985")
+        _c211 = sum(1 for i in items if i.get("uni_tier") == "211")
+        uni_facets = {"985": _c985, "211": _c985 + _c211}
+        if want_univ in ("985", "211"):
+            items = [i for i in items
+                     if i.get("uni_tier") == "985"
+                     or (want_univ == "211" and i.get("uni_tier") == "211")]
         # 分布统计与结果过滤共用 `db.gender_matches` 一个口径：
         # 否则会出现"点了男，列表 3 个人，下拉里写着 4"这种对不上的情况。
         facets = {g: sum(1 for i in items if db.gender_matches(i.get("gender"), g))
@@ -355,6 +387,9 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                "my_permissions": s["permissions"],
                "archived_view": want_archived,
                "gender_facets": facets if allowed else None,
+               "uni_facets": uni_facets,
+               "edu_filter": {"min": want_edu, "applied": bool(want_edu),
+                              "hidden_unknown": hidden_unknown},
                "paging": paging,
                "gender_filter": {
                    "enabled": allowed,

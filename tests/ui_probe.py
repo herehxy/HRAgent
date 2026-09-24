@@ -602,6 +602,39 @@ def main() -> int:
             and bool(has_counts) and bool(opened) and bool(rows_clickable) and bool(modal_ok)
         c.shot(os.path.join(args.out, "18f-人才库-投递管道折叠条.png"))
 
+        # ⑦c-f 初筛下拉（v1.7.3）：学历 ≥ 门槛 + 院校层次 985/211 + 卡片标签。
+        # 数字对不上是最常见的坏法（下拉写 4、筛出来 3），所以每步都与接口 count 对账。
+        has_edu_sel = c.eval("!!document.querySelector('select[onchange*=\"EDU_MIN\"]')")
+        has_uni_sel = c.eval("!!document.querySelector('select[onchange*=\"UNIV\"]')")
+        c.eval("EDU_MIN='本科';poolPageReset();refresh()")
+        time.sleep(1.8)
+        edu_cnt = c.eval(
+            "(async()=>{const r=await api('/api/candidates?education=%E6%9C%AC%E7%A7%91');"
+            "return r.count;})()", await_promise=True)
+        edu_cards = c.eval("document.querySelectorAll('.pickChk').length") or 0
+        edu_ok = bool(edu_cnt) and int(edu_cards) == min(10, int(edu_cnt))
+        c.eval("UNIV='985';poolPageReset();refresh()")
+        time.sleep(1.8)
+        uni_cnt = c.eval(
+            "(async()=>{const r=await api('/api/candidates?univ=985');"
+            "return r.count;})()", await_promise=True)
+        uni_cards = c.eval("document.querySelectorAll('.pickChk').length") or 0
+        uni_ok = bool(uni_cnt) and int(uni_cards) == min(10, int(uni_cnt))
+        c.eval("EDU_MIN='';UNIV='';poolPageReset();refresh()")
+        time.sleep(1.8)
+        pool4 = c.eval("(document.getElementById('view').innerHTML||'')") or ""
+        any_uni = c.eval(
+            "(async()=>{const r=await api('/api/candidates');"
+            "return (r.items||[]).some(x=>!!x.uni_tier);})()", await_promise=True)
+        tag_ok = (bool(any_uni) and (">985<" in pool4 or ">211<" in pool4)) or not any_uni
+        print(f"  初筛下拉：学历/院校选择器 {bool(has_edu_sel)}/{bool(has_uni_sel)}；"
+              f"学历≥本科 界面 {edu_cards} 人 = 接口 {edu_cnt} 人 {bool(edu_ok)}；"
+              f"985 筛选 界面 {uni_cards} 人 = 接口 {uni_cnt} 人 {bool(uni_ok)}；"
+              f"卡片 985/211 标签 {bool(tag_ok)}（库内 {'有' if any_uni else '无'}标签数据）")
+        ok = ok and bool(has_edu_sel) and bool(has_uni_sel) and bool(edu_ok) \
+            and bool(uni_ok) and bool(tag_ok)
+        c.shot(os.path.join(args.out, "18g-人才库-学历与院校初筛.png"))
+
         # 归档页：勾选框 + 批量取消 + 满 30 天彻底删除的口径说明。
         # 归档页有没有人是"使用状态"而非验收输入，所以先保证有人再看细则：
         # 没人就临时归档一位（验完立刻取消），把"剩余天数"这条口径真正看到一遍。

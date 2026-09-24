@@ -1945,6 +1945,56 @@ def main(verbose: bool = True) -> int:
             c.ok(all(_a.get(x["id"]) == x["tier_effective"] for x in b2["items"]),
                  "按性别筛选不改变任何人的档位（筛选只影响列出谁）")
 
+            # —— 初筛（v1.7.3）：最低学历 ≥ 门槛 + 院校层次 985/211 ——
+            # 学校本身只做标签（uni_tier 随每条下发），筛选只开放到 985/211 层次。
+            c.ok(all("uni_tier" in x for x in b0["items"]),
+                 "列表每条都带 uni_tier 字段（卡片 985/211 标签的数据来源）")
+            _, e1_body = _asgi(srv.app, "GET",
+                               "/api/candidates?education=%E6%9C%AC%E7%A7%91", {})  # 本科
+            _, e2_body = _asgi(srv.app, "GET",
+                               "/api/candidates?education=%E5%8D%9A%E5%A3%AB", {})  # 博士
+            e1, e2 = json.loads(e1_body), json.loads(e2_body)
+            _RANK = {"大专": 1, "专科": 1, "本科": 2, "学士": 2, "研究生": 3, "硕士": 3, "博士": 4}
+            c.ok(all(_RANK.get(x.get("edu_level") or "", 0) >= 2 for x in e1["items"])
+                 and all(_RANK.get(x.get("edu_level") or "", 0) >= 4 for x in e2["items"])
+                 and e2["count"] <= e1["count"] <= b0["count"]
+                 and e1.get("edu_filter", {}).get("applied") is True,
+                 "最低学历是 ≥ 门槛口径且如实标注（博士筛选 ⊆ 本科筛选 ⊆ 全量）",
+                 f"全量 {b0['count']} / 本科及以上 {e1['count']} / 博士 {e2['count']}")
+            # 用第一条候选人做院校/学历的确定性验证（改完恢复，不污染后续断言）
+            _c = db.connect(db_path)
+            _row = _c.execute("SELECT id, edu_level, school FROM candidates "
+                              "ORDER BY id LIMIT 1").fetchone()
+            _c.close()
+            _c = db.connect(db_path)
+            _c.execute("UPDATE candidates SET school='西安交通大学', edu_level='' WHERE id=?",
+                       (_row["id"],))
+            _c.commit()
+            _c.close()
+            _, u1_body = _asgi(srv.app, "GET", "/api/candidates?univ=985", {})
+            u1 = json.loads(u1_body)
+            c.ok(u1["count"] >= 1 and all(x.get("uni_tier") == "985" for x in u1["items"]),
+                 "985 筛选生效且结果里都是 985（全名/别名/校区后缀归一后匹配）",
+                 f"count={u1['count']}")
+            _, u2_body = _asgi(srv.app, "GET", "/api/candidates?univ=211", {})
+            u2 = json.loads(u2_body)
+            c.ok(all(x.get("uni_tier") in ("985", "211") for x in u2["items"])
+                 and u2["count"] >= u1["count"],
+                 "211 筛选把 985 也算进去（985 学校全部同时是 211）",
+                 f"count={u2['count']}")
+            _, u3_body = _asgi(srv.app, "GET",
+                               "/api/candidates?education=%E6%9C%AC%E7%A7%91", {})
+            u3 = json.loads(u3_body)
+            c.ok(u3.get("edu_filter", {}).get("hidden_unknown", 0) >= 1
+                 and not any(x["id"] == _row["id"] for x in u3["items"]),
+                 "学历无法判定的人被门槛挡下时，人数被如实报出（不静默消失）",
+                 f"hidden_unknown={u3.get('edu_filter', {}).get('hidden_unknown')}")
+            _c = db.connect(db_path)
+            _c.execute("UPDATE candidates SET school=?, edu_level=? WHERE id=?",
+                       (_row["school"], _row["edu_level"], _row["id"]))
+            _c.commit()
+            _c.close()
+
             # 落库与回填：简历写了性别才写；已有值不被反向覆盖
             # 用一份**内容不同**的简历：同一份内容会被文件层去重跳过（那测的就不是性别了）
             resume_g = ("姓名：性别样例二\n性别：女\n电话：13800005555\n邮箱：gender@test.cn\n"
