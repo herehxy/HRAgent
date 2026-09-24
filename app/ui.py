@@ -1,6 +1,6 @@
 """工作台界面：单页应用（HTML + 原生 JS，无构建步骤、无外部 CDN）。
 
-九个视图：人才库（顶部内嵌投递管道完整看板） / 归档 / 智能助手 / 导入与来源 / 岗位管理 /
+九个视图：人才库（顶部内嵌投递管道，默认折叠一行人数） / 归档 / 智能助手 / 导入与来源 / 岗位管理 /
 提案与审计 / 检索 / 邮箱配置 / 系统说明（红线承诺集中展示在「系统说明」页）。
 
 产品定位（v2）：**只给 HR 使用**，单角色、无盲筛、无角色切换。
@@ -183,6 +183,9 @@ let EDU_MIN = '', UNIV = '';
 // 否则"在第 3 页改了搜索词"会落在一个不存在的页上（后端会兜底夹到末页，但那不是用户想要的）。
 // 导出 CSV 不分页：另发一次不带 page 参数的请求拿全量，见 exportCsv。
 let POOL_PAGE = 1;const POOL_SIZE = 10;
+// 投递管道看板折叠态（v1.7.5）：默认收起只看一行人数，展开才是完整看板；
+// 记在全局变量上，翻页 / 搜索 / 改档位等 refresh 重渲染后不丢。
+let PIPE_OPEN = false;
 function poolPageReset(){ POOL_PAGE = 1; }
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
@@ -761,19 +764,36 @@ async function exportCsv(){
   toast(`已导出 CSV（${rows.length} 人，姓名/联系方式/技能概要 + 对应岗位）`,'ok');
 }
 
-/* --------------------- 投递管道（嵌入人才库，v1.7.2 / v1.7.4 常驻看板） ---------------------
+/* --------------------- 投递管道（嵌入人才库，v1.7.5 折叠 + 完整看板） ---------------------
    独立「投递管道」导航页整体退出（VIEWS 已移除，#pipe 旧链接自动落回人才库）。
-   按试用反馈（v1.7.4）从"折叠下拉"改回**常驻完整看板**：所有阶段列全展示、
-   每阶段人员全部列出（后端已去 20 条截断）、行内带**阶段推进下拉**（原页的
-   流程操作不因页面退出而丢失），点姓名直接打开该人的完整档案。
-   数据仍是 /api/pipeline 一份；翻页 / 搜索 / 改档位等 refresh 重渲染后照常重画。 */
+   形态按试用反馈定稿（v1.7.5）：**默认折叠成一行**，只看各阶段人数（超期红字）；
+   点「展开」出完整看板——在招流程的阶段列全展示、每阶段人员全部列出（后端无截断）、
+   行内带**阶段推进下拉**（原页的流程操作不丢），点姓名直接打开该人的完整档案。
+   已入职 / 已结束是终态，不占看板（也不占折叠行），要看去候选人卡片上按阶段看。
+   数据仍是 /api/pipeline 一份；折叠态记在 PIPE_OPEN，refresh 重渲染后不丢。 */
+const _PIPE_STAGES = STAGES.filter(s=>s!=='已入职' && s!=='已结束');   // 在招流程阶段
+function pipeToggle(){ PIPE_OPEN = !PIPE_OPEN; refresh(); }
 function pipeBoardHtml(p){
   const order = (p && p.stage_order) || STAGES;
   const st = (p && p.stages) || {};
   const openTotal = (p && p.open_total) || 0;
+  // 折叠行：在招流程各阶段人数，一段一行放下（超期红字提醒），已入职/已结束不计
+  const counts = _PIPE_STAGES.map(s=>{
+    const v = st[s] || {count:0, overdue:0};
+    return `<span style="color:${v.overdue?'#f53f3f':'#1d5fd8'}"
+      title="${esc(s)}：${v.count} 人${v.overdue?('，超期 '+v.overdue):''}">${esc(s)} ${v.count}${v.overdue?('（超期 '+v.overdue+'）'):''}</span>`;
+  }).join('<span style="color:#c9cdd4"> · </span>');
+  const head = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <b>投递管道</b>
+      <span class="small" style="color:#4e5969">在流程中 ${openTotal} 条</span>
+      <span style="flex:1"></span>
+      <button id="pipeBtn" class="${PIPE_OPEN?'':'btn-primary'}" onclick="pipeToggle()">${PIPE_OPEN?'收起 ▲':'展开 ▼'}</button>
+    </div>
+    <div class="bar" style="margin-top:8px;flex-wrap:wrap;gap:6px 10px">${counts || '<span class="small" style="color:#86909c">各阶段暂无人</span>'}</div>`;
+  if (!PIPE_OPEN) return `<div class="card" id="pipeCard" style="margin-bottom:12px">${head}</div>`;
   const chans = Object.entries((p && p.channels) || {})
     .sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${esc(k)} ${v}`).join(' · ');
-  const cols = order.map(s=>{
+  const cols = _PIPE_STAGES.map(s=>{
     const v = st[s] || {count:0, items:[], overdue:0};
     // 每条：姓名（点开完整档案）· 岗位 · 投递天数 · 超期红字 · 行内推进阶段下拉
     const rows = (v.items||[]).map(i=>`
@@ -793,15 +813,10 @@ function pipeBoardHtml(p){
       <span style="color:${v.overdue?'#f53f3f':'#86909c'}">${v.count}${v.overdue?(' / 超期'+v.overdue):''}</span></div>
       ${rows}</div>`;
   }).join('');
-  return `<div class="card" style="margin-bottom:12px">
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <b>投递管道</b>
-      <span class="small" style="color:#4e5969">在流程中 ${openTotal} 条（已入职 / 已结束不计）</span>
-      <span style="flex:1"></span>
-      <span class="small" style="color:#86909c">来源分布：${chans||'—'}</span>
-    </div>
+  return `<div class="card" id="pipeCard" style="margin-bottom:12px">${head}
     <div class="cols" style="margin-top:10px">${cols}</div>
-    <div class="small" style="color:#86909c;margin-top:8px">点姓名打开完整档案；行内下拉可直接推进阶段（写审计）。停留超过 15 天的条目红字标出。</div>
+    <div class="small" style="color:#86909c;margin-top:8px">点姓名打开完整档案；行内下拉可直接推进阶段（写审计）。停留超过 15 天红字标出。
+      已入职 / 已结束的投递不在此看板，可在候选人卡片的阶段下拉里查看与推进。</div>
   </div>`;
 }
 

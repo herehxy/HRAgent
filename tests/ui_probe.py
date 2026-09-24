@@ -568,25 +568,33 @@ def main() -> int:
         c.shot(os.path.join(args.out, "18e-人才库-分页.png"))
         c.shot(os.path.join(args.out, "18c-人才库-批量归档与建议岗位.png"))
 
-        # ⑦c-e 投递管道嵌入人才库（v1.7.2 下拉 → v1.7.4 常驻完整看板）：
-        # 独立导航页退出；看板**所有阶段列全展示**、每阶段人员全部列出（无截断）、
-        # 行内带阶段推进下拉（被删页面的流程操作不丢）、点姓名打开完整档案。
+        # ⑦c-e 投递管道嵌入人才库（v1.7.2 下拉 → v1.7.4 看板 → v1.7.5 折叠定稿）：
+        # 独立导航页退出；**默认折叠一行**只看各阶段人数（已入职/已结束终态不展示）；
+        # 点「展开」出完整看板（在招 5 阶段列、人员全量、行内推进下拉、点人开档案）。
         c.goto(f"{args.url}/#pool")
         time.sleep(1.8)
-        pool3 = c.eval("(document.getElementById('view').innerHTML||'')") or ""
-        has_pipe_card = ("投递管道" in pool3) and ('class="cols"' in pool3)
+        pool3 = c.eval("(document.getElementById('pipeCard')||{innerText:''}).innerText") or ""
+        has_pipe_card = ("投递管道" in pool3) and ("pipeBtn" in
+            (c.eval("(document.getElementById('view').innerHTML||'')") or ""))
         nav_pipe_gone = c.eval("!document.getElementById('tabs').innerHTML.includes(\"go('pipe')\")")
+        collapsed_cols = c.eval("document.querySelectorAll('#view .pcol').length") or 0
+        one_line_counts = ("在流程中" in pool3) and all(s in pool3 for s in
+            ["新投递", "已联系", "初面", "复面", "待offer"])
+        no_terminal = ("已入职" not in pool3) and ("已结束" not in pool3)
+        c.eval("pipeToggle()")
+        time.sleep(1.8)
         col_cnt = c.eval("document.querySelectorAll('#view .pcol').length") or 0
-        all_stages = int(col_cnt) == 7          # STAGES 全部 7 列，含空阶段
-        item_cnt = c.eval("document.querySelectorAll('#view .pcol .it').length") or 0
-        rows_clickable = "showDetail(" in pool3
+        all_stages = int(col_cnt) == 5          # 在招流程 5 列（已入职/已结束不占板）
+        rows_clickable = "showDetail(" in (c.eval(
+            "(document.getElementById('view').innerHTML||'')") or "")
         stage_sel_cnt = c.eval(
             "document.querySelectorAll('#view .pcol .it select').length") or 0
         # 点人 → 完整档案弹层真的打开（取管道里有 candidate_id 的第一条）
         pid = c.eval(
             "(async()=>{const r=await api('/api/pipeline');"
-            "for (const s of Object.values(r.stages||{}))"
-            "  for (const it of (s.items||[])) if (it.candidate_id) return it.candidate_id;"
+            "for (const s of ['新投递','已联系','初面','复面','待offer'])"
+            "  for (const it of ((r.stages||{})[s]||{items:[]}).items)"
+            "    if (it.candidate_id) return it.candidate_id;"
             "return null;})()", await_promise=True)
         modal_ok = False
         if pid:
@@ -595,22 +603,25 @@ def main() -> int:
             modal_ok = c.eval(
                 "(document.getElementById('mTitle')||{textContent:''}).textContent.includes('完整档案')")
             c.eval("closeModal();")
-        # 全部展示：接口各阶段 items 数与列内条目数一致（无 20 条截断）
+        # 全部展示：展开后各列条目数与接口 items 数逐列一致（无截断）
         cap_ok = c.eval(
             "(async()=>{const r=await api('/api/pipeline');"
             "const dom=document.querySelectorAll('#view .pcol');"
-            "const order=r.stage_order||[];"
-            "return order.every((s,i)=>{const v=r.stages[s]||{items:[]};"
+            "const order=['新投递','已联系','初面','复面','待offer'];"
+            "return order.every((s,i)=>{const v=(r.stages||{})[s]||{items:[]};"
             "const col=dom[i]; if(!col) return false;"
-            "const n=col.querySelectorAll('.it').length;"
-            "return n===Math.max(1,(v.items||[]).length);});})()",
+            "return col.querySelectorAll('.it').length===Math.max(1,(v.items||[]).length);});})()",
             await_promise=True)
-        print(f"  投递管道看板嵌入人才库：卡片 {bool(has_pipe_card)}；独立导航页已撤 {bool(nav_pipe_gone)}；"
-              f"阶段列 {col_cnt}/7 全展示 {all_stages}；人员条目 {item_cnt} 个与接口一致 {bool(cap_ok)}；"
-              f"行内推进下拉 {stage_sel_cnt} 个；条目可点 {bool(rows_clickable)}；点人弹完整档案 {bool(modal_ok)}")
-        ok = ok and bool(has_pipe_card) and bool(nav_pipe_gone) and all_stages \
+        c.eval("pipeToggle()")                  # 收回默认态，不影响后续场景
+        time.sleep(1.2)
+        print(f"  投递管道折叠看板：卡片与按钮 {bool(has_pipe_card)}；独立导航页已撤 {bool(nav_pipe_gone)}；"
+              f"默认折叠(0列) {int(collapsed_cols)==0}；一行人数 {bool(one_line_counts)}；"
+              f"终态不上板 {bool(no_terminal)}；展开 5 列 {all_stages}；"
+              f"条目与接口一致 {bool(cap_ok)}；推进下拉 {stage_sel_cnt} 个；点人弹档案 {bool(modal_ok)}")
+        ok = ok and bool(has_pipe_card) and bool(nav_pipe_gone) and int(collapsed_cols)==0 \
+            and bool(one_line_counts) and bool(no_terminal) and all_stages \
             and bool(cap_ok) and bool(rows_clickable) and bool(modal_ok)
-        c.shot(os.path.join(args.out, "18f-人才库-投递管道看板.png"))
+        c.shot(os.path.join(args.out, "18f-人才库-投递管道折叠看板.png"))
 
         # ⑦c-f 初筛下拉（v1.7.3）：学历 ≥ 门槛 + 院校层次 985/211 + 卡片标签。
         # 数字对不上是最常见的坏法（下拉写 4、筛出来 3），所以每步都与接口 count 对账。
