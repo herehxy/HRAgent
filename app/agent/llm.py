@@ -37,18 +37,19 @@ def mask_key(key) -> str:
 
 
 def save_cfg(base_url: str | None = None, model: str | None = None,
-             api_key: str | None = None) -> dict:
+             api_key: str | None = None, temperature: float | None = None) -> dict:
     """界面保存模型配置（v1.7.6）。
 
-    base_url / model 写 `config/model.json`（保留 preset / _presets / 超时等其他字段）；
-    api_key 写 `config/secrets.json`（0600，已 gitignore）——**不进 SQLite**：
-    settings 表随库备份流动，密钥混进去等于把秘密带进每次备份。
+    base_url / model / temperature 写 `config/model.json`（保留 preset / _presets /
+    超时等其他字段）；api_key 写 `config/secrets.json`（0600，已 gitignore）——
+    **不进 SQLite**：settings 表随库备份流动，密钥混进去等于把秘密带进每次备份。
     api_key 传 None 或空串 = 不修改（界面"留空不改"语义）。
+    temperature 合法域 [0, 2]，越界由调用方（server 层）先拦。
 
     返回 {"changed": [字段名], "env_override": [会盖过文件值的环境变量名]}。
     """
     changed: list[str] = []
-    if base_url is not None or model is not None:
+    if base_url is not None or model is not None or temperature is not None:
         cfg: dict = {}
         if os.path.exists(CONFIG_PATH):
             try:
@@ -63,6 +64,9 @@ def save_cfg(base_url: str | None = None, model: str | None = None,
         if model and model.strip() and model.strip() != cfg.get("model"):
             cfg["model"] = model.strip()
             changed.append("model")
+        if temperature is not None and float(temperature) != float(cfg.get("temperature", 0)):
+            cfg["temperature"] = float(temperature)
+            changed.append("temperature")
         if changed:
             tmp = CONFIG_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:

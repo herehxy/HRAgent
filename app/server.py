@@ -2031,6 +2031,7 @@ class ModelCfgReq(BaseModel):
     base_url: str | None = None
     model: str | None = None
     api_key: str | None = None
+    temperature: float | None = None
 
 
 @app.get("/api/model-config")
@@ -2055,6 +2056,7 @@ def api_model_config_get(x_tp_token: str | None = Header(default=None, alias="X-
         src = "config/model.json" if key else "未配置"
     env_set = [k for k in ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY") if os.environ.get(k)]
     return {"base_url": c.get("base_url") or "", "model": c.get("model") or "",
+            "temperature": float(c.get("temperature", 0)),
             "key_masked": llm.mask_key(key), "key_set": bool(key),
             "key_source": src, "env_override": env_set,
             "note": "API Key 只显示掩码；保存写 config/secrets.json（0600，不入库不提交），"
@@ -2074,7 +2076,10 @@ def api_model_config_set(req: ModelCfgReq,
     require(s, "settings")
     if req.base_url is not None and req.base_url.strip() and not req.base_url.strip().startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="模型地址要以 http:// 或 https:// 开头")
-    r = llm.save_cfg(base_url=req.base_url, model=req.model, api_key=req.api_key)
+    if req.temperature is not None and not (0 <= req.temperature <= 2):
+        raise HTTPException(status_code=400, detail="temperature 取值范围 0–2")
+    r = llm.save_cfg(base_url=req.base_url, model=req.model,
+                     api_key=req.api_key, temperature=req.temperature)
     if not r["changed"]:
         return {"ok": True, "changed": [], "note": "没有需要保存的修改（API Key 留空 = 不修改）。"}
     conn = db.connect(DB_PATH)

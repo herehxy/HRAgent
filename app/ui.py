@@ -1980,6 +1980,10 @@ async function viewSys(){
       <div class="k">API Key</div><div><input id="mcKey" type="password" style="width:60%"
         placeholder="${mc.key_set?('已配置（'+esc(mc.key_masked)+'），留空不修改'):'未配置，输入后保存'}">
         <span class="small">来源：${esc(mc.key_source||'—')}</span></div>
+      <div class="k">随机度 temperature</div><div><input id="mcTemp" type="number" step="0.1" min="0" max="2"
+        style="width:80px" value="${mc.temperature==null?0:mc.temperature}">
+        <span class="small">0 = 稳定可复现（分级/抽取建议保持 0，配合原文反幻觉）；
+          调高回答更有变化，但编造风险上升。所有模型调用共用这一个值。</span></div>
     </div>
     ${mc.env_override && mc.env_override.length
       ? `<div class="warn" style="margin-top:8px">环境变量 ${esc(mc.env_override.join('、'))} 已设置，优先于这里的文件值——改动可能被它盖过。</div>` : ''}
@@ -2024,9 +2028,12 @@ async function saveModelCfg(){
   const bu = document.getElementById('mcBaseUrl').value.trim();
   const md = document.getElementById('mcModel').value.trim();
   const ak = document.getElementById('mcKey').value;
+  const tpRaw = document.getElementById('mcTemp').value;
+  const tp = tpRaw === '' ? null : parseFloat(tpRaw);
   if (!bu){ toast('模型地址不能为空（例如 https://api.deepseek.com/v1）','warn'); return; }
+  if (tp != null && (isNaN(tp) || tp < 0 || tp > 2)){ toast('temperature 取值范围 0–2','warn'); return; }
   const r = await api('/api/model-config', {method:'POST',
-    body:JSON.stringify({base_url:bu, model:md, api_key:ak})});
+    body:JSON.stringify({base_url:bu, model:md, api_key:ak, temperature:tp})});
   if (r.__http_error || r.error){ toast(r.detail||r.error||'保存失败','danger'); return; }
   document.getElementById('mcKey').value = '';
   toast(r.note||'已保存','ok');

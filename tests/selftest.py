@@ -2018,13 +2018,15 @@ def main(verbose: bool = True) -> int:
                 _, p1_body = _asgi(srv.app, "POST", "/api/model-config", _hj,
                                    json.dumps({"base_url": "http://127.0.0.1:9/v1",
                                                "model": "test-model",
-                                               "api_key": _KEY}).encode())
+                                               "api_key": _KEY,
+                                               "temperature": 0.7}).encode())
                 p1 = json.loads(p1_body)
                 c.ok(p1.get("ok") and "api_key" in (p1.get("changed") or [])
+                     and "temperature" in (p1.get("changed") or [])
                      and p1.get("key_masked") == "sk-****abcd"
                      and _KEY not in p1_body,
                      "保存后只回掩码（完整 key 不出现在任何响应里，含审计路径）",
-                     str(p1.get("key_masked")))
+                     f"{p1.get('key_masked')} / changed={p1.get('changed')}")
                 _st1 = os.stat(_llm.SECRETS_PATH)
                 c.ok(_st1.st_mode & 0o077 == 0,
                      "密钥文件权限 0600（组/其他人不可读）",
@@ -2033,18 +2035,22 @@ def main(verbose: bool = True) -> int:
                     _cfg_f = json.load(_fh)
                 c.ok(_cfg_f.get("base_url") == "http://127.0.0.1:9/v1"
                      and _cfg_f.get("model") == "test-model"
+                     and float(_cfg_f.get("temperature")) == 0.7
                      and "api_key" not in _cfg_f,
-                     "模型地址/名写 model.json，key 只进 secrets.json（两文件分离）")
+                     "地址/名/温度写 model.json，key 只进 secrets.json（两文件分离）",
+                     f"temperature={_cfg_f.get('temperature')}")
                 _, g1_body = _asgi(srv.app, "GET", "/api/model-config", {})
                 g1 = json.loads(g1_body)
                 c.ok(g1.get("key_masked") == "sk-****abcd" and g1.get("key_set") is True
-                     and _KEY not in g1_body and "密钥文件" in (g1.get("key_source") or ""),
+                     and _KEY not in g1_body and "密钥文件" in (g1.get("key_source") or "")
+                     and float(g1.get("temperature")) == 0.7,
                      "回读只见掩码，来源如实标为密钥文件",
-                     f"{g1.get('key_masked')} / {g1.get('key_source')}")
+                     f"{g1.get('key_masked')} / {g1.get('key_source')} / temp={g1.get('temperature')}")
                 _, p2_body = _asgi(srv.app, "POST", "/api/model-config", _hj,
                                    json.dumps({"base_url": "http://127.0.0.1:9/v1",
                                                "model": "test-model",
-                                               "api_key": ""}).encode())
+                                               "api_key": "",
+                                               "temperature": 0.7}).encode())
                 p2 = json.loads(p2_body)
                 c.ok(p2.get("changed") == [] and "没有需要保存" in (p2.get("note") or ""),
                      "留空 Key 且值未变 = 无操作（不写盘、不刷审计）",
@@ -2054,6 +2060,11 @@ def main(verbose: bool = True) -> int:
                                                        "model": "", "api_key": ""}).encode())
                 c.ok(_st_bad == 400, "模型地址必须 http(s) 开头（格式错误 400）",
                      f"status={_st_bad}")
+                _st_t, _t_body = _asgi(srv.app, "POST", "/api/model-config", _hj,
+                                       json.dumps({"base_url": "http://127.0.0.1:9/v1",
+                                                   "temperature": 3}).encode())
+                c.ok(_st_t == 400, "temperature 越界（>2）被拦（400）",
+                     f"status={_st_t}")
                 _c = db.connect(db_path)
                 _ar = _c.execute("SELECT after FROM audit_log WHERE entity='settings' "
                                  "AND entity_id='model-config' ORDER BY id DESC LIMIT 1").fetchone()
