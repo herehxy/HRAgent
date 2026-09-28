@@ -1995,6 +1995,78 @@ def main(verbose: bool = True) -> int:
             _c.commit()
             _c.close()
 
+            # —— 模型与密钥配置（v1.7.6）：掩码下发、文件落盘 0600、审计不记值 ——
+            # 把 llm 的配置路径指到临时目录，**绝不碰真实 config/**；
+            # 环境变量会盖过文件值，测试期间摘掉，测完原样恢复。
+            import app.agent.llm as _llm
+            _mc_dir = os.path.join(work, "model_cfg")
+            os.makedirs(_mc_dir, exist_ok=True)
+            _old_cp, _old_sp = _llm.CONFIG_PATH, _llm.SECRETS_PATH
+            _llm.CONFIG_PATH = os.path.join(_mc_dir, "model.json")
+            _llm.SECRETS_PATH = os.path.join(_mc_dir, "secrets.json")
+            _old_env = {k: os.environ.pop(k) for k in
+                        ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY") if k in os.environ}
+            try:
+                _KEY = "sk-test-1234567890abcd"
+                _, g0_body = _asgi(srv.app, "GET", "/api/model-config", {})
+                g0 = json.loads(g0_body)
+                c.ok(g0.get("key_set") is False and g0.get("key_masked") == ""
+                     and g0.get("key_source") == "未配置",
+                     "未配置时如实回报：key_set=False、掩码为空、来源=未配置",
+                     str(g0.get("key_source")))
+                _hj = {"Content-Type": "application/json"}
+                _, p1_body = _asgi(srv.app, "POST", "/api/model-config", _hj,
+                                   json.dumps({"base_url": "http://127.0.0.1:9/v1",
+                                               "model": "test-model",
+                                               "api_key": _KEY}).encode())
+                p1 = json.loads(p1_body)
+                c.ok(p1.get("ok") and "api_key" in (p1.get("changed") or [])
+                     and p1.get("key_masked") == "sk-****abcd"
+                     and _KEY not in p1_body,
+                     "保存后只回掩码（完整 key 不出现在任何响应里，含审计路径）",
+                     str(p1.get("key_masked")))
+                _st1 = os.stat(_llm.SECRETS_PATH)
+                c.ok(_st1.st_mode & 0o077 == 0,
+                     "密钥文件权限 0600（组/其他人不可读）",
+                     oct(_st1.st_mode & 0o777))
+                with open(_llm.CONFIG_PATH, encoding="utf-8") as _fh:
+                    _cfg_f = json.load(_fh)
+                c.ok(_cfg_f.get("base_url") == "http://127.0.0.1:9/v1"
+                     and _cfg_f.get("model") == "test-model"
+                     and "api_key" not in _cfg_f,
+                     "模型地址/名写 model.json，key 只进 secrets.json（两文件分离）")
+                _, g1_body = _asgi(srv.app, "GET", "/api/model-config", {})
+                g1 = json.loads(g1_body)
+                c.ok(g1.get("key_masked") == "sk-****abcd" and g1.get("key_set") is True
+                     and _KEY not in g1_body and "密钥文件" in (g1.get("key_source") or ""),
+                     "回读只见掩码，来源如实标为密钥文件",
+                     f"{g1.get('key_masked')} / {g1.get('key_source')}")
+                _, p2_body = _asgi(srv.app, "POST", "/api/model-config", _hj,
+                                   json.dumps({"base_url": "http://127.0.0.1:9/v1",
+                                               "model": "test-model",
+                                               "api_key": ""}).encode())
+                p2 = json.loads(p2_body)
+                c.ok(p2.get("changed") == [] and "没有需要保存" in (p2.get("note") or ""),
+                     "留空 Key 且值未变 = 无操作（不写盘、不刷审计）",
+                     str(p2.get("changed")))
+                _st_bad, _bad_body = _asgi(srv.app, "POST", "/api/model-config", _hj,
+                                           json.dumps({"base_url": "ftp://x",
+                                                       "model": "", "api_key": ""}).encode())
+                c.ok(_st_bad == 400, "模型地址必须 http(s) 开头（格式错误 400）",
+                     f"status={_st_bad}")
+                _c = db.connect(db_path)
+                _ar = _c.execute("SELECT after FROM audit_log WHERE entity='settings' "
+                                 "AND entity_id='model-config' ORDER BY id DESC LIMIT 1").fetchone()
+                _c.close()
+                _ad = _ar["after"] if _ar else ""
+                c.ok(bool(_ad) and "api_key" in _ad
+                     and _KEY not in _ad and "sk-****" not in _ad,
+                     "审计记了改了哪些字段，但 key 的值与掩码都不进审计",
+                     _ad[:40])
+            finally:
+                _llm.CONFIG_PATH, _llm.SECRETS_PATH = _old_cp, _old_sp
+                os.environ.update(_old_env)
+
             # 落库与回填：简历写了性别才写；已有值不被反向覆盖
             # 用一份**内容不同**的简历：同一份内容会被文件层去重跳过（那测的就不是性别了）
             resume_g = ("姓名：性别样例二\n性别：女\n电话：13800005555\n邮箱：gender@test.cn\n"

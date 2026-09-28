@@ -19,6 +19,75 @@ from .. import net
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CONFIG_PATH = os.path.join(_BASE_DIR, "config", "model.json")
+SECRETS_PATH = os.path.join(_BASE_DIR, "config", "secrets.json")
+
+
+def mask_key(key) -> str:
+    """API Key 掩码：保留前 3 后 4，中间一律 ****。
+
+    这是 key 唯一允许离开服务端的形态——完整 key 永远不下发、不进审计、
+    不进数据库。太短（≤8 位）的值连首尾都不给，防止侧漏拼回。
+    """
+    k = str(key or "")
+    if not k:
+        return ""
+    if len(k) <= 8:
+        return "****"
+    return k[:3] + "****" + k[-4:]
+
+
+def save_cfg(base_url: str | None = None, model: str | None = None,
+             api_key: str | None = None) -> dict:
+    """界面保存模型配置（v1.7.6）。
+
+    base_url / model 写 `config/model.json`（保留 preset / _presets / 超时等其他字段）；
+    api_key 写 `config/secrets.json`（0600，已 gitignore）——**不进 SQLite**：
+    settings 表随库备份流动，密钥混进去等于把秘密带进每次备份。
+    api_key 传 None 或空串 = 不修改（界面"留空不改"语义）。
+
+    返回 {"changed": [字段名], "env_override": [会盖过文件值的环境变量名]}。
+    """
+    changed: list[str] = []
+    if base_url is not None or model is not None:
+        cfg: dict = {}
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, encoding="utf-8") as fh:
+                    cfg = json.load(fh)
+            except (ValueError, OSError):
+                cfg = {}
+        # 与文件现值做 diff：没变的字段不写、不记审计（防止"打开就点保存"刷审计）
+        if base_url and base_url.strip() and base_url.strip() != cfg.get("base_url"):
+            cfg["base_url"] = base_url.strip()
+            changed.append("base_url")
+        if model and model.strip() and model.strip() != cfg.get("model"):
+            cfg["model"] = model.strip()
+            changed.append("model")
+        if changed:
+            tmp = CONFIG_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(cfg, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, CONFIG_PATH)
+    if api_key:
+        sec: dict = {}
+        if os.path.exists(SECRETS_PATH):
+            try:
+                with open(SECRETS_PATH, encoding="utf-8") as fh:
+                    sec = json.load(fh)
+            except (ValueError, OSError):
+                sec = {}
+        if sec.get("api_key") != api_key.strip():
+            sec["api_key"] = api_key.strip()
+            # secrets.json 可能已有 base_url/model 覆盖项，一并保留
+            tmp = SECRETS_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(sec, fh, ensure_ascii=False, indent=2)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, SECRETS_PATH)
+            changed.append("api_key")
+    env_override = [k for k in ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY")
+                    if os.environ.get(k)]
+    return {"changed": changed, "env_override": env_override}
 
 
 def load_cfg() -> dict:
@@ -34,10 +103,9 @@ def load_cfg() -> dict:
     if preset and preset in cfg.get("_presets", {}):
         cfg.update(cfg["_presets"][preset])
     # 2) 本地密钥文件（不入库、不提交）：config/secrets.json {"api_key": "..."}
-    secrets_path = os.path.join(_BASE_DIR, "config", "secrets.json")
-    if os.path.exists(secrets_path):
+    if os.path.exists(SECRETS_PATH):
         try:
-            with open(secrets_path, encoding="utf-8") as fh:
+            with open(SECRETS_PATH, encoding="utf-8") as fh:
                 sec = json.load(fh)
             for k in ("api_key", "base_url", "model"):
                 if sec.get(k):

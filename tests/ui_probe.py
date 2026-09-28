@@ -725,6 +725,25 @@ def main() -> int:
         ok = ok and bool(gtoggle) and ("就业促进法" in sys_html)
         c.shot(os.path.join(args.out, "19-系统说明-性别筛选开关.png"))
 
+        # ⑦d-b 模型与密钥卡片（v1.7.6，只读验收）：
+        # 卡片在页、Key 输入框是密码型、界面只见掩码（****）、无"明文 key"语义。
+        # **绝不 POST**——探针跑在真实库上，写配置是 selftest 临时目录里的事。
+        mc_url = c.eval("(document.getElementById('mcBaseUrl')||{}).value") or ""
+        mc_key_type = c.eval("(document.getElementById('mcKey')||{}).type") or ""
+        mc_key_val = c.eval("(document.getElementById('mcKey')||{}).value") or ""
+        mc_api = c.eval(
+            "(async()=>{const r=await api('/api/model-config');"
+            "return {masked:r.key_masked||'', set:r.key_set, src:r.key_source||''};})()",
+            await_promise=True) or {}
+        masked = str(mc_api.get("masked") or "")
+        ui_masked_ok = (not mc_api.get("set")) or ("****" in masked and masked in sys_html + str(mc_key_val))
+        probe_mc_ok = bool(mc_url) and mc_key_type == "password" and mc_key_val == "" \
+            and ("****" in masked or not mc_api.get("set")) and ui_masked_ok
+        print(f"  模型与密钥卡片：地址输入框 {bool(mc_url)}；Key 输入框为密码型 {mc_key_type=='password'} 且默认空 {mc_key_val==''}；"
+              f"接口掩码 {masked or '（未配置）'}；界面只见掩码 {bool(ui_masked_ok)}")
+        ok = ok and bool(probe_mc_ok)
+        c.shot(os.path.join(args.out, "19b-系统说明-模型与密钥.png"))
+
         # ⑦e 运行环境：模型口径必须"说全"，不能让降级看起来像正常。
         #    两处都实测踩过：① 向量模型不可达（Ollama 没起）时界面只写"384 维 · 已索引 N 人"，
         #    读起来像一切正常，而实际早已退回本地哈希向量；② 只有模型名、看不出走的是

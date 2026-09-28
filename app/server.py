@@ -2026,6 +2026,76 @@ def api_settings_get(x_tp_token: str | None = Header(default=None, alias="X-TP-T
         conn.close()
 
 
+class ModelCfgReq(BaseModel):
+    """模型配置保存。api_key 传空/缺省 = 不修改（前端"留空不改"）。"""
+    base_url: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+
+
+@app.get("/api/model-config")
+def api_model_config_get(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """模型与密钥配置（只读）。
+
+    **API Key 只以掩码形态离开服务端**（`sk-****1234`），完整值永不下发——
+    这条与"密文不下发"同一条红线：界面要能看状态，但不能成为密钥的出口。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    c = llm.load_cfg()
+    key = c.get("api_key") or ""
+    if os.environ.get("LLM_API_KEY"):
+        src = "环境变量 LLM_API_KEY"
+    elif c.get("api_key_env"):
+        src = f"环境变量 {c['api_key_env']}" if os.environ.get(c["api_key_env"]) else "未解析到（该环境变量未设置）"
+    elif os.path.exists(llm.SECRETS_PATH):
+        src = "密钥文件 config/secrets.json"
+    else:
+        src = "config/model.json" if key else "未配置"
+    env_set = [k for k in ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY") if os.environ.get(k)]
+    return {"base_url": c.get("base_url") or "", "model": c.get("model") or "",
+            "key_masked": llm.mask_key(key), "key_set": bool(key),
+            "key_source": src, "env_override": env_set,
+            "note": "API Key 只显示掩码；保存写 config/secrets.json（0600，不入库不提交），"
+                    "保存即生效（每次模型调用重新读取配置）。环境变量优先于文件值。"}
+
+
+@app.post("/api/model-config")
+def api_model_config_set(req: ModelCfgReq,
+                         x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """保存模型配置（写文件，写审计）。
+
+    审计记录**只记改了哪些字段**，api_key 的值与掩码都不写进审计——
+    审计日志随库备份流动，秘密值不进去是底线。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
+    if req.base_url is not None and req.base_url.strip() and not req.base_url.strip().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="模型地址要以 http:// 或 https:// 开头")
+    r = llm.save_cfg(base_url=req.base_url, model=req.model, api_key=req.api_key)
+    if not r["changed"]:
+        return {"ok": True, "changed": [], "note": "没有需要保存的修改（API Key 留空 = 不修改）。"}
+    conn = db.connect(DB_PATH)
+    try:
+        # 审计只记字段名：base_url/model 属配置可记，api_key 只记"已更新"
+        fields = "、".join(("api_key（值不记录）" if f == "api_key" else f) for f in r["changed"])
+        db.add_audit(conn, "settings", "model-config", "update",
+                     "", f"更新模型配置：{fields}", s["username"], s["role"])
+    finally:
+        conn.close()
+    c2 = llm.load_cfg()
+    note = "已保存并即生效（每次模型调用重新读取配置）。"
+    if r["env_override"]:
+        note += (" 注意：环境变量 " + "、".join(r["env_override"]) +
+                 " 优先于文件值，当前进程里它会盖过刚保存的配置——"
+                 "要么删掉环境变量，要么继续用环境变量管理。")
+    return {"ok": True, "changed": r["changed"],
+            "key_masked": llm.mask_key(c2.get("api_key")), "key_set": bool(c2.get("api_key")),
+            "env_override": r["env_override"], "note": note}
+
+
 @app.post("/api/settings")
 def api_settings_set(req: SettingsReq,
                      x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),

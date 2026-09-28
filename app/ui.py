@@ -1884,8 +1884,8 @@ async function testMailCfg(){
 
 /* ------------------------------ 系统说明 ------------------------------ */
 async function viewSys(){
-  const [pol, onto, st] = await Promise.all([
-    api('/api/policy'), api('/api/ontology'), api('/api/settings')]);
+  const [pol, onto, st, mc] = await Promise.all([
+    api('/api/policy'), api('/api/ontology'), api('/api/settings'), api('/api/model-config')]);
   const a = pol.access || {}, pii = a.pii_protection || {};
   const gOn = !!st.gender_filter_enabled;
   document.getElementById('view').innerHTML = `
@@ -1968,6 +1968,26 @@ async function viewSys(){
       <div class="small" style="margin-top:8px">备份方式：停服后整目录拷贝即可（重点 <code>data/</code> 与 <code>config/</code>）。</div>
     </div>
   </div>
+  <div class="card"><h2>模型与密钥</h2>
+    <div class="note">API Key 只以掩码显示（<code>sk-****1234</code>），完整值不离开服务端；
+      保存写 <code>config/secrets.json</code>（0600，不入库不提交），**保存即生效**（每次模型调用重新读取配置）；
+      动作写入审计。留空 Key 表示不修改。</div>
+    <div class="kv" style="margin-top:8px">
+      <div class="k">模型地址</div><div><input id="mcBaseUrl" style="width:90%" value="${esc(mc.base_url||'')}"
+        placeholder="https://api.deepseek.com/v1"></div>
+      <div class="k">模型名</div><div><input id="mcModel" style="width:60%" value="${esc(mc.model||'')}"
+        placeholder="deepseek-chat / qwen2.5:14b"></div>
+      <div class="k">API Key</div><div><input id="mcKey" type="password" style="width:60%"
+        placeholder="${mc.key_set?('已配置（'+esc(mc.key_masked)+'），留空不修改'):'未配置，输入后保存'}">
+        <span class="small">来源：${esc(mc.key_source||'—')}</span></div>
+    </div>
+    ${mc.env_override && mc.env_override.length
+      ? `<div class="warn" style="margin-top:8px">环境变量 ${esc(mc.env_override.join('、'))} 已设置，优先于这里的文件值——改动可能被它盖过。</div>` : ''}
+    <div class="bar" style="margin-top:10px">
+      <button class="btn-primary" onclick="saveModelCfg()">保存模型配置</button>
+      <span class="small">改完立即生效，无需重启；新地址/新模型是否可达见下方「运行环境」。</span>
+    </div>
+  </div>
   <div class="card"><h2>运行环境</h2>
     <div class="kv">
       <div class="k">对话模型</div><div>${esc(META.model.model||'—')} ·
@@ -1997,6 +2017,21 @@ async function viewSys(){
     </div>
   </div>`;
   loadExtensionInfo();
+}
+// 保存模型配置（v1.7.6）：地址/模型名直接下发，Key 留空 = 不修改；
+// 后端写 config/model.json + secrets.json（0600）并写审计，保存即生效。
+async function saveModelCfg(){
+  const bu = document.getElementById('mcBaseUrl').value.trim();
+  const md = document.getElementById('mcModel').value.trim();
+  const ak = document.getElementById('mcKey').value;
+  if (!bu){ toast('模型地址不能为空（例如 https://api.deepseek.com/v1）','warn'); return; }
+  const r = await api('/api/model-config', {method:'POST',
+    body:JSON.stringify({base_url:bu, model:md, api_key:ak})});
+  if (r.__http_error || r.error){ toast(r.detail||r.error||'保存失败','danger'); return; }
+  document.getElementById('mcKey').value = '';
+  toast(r.note||'已保存','ok');
+  META = await api('/api/meta');   // 新配置的可达状态要反映到「运行环境」
+  refresh();
 }
 // 扩展机制信息（学科目录 + 领域包）：只读展示，让人知道"加新行业"的入口在哪。
 // 刻意不在这里放"一键导入"：导入会改写全院共用的技能本体，属于口径级动作，
