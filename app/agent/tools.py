@@ -394,8 +394,6 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             # 解释档位时同样区分"已归岗"与"只是建议岗位"：建议岗位的学历门槛
             # 不能用来判 D（v1.8.9），解释里也就不该出现按猜出来的门槛下的结论。
             _has_job = any(x.get("job_id") for x in (d.get("applications") or []))
-            # v1.12：库内档位现在是**模型判的**（tier_source=llm），现场这里用规则通道重算，
-            # 目的是给 HR 一个**对照与交叉校验**：模型判 X、规则判 Y，不一致就提示复核。
             g = grade(cand, jd, ctx.tiers, job_confirmed=_has_job)
             mm = major_match({**cand, "major": d.get("major")}, jd, db.skill_categories(conn))
             # 与库内记录对账（v1.6）：这里是"现在重算"，库里是"上次重算时写下的结论"。
@@ -404,21 +402,17 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             _apps = d.get("applications") or []
             _db_app = next((x for x in _apps if x.get("job_id")), (_apps[0] if _apps else {}))
             consistency = None
-            # v1.12：口径改成"库内**规则通道** vs 现场规则重算"——过去库内 tier_suggested
-            # 就是规则结论，现在它是模型结论，拿它跟规则重算比会把"模型与规则本来就不同"
-            # 误报成"库内记录过期"。模型与规则的分歧另有 agreement 字段表达。
-            _db_rule_tier = _db_app.get("tier_rule")
-            _db_rule_score = _db_app.get("score_rule")
-            if _db_rule_score is not None or _db_rule_tier:
-                _same = (float(_db_rule_score or 0) == float(g["score"])
-                         and (_db_rule_tier or "") == g["tier_suggested"])
+            if _db_app.get("score") is not None:
+                _same = (float(_db_app.get("score") or 0) == float(g["score"])
+                         and (_db_app.get("tier_suggested") or "") == g["tier_suggested"])
                 consistency = {
                     "same": _same,
-                    "db_score": _db_rule_score, "db_tier": _db_rule_tier,
+                    "db_score": _db_app.get("score"),
+                    "db_tier": _db_app.get("tier_suggested"),
                     "db_hits": _db_app.get("hits") or [],
-                    "note": ("库内规则结论与当前重算一致" if _same else
-                             "库内规则结论与当前重算不一致（技能词表或该岗位 JD 更新过）："
-                             "库内是上次重算写下的。可在「岗位管理」页对该岗位点"
+                    "note": ("库内记录与当前重算一致" if _same else
+                             "库内记录与当前重算不一致（技能词表或该岗位 JD 更新过）："
+                             "库内是上次重算写下的结论。可在「部门与岗位」页对该岗位点"
                              "「重新分析」刷新库内结论。"),
                 }
             return _ok({
@@ -434,20 +428,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 "consistency": consistency,
                 "needs_review": g["needs_review"],
                 "unverified_skills": cand["unverified_skills"],
-                # v1.12：把库内**模型结论**与其元信息一并给出（解释以模型判断为主，
-                # 规则只是对照）。tier_meta 里有 prompt 版本 / 所用模型 / 置信度 /
-                # 证据核验结果——"这条档位是谁按哪版口径判的"要答得上来。
-                "tier_source": _db_app.get("tier_source"),
-                "tier_rule": _db_app.get("tier_rule") or g["tier_suggested"],
-                "score_rule": _db_app.get("score_rule"),
-                "llm": (json.loads(_db_app.get("tier_meta") or "{}")
-                        if _db_app.get("tier_meta") else None),
-                "agreement": (None if not _db_app.get("tier_rule")
-                              else (_db_app.get("tier_rule") == _db_app.get("tier_suggested"))),
-                "method": ("档位由模型判读（读 JD + 简历后给结论，命中项必须附原文证据，"
-                           "证据核对不过的不计入）；下方 breakdown 是**规则通道参考分**，"
-                           "口径：学历 0.25 / 年限 0.25 / 必需技能 0.35 / 加分项 0.15，"
-                           "仅用于排序与交叉校验，不决定档位。"),
+                "method": "纯规则计算，不调用模型；分值构成：学历 0.25 / 年限 0.25 / 必需技能 0.35 / 加分项 0.15",
             })
 
         # ---------------- 算 ----------------

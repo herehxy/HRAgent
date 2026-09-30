@@ -42,7 +42,6 @@ from .pipeline.extract import extract
 from .pipeline import subject_meta as subject_meta_mod
 from .pipeline import major_llm as major_llm_mod
 from .pipeline import majors as majors_mod
-from .pipeline import tier_llm
 
 
 def _enrich_major(cand: dict, text: str) -> tuple[dict, str]:
@@ -274,8 +273,7 @@ def _regrade_if_unconfirmed(conn, app: dict, g: dict) -> bool:
     conn.execute(
         """UPDATE applications SET score = ?, tier_suggested = ?, needs_review = ?,
            reasons = ?, risks = ?, hits = ?, miss = ?, preferred_hit = ?, breakdown = ?,
-           extract_mode = ?, confidence = ?,
-           tier_rule = ?, score_rule = ?, tier_source = ?, tier_meta = ?, updated_at = ?
+           extract_mode = ?, confidence = ?, updated_at = ?
            WHERE id = ?""",
         (g["score"], g["tier_suggested"], 1 if g["needs_review"] else 0,
          json.dumps(g["reasons"], ensure_ascii=False),
@@ -284,9 +282,7 @@ def _regrade_if_unconfirmed(conn, app: dict, g: dict) -> bool:
          json.dumps(g["miss"], ensure_ascii=False),
          json.dumps(g["preferred_hit"], ensure_ascii=False),
          json.dumps(g["breakdown"], ensure_ascii=False),
-         None, None,
-         g.get("tier_rule"), g.get("score_rule"), g.get("tier_source"),
-         tier_llm.meta_for_db(g), db.now(), app["id"]),
+         None, None, db.now(), app["id"]),
     )
     conn.commit()
     return True
@@ -470,18 +466,12 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         cand, major_note = _enrich_major(cand, text)
         if major_note:
             result["notes"].append(major_note)
-            # 归一后专业方向会变，但**打分不在这里重算**：v1.12 起档位由下方
-            # judge() 统一判定一次（模型主导 + 规则交叉校验），在这里再算一遍规则分
-            # 只会留下两套口径、还白跑一次。等下方判定即可。
-
-    # —— 档位判定（v1.12）：模型主导 + 规则交叉校验，全流程只调用一次模型 ——
-    # 时机刻意放在**抽取 / 标题字段覆盖 / 专业归一全部完成之后**，让模型看到最终画像；
-    # 中间那几处 grade() 只是给"建议岗位试算"和临时 result 用的规则值。落库以这里为准：
-    # 模型不可用（或 TP_LLM_GRADING=0、tiers.json 关掉）时自动退回同一把规则尺子，
-    # 并把"这次是规则判的"写进 tier_source，不假装是模型结论。
-    _judge_jd, _judge_confirmed = (route["jd"], False) if route else (jd, job_id is not None)
-    g = tier_llm.judge(cand, _judge_jd, tiers, raw_text=text,
-                       job_confirmed=_judge_confirmed, use_llm=use_llm)
+            if route:
+                g = grade(cand, route["jd"], tiers)
+            else:
+                g = grade(cand, jd, tiers, job_confirmed=(job_id is not None))
+            result["tier"] = g["tier_suggested"]
+            result["score"] = g["score"]
 
     if not ok:
         g["needs_review"] = True
@@ -580,9 +570,6 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         "hit": g["hit"], "miss": g["miss"], "preferred_hit": g["preferred_hit"],
         "breakdown": g["breakdown"], "extract_mode": cand.get("extract_mode"),
         "confidence": cand.get("confidence"),
-        # v1.12：档位来源与规则通道对照值一并落库（模型判的档位 + 规则判的档位都要留）
-        "tier_rule": g.get("tier_rule"), "score_rule": g.get("score_rule"),
-        "tier_source": g.get("tier_source"), "tier_meta": tier_llm.meta_for_db(g),
     })
     if reuse_doc and prior_doc is not None:
         # 复用既有原件：`documents.file_hash` 是 UNIQUE，同一份文件只允许一条台账，
@@ -895,6 +882,17 @@ def spawn_auto_analysis(db_path: str, report: dict, limit: int = 20) -> int:
                                       source=ins.get("source") or "auto_ingest",
                                       model=ins.get("model") or "",
                                       business_direction=ins.get("business_direction"))
+                    # 模型建议档位 → 更新 tier_suggested（HR 未确认时才更新）
+                    _mt = ins.get("suggested_tier")
+                    if _mt and _mt in ("A","B","C","D") and app_id:
+                        _ar = conn.execute("SELECT tier_suggested, tier_final FROM applications WHERE id=?",
+                                           (app_id,)).fetchone()
+                        if _ar and not _ar["tier_final"] and _ar["tier_suggested"] != _mt:
+                            conn.execute("UPDATE applications SET tier_suggested=?, updated_at=? WHERE id=?",
+                                         (_mt, db.now(), app_id))
+                            conn.commit()
+                            print(f"[auto_insight] 候选人#{cid} 档位 {_ar['tier_suggested']} → {_mt}（模型）",
+                                  file=sys.stderr)
                 except Exception as exc:               # noqa: BLE001 — 单条失败不扩散
                     print(f"[auto_insight] 候选人#{cid} 分析失败："
                           f"{type(exc).__name__}: {exc}", file=sys.stderr)

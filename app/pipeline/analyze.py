@@ -18,8 +18,9 @@ _FIT_SYSTEM = (
     "你是稀有金属材料行业的资深招聘官。依据岗位要求(JD)与候选人简历，做匹配分析。"
     "只依据给定信息，不要编造经历。严格输出 JSON："
     '{"highlights":["亮点，最多4条"],"risks":["不足或需确认点，最多4条"],'
-    '"summary":"一句话结论(40字内)","suggested_tier":"A/B/C/D",'
+    '"summary":"一句话结论(40字内)","suggested_tier":"A/B/C/D（必填，不能省略）",'
     '"confidence":0.0到1.0,"business_direction":"这个人实际做的业务方向(2-8字，如 材料工艺/后端开发)"}。'
+    "**suggested_tier 必须输出 A/B/C/D 之一，这是最重要的字段，漏了等于没做分析。**"
     "档位口径：A=必需条件全中且明显匹配；B=基本匹配、缺1项可培养；C=条件偏弱但有潜力；"
     "D=本岗位暂不匹配（仍会保留进人才库）。"
     "判断时**先看专业方向是否对口**：若候选人技能集中在与岗位侧重完全不同的大类"
@@ -207,6 +208,19 @@ def auto_insight(cand: dict, jd: dict | None, grade_result: dict | None = None) 
         fit = None
 
     if isinstance(fit, dict) and (fit.get("summary") or fit.get("highlights")):
+        # suggested_tier 兜底：模型有时把档位写在 summary 里而不是结构化字段里
+        model_tier = fit.get("suggested_tier")
+        if model_tier not in ("A", "B", "C", "D"):
+            import re as _re
+            m = _re.search(r"(?:建议|初判|评分)[^\n]*?([A-D])\s*档",
+                           fit.get("summary") or "")
+            model_tier = m.group(1) if m else None
+        # **档位决策**：D（学历不达标）优先于模型建议——
+        # 学历是硬门槛，模型不能越过；其余情况模型建议优先于规则
+        rule_tier = (grade_result or {}).get("tier_suggested")
+        final_tier = rule_tier                                # 默认用规则
+        if rule_tier != "D" and model_tier in ("A", "B", "C", "D"):
+            final_tier = model_tier                           # 模型可用且规则非 D → 用模型
         return {
             "summary": (fit.get("summary") or "").strip(),
             "reasons": [x for x in (fit.get("highlights") or []) if x][:4],
@@ -214,7 +228,7 @@ def auto_insight(cand: dict, jd: dict | None, grade_result: dict | None = None) 
             "evidence": evidence,
             "source": "auto_ingest",
             "model": llm.load_cfg().get("model") or "",
-            "suggested_tier": fit.get("suggested_tier"),
+            "suggested_tier": final_tier,
             "confidence": fit.get("confidence"),
             "business_direction": str(fit.get("business_direction") or "").strip() or None,
         }

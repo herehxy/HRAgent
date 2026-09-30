@@ -32,7 +32,6 @@ import sys
 from . import db
 from .pipeline.extract import extract
 from .pipeline.tier import grade
-from .pipeline import tier_llm
 
 
 def _reprofile(conn: sqlite3.Connection, doc_id: int | None, jd: dict) -> dict | None:
@@ -108,9 +107,7 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
             cand["major_canonical"] = _mj["major_canonical"]
             cand["major_via"] = _mj.get("major_via") or "规则"
         # 按某个具体岗位重算它下面的投递：岗位明确 -> 允许按学历判 D
-        # v1.12：档位走「模型主导 + 规则交叉校验」通道（HR 主动触发的重算值得调模型）；
-        # 规则通道的分数/档位一并落库，供界面做"模型判 X / 规则判 Y"的对照。
-        g = tier_llm.judge(cand, jd, tiers, raw_text=text, job_confirmed=True, use_llm=True)
+        g = grade(cand, jd, tiers, job_confirmed=True)
         old_tier, new_tier = a.get("tier_suggested"), g["tier_suggested"]
         old_score, new_score = a.get("score"), g["score"]
         diff = (old_tier != new_tier) or (abs((old_score or 0) - (new_score or 0)) > 0.005)
@@ -125,8 +122,6 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
             "reasons": g["reasons"], "risks": g["risks"],
             "hits": g["hit"], "miss": g["miss"], "preferred_hit": g["preferred_hit"],
             "old_extract_mode": a.get("extract_mode"),
-            "tier_source": g.get("tier_source"), "tier_rule": g.get("tier_rule"),
-            "agreement": g.get("agreement"),
         }
 
         # 画像口径提示：当初走模型通道的，这次是规则通道重算，差异未必全来自 JD
@@ -144,8 +139,7 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
                 conn.execute(
                     """UPDATE applications SET score = ?, tier_suggested = ?, needs_review = ?,
                        reasons = ?, risks = ?, hits = ?, miss = ?, preferred_hit = ?,
-                       breakdown = ?, tier_rule = ?, score_rule = ?, tier_source = ?,
-                       tier_meta = ?, updated_at = ?
+                       breakdown = ?, updated_at = ?
                        WHERE id = ?""",
                     (new_score, new_tier, 1 if g["needs_review"] else 0,
                      json.dumps(g["reasons"], ensure_ascii=False),
@@ -154,8 +148,7 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
                      json.dumps(g["miss"], ensure_ascii=False),
                      json.dumps(g["preferred_hit"], ensure_ascii=False),
                      json.dumps(g["breakdown"], ensure_ascii=False),
-                     g.get("tier_rule"), g.get("score_rule"), g.get("tier_source"),
-                     tier_llm.meta_for_db(g), db.now(), a["id"]))
+                     db.now(), a["id"]))
                 db.add_audit(conn, "application", str(a["id"]), "regrade",
                              f"{old_tier}（{old_score}）",
                              f"JD 变更后重算为 {new_tier}（{new_score}）", operator, role)

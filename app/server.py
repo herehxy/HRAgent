@@ -449,12 +449,6 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                 "major": det.get("major_match") or {},
                 "risks": det.get("risks") or [],
                 "consistency": det.get("consistency"),
-                # v1.12：档位来源（llm/rule）与规则通道对照值——界面要能说清
-                # "这条档位是模型判的还是规则判的"，以及两者是否一致。
-                "tier_source": det.get("tier_source"),
-                "tier_rule": det.get("tier_rule"), "score_rule": det.get("score_rule"),
-                "llm": det.get("llm"), "agreement": det.get("agreement"),
-                "reasons": det.get("reasons") or [],
             }
         presented = auth.present_list(items)
         out = {"count": len(presented), "items": presented,
@@ -549,11 +543,20 @@ def api_candidate_reanalyze(cid: int,
                           source=ins.get("source") or "manual",
                           model=ins.get("model") or "",
                           business_direction=ins.get("business_direction"))
+        # 模型建议档位 → 更新 tier_suggested（HR 未确认时才更新；D 不覆盖）
+        _mt = ins.get("suggested_tier")
+        if _mt and _mt in ("A", "B", "C", "D") and app_id:
+            _ar = conn.execute("SELECT tier_suggested, tier_final FROM applications WHERE id=?",
+                               (app_id,)).fetchone()
+            if _ar and not _ar["tier_final"] and _ar["tier_suggested"] != _mt:
+                conn.execute("UPDATE applications SET tier_suggested=?, updated_at=? WHERE id=?",
+                             (_mt, db.now(), app_id))
+                conn.commit()
         db.add_audit(conn, "candidate", str(cid), "reanalyze", "",
                      f"{s['username']} 重跑自动分析（{ins.get('source')}）",
                      s["username"], s["role"])
         return {"ok": True, "job": job_meta, "insight": db.get_insight(conn, cid, app_id),
-                "note": "分析已更新。它只影响展示，不改动档位、阶段与岗位。"}
+                "note": "分析已更新。模型建议档位已同步到建议档（HR 未确认的）；阶段与岗位不受影响。"}
     finally:
         conn.close()
 
