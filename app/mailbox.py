@@ -88,7 +88,9 @@ _SECRET_DEFAULT_PATH = os.path.join(BASE, "config", "imap.secret")
 
 # UI 可编辑、且允许写回 mailbox.json 的顶层键（白名单，避免误写入口径）
 _EDITABLE_KEYS = {"mode", "eml_dir", "folder_dir", "archive_dir", "attachment_ext",
-                  "max_attachment_mb", "imap", "dedup"}
+                  "max_attachment_mb", "imap", "dedup",
+                  # v1.8.3 发信：SMTP 服务器配置（口令仍走 imap.secret，不在这里）
+                  "smtp"}
 
 
 def save_config(updates: dict, path: str | None = None) -> dict:

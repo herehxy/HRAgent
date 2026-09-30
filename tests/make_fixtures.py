@@ -206,7 +206,11 @@ def write_resumes(out_dir: str) -> list[str]:
     for name, text in (("陈志远-简历-工艺工程师.txt", CHEN_V1),
                        ("刘婉清-简历.txt", LIU_V1),
                        ("赵敏-简历.md", ZHAO_V1)):
-        with open(os.path.join(out_dir, name), "w", encoding="utf-8") as fh:
+        # newline="\n" 不能省：Windows 文本模式会把 "\n" 写成 "\r\n"，
+        # 夹具文件就与邮件附件（纯 LF）**不再字节一致**，跨渠道去重的
+        # SHA256 判重随之失效——自检 R 段会误报"本该拦下的重复没拦下"。
+        with open(os.path.join(out_dir, name), "w", encoding="utf-8",
+                  newline="\n") as fh:
             fh.write(text)
     _make_pdf(os.path.join(out_dir, "林一诺-简历.pdf"), LIN_PDF_TEXT)
     _make_pdf(os.path.join(out_dir, "沈亦飞-简历.pdf"), SHEN_PDF_TEXT)

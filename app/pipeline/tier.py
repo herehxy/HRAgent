@@ -39,7 +39,13 @@ def resolve_requirements(jd: dict) -> tuple[list[str], list[str]]:
     return req, bonus
 
 
-def grade(cand: dict, jd: dict, tiers_cfg: dict) -> dict:
+def grade(cand: dict, jd: dict, tiers_cfg: dict, job_confirmed: bool = False) -> dict:
+    """按 JD 尺子算分与档位。
+
+    `job_confirmed`：这把尺子是否来自**已经明确归岗**的投递（文件名/邮件标题里带了岗位名）。
+    它只影响一件事——**能不能判 D**：没归岗的投递，尺子可能是系统猜的"建议岗位"，
+    用猜出来的门槛把人判死是不合理的（v1.8.9 口径）。
+    """
     must = jd.get("must", {})
     pref = jd.get("preferred", {})
     thr = tiers_cfg.get("thresholds", {"A": 0.85, "B": 0.65, "C": 0.45})
@@ -65,18 +71,24 @@ def grade(cand: dict, jd: dict, tiers_cfg: dict) -> dict:
         edu_score = 0.25
 
     # —— 年限 ——
+    # `years_ok` 只在"明确不足"时才 False；**未识别（None）≠ 不满足**——
+    # 识别不出来就判 D，等于把"抽取器的无能为力"记在候选人头上，
+    # 校招简历（没有正式工作年限可写）几乎全军覆没（实测：研究生应届被初判 D）。
+    # 未识别改为：不参与淘汰、年限项不计分、整体封顶 C，并要求人工核对。
     years = cand.get("years")
+    years_unknown = years is None
     y_min = int(must.get("years_min", 0) or 0)
     if years is None:
-        risks.append("工作年限未识别")
-        years_score, years_ok = 0.0, False
+        risks.append("工作年限未识别（不据此判不匹配，请人工核对简历）")
+        years_score = 0.0
+        years_ok = True                    # 不淘汰；靠下方封顶 C 兜住
     elif years < y_min:
         risks.append(f"工作年限不足（要求 {y_min} 年）")
-        years_score = round(0.15 * (years / y_min), 3) if y_min else 0.0
+        years_score = round(0.12 * (years / y_min), 3) if y_min else 0.0
         years_ok = False
     else:
         reasons.append(f"{years} 年经验达标")
-        years_score = 0.15 + min(0.10, 0.02 * (years - y_min))
+        years_score = 0.12 + min(0.08, 0.02 * (years - y_min))
         years_ok = True
 
     # —— 必需技能（缺失只提示，不淘汰；仅计已核验技能）——
@@ -96,7 +108,7 @@ def grade(cand: dict, jd: dict, tiers_cfg: dict) -> dict:
     miss = [s for s in req if s not in skills]
     miss_onto = [s for s in miss if nz.canonical_of(s)]
     miss_custom = [s for s in miss if not nz.canonical_of(s)]
-    must_score = 0.35 * (len(hit) / len(req)) if req else 0.35
+    must_score = 0.30 * (len(hit) / len(req)) if req else 0.30
     if hit:
         reasons.append(f"必需技能命中 {len(hit)}/{len(req)}")
     if miss_onto:
@@ -115,29 +127,62 @@ def grade(cand: dict, jd: dict, tiers_cfg: dict) -> dict:
 
     score = round(edu_score + years_score + must_score + pref_score, 3)
 
-    # —— 分档（无淘汰）——
-    # 规则一：学历/年限未达硬性门槛 -> D（本岗位暂不匹配，转人才库保留，日后可被其他岗位召回）
-    # 规则二：技能缺口 >= 2 项 -> 分数达标给 C（有相关背景的储备），不达标才给 D
-    # 规则三：其余按分数与缺口数落 A/B/C
-    thr_c = thr.get("C", 0.45)
-    if (not edu_ok) or (not years_ok):
-        tier = d_tier
-        if not edu_ok:
-            risks.append("学历未过门槛，本岗位暂不匹配；建议保留入池，供其他岗位召回")
-        if not years_ok:
-            risks.append("年限未过门槛，本岗位暂不匹配；建议保留入池")
-    elif len(miss) >= 2:
-        tier = "C" if score >= thr_c else d_tier
-        if tier == "C":
-            reasons.append("技能缺口较大但具备相关背景，建议入储备池")
-    elif not miss and score >= thr.get("A", 0.85):
-        tier = "A"
-    elif score >= thr.get("B", 0.65) and len(miss) <= 1:
-        tier = "B"
-    elif score >= thr_c:
-        tier = "C"
+    # —— 专业方向（v1.8.6：从"只提示"升级为计入评分的一等维度）——
+    # 实战口径：**先看方向对不对，再看缺哪门技能**。一位专业高度对口的候选人，
+    # 不该因为简历里没写某门必需技能（或根本没写工作年限）就被压到 D。
+    # 权重腾挪：必需技能 0.35→0.30、年限 0.25→0.20，腾出 0.10 给专业方向；
+    # 总分上限仍是 1.00。对口 +0.10；无法判定/未设需求 +0.05（中性）；
+    # 明确不对口 +0.05 并如实提示（**不对口仍然不淘汰**，维持 v1.7 口径）。
+    major_required = (must.get("major_required")
+                      or pref.get("major_required") or [])
+    # v1.11：优先用**归一后的专业**（major_canonical，学科目录条目）参与判定——
+    # 规则归不出来时由模型归一（见 pipeline/major_llm.py），打分仍在本函数内完成。
+    major_check = mj.in_list(cand.get("major_canonical") or cand.get("major")
+                             or cand.get("education_major"), major_required)
+    major_check["via"] = cand.get("major_via") or "规则"
+    if major_check.get("in_list") is True:
+        major_score = 0.10
+        reasons.append("专业方向与岗位需求对口")
     else:
+        major_score = 0.05
+        if major_check.get("in_list") is False:
+            risks.append("专业方向不在岗位需求清单内（不据此淘汰，供人工权衡）")
+    score = round(score + major_score, 3)
+
+    # —— 分档（v1.8.9：D 只留给「已明确归岗 + 学历不符合」）——
+    # HR 口径：自动判 D 必须同时满足两条——
+    #   ① 这条投递**已经明确归岗**（岗位来自文件名/邮件标题，不是系统猜的建议岗位）；
+    #   ② 学历**明确**低于该岗位要求。
+    # 其余情况一律不低于 C：没归岗只出建议、学历没识别出来不替人下结论、
+    # 年限不足与技能缺口只影响分数与风险提示。理由和"年限未识别不判 D"同源——
+    # 系统识别不出来 / 岗位还没定，都不是候选人"不符合"的证据。
+    cap_c = years_unknown
+    edu_hard_fail = (not edu_ok) and c_rank > 0 and job_confirmed
+    if edu_hard_fail:
         tier = d_tier
+        risks.append("学历不达本岗位门槛，本岗位暂不匹配；建议保留入池，供其他岗位召回")
+    else:
+        if not edu_ok:
+            cap_c = True
+            if c_rank == 0:
+                risks.append("学历未识别，无法与岗位门槛比对；不据此判 D，已标待人工判读")
+            else:
+                risks.append("按当前（建议）岗位尺子学历不足，但本投递尚未明确归岗，"
+                             "不据此判 D；采纳岗位后再定")
+        if not years_ok:
+            cap_c = True               # 年限明确不足：不判 D，但封顶 C
+        if len(miss) >= 2:
+            tier = "C"
+            reasons.append("技能缺口较大但具备相关背景，建议入储备池")
+        elif not miss and score >= thr.get("A", 0.85):
+            tier = "A"
+        elif score >= thr.get("B", 0.65) and len(miss) <= 1:
+            tier = "B"
+        else:
+            tier = "C"
+        if cap_c and tier in ("A", "B"):
+            tier = "C"
+            reasons.append("学历或年限存在未达/未识别项，按口径最高给 C；请人工核对后重新定档")
 
     # —— 加分项缺口 ——
     # v1.7.1 修语义：`unverified_skills` 里的东西**不是**"候选人自称但没证据的技能"，
@@ -157,13 +202,6 @@ def grade(cand: dict, jd: dict, tiers_cfg: dict) -> dict:
 
     needs_review = (not cand.get("name")) or (years is None) or (not skills)
 
-    # —— 不变式③ 专业需求（一等维度，**不参与打分与淘汰**）——
-    # 材料物理去做工艺是常态，专业不对口不该判死；但必须让 HR 看得见。
-    major_required = (must.get("major_required")
-                      or pref.get("major_required") or [])
-    major_check = mj.in_list(cand.get("major") or cand.get("education_major"),
-                             major_required)
-
     return {
         "score": score,
         "tier_suggested": tier,
@@ -181,6 +219,7 @@ def grade(cand: dict, jd: dict, tiers_cfg: dict) -> dict:
             "年限": round(years_score, 3),
             "必需技能": round(must_score, 3),
             "加分项": round(pref_score, 3),
+            "专业方向": round(major_score, 3),
         },
         "needs_review": bool(needs_review),
     }
@@ -312,8 +351,10 @@ def major_match(cand: dict, jd: dict, cat_of: dict[str, str]) -> dict:
             fallback.append({"job_skill": jt, "cand_skill": best, "score": score})
 
     has_cls = bool(job_cats) and bool(cand_cats)
-    # 专业维度先算出来：它既是独立呈现的一等维度，也是技能通道失效时的第二条通道
-    major_check = mj.in_list(cand.get("major") or cand.get("education_major"),
+    # 专业维度先算出来：它既是独立呈现的一等维度，也是技能通道失效时的第二条通道。
+    # v1.11：优先用**归一后的专业**（与 grade 同一口径，避免两处判定不一致）。
+    major_check = mj.in_list(cand.get("major_canonical") or cand.get("major")
+                             or cand.get("education_major"),
                              (jd.get("must") or {}).get("major_required")
                              or (jd.get("preferred") or {}).get("major_required"))
 

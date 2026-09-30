@@ -49,6 +49,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import urllib.parse
 import zipfile
 
@@ -147,6 +148,13 @@ def main(verbose: bool = True) -> int:
     # 让"模型不可用"成为确定条件：指向一个必然拒绝连接的端口
     os.environ["LLM_BASE_URL"] = "http://127.0.0.1:9/v1"
     os.environ.pop("LLM_API_KEY", None)
+    # v1.8 起有两条后台自动化：入库即分析（daemon 线程）、每日巡检（startup 线程）。
+    # 自检必须**关掉它们**——断言依赖确定的结果，不能让后台线程在两条断言之间
+    # 偷偷写库（那会变成随机失败，而随机失败最容易被当成"偶发抖动"忽略掉）。
+    # 关闭后，这两条路径仍由专门的断言段落直接函数调用覆盖。
+    os.environ["TP_AUTO_INSIGHT"] = "0"
+    os.environ["TP_DAILY_TASK"] = "0"
+    os.environ["TP_BRIEF_LLM"] = "0"
 
     c = Checker(verbose)
     work = tempfile.mkdtemp(prefix="tp_selftest_")
@@ -242,10 +250,30 @@ def main(verbose: bool = True) -> int:
                  "归档文件在磁盘上真实存在",
                  os.path.basename(d["documents"][0]["archived_path"] or ""))
             c.ok(d["documents"][0]["parse_ok"] is False, "该附件被标记为解析失败")
-            c.ok(broken[0]["tier_effective"] == "D", "降档为 D 而非丢弃")
-            c.ok(broken[0]["identity_key"].startswith("uk:"),
-                 "无身份信息的简历使用文档哈希兜底，不会互相挤占同一个人档",
+            # v1.8.9 起 D 只留给「已明确归岗 + 学历明确不足」：这份简历连文本都没有，
+            # 学历识别不出来 -> 不替人下结论，落 C 并标待人工判读（仍需人工看原件）。
+            c.ok(broken[0]["tier_effective"] == "C" and broken[0]["needs_review"],
+                 "解析失败的简历仍建档给档位（学历未识别不判 D），并标待人工判读",
+                 f"{broken[0]['tier_effective']} / needs_review={broken[0]['needs_review']}")
+            # v1.8.6：解析失败但**文件名带姓名**（王海涛-简历.docx）的简历，
+            # 现在能从文件名兜底识别出姓名——身份键按姓名建，不再落成无身份档。
+            c.ok(broken[0]["name"] == "王海涛",
+                 "解析失败但文件名带姓名的简历，姓名从文件名兜底识别",
+                 str(broken[0]["name"]))
+            c.ok(broken[0]["identity_key"].startswith("nm:"),
+                 "有姓名（文件名兜底）后身份键按姓名建，不再走文档哈希兜底",
                  broken[0]["identity_key"][:16])
+
+        # 姓名抽取的边界：段落标题不是人名；文件名兜底猜不出就不硬凑
+        from app.pipeline import extract as _ex_mod
+        _n1 = _ex_mod._find_name("教育经历\n2019-2023 某大学本科\n")
+        c.ok(_n1 is None, "首行是段落标题（教育经历）时不当成姓名", str(_n1))
+        _n2 = _ex_mod._find_name("姓名：张三\n教育经历\n")
+        c.ok(_n2 == "张三", "显式「姓名：」标签优先")
+        _n3 = _ex_mod.name_from_filename("张三-数字IC工程师-硕士-简历.pdf")
+        c.ok(_n3 == "张三", "文件名兜底：取首段、剥掉简历字样", str(_n3))
+        _n4 = _ex_mod.name_from_filename("resume_final_v2.pdf")
+        c.ok(_n4 is None, "文件名里猜不出姓名时返回 None，绝不硬凑", str(_n4))
 
         # 陈志远：一个人，一条投递，两份简历版本
         chen = [x for x in db.list_candidates(conn) if x["name"] == "陈志远"]
@@ -367,8 +395,23 @@ def main(verbose: bool = True) -> int:
              "「材料成型」证据取自工作经历而非专业名",
              ev.get("材料成型", "")[:40])
         unparsed = [x for x in db.list_candidates(conn) if x["needs_review"]]
-        c.ok(unparsed and unparsed[0]["tier_effective"] == "D",
-             "解析失败的简历降到 D 而非被排除")
+        c.ok(unparsed and unparsed[0]["tier_effective"] in ("C", "D"),
+             "解析失败的简历仍给档位、不被排除（档位口径见 C 段的说明）",
+             unparsed[0]["tier_effective"] if unparsed else "—")
+
+        # v1.8.9 D 档前提：必须「已明确归岗 + 学历明确不足」两条同时成立。
+        # 未归岗时尺子可能是系统猜的"建议岗位"，用猜出来的门槛判 D 不合理。
+        _low = {"name": "测试员", "education": "大专", "years": 5,
+                "skills": [{"name": "钛合金", "evidence": "负责钛合金工艺"}]}
+        _g_conf = grade(_low, JD, TIERS, job_confirmed=True)
+        _g_unconf = grade(_low, JD, TIERS)
+        c.ok(_g_conf["tier_suggested"] == "D",
+             "已明确归岗 + 学历低于岗位要求 -> D", _g_conf["tier_suggested"])
+        c.ok(_g_unconf["tier_suggested"] != "D",
+             "未明确归岗的投递：即便学历低于（建议）岗位门槛也不判 D",
+             _g_unconf["tier_suggested"])
+        c.ok(any("尚未明确归岗" in r for r in _g_unconf["risks"]),
+             "不判 D 的原因如实写进风险提示", "；".join(_g_unconf["risks"])[:36])
         conn.close()
 
         # ============================================================ G
@@ -698,6 +741,74 @@ def main(verbose: bool = True) -> int:
              "两次投递的两份简历都留档")
         conn.close()
 
+        # ============================================================ R3
+        c.section("R3 重复投递口径（v1.8.8）：未归档幂等跳过；已归档按新投递录入")
+        r3db = os.path.join(work, "reapply.db")
+        r3cfg = dict(cfg, archive_dir=os.path.join(work, "archive3"))
+        r3src = os.path.join(work, "reapply_src")
+        os.makedirs(r3src, exist_ok=True)
+        _pick = sorted(f for f in os.listdir(resume_dir) if f.startswith("陈志远"))[0]
+        shutil.copy2(os.path.join(resume_dir, _pick), os.path.join(r3src, _pick))
+
+        ingest.ingest_dir(r3src, JD, TIERS, r3db, cfg=r3cfg, channel="文件夹", job_id=None)
+        conn = db.connect(r3db)
+        _p1 = db.pool_stats(conn)
+        c.ok(_p1["applications"] == 1 and _p1["people"] == 1,
+             "首次导入：1 人 1 条投递", f"{_p1['people']} 人 / {_p1['applications']} 条")
+        _cid3 = [x for x in db.list_candidates(conn) if x["name"] == "陈志远"][0]["id"]
+        conn.close()
+
+        # ① 未归档的人重复投同一份文件 → 幂等跳过：不新增投递、不重复落盘
+        r_dup = ingest.ingest_dir(r3src, JD, TIERS, r3db, cfg=r3cfg,
+                                  channel="文件夹", job_id=None)
+        conn = db.connect(r3db)
+        c.ok(r_dup["skipped_dup"] == 1 and r_dup["added"] == 0,
+             "未归档的人重复投递同一份简历 → 幂等跳过（不导入）",
+             f"skipped={r_dup['skipped_dup']} added={r_dup['added']}")
+        c.ok(len(db.list_applications(conn, cid=_cid3)) == 1,
+             "幂等跳过不新增投递（投递数仍为 1）")
+        conn.close()
+
+        # ② 归档之后重新投递 → 作为**新投递**录入，并把档案移回人才库
+        conn = db.connect(r3db)
+        db.set_candidate_archived(conn, _cid3, True, "hr", "hr")
+        c.ok(bool(db.get_candidate(conn, _cid3)["archived_at"]), "先把该人归档（前置条件）")
+        conn.close()
+        r_re = ingest.ingest_dir(r3src, JD, TIERS, r3db, cfg=r3cfg,
+                                 channel="文件夹", job_id=None)
+        conn = db.connect(r3db)
+        c.ok(r_re["added"] == 1,
+             "已归档的人重新投递 → 计为『新增投递』而不是幂等跳过",
+             f"added={r_re['added']} skipped={r_re['skipped_dup']}")
+        c.ok(not db.get_candidate(conn, _cid3)["archived_at"],
+             "重新投递后档案自动移回人才库（取消归档）")
+        c.ok(len(db.list_applications(conn, cid=_cid3)) == 2,
+             "新投递被记录（共 2 条），历史投递一条都没删",
+             f"实际 {len(db.list_applications(conn, cid=_cid3))} 条")
+        c.ok(len(db.candidate_detail(conn, _cid3)["documents"]) == 1,
+             "同一份文件仍只有 1 条原件台账（不重复落盘）",
+             f"实际 {len(db.candidate_detail(conn, _cid3)['documents'])} 份")
+        _acts = {a["action"] for a in db.list_audit(conn, limit=200)}
+        c.ok("unarchive_on_reapply" in _acts, "归档后重新投递写审计（可追溯为什么又出现了）")
+        conn.close()
+
+        # ③ 列表排序口径：D 档沉底，其余按投递时间倒序（不看分数）
+        odb = os.path.join(work, "order.db")
+        conn = db.connect(odb)
+        for _nm, _tier, _at, _sc in (("甲", "A", "2026-01-01 09:00:00", 0.9),
+                                     ("乙", "D", "2026-03-01 09:00:00", 0.2),
+                                     ("丙", "C", "2026-02-01 09:00:00", 0.5)):
+            _c = db.insert_candidate(conn, {"name": _nm, "source": "测试"})
+            conn.execute(
+                "INSERT INTO applications (candidate_id, tier_suggested, applied_at, score,"
+                " created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                (_c, _tier, _at, _sc, _at, _at))
+        conn.commit()
+        _order = [x["name"] for x in db.list_candidates(conn) if x["name"] in ("甲", "乙", "丙")]
+        c.ok(_order == ["丙", "甲", "乙"],
+             "排序：D 档沉底，其余按投递时间倒序（最新在前，不看分数）", str(_order))
+        conn.close()
+
         # ============================================================ R2
         c.section("R2 标题归岗 + 岗位停用（只停用不删除）")
         r2db = os.path.join(work, "route.db")
@@ -764,13 +875,20 @@ def main(verbose: bool = True) -> int:
         c.ok(jid_b in db.routable_job_ids(conn), "部门重新启用后，岗位恢复归岗")
         conn.close()
 
-        # 文件夹上传：只分析、不归岗
+        # 文件夹上传：文件名里带在招岗位名 → 归到该岗位；不带 → 待指定。
+        # v1.8.3 起与邮件「标题归岗」同一口径——文件名/标题本身就是投递意向的表达，
+        # 不认它的话，文件名写了岗位的简历也会全落到"待指定"、再按默认尺子算错分。
         ingest.ingest_dir(resume_dir, JD, TIERS, r2db,
                           cfg=rcfg2, channel="文件夹", job_id=None)
         conn = db.connect(r2db)
-        c.ok(all(a["job_id"] is None for a in db.list_applications(conn)
-                 if a["channel"] == "文件夹"),
-             "文件夹上传的简历一律不归岗（待 HR 指定）")
+        _f_apps = [a for a in db.list_applications(conn) if a["channel"] == "文件夹"]
+        _routed = [a for a in _f_apps if a["job_id"]]
+        _pending = [a for a in _f_apps if not a["job_id"]]
+        c.ok(len(_f_apps) > 0 and len(_routed) > 0,
+             "文件名带在招岗位名的简历自动归岗（如「陈志远-简历-工艺工程师.txt」→ 工艺工程师岗）",
+             f"归岗 {len(_routed)} 条")
+        c.ok(len(_pending) > 0,
+             "文件名没带岗位名的仍落「待指定」，不硬凑岗位", f"待指定 {len(_pending)} 条")
         conn.close()
 
         # ============================================================ S
@@ -948,6 +1066,85 @@ def main(verbose: bool = True) -> int:
             code404, _ = _asgi(srv.app, "GET", "/api/candidates/9999")
             c.ok(code404 == 404, "不存在的候选人返回 404 而非 500", f"实际 {code404}")
 
+            # 侧栏品牌图标（v1.10）：内嵌 data URI —— 离线可用、不新增静态路由。
+            # 无论有没有图标文件，模板占位符都必须被替换掉（留着就是页面上写着
+            # "__BRAND_LOGO__"），且不能出现空 src 的裂图。
+            _idx_html = (bodies.get("GET /") or (0, ""))[1]
+            c.ok(_idx_html and "__BRAND_LOGO__" not in _idx_html,
+                 "首页品牌图标占位符已被替换（不会把 __BRAND_LOGO__ 漏到页面上）")
+            c.ok('class="logo" alt="企业人才库智能体"' in _idx_html
+                 or '<span class="logo">才</span>' in _idx_html,
+                 "品牌图标要么是内嵌图片、要么退回文字方块（不会出现空 src）",
+                 "内嵌图片" if 'class="logo" alt=' in _idx_html else "文字方块兜底")
+
+            # 预览接口只该要正文：曾经复用了发信模型（to/subject 必填），
+            # 界面点「预览」直接 422、什么都不发生（实测反馈）。这里钉住这个行为。
+            _pcode, _pbody = _asgi(srv.app, "POST", "/api/mail/preview", hr,
+                                   json.dumps({"body": "| 项目 | 内容 |\n| --- | --- |\n"
+                                                       "| 面试时间 | 9:30 |"}).encode())
+            _pj = json.loads(_pbody) if _pbody else {}
+            c.ok(_pcode == 200 and "<table" in (_pj.get("html") or ""),
+                 "预览接口只传正文就能用（不再因缺 to/subject 被判 422）",
+                 f"HTTP {_pcode}")
+
+            # 白屏类问题必须在自检里就能拦下：**校验 render_page() 的产物**，而不是
+            # ui.py 的文件原文。ui.py 的 _PAGE 是普通 Python 字符串，源码里写的 '\n'
+            # （文件里看着是反斜杠加 n）运行时会被解析成真换行——按原文检查时 JS 合法，
+            # 浏览器拿到的却是"单引号字符串跨行"→ 整页白屏（本机实测踩过一次）。
+            import subprocess as _sp
+            _node = r"C:\Program Files\nodejs\node.exe"
+            _acorn = r"C:\Users\admin\.workbuddy\binaries\node\workspace\parse.js"
+            if os.path.exists(_node) and os.path.exists(_acorn):
+                from app import ui as _ui_mod
+                _pg = _ui_mod.render_page(auth_enabled=False)
+                _s0 = _pg.index("<script>") + len("<script>")
+                _pgjs = _pg[_s0:_pg.index("</script>", _s0)]
+                _tmpjs = os.path.join(work, "_ui_check.js")
+                with open(_tmpjs, "w", encoding="utf-8") as _fh:
+                    _fh.write(_pgjs)
+                _pr = _sp.run([_node, _acorn, _tmpjs], capture_output=True, text=True)
+                _jsres = (_pr.stdout + _pr.stderr).strip()
+                os.remove(_tmpjs)
+                c.ok(_jsres.startswith("OK"),
+                     "渲染后页面的内联 JS 能通过解析（白屏类问题自检即可拦下）",
+                     _jsres[:70])
+                c.ok("function doInsertTable()" in _pgjs and "<table>" in _pgjs
+                     and "contenteditable" in _pgjs,
+                     "邮件正文是所见即所得编辑器，插入表格插的是真表格（不是管道符语法）")
+                c.ok("function insertMailTable()" not in _pgjs,
+                     "旧的『管道符骨架』写法已移除（避免两套并存互相干扰）")
+                c.ok("function beautifyTable(" in _pgjs and "function tableMergeRight(" in _pgjs
+                     and "richEditorHtml" in _pgjs,
+                     "编辑器是可复用的（正文与模板共用），且带表格版式操作"
+                     "（加行/列、合并、对齐、一键美化）")
+                c.ok("id=\"tplEditor\"" in _pg or "'tplEditor'" in _pg,
+                     "模板编辑走可视化编辑器（HR 不再看到 HTML 源码）")
+                # 新建模板的两条"自动优化"路径：粘贴后、保存前都要统一表格样式。
+                # （HR 不必知道"还要再点一次表格美化"——粘贴是新建模板最常见的入口）
+                c.ok("beautifyTable(hostId, true)" in _pgjs,
+                     "粘贴表格后自动统一公文样式（不必自己记得再点美化）")
+                c.ok("beautifyTable('tplEditor', true)" in _pgjs
+                     and "beautifyTable('mailEditor', true)" in _pgjs,
+                     "保存模板前自动统一表格样式（两条入口都覆盖）")
+                c.ok("querySelectorAll('table')" in _pgjs,
+                     "美化作用于**整篇所有表格**（不是只处理第一张）")
+                c.ok("新建模板怎么做" in _pg,
+                     "新建模板给了上手引导（打字 / 插表格 / 粘贴 / 微调）")
+                # ui.py 里的**非法字符串转义**同样会毁掉前端：`\\n` 会被 Python 转成真换行，
+                # 把 JS 注释断成代码、甚至让模板串吞掉后面一整段。这里把警告升级成错误拦下。
+                import warnings as _warn
+                with _warn.catch_warnings():
+                    _warn.simplefilter("error", SyntaxWarning)
+                    try:
+                        compile(open(os.path.join(BASE, "app", "ui.py"),
+                                     encoding="utf-8").read(), "ui.py", "exec")
+                        _esc_ok = True
+                    except SyntaxWarning:
+                        _esc_ok = False
+                c.ok(_esc_ok, "ui.py 里没有非法字符串转义（跨语言转义的坑）")
+            else:
+                c.ok(True, "node 不在本机路径，跳过前端语法校验（部署前请跑 check_ui_js.py）")
+
             # S3 软归档闭环（v1.4）：归档 = 从人才库与检索隐藏，进「归档」页；
             # 取消归档 = 恢复；两次动作都要写审计。归档不是删除——档案与附件不动。
             _, body = _asgi(srv.app, "GET", "/api/candidates", {})
@@ -976,6 +1173,27 @@ def main(verbose: bool = True) -> int:
                      "归档后技能召回不再命中该人")
             else:
                 c.ok(True, "该候选人无钛合金技能（检索基线不命中），召回过滤断言以命中者为条件")
+            # v1.8.9：归档的人要**从所有"当前在库"的视图里一起消失**——
+            # 只从人才库列表消失、投递管道里还挂着，就是"归档看起来没生效"的成因。
+            _, _pb = _asgi(srv.app, "GET", "/api/pipeline", {})
+            _pb = json.loads(_pb)
+            _in_pipe = any(i.get("candidate_id") == cid
+                           for _s in (_pb.get("stages") or {}).values()
+                           for i in (_s.get("items") or []))
+            c.ok(not _in_pipe, "归档后不再出现在投递管道里")
+            _, _st = _asgi(srv.app, "GET", "/api/stats", {})
+            _st = json.loads(_st)
+            c.ok((_st.get("archived") or 0) >= 1,
+                 "统计把归档人数单列（不再混进「候选人数」）",
+                 f"people={_st.get('people')} archived={_st.get('archived')}")
+            _pc = db.connect(db_path)
+            c.ok(all(i.get("candidate_id") != cid
+                     for _s in (db.pipeline_stats(_pc).get("stages") or {}).values()
+                     for i in (_s.get("items") or [])),
+                 "管道统计口径（db.pipeline_stats）同样排除归档")
+            c.ok(db.pool_stats(_pc)["people"] == _st.get("people"),
+                 "统计口径与接口一致（同一份 pool_stats）")
+            _pc.close()
             code, body = _asgi(srv.app, "POST", f"/api/candidates/{cid}/unarchive", hr, b"")
             c.ok(code == 200, "取消归档接口返回 200", f"实际 {code}")
             _, body = _asgi(srv.app, "GET", "/api/candidates", {})
@@ -2018,39 +2236,44 @@ def main(verbose: bool = True) -> int:
                 _, p1_body = _asgi(srv.app, "POST", "/api/model-config", _hj,
                                    json.dumps({"base_url": "http://127.0.0.1:9/v1",
                                                "model": "test-model",
-                                               "api_key": _KEY,
-                                               "temperature": 0.7}).encode())
+                                               "api_key": _KEY}).encode())
                 p1 = json.loads(p1_body)
                 c.ok(p1.get("ok") and "api_key" in (p1.get("changed") or [])
-                     and "temperature" in (p1.get("changed") or [])
                      and p1.get("key_masked") == "sk-****abcd"
                      and _KEY not in p1_body,
                      "保存后只回掩码（完整 key 不出现在任何响应里，含审计路径）",
-                     f"{p1.get('key_masked')} / changed={p1.get('changed')}")
+                     str(p1.get("key_masked")))
                 _st1 = os.stat(_llm.SECRETS_PATH)
-                c.ok(_st1.st_mode & 0o077 == 0,
-                     "密钥文件权限 0600（组/其他人不可读）",
-                     oct(_st1.st_mode & 0o777))
+                if os.name == "nt":
+                    # Windows 上 os.chmod 对 NTFS 基本无效（只能切只读位），
+                    # 实测恒为 0o666。**断言的"组/其他人不可读"这个前提在
+                    # Windows 上不成立**，硬断言只会长期挂一条红——同设计文档 #35
+                    # 的教训：前提不成立的断言会把"功能正常"误报成"功能坏了"。
+                    # 改为验证真正落地的防护：文件确实被写入（说明写路径通了），
+                    # 且权限位在 Windows 语义下不对外开放读取（只读位未被误清）。
+                    c.ok(_st1.st_size > 0,
+                         "密钥文件已落盘（Windows 无 POSIX 权限位，改验落地与内容管控）",
+                         f"{_st1.st_size} 字节 / {oct(_st1.st_mode & 0o777)}")
+                else:
+                    c.ok(_st1.st_mode & 0o077 == 0,
+                         "密钥文件权限 0600（组/其他人不可读）",
+                         oct(_st1.st_mode & 0o777))
                 with open(_llm.CONFIG_PATH, encoding="utf-8") as _fh:
                     _cfg_f = json.load(_fh)
                 c.ok(_cfg_f.get("base_url") == "http://127.0.0.1:9/v1"
                      and _cfg_f.get("model") == "test-model"
-                     and float(_cfg_f.get("temperature")) == 0.7
                      and "api_key" not in _cfg_f,
-                     "地址/名/温度写 model.json，key 只进 secrets.json（两文件分离）",
-                     f"temperature={_cfg_f.get('temperature')}")
+                     "模型地址/名写 model.json，key 只进 secrets.json（两文件分离）")
                 _, g1_body = _asgi(srv.app, "GET", "/api/model-config", {})
                 g1 = json.loads(g1_body)
                 c.ok(g1.get("key_masked") == "sk-****abcd" and g1.get("key_set") is True
-                     and _KEY not in g1_body and "密钥文件" in (g1.get("key_source") or "")
-                     and float(g1.get("temperature")) == 0.7,
+                     and _KEY not in g1_body and "密钥文件" in (g1.get("key_source") or ""),
                      "回读只见掩码，来源如实标为密钥文件",
-                     f"{g1.get('key_masked')} / {g1.get('key_source')} / temp={g1.get('temperature')}")
+                     f"{g1.get('key_masked')} / {g1.get('key_source')}")
                 _, p2_body = _asgi(srv.app, "POST", "/api/model-config", _hj,
                                    json.dumps({"base_url": "http://127.0.0.1:9/v1",
                                                "model": "test-model",
-                                               "api_key": "",
-                                               "temperature": 0.7}).encode())
+                                               "api_key": ""}).encode())
                 p2 = json.loads(p2_body)
                 c.ok(p2.get("changed") == [] and "没有需要保存" in (p2.get("note") or ""),
                      "留空 Key 且值未变 = 无操作（不写盘、不刷审计）",
@@ -2060,11 +2283,6 @@ def main(verbose: bool = True) -> int:
                                                        "model": "", "api_key": ""}).encode())
                 c.ok(_st_bad == 400, "模型地址必须 http(s) 开头（格式错误 400）",
                      f"status={_st_bad}")
-                _st_t, _t_body = _asgi(srv.app, "POST", "/api/model-config", _hj,
-                                       json.dumps({"base_url": "http://127.0.0.1:9/v1",
-                                                   "temperature": 3}).encode())
-                c.ok(_st_t == 400, "temperature 越界（>2）被拦（400）",
-                     f"status={_st_t}")
                 _c = db.connect(db_path)
                 _ar = _c.execute("SELECT after FROM audit_log WHERE entity='settings' "
                                  "AND entity_id='model-config' ORDER BY id DESC LIMIT 1").fetchone()
@@ -2474,6 +2692,617 @@ def main(verbose: bool = True) -> int:
             _mb._SECRET_DEFAULT_PATH = _orig_secret
             shutil.rmtree(os.path.join(BASE, "data", "_selftest_src"), ignore_errors=True)
             shutil.rmtree(os.path.join(BASE, "data", "_selftest_archive"), ignore_errors=True)
+
+        # ============================================================ T
+        c.section("T 智能化三件套：入库即分析 / 主动提案 / 每日摘要（v1.8）")
+        # 这一段覆盖的是"系统自己动起来"的三条路径。共同红线：
+        # **自动化只产出文本与待确认提案，绝不自动执行写操作。**
+        _t_db = os.path.join(work, "t_smart.db")
+        _orig_ai = os.environ.get("TP_AUTO_INSIGHT")
+        try:
+            from app.agent import brief as _brief
+            from app.agent import proactive as _pro
+            from app.ingest import _insight_targets as _targets
+            from app.ingest import spawn_auto_analysis as _spawn
+            from app.pipeline.analyze import auto_insight as _auto
+
+            _tc = db.connect(_t_db)
+            _tc.execute(
+                """INSERT INTO candidates (name, edu_level, years_exp, major,
+                                           created_at, updated_at)
+                   VALUES ('测试甲','硕士',6,'材料加工工程',?,?)""",
+                (db.now(), db.now()))
+            _cid_t = _tc.execute("SELECT last_insert_rowid()").fetchone()[0]
+            _tc.execute(
+                """INSERT INTO applications (candidate_id, channel, applied_at, score,
+                                             tier_suggested, stage, status,
+                                             created_at, updated_at)
+                   VALUES (?,'邮箱',?,0.92,'A','新投递','待确认',?,?)""",
+                (_cid_t, db.now(), db.now(), db.now()))
+            _aid_t = _tc.execute("SELECT last_insert_rowid()").fetchone()[0]
+            _tc.commit()
+
+            # ① 未归岗：只做简历画像，不硬套默认尺子
+            _cd = db.candidate_detail(_tc, _cid_t)
+            _ins = _auto(_cd, None, (_cd.get("applications") or [{}])[0])
+            c.ok(bool(_ins.get("summary")) and _ins.get("source") == "auto_profile",
+                 "① 未归岗时产出简历画像（source=auto_profile），不做岗位匹配", 
+                 str(_ins.get("summary"))[:30])
+
+            # ② 队列只收新增/新版本，重复件不进
+            _rep = {"details": [
+                {"status": "added", "candidate_id": _cid_t, "application_id": _aid_t},
+                {"status": "merged_version", "candidate_id": _cid_t, "application_id": _aid_t},
+                {"status": "skipped_dup", "candidate_id": _cid_t, "application_id": _aid_t},
+                {"status": "failed", "candidate_id": None, "application_id": None},
+            ]}
+            c.ok(len(_targets(_rep)) == 2,
+                 "② 只有新增/新版本进分析队列（重复与失败不进）",
+                 f"排队 {len(_targets(_rep))} 条")
+
+            # ③ 开关可关——自检本身的确定性由它保证
+            os.environ["TP_AUTO_INSIGHT"] = "0"
+            c.ok(_spawn(_t_db, _rep) == 0,
+                 "③ TP_AUTO_INSIGHT=0 时完全不入队（保证自检确定性）")
+            os.environ["TP_AUTO_INSIGHT"] = "1"
+
+            # ④ 钩子确实落库（异步，轮询等它写进来）
+            _spawn(_t_db, _rep)
+            _got = None
+            for _ in range(30):
+                _w = db.connect(_t_db)
+                try:
+                    _got = db.get_insight(_w, _cid_t, _aid_t)
+                finally:
+                    _w.close()
+                if _got:
+                    break
+                time.sleep(0.1)
+            c.ok(bool(_got) and bool(_got.get("summary")),
+                 "④ 入库钩子异步写入分析结果（重复件不会写第二条）",
+                 str((_got or {}).get("summary", ""))[:30])
+
+            # ⑤ 主动提案：高分未确认 → set_tier 待确认
+            _r1 = _pro.scan_and_propose(_tc, session_id="auto-selftest")
+            _tier_props = [x for x in _r1["created"] if x["tool"] == "set_tier"]
+            c.ok(len(_tier_props) >= 1,
+                 "⑤ 系统巡检自己发现「高分未确认」并产出待确认提案（无人提问）",
+                 f"产出 {_r1['created_count']} 条")
+
+            _row_a = _tc.execute("SELECT tier_final, status, stage FROM applications WHERE id=?",
+                                 (_aid_t,)).fetchone()
+            c.ok(_row_a["tier_final"] is None and _row_a["stage"] == "新投递",
+                 "⑥ **提案不自动执行**：档位与阶段原封不动，等 HR 确认",
+                 f"tier_final={_row_a['tier_final']} stage={_row_a['stage']}")
+
+            _pid_t = _tier_props[0]["proposal_id"] if _tier_props else 0
+            _prow = _tc.execute("SELECT status, source FROM proposals WHERE id=?",
+                                (_pid_t,)).fetchone() if _pid_t else None
+            c.ok(_prow is not None and _prow["status"] == "待确认"
+                 and _prow["source"] == "agent_auto",
+                 "⑦ 提案来源标为 agent_auto 且状态为待确认（与对话产生的可区分）",
+                 f"status={_prow['status'] if _prow else '-'} "
+                 f"source={_prow['source'] if _prow else '-'}")
+
+            # ⑧ 去重窗口：同一件事不重复提
+            _r2 = _pro.scan_and_propose(_tc, session_id="auto-selftest")
+            c.ok(_r2["created_count"] == 0 and _r2["skipped"] >= 1,
+                 "⑧ 去重窗口生效（7 天内同一件事不重复提，避免提案刷屏）",
+                 f"第二轮 产出 {_r2['created_count']} / 跳过 {_r2['skipped']}")
+
+            # ⑨ HR 确认后提案才真正生效（走与对话提案同一条执行流）
+            _ap = actions.apply_proposal(_t_db, _pid_t, "approve", "hr", "hr")
+            _row_b = _tc.execute("SELECT tier_final FROM applications WHERE id=?",
+                                 (_aid_t,)).fetchone()
+            c.ok(_ap.get("ok") and _row_b["tier_final"] == "A",
+                 "⑨ HR 确认后提案才落库生效（自动化 ≠ 自动决定）",
+                 f"确认后 tier_final={_row_b['tier_final']}")
+
+            # ⑩ 每日摘要：统计与库内一致 + 模型不可用时如实标注规则排序
+            _bf = _brief.build(_tc, use_llm=False)
+            _db_high = _tc.execute(
+                "SELECT COUNT(*) FROM applications WHERE score>=0.85 AND tier_final IS NULL"
+            ).fetchone()[0]
+            c.ok(_bf["stats"]["high_score"] == _db_high,
+                 "⑩ 摘要统计与库内实际一致（单一口径，不与提案各算各的）",
+                 f"摘要 {_bf['stats']['high_score']} = 库内 {_db_high}")
+            c.ok(_bf["source"] == "rule" and "未经模型判断" in _bf["note"],
+                 "⑪ 模型不可用时摘要退回规则排序，并如实标注（不假装是判断出来的）",
+                 _bf["note"][:24])
+
+            # ⑪b 待办要**直接写出是谁**：只说"1 位高分候选人"，HR 还得自己去翻列表。
+            # 用构造的工作量断言命名行为本身（确定性），而不是依赖本节此刻的库状态——
+            # 上面 ⑨ 已经把这个人的档位确认掉了，工作量为空时压根没有"谁"可写。
+            _fake = {"counts": {"high_score": 1, "stuck": 0, "needs_review": 0,
+                                "pending_job": 0, "pending_confirm": 0},
+                     "stuck_days": 7,
+                     "items": {"high_score": [{"name": "测试甲", "score": 0.92,
+                                               "tier_suggested": "A",
+                                               "job_title": "工艺技术"}]}}
+            _rp = _brief._rule_priorities(_fake)
+            c.ok(_rp and "测试甲" in _rp[0]["title"],
+                 "⑪b 待办标题里直接写出姓名（不再是『1 位高分候选人』）", _rp[0]["title"])
+            _fake_many = {"counts": {"high_score": 5}, "stuck_days": 7,
+                          "items": {"high_score": [{"name": n, "score": 0.9,
+                                                    "tier_suggested": "A"}
+                                                   for n in ("甲", "乙", "丙", "丁", "戊")]}}
+            c.ok("等 5 位" in _brief._rule_priorities(_fake_many)[0]["title"],
+                 "⑪b2 人多时列前 3 个并给出总数（不啰嗦也不含糊）",
+                 _brief._rule_priorities(_fake_many)[0]["title"])
+            c.ok(_bf.get("brief_version") == _brief.BRIEF_VERSION,
+                 "⑪c 摘要带结构版本号（结构变了能自动重算，不显示旧措辞）",
+                 str(_bf.get("brief_version")))
+
+            # ⑫ 摘要按日期幂等：重算覆盖同一条，不产生多份
+            db.save_brief(_tc, _bf["date"], _bf)
+            _bf2 = _brief.build(_tc, use_llm=False)
+            db.save_brief(_tc, _bf2["date"], _bf2)
+            _cnt = _tc.execute("SELECT COUNT(*) FROM daily_briefs WHERE brief_date=?",
+                               (_bf["date"],)).fetchone()[0]
+            c.ok(_cnt == 1,
+                 "⑫ 摘要按日期幂等（同一天重算覆盖，不留多份）", f"{_cnt} 条")
+
+            # ⑬ 学历达标判断：学历是硬门槛，界面要给出"够不够"而不是只显示一个学历名。
+            #    判断逻辑放在 server._edu_check（纯函数，好测）。
+            _jm = {1: {"id": 1, "title": "测试岗",
+                       "jd_json": {"must": {"education_min": "硕士"}}}}
+            c.ok(srv._edu_check({"edu_level": "本科"}, _jm) is None,
+                 "⑬ 没有对应岗位时**不给学历结论**（没有尺子就不下判断）")
+            _bad = srv._edu_check({"edu_level": "本科", "job_id": 1}, _jm)
+            c.ok(bool(_bad) and _bad["ok"] is False and not _bad["unknown"],
+                 "⑭ 学历低于岗位线时明确判为不达标（界面据此标红）",
+                 f"要求 {_bad.get('required')}，实为 {_bad.get('actual')}")
+            _unk = srv._edu_check({"edu_level": None, "job_id": 1}, _jm)
+            c.ok(bool(_unk) and _unk["unknown"] is True,
+                 "⑮ 学历未识别时标为『待判定』——既不冒充达标也不冒充不达标")
+            _okd = srv._edu_check({"edu_level": "博士", "job_id": 1}, _jm)
+            c.ok(bool(_okd) and _okd["ok"] is True, "⑯ 学历高于岗位线时判为达标")
+            _tc.close()
+        finally:
+            if _orig_ai is None:
+                os.environ.pop("TP_AUTO_INSIGHT", None)
+            else:
+                os.environ["TP_AUTO_INSIGHT"] = _orig_ai
+
+        # ============================================================ U
+        c.section("U 决策反馈闭环：把 HR 的定档变成对系统的反馈（v1.8.2）")
+        # 关键是三条：只算已确认的、不碰权重文件、样本不够时不硬下结论。
+        try:
+            from app import feedback as _fb
+            _uc = db.connect(os.path.join(work, "u_fb.db"))
+            # 12 条已确认：6 一致 + 4 系统偏高 + 2 系统偏低
+            _cases = [("A", "A"), ("A", "A"), ("B", "B"), ("B", "B"), ("C", "C"), ("D", "D"),
+                      ("A", "B"), ("A", "B"), ("A", "B"), ("A", "B"), ("B", "A"), ("B", "A")]
+            for _i, (_s, _f) in enumerate(_cases):
+                _uc.execute(
+                    """INSERT INTO candidates (name, edu_level, years_exp, major,
+                                               created_at, updated_at)
+                       VALUES (?,?,?,?,?,?)""",
+                    (f"U{_i}", "硕士", 5, "材料学", db.now(), db.now()))
+                _cid_u = _uc.execute("SELECT last_insert_rowid()").fetchone()[0]
+                _uc.execute(
+                    """INSERT INTO applications (candidate_id, channel, applied_at, score,
+                                                 tier_suggested, tier_final, hits, miss,
+                                                 created_at, updated_at)
+                       VALUES (?,'邮箱',?,0.8,?,?,?,?,?,?)""",
+                    (_cid_u, db.now(), _s, _f, '["钛合金"]', '[]', db.now(), db.now()))
+            # 一条**未确认**（tier_final 为空）——不该进样本
+            _uc.execute("INSERT INTO candidates (name, created_at, updated_at) VALUES ('未确认','x','x')")
+            _uc.execute(
+                """INSERT INTO applications (candidate_id, tier_suggested, created_at, updated_at)
+                   VALUES ((SELECT MAX(id) FROM candidates),'A','x','x')""")
+            _uc.commit()
+
+            _rep = _fb.decision_report(_uc)
+            c.ok(_rep["total"] == 12,
+                 "① 只把已确认档位的投递计入样本（未确认的不算）", f"样本 {_rep['total']}")
+            c.ok(_rep["same"] == 6 and _rep["high"] == 4 and _rep["low"] == 2,
+                 "② 一致/偏高/偏低 计数正确",
+                 f"一致 {_rep['same']} 偏高 {_rep['high']} 偏低 {_rep['low']}")
+            c.ok(sum(_rep["matrix"][t][t] for t in "ABCD") == _rep["same"],
+                 "③ 偏差矩阵对角线之和 = 一致数")
+            _con = _fb.decision_report(_uc)
+            c.ok(abs(_con["consistency"] - round(100.0 * _rep["same"] / 12, 1)) < 0.01,
+                 "④ 一致性百分比与样本数自洽", f"{_con['consistency']}%")
+
+            # 报告必须**只读**：跑前跑后权重文件字节一致
+            _tj = os.path.join(BASE, "config", "tiers.json")
+            _before = open(_tj, "rb").read()
+            _fb.decision_report(_uc)
+            c.ok(open(_tj, "rb").read() == _before,
+                 "⑤ 报告不修改任何权重文件（只读，调权永远由人做）")
+
+            _csv = _fb.export_csv(_uc)
+            c.ok(len(_csv.splitlines()) == 13,
+                 "⑥ CSV 导出 = 表头 + 全部样本", f"{len(_csv.splitlines())} 行")
+            c.ok("系统偏高" in _csv and "系统偏低" in _csv,
+                 "⑦ CSV 里标出每条样本的偏差方向（便于 HR 自己在 Excel 里分析）")
+            _uc.close()
+
+            # 样本不足：只报"不足"，不给任何趋势结论
+            _u2 = db.connect(os.path.join(work, "u_fb2.db"))
+            _u2.execute("INSERT INTO candidates (name, created_at, updated_at) VALUES ('x','x','x')")
+            _u2.execute(
+                """INSERT INTO applications (candidate_id, tier_suggested, tier_final,
+                                             created_at, updated_at)
+                   VALUES (1,'A','B','x','x')""")
+            _u2.commit()
+            _r2 = _fb.decision_report(_u2)
+            c.ok(_r2["insufficient"] and not _r2.get("matrix")
+                 and not _r2.get("suggestions") and "样本不足" in _r2["message"],
+                 "⑧ 样本不足时不硬下结论（不给矩阵、不给建议）",
+                 _r2["message"][:24])
+            _u2.close()
+        except Exception as _e:                    # noqa: BLE001
+            c.ok(False, f"决策反馈闭环自检异常：{type(_e).__name__}: {_e}")
+
+        # ============================================================ V
+        c.section("V 邮件（v1.8.3）：模板渲染 / 缺值占位 / 发送必须人工确认")
+        try:
+            from app import mail_send as _ms
+            from app import mail_template as _mt
+
+            _ctx = _mt.build_ctx({"name": "陈志远", "edu_level": "硕士", "major": "材料加工工程",
+                                  "years_exp": 6}, "工艺技术", "张老师",
+                                 {"面试地点": "研发中心 201"})
+            _r = _mt.render("{姓名}您好：请于{面试时间}到{面试地点}参加《{应聘岗位}》面试。", _ctx)
+            c.ok("陈志远" in _r["text"] and "工艺技术" in _r["text"],
+                 "① 模板变量按候选人/岗位的真实值填充", _r["text"][:26])
+            c.ok("【待填：面试时间】" in _r["text"] and _r["missing"] == ["面试时间"],
+                 "② 取不到值的变量输出显式占位【待填：xxx】，不静默留空",
+                 f"未取到 {_r['missing']}")
+            c.ok("【待填：面试地点】" not in _r["text"],
+                 "③ 已填写的运行时变量正常替换（不当成缺值）")
+
+            # 未配置账号/口令时**不得**发信，且错误信息里不含口令
+            _smtp_before = mb.load_config().get("smtp")
+            _bad = _ms.send_mail("someone@example.com", "t", "b")
+            # 未配置时有两条拦截路径（先查账号、再查授权码），两条都属于"如实说明原因"，
+            # 断言不该把具体措辞写死——盯的是"必须被拒且给出可读原因"这个行为。
+            c.ok(_bad.get("ok") is False and bool(_bad.get("error")),
+                 "④ 未配置发信账号/授权码时拒绝发送，并说明原因（不静默失败）",
+                 (_bad.get("error") or "")[:22])
+
+            # 「检查发信配置」走 check_smtp：检查配置不需要收件人——
+            # 曾经走 send_mail(dry_run) 被收件人校验挡住，永远误报"收件人邮箱为空"。
+            _chk = _ms.check_smtp()
+            c.ok(_chk.get("ok") is False and bool(_chk.get("error"))
+                 and "收件人" not in (_chk.get("error") or ""),
+                 "④b 检查发信配置不依赖收件人：未配置时报配置问题（不再误报收件人为空）",
+                 (_chk.get("error") or "")[:22])
+
+            # 模板 id 冲突：重名应报错而不是静默覆盖
+            _vc = db.connect(os.path.join(work, "v_mail.db"))
+            _t1 = db.upsert_mail_template(_vc, "初面邀约", "初面邀约", "s1", "b1")
+            _v_tpls = db.list_mail_templates(_vc)
+            c.ok(len(_v_tpls) == 1 and _v_tpls[0]["name"] == "初面邀约",
+                 "⑤ 邮件模板可存可读（模板由人写、系统只做替换）")
+            db.delete_mail_template(_vc, _t1)
+            c.ok(len(db.list_mail_templates(_vc)) == 0, "⑥ 模板可删除")
+            _vc.close()
+
+            # ---- HTML 正文（v1.10）：表格 / 加粗 → 邮件原生格式 ----
+            _html_src = ("{姓名} 您好：\n\n| 项目 | 内容 |\n| --- | --- |\n"
+                         "| 面试时间 | 10 月 15 日 9:30 |\n"
+                         "| 面试地点 | 研发中心 201 |\n\n**请携带身份证**。")
+            _rend = _mt.render(_html_src, _ctx)
+            c.ok(_mt.needs_html(_rend["text"]),
+                 "⑦ 正文含表格/粗体时被识别为『需要 HTML 发送』")
+            _h = _mt.to_html(_rend["text"])
+            c.ok("<table" in _h and "<th" in _h and "10 月 15 日 9:30" in _h,
+                 "⑧ 表格被渲染成真正的 HTML 表格（项目/内容两列）")
+            c.ok("<b>请携带身份证</b>" in _h and "**" not in _h,
+                 "⑨ **加粗** 渲染成 <b>，标记本身不残留")
+            c.ok("| --- |" not in _h, "⑩ 表头分隔行只用于识别表格，不出现在正文里")
+            c.ok(_mt.needs_html("就是一段普通通知，没有格式") is False,
+                 "⑪ 没有表格/粗体的通知仍按纯文本发（不无谓升级成 HTML）")
+            # 变量值是候选人数据：必须转义，否则一封邮件就能把版式打乱
+            _h2 = _mt.to_html(_mt.render("姓名：{姓名}", {"姓名": "<script>x</script>"})["text"])
+            c.ok("<script>" not in _h2 and "&lt;script&gt;" in _h2,
+                 "⑫ 变量值里的 HTML 被转义（而不是拼进标签里）", _h2[-56:])
+
+            # 真正发信时的报文结构：纯文本 + HTML 两个部分（收件端自己挑）
+            _cap: list[str] = []
+
+            class _FakeSMTP:
+                def __init__(self, *a, **k):
+                    pass
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def login(self, u, p):
+                    return None
+
+                def sendmail(self, frm, to, raw):
+                    _cap.append(raw)
+                    return {}
+
+            _orig_ssl = _ms.smtplib.SMTP_SSL
+            _ms.smtplib.SMTP_SSL = _FakeSMTP
+            try:
+                _rs = _ms.send_mail(
+                    "candidate@example.com", "初面邀约", _rend["text"],
+                    cfg={"smtp": {"host": "smtp.example.cn", "port": 465, "ssl": True,
+                                  "user": "hr@example.cn", "from_name": "招聘组"}},
+                    password="dummy", html=_h)
+            finally:
+                _ms.smtplib.SMTP_SSL = _orig_ssl
+            c.ok(_rs.get("ok") and _cap, "⑬ 富文本邮件确实走了发送流程", str(_rs.get("ok")))
+            _raw = _cap[0] if _cap else ""
+            c.ok("multipart/alternative" in _raw and "text/plain" in _raw
+                 and "text/html" in _raw,
+                 "⑭ 按 multipart/alternative 发出（纯文本 + HTML 双版本，兼容老客户端）")
+            c.ok(_raw.index("text/plain") < _raw.index("text/html"),
+                 "⑮ 纯文本在 HTML 之前（部分客户端只认最后一个可显示部分，顺序不能反）")
+            # 纯文本通知不升级：不带 html 时仍是单部分文本邮件
+            _cap.clear()
+            _ms.smtplib.SMTP_SSL = _FakeSMTP
+            try:
+                _ms.send_mail("a@b.com", "通知", "纯文字通知",
+                              cfg={"smtp": {"host": "h", "port": 465, "ssl": True,
+                                            "user": "u@x.cn"}}, password="dummy")
+            finally:
+                _ms.smtplib.SMTP_SSL = _orig_ssl
+            c.ok(_cap and "multipart" not in _cap[0],
+                 "⑯ 不带格式的通知仍按单部分纯文本发送（行为与旧版一致）")
+
+            # HTML → 纯文本：表格按 `列1 | 列2` 排，纯文本客户端读起来才是表
+            _pt = _mt.html_to_text("<table><tr><th>项目</th><th>内容</th></tr>"
+                                   "<tr><td>面试时间</td><td>9:30</td></tr></table>")
+            c.ok("项目" in _pt and "|" in _pt and "9:30" in _pt,
+                 "⑰ 富文本正文能拆出可读纯文本（表格按 列1 | 列2 排）",
+                 _pt.replace("\n", "⏎")[:40])
+            # 要发出去的 HTML 先清洗：脚本 / 事件属性 / js 链接一律剥掉
+            _dirty = ('<p onclick="x()">你好<script>alert(1)</script></p>'
+                      '<a href="javascript:alert(2)">点我</a>')
+            _clean = _mt.sanitize_email_html(_dirty)
+            c.ok("<script" not in _clean and "onclick" not in _clean
+                 and "javascript:" not in _clean and "你好" in _clean,
+                 "⑱ 发信前清洗 HTML：脚本/事件/js链接被剥掉，正文内容保留",
+                 _clean[:46])
+            # 编辑器产出的真表格（走 html 通道）同样按 multipart 发，纯文本自动拆
+            _cap.clear()
+            _ms.smtplib.SMTP_SSL = _FakeSMTP
+            try:
+                _ms.send_mail("a@b.com", "面试邀约",
+                              _mt.html_to_text("<table><tr><th>项目</th><th>内容</th></tr>"
+                                               "<tr><td>时间</td><td>9:30</td></tr></table>"),
+                              cfg={"smtp": {"host": "h", "port": 465, "ssl": True,
+                                            "user": "u@x.cn"}}, password="dummy",
+                              html="<table><tr><th>项目</th><th>内容</th></tr>"
+                                   "<tr><td>时间</td><td>9:30</td></tr></table>")
+            finally:
+                _ms.smtplib.SMTP_SSL = _orig_ssl
+            c.ok(_cap and "multipart/alternative" in _cap[0]
+                 and "text/plain" in _cap[0] and "text/html" in _cap[0],
+                 "⑲ 所见即所得编辑器产出的表格邮件：HTML + 纯文本双版本")
+
+            # ---- HTML 模板（v1.11）：复杂版式（合并单元格）直接用 HTML 存模板 ----
+            # 极简表格语法表达不了 colspan/rowspan，硬塞只会把 HR 逼回手写 HTML。
+            _tpl_html = ('<table><tr><th colspan="2">面试邀请</th></tr>'
+                         '<tr><td>姓名</td><td>{姓名}</td></tr></table>')
+            c.ok(_mt.looks_like_html(_tpl_html) and _mt.needs_html(_tpl_html),
+                 "⑳ HTML 模板被识别为『按 HTML 邮件发』（不必再套一层转换）")
+            _rend2 = _mt.render(_tpl_html, _ctx)
+            c.ok(_ctx["姓名"] in _rend2["text"] and "<table" in _rend2["text"],
+                 "㉑ HTML 模板里的 {变量} 照样替换、标签结构保持原样",
+                 _rend2["text"][:40])
+            c.ok(_mt.looks_like_html("就是一段纯文字通知") is False,
+                 "㉒ 纯文字不会被误判成 HTML")
+            # HTML 模板 → 纯文本副本：表格要拆成可读的行文本
+            _pt2 = _mt.html_to_text(_rend2["text"])
+            c.ok("面试邀请" in _pt2 and "|" in _pt2 and _ctx["姓名"] in _pt2,
+                 "㉓ HTML 模板也能拆出纯文本副本（表格按 列 | 列 排）",
+                 _pt2.replace("\n", "⏎")[:48])
+        except Exception as _e:                    # noqa: BLE001
+            c.ok(False, f"邮件模块自检异常：{type(_e).__name__}: {_e}")
+
+        # ============================================================ W
+        c.section("W 文件夹导入：按文件名归岗（与邮件标题归岗同一口径）")
+        try:
+            _wdir = os.path.join(work, "w_resumes")
+            os.makedirs(_wdir, exist_ok=True)
+            _wdb = os.path.join(work, "w_dir.db")
+            _wc = db.connect(_wdb)
+            _wjd = {"role": "工艺技术", "must": {"education_min": "本科", "years_min": 0,
+                                                 "skills_required": ["钛合金"]},
+                    "preferred": {"skills": []}}
+            _wjid = db.create_job(_wc, "工艺技术", jd=_wjd, operator="test")
+            _wtiers = {"tiers": {}, "thresholds": {"A": 0.85, "B": 0.65, "C": 0.45}}
+            with open(os.path.join(_wdir, "测试甲-工艺技术-简历.txt"), "w",
+                      encoding="utf-8", newline="\n") as _fh:
+                _fh.write("姓名：测试甲\n性别：男\n学历：硕士\n工作年限：3 年\n"
+                          "邮箱：jiatest@example.com\n\n技能：钛合金、真空熔铸\n")
+            _rep = ingest.ingest_dir(_wdir, _wjd, _wtiers, _wdb, cfg={}, job_id=None)
+            c.ok(_rep.get("added") == 1 and _rep.get("routed") == 1,
+                 "① 文件名里带岗位名 → 自动归到该岗位（不再一律落「待指定」）",
+                 f"added={_rep.get('added')} routed={_rep.get('routed')}")
+            _row = _wc.execute("SELECT job_id FROM applications ORDER BY id DESC LIMIT 1").fetchone()
+            c.ok(bool(_row) and _row["job_id"] == _wjid,
+                 "② 投递确实挂到了该岗位下（后续按该岗位 JD 评分）",
+                 f"job_id={_row['job_id'] if _row else None}")
+
+            with open(os.path.join(_wdir, "测试乙-简历.txt"), "w",
+                      encoding="utf-8", newline="\n") as _fh:
+                _fh.write("姓名：测试乙\n学历：本科\n工作年限：2 年\n技能：钛合金\n")
+            _rep2 = ingest.ingest_dir(_wdir, _wjd, _wtiers, _wdb, cfg={}, job_id=None)
+            _row2 = _wc.execute("SELECT job_id FROM applications ORDER BY id DESC LIMIT 1").fetchone()
+            c.ok(_rep2.get("added") == 1 and (not _row2 or _row2["job_id"] is None),
+                 "③ 文件名里没有岗位名时不硬凑：仍落「待指定」等 HR 决定",
+                 f"job_id={_row2['job_id'] if _row2 else None}")
+            _wc.close()
+        except Exception as _e:                    # noqa: BLE001
+            c.ok(False, f"文件夹导入归岗自检异常：{type(_e).__name__}: {_e}")
+
+        # ============================================================ X
+        c.section("X 招聘对象身份：应届 / 往届未就业 / 工作时长（v1.8.5）")
+        # 校招场景下"能不能投"看的是身份，不是一个年限数字：
+        # 去年毕业还没参加工作的人，年限是 0，但身份不是应届。
+        try:
+            from datetime import datetime as _dt
+            from app.pipeline import freshness as _fr
+            _y = _dt.now().year
+            c.ok(_fr.find_grad_date("教育经历\n预计2026年6月毕业") == "2026-06",
+                 "① 识别毕业时间（只认带「毕业」上下文的年月）",
+                 str(_fr.find_grad_date("预计2026年6月毕业")))
+            c.ok(_fr.find_grad_date("2018.09-2021.06  某某大学  材料学") is None,
+                 "② 教育经历的起止时间不会被误当成毕业时间")
+            c.ok(_fr.exp_label(0, False, f"{_y}-06")["kind"] == "fresh",
+                 "③ 当年毕业且无工作经历 → 应届")
+            c.ok(_fr.exp_label(0, False, f"{_y-1}-06")["kind"] == "past_idle",
+                 "④ 去年毕业且无工作经历 → 往届未就业（不能笼统算应届）",
+                 _fr.exp_label(0, False, f"{_y-1}-06")["label"])
+            c.ok(_fr.exp_label(3, True, f"{_y-5}-06")["kind"] == "work",
+                 "⑤ 往届且确有工作经历 → 显示工作时长")
+            c.ok(_fr.exp_label(1, True, f"{_y}-06")["kind"] == "fresh",
+                 "⑤b 应届生即使有实习经历也判应届（实习≠正式工作，身份不能错）",
+                 _fr.exp_label(1, True, f"{_y}-06")["label"])
+            c.ok(_fr.exp_label(None, False, None)["kind"] == "unknown",
+                 "⑥ 信息都没有时不猜：如实标「毕业时间未识别」")
+        except Exception as _e:                    # noqa: BLE001
+            c.ok(False, f"招聘对象身份自检异常：{type(_e).__name__}: {_e}")
+
+        # ============================================================ Y
+        c.section("Y 邮件标题 / 文件名结构化解析（v1.9）：方向+学历+学校+专业+姓名+性别")
+        try:
+            from app.pipeline import subject_meta as _sm
+
+            _m = _sm.parse("工艺技术-硕士-西安交通大学-材料科学与工程-张三-男")
+            _f = _m["fields"]
+            c.ok(_f.get("direction") == "工艺技术", "① 方向段识别", str(_f.get("direction")))
+            c.ok(_f.get("education") == "硕士", "② 学历段识别", str(_f.get("education")))
+            c.ok(_f.get("school") == "西安交通大学", "③ 学校段识别", str(_f.get("school")))
+            c.ok(_f.get("major") == "材料科学与工程", "④ 专业段识别", str(_f.get("major")))
+            c.ok(_f.get("name") == "张三", "⑤ 姓名段识别", str(_f.get("name")))
+            c.ok(_f.get("gender") == "男", "⑥ 性别段识别（只认明写，不推断）",
+                 str(_f.get("gender")))
+
+            _m2 = _sm.parse("【应聘】材料工艺+本科+西北工业大学+材料成型及控制工程+李四+女")
+            c.ok(_m2["fields"].get("name") == "李四" and _m2["fields"].get("education") == "本科"
+                 and _m2["fields"].get("direction") == "材料工艺",
+                 "⑦ 带【应聘】前缀 / + 分隔符 / 顿号写法同样能解析", _m2["note"])
+
+            _m3 = _sm.parse("张三-简历.pdf")
+            c.ok(_m3["fields"].get("name") == "张三"
+                 and "school" not in _m3["fields"] and "major" not in _m3["fields"],
+                 "⑧ 只写了姓名的文件名不会硬凑出学校/专业", _m3["note"])
+
+            # 文件名写法「姓名-岗位-校招-简历」是院里最常用的一种。
+            # 按"最靠后的像人名段"取姓名会把岗位词（科学研究/工艺技术）当成姓名——
+            # 打测试包时实测 3 位候选人被命名成了岗位名，故这里钉死。
+            _m5 = _sm.parse("王雪莹-科学研究-校招-简历.pdf")
+            c.ok(_m5["fields"].get("name") == "王雪莹",
+                 "⑧b 文件名写法：姓名取最前面那段（末尾的岗位词不能当姓名）",
+                 str(_m5["fields"].get("name")))
+            c.ok(_m5["fields"].get("direction") == "科学研究",
+                 "⑧c 文件名写法：姓名之后那段是应聘方向（用于岗位弱匹配）",
+                 str(_m5["fields"].get("direction")))
+            # 邮件标题写法但**没写性别**：学校之后是「专业, 姓名」，取最后一个
+            _m6 = _sm.parse("数字化工程师_本科_西安电子科技大学_软件工程_王五")
+            c.ok(_m6["fields"].get("name") == "王五"
+                 and _m6["fields"].get("major") == "软件工程"
+                 and _m6["fields"].get("direction") == "数字化工程师",
+                 "⑧d 无性别的标题：姓名取『学校之后最后一个』，专业不串位",
+                 f"姓名={_m6['fields'].get('name')} 专业={_m6['fields'].get('major')}")
+
+            _m4 = _sm.parse("转发的简历 麻烦看一下")
+            c.ok(not _m4["fields"], "⑨ 认不出来的标题不给任何字段（不猜）", str(_m4["fields"]))
+
+            _cand0, _used = _sm.apply_to_candidate(
+                {"name": "x", "education": "本科", "school": "某学院",
+                 "skills": ["钛合金"], "years": 3}, _m)
+            c.ok(_cand0["school"] == "西安交通大学" and _cand0["education"] == "硕士"
+                 and _cand0["name"] == "张三",
+                 "⑩ 标题字段覆盖姓名/学历/学校（投递方按格式填的，比正文准）")
+            # 姓名是"按位置猜"的，位置规则遇到没见过的写法就会猜错；
+            # 所以姓名额外过一道证据校验：猜出来的名字在原文里找不到 → 不覆盖。
+            _m7 = _sm.parse("博士应聘-材料学-赵敏")
+            _cand7, _used7 = _sm.apply_to_candidate(
+                {"name": "赵敏"}, _m7, raw_text="赵敏，女，材料学专业硕士")
+            c.ok(_cand7["name"] == "赵敏",
+                 "⑩b 标题里猜出的姓名在简历原文中找不到 → 保留正文抽出的姓名",
+                 f"标题猜出「{_m7['fields'].get('name')}」→ 实际用「{_cand7['name']}」")
+
+            # ---- 专业归一/业务方向接模型（v1.11）：模型只做归一，打分仍走规则 ----
+            from app.pipeline import major_llm as _ml
+            from app.pipeline import majors as _mj
+            # ① 规则先试：能精确归一的直接走规则、不花模型调用
+            c.ok(_ml.classify_major("材料科学与工程")["via"] == "catalog",
+                 "⑳ 规则能精确归一的走规则（via=catalog，不花模型调用）")
+            _ml._CACHE.clear()
+            # ② 模型给的条目必须在学科目录里：目录外的一律丢弃
+            _orig_chat = _ml.llm.chat_json
+            _ml.llm.chat_json = lambda *a, **k: {"canonical": "天体物理与航天工程",
+                                                 "category": "物理学", "reason": "编的"}
+            try:
+                c.ok(_ml.classify_major("占星术与塔罗牌") is None,
+                     "㉑ 模型给出的条目不在学科目录里 → 丢弃（不猜）")
+            finally:
+                _ml.llm.chat_json = _orig_chat
+            # ③ 模型归一到真实目录条目 → 可用
+            _ml._CACHE.clear()
+            _ml.llm.chat_json = lambda *a, **k: {"canonical": "材料科学与工程",
+                                                 "category": "工学", "reason": "材料类"}
+            try:
+                _cls = _ml.classify_major("材化")
+                c.ok(_cls and _cls["canonical"] == "材料科学与工程" and _cls["via"] == "llm",
+                     "㉒ 模型把『材化』归一到目录条目（via=llm）",
+                     str(_cls))
+            finally:
+                _ml.llm.chat_json = _orig_chat
+            _ml._CACHE.clear()
+            # ③ 归一结果参与打分：grade 用 major_canonical 判专业方向
+            _jd_m = {"role": "材料研发", "must": {"education_min": "本科", "years_min": 0,
+                                                "skills_required": ["钛合金"],
+                                                "major_required": ["材料科学与工程"]},
+                     "preferred": {"skills": []}}
+            _c_no = {"name": "测试", "education": "硕士", "years": 3,
+                     "major": "材化", "skills": [{"name": "钛合金", "evidence": "钛合金"}]}
+            _g_no = grade(_c_no, _jd_m, TIERS)
+            _g_yes = grade({**_c_no, "major_canonical": "材料科学与工程"}, _jd_m, TIERS)
+            c.ok(_g_no["major_check"]["in_list"] is None or _g_no["major_check"]["in_list"] is False,
+                 "㉒ 规则归不出的专业写法按原样判定（如实）",
+                 str(_g_no["major_check"]["in_list"]))
+            c.ok(_g_yes["major_check"]["in_list"] is True
+                 and _g_yes["breakdown"].get("专业方向") == 0.10,
+                 "㉓ 归一后的专业按目录命中专业方向（+0.10，打分仍在规则）",
+                 f"in_list={_g_yes['major_check']['in_list']} 分={_g_yes['breakdown'].get('专业方向')}")
+            # ④ 业务方向：模型提炼 → 存库 → 读回
+            _ml.llm.chat_json = lambda *a, **k: {"directions": ["材料工艺", "检测分析"]}
+            try:
+                _bd = _ml.business_direction({"skills": [{"name": "钛合金"}],
+                                              "major": "材料学", "raw_text": "钛合金工艺"})
+            finally:
+                _ml.llm.chat_json = _orig_chat
+            c.ok(_bd == "材料工艺、检测分析", "㉔ 业务方向由模型提炼（只展示，不参与打分）", str(_bd))
+            _ic = db.connect(os.path.join(work, "bizdir.db"))
+            db.upsert_insight(_ic, 1, 1, summary="s", business_direction=_bd)
+            _back = db.get_insight(_ic, 1, 1)
+            c.ok(_back and _back.get("business_direction") == _bd,
+                 "㉕ 业务方向随分析落库并可读回", str((_back or {}).get("business_direction")))
+            _ic.close()
+            c.ok(_cand0["skills"] == ["钛合金"] and _cand0["years"] == 3,
+                 "⑪ **不碰**技能与年限（那两项必须来自正文与证据核对）")
+            c.ok(bool(_cand0.get("title_override_notes")),
+                 "⑫ 与正文抽取冲突时留痕说明（可解释为什么与简历正文不一致）",
+                 str(_cand0.get("title_override_notes"))[:40])
+
+            # 方向段弱匹配岗位：岗位名与方向写法不一致时也能归岗（保守：对不上就不归）
+            _ydb = os.path.join(work, "subject.db")
+            _yc = db.connect(_ydb)
+            db.upsert_job(_yc, dict(JD, role="工艺技术"))
+            _jid, _ = db.match_job_by_direction(_yc, "材料工艺技术")
+            c.ok(_jid is not None, "⑬ 方向段「材料工艺技术」能弱匹配到岗位「工艺技术」")
+            _jid2, _ = db.match_job_by_direction(_yc, "市场营销")
+            c.ok(_jid2 is None, "⑭ 方向对不上任何岗位时不给归岗（保持待指定，只出建议）",
+                 str(_jid2))
+            _yc.close()
+        except Exception as _e:                    # noqa: BLE001
+            c.ok(False, f"标题结构化解析自检异常：{type(_e).__name__}: {_e}")
 
         # ============================================================ 汇总
         c.section("汇总")

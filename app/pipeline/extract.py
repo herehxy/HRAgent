@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -115,13 +116,56 @@ def _find_years(text: str) -> int | None:
 
 
 def _find_name(text: str) -> str | None:
-    m = re.search(r"姓名[:：]\s*([\u4e00-\u9fa5]{2,4})", text)
+    """从正文抽姓名：显式「姓名：」标签 > 首行。
+
+    首行兜底必须**排除段落标题**：不少 PDF 的姓名在图片/页眉里，解析出来的
+    第一行是「教育经历」这类标题——曾经被当成姓名建档，整个档案变成"教育经历"。
+    """
+    m = re.search(r"姓名\s*[:：]\s*([\u4e00-\u9fa5·]{2,4})", text)
     if m:
         return m.group(1)
     first = (text.strip().split("\n") or [""])[0].strip()
     first = re.sub(r"^(个人简历|简历|应聘简历)[\s:：]*", "", first)
-    if re.fullmatch(r"[\u4e00-\u9fa5]{2,4}", first):
+    if re.fullmatch(r"[\u4e00-\u9fa5·]{2,4}", first) and first not in SECTION_HEADS:
         return first
+    return None
+
+
+# 简历的段落标题词表：它们长得像人名（2-4 个汉字），但永远不是人名。
+# 与 _EDU_HEADS/_OTHER_HEADS（年限排除用）合并并补充若干常见变体。
+SECTION_HEADS = set(_EDU_HEADS) | set(_OTHER_HEADS) | {
+    "求职意向", "个人信息", "个人资料", "基本情况", "教育", "工作", "实习",
+    "技能", "擅长", "校园经历", "社会经历", "学术成果", "获奖情况", "荣誉奖项",
+    "自我介绍", "个人优势", "代表作品", "研究方向", "业务方向", "专业方向",
+    "主讲课程", "承担项目", "发表论文", "授权专利", "联系方式",
+}
+
+
+def _fix_name_from_filename(out: dict, filename: str | None) -> None:
+    """姓名缺失（或误取了段落标题）时按文件名兜底，并如实标注来源供 HR 核对。"""
+    nm = out.get("name")
+    if not nm or nm in SECTION_HEADS:
+        guess = name_from_filename(filename)
+        if guess:
+            out["name"] = guess
+            out["name_source"] = "文件名"
+
+
+def name_from_filename(filename: str | None) -> str | None:
+    """从文件名猜姓名（正文识别不出时的兜底）。
+
+    绝大多数简历文件以姓名开头：`张三-简历.pdf`、`张三_数字IC工程师_硕士.pdf`、
+    `李四.pdf`。取扩展名前的第一段，剥掉"简历/resume/CV"字样、数字与括号后，
+    剩下恰好是 2-4 个汉字才采纳——**猜不出就返回 None，绝不硬凑**。
+    """
+    if not filename:
+        return None
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    stem = re.sub(r"(个人|求职)??简历|resume|cv", "", stem, flags=re.IGNORECASE)
+    stem = re.split(r"[-_—\s·（）()【】\[\],，、.]", stem, maxsplit=1)[0]
+    stem = re.sub(r"[\d（）()【】\[\]]+", "", stem).strip()
+    if re.fullmatch(r"[\u4e00-\u9fa5·]{2,4}", stem) and stem not in SECTION_HEADS:
+        return stem
     return None
 
 
@@ -320,8 +364,13 @@ def _assemble(text: str, fields: dict, detail: list[dict], mode: str) -> dict:
     }
 
 
-def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = None) -> dict:
-    """统一入口。**绝不抛错**——任何失败都退化为规则通道，简历不会因抽取失败而丢失。"""
+def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = None,
+            filename: str | None = None) -> dict:
+    """统一入口。**绝不抛错**——任何失败都退化为规则通道，简历不会因抽取失败而丢失。
+
+    `filename`：来源文件名。姓名在图片/页眉里的 PDF 解析不出正文姓名，
+    此时按文件名兜底（大多数简历文件以姓名开头），并在 `name_source` 里如实标注。
+    """
     safe_text, sensitive_found = sanitize.scrub(text)
 
     if use_llm and llm_conf and llm_conf.get("api_key"):
@@ -377,6 +426,7 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
             out["confidence"] = round(max(out["confidence"], min(1.0, model_conf)), 2)
             out["sensitive_found"] = sensitive_found
             out["sensitive_fields_removed"] = removed
+            _fix_name_from_filename(out, filename)
             return out
         except (urllib.error.URLError, KeyError, ValueError, TypeError, json.JSONDecodeError):
             pass  # 静默回退规则通道
@@ -391,4 +441,5 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
         }, [], mode="failed")
     out["sensitive_found"] = sensitive_found
     out["sensitive_fields_removed"] = []
+    _fix_name_from_filename(out, filename)
     return out

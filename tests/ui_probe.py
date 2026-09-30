@@ -731,7 +731,6 @@ def main() -> int:
         mc_url = c.eval("(document.getElementById('mcBaseUrl')||{}).value") or ""
         mc_key_type = c.eval("(document.getElementById('mcKey')||{}).type") or ""
         mc_key_val = c.eval("(document.getElementById('mcKey')||{}).value") or ""
-        mc_temp = c.eval("(document.getElementById('mcTemp')||{}).value") or ""
         mc_api = c.eval(
             "(async()=>{const r=await api('/api/model-config');"
             "return {masked:r.key_masked||'', set:r.key_set, src:r.key_source||''};})()",
@@ -741,9 +740,8 @@ def main() -> int:
         probe_mc_ok = bool(mc_url) and mc_key_type == "password" and mc_key_val == "" \
             and ("****" in masked or not mc_api.get("set")) and ui_masked_ok
         print(f"  模型与密钥卡片：地址输入框 {bool(mc_url)}；Key 输入框为密码型 {mc_key_type=='password'} 且默认空 {mc_key_val==''}；"
-              f"温度输入框 {bool(mc_temp)}（值 {mc_temp}）；"
               f"接口掩码 {masked or '（未配置）'}；界面只见掩码 {bool(ui_masked_ok)}")
-        ok = ok and bool(probe_mc_ok) and bool(mc_temp)
+        ok = ok and bool(probe_mc_ok)
         c.shot(os.path.join(args.out, "19b-系统说明-模型与密钥.png"))
 
         # ⑦e 运行环境：模型口径必须"说全"，不能让降级看起来像正常。

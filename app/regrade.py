@@ -56,6 +56,16 @@ def _reprofile(conn: sqlite3.Connection, doc_id: int | None, jd: dict) -> dict |
         return None
 
 
+def _major_of(conn: sqlite3.Connection, candidate_id) -> dict:
+    """取候选人已归一的专业（v1.11）。没有就返回空 dict，调用方照旧。"""
+    try:
+        row = conn.execute("SELECT major_canonical, major_via FROM candidates WHERE id = ?",
+                           (candidate_id,)).fetchone()
+        return dict(row) if row else {}
+    except Exception:                                       # noqa: BLE001
+        return {}
+
+
 def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
                 operator: str = "hr", role: str = "hr", apply: bool = True) -> dict:
     """把 `job_id` 下所有投递按当前 JD 重算系统建议。返回逐人差异报告。
@@ -65,8 +75,9 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
     """
     apps = conn.execute(
         """SELECT a.*, c.name AS candidate_name, c.gender
-           FROM applications a LEFT JOIN candidates c ON c.id = a.candidate_id
-           WHERE a.job_id = ? ORDER BY a.id""", (job_id,)).fetchall()
+           FROM applications a JOIN candidates c ON c.id = a.candidate_id
+           WHERE a.job_id = ? AND COALESCE(c.archived_at, '') = ''
+           ORDER BY a.id""", (job_id,)).fetchall()
 
     items: list[dict] = []
     changed = kept = no_text = 0
@@ -91,7 +102,12 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
             })
             continue
 
-        g = grade(cand, jd, tiers)
+        _mj = _major_of(conn, a.get("candidate_id"))
+        if _mj.get("major_canonical"):
+            cand["major_canonical"] = _mj["major_canonical"]
+            cand["major_via"] = _mj.get("major_via") or "规则"
+        # 按某个具体岗位重算它下面的投递：岗位明确 -> 允许按学历判 D
+        g = grade(cand, jd, tiers, job_confirmed=True)
         old_tier, new_tier = a.get("tier_suggested"), g["tier_suggested"]
         old_score, new_score = a.get("score"), g["score"]
         diff = (old_tier != new_tier) or (abs((old_score or 0) - (new_score or 0)) > 0.005)
@@ -183,7 +199,7 @@ def suggest_jobs(conn: sqlite3.Connection, doc_id: int | None,
             cand = _reprofile(conn, doc_id, jd)
         if cand is None:
             return []
-        g = grade(cand, jd, tiers)
+        g = grade(cand, jd, tiers)      # 只用于出「建议岗位」：不判 D（尺子是试算的）
         out.append({
             "job_id": j["id"], "title": j.get("title") or "",
             "dept": j.get("dept") or "",
@@ -225,7 +241,11 @@ def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
             if cj is None:
                 continue
             try:
-                gi = grade(cj, j["jd"], tiers)
+                _mjr = _major_of(conn, cj.get("candidate_id"))
+                if _mjr.get("major_canonical"):
+                    cj["major_canonical"] = _mjr["major_canonical"]
+                    cj["major_via"] = _mjr.get("major_via") or "规则"
+                gi = grade(cj, j["jd"], tiers)   # 建议试算，不判 D
             except Exception:
                 continue
             scored.append({"job": j, "g": gi, "cand": cj})
@@ -329,7 +349,8 @@ def assign_job(conn: sqlite3.Connection, application_id: int, job_id: int,
         note = "简历原文不可用（解析失败），已归岗但未重算，请人工判读"
         after = f"归到 {jrow['title']}（未重算：原文不可用）"
     else:
-        g = grade(cand, jd, tiers)
+        # 归岗后重算：岗位是 HR 明确指定的 -> 允许按学历判 D
+        g = grade(cand, jd, tiers, job_confirmed=True)
         # 技能清单要跟这次重算一起写库：命中用的是"本体词表 + 该岗位 JD 词表"抽出来的技能，
         # 不刷新就会出现「命中里写着 Java / Spring Boot，技能栏里却没有 Java」的
         # 自相矛盾档案。**这类"结论更新了、证据没跟上"的不一致，比算错更难发现**，

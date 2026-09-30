@@ -231,7 +231,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 conn, tier=args.get("tier"), keyword=args.get("keyword"),
                 skill=skill_terms, min_years=args.get("min_years"),
                 education=args.get("education"), stage=args.get("stage"),
-                job_id=ctx.job_id)
+                job_id=ctx.job_id,
+                # 归档的人不在人才库里，助手也就不该把他们列出来（与界面同一口径）
+                archived=False)
             limit = int(args.get("limit") or 20)
             return _ok({"count": len(items), "returned": min(limit, len(items)),
                         "candidates": [_brief(c) for c in items[:limit]]})
@@ -389,7 +391,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                     hint="请在「人才库」卡片上归岗，或采纳系统给出的建议岗位。"
                          "若系统连建议都没给，通常是该候选人与所有在招岗位的距离都超出建议阈值"
                          "（例如跨行业简历），此时只需人工确认一个岗位即可。")
-            g = grade(cand, jd, ctx.tiers)
+            # 解释档位时同样区分"已归岗"与"只是建议岗位"：建议岗位的学历门槛
+            # 不能用来判 D（v1.8.9），解释里也就不该出现按猜出来的门槛下的结论。
+            _has_job = any(x.get("job_id") for x in (d.get("applications") or []))
+            g = grade(cand, jd, ctx.tiers, job_confirmed=_has_job)
             mm = major_match({**cand, "major": d.get("major")}, jd, db.skill_categories(conn))
             # 与库内记录对账（v1.6）：这里是"现在重算"，库里是"上次重算时写下的结论"。
             # 不一致通常是因为技能词表更新过（如本体补充了软件类技能），

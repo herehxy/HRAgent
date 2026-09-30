@@ -37,19 +37,18 @@ def mask_key(key) -> str:
 
 
 def save_cfg(base_url: str | None = None, model: str | None = None,
-             api_key: str | None = None, temperature: float | None = None) -> dict:
+             api_key: str | None = None) -> dict:
     """界面保存模型配置（v1.7.6）。
 
-    base_url / model / temperature 写 `config/model.json`（保留 preset / _presets /
-    超时等其他字段）；api_key 写 `config/secrets.json`（0600，已 gitignore）——
-    **不进 SQLite**：settings 表随库备份流动，密钥混进去等于把秘密带进每次备份。
+    base_url / model 写 `config/model.json`（保留 preset / _presets / 超时等其他字段）；
+    api_key 写 `config/secrets.json`（0600，已 gitignore）——**不进 SQLite**：
+    settings 表随库备份流动，密钥混进去等于把秘密带进每次备份。
     api_key 传 None 或空串 = 不修改（界面"留空不改"语义）。
-    temperature 合法域 [0, 2]，越界由调用方（server 层）先拦。
 
     返回 {"changed": [字段名], "env_override": [会盖过文件值的环境变量名]}。
     """
     changed: list[str] = []
-    if base_url is not None or model is not None or temperature is not None:
+    if base_url is not None or model is not None:
         cfg: dict = {}
         if os.path.exists(CONFIG_PATH):
             try:
@@ -64,9 +63,6 @@ def save_cfg(base_url: str | None = None, model: str | None = None,
         if model and model.strip() and model.strip() != cfg.get("model"):
             cfg["model"] = model.strip()
             changed.append("model")
-        if temperature is not None and float(temperature) != float(cfg.get("temperature", 0)):
-            cfg["temperature"] = float(temperature)
-            changed.append("temperature")
         if changed:
             tmp = CONFIG_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
@@ -210,7 +206,15 @@ def list_models(cfg: dict | None = None) -> list[str]:
 
 
 def status() -> dict:
-    """给界面/CLI 用的连通性检查。"""
+    """给界面/CLI 用的连通性检查。
+
+    除了"通不通"，还要回答"**为什么不通**"——实测摔过两次：
+    ① 环境里的代理不转发回环地址，本地 Ollama 明明在跑却报 502；
+    ② 环境里残留一个失效代理，访问外部模型端点直接报"连接被拒绝"，
+       而界面只显示"模型不可用"，HR 根本无从下手。
+    所以这里把 `proxy_env`（环境里的代理变量）、`route`（最近一次实际走的路线）、
+    `hint`（按现象给出的下一步）一并返回，界面据此直接告诉人该改什么。
+    """
     cfg = load_cfg()
     out = {
         "enabled": bool(cfg.get("enabled", True)),
@@ -220,9 +224,16 @@ def status() -> dict:
         "model_installed": False,
         "models": [],
         "error": None,
+        "hint": "",
+        "proxy_env": net.proxy_env(),
+        "route": net.last_route(),
+        # 用模型的功能清单：模型不可用时这些会退回规则通道，界面要如实列出来
+        "features": ["简历字段抽取", "入库自动分析", "今日待办优先级判断",
+                     "智能助手对话（含工具调用）", "面试提纲生成"],
     }
     if not out["enabled"]:
         out["error"] = "模型接入已在 config/model.json 中关闭"
+        out["hint"] = "想启用：系统配置 → 模型与密钥，把「启用」打开并保存。"
         return out
     try:
         models = list_models(cfg)
@@ -232,6 +243,16 @@ def status() -> dict:
         out["model_installed"] = any(want == m or want in m for m in models)
         if not out["model_installed"]:
             out["error"] = f"服务可达，但未安装模型 {want}（可用：{', '.join(models) or '无'}）"
+            out["hint"] = f"把「模型名」改成可用清单里的一个（如 {models[0]}），或先拉取该模型。"
     except (urllib.error.URLError, ValueError, KeyError, OSError) as exc:
-        out["error"] = f"模型服务不可达：{exc}；请确认 Ollama/vLLM 已启动"
+        out["error"] = f"模型服务不可达：{exc}"
+        if net.is_loopback(out.get("base_url") or ""):
+            out["hint"] = ("地址是回环地址，请确认本地模型服务已启动"
+                           "（Ollama：`ollama serve`；已装模型用 `ollama list` 查）。")
+        elif out["proxy_env"]:
+            out["hint"] = (f"环境变量里有代理 {list(out['proxy_env'])[0]}，"
+                           f"若该代理不可用会导致外部端点连不上（本次已尝试直连兜底）。"
+                           f"要么修好/清掉代理变量，要么改用内网或本地模型。")
+        else:
+            out["hint"] = "检查模型地址与网络：内网服务确认域名/端口，外部服务确认可出网。"
     return out

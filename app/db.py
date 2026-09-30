@@ -136,6 +136,45 @@ CREATE TABLE IF NOT EXISTS candidate_tags (
     PRIMARY KEY (candidate_id, tag_id)
 );
 
+-- ---------- 系统自动分析结果（v1.8：入库即分析） ----------
+-- 为什么单独存表而不是塞进 applications：
+--   1) 分析是**派生数据**，可随时重算；混进业务表会让"重算"变成"改库"；
+--   2) 一条投递可能被重分析多次，只保留最新一条（UNIQUE + 覆盖），历史留在 agent_runs；
+--   3) 分析失败或未出结果时，业务表完全不受影响——这是"不阻断主流程"的落点。
+CREATE TABLE IF NOT EXISTS candidate_insights (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id INTEGER NOT NULL,
+    application_id INTEGER NOT NULL,
+    summary TEXT,                       -- 一句话画像
+    reasons TEXT,                       -- 匹配理由（JSON 数组）
+    risks TEXT,                         -- 风险点（JSON 数组）
+    evidence TEXT,                      -- 原文证据（JSON 数组，反幻觉要求）
+    source TEXT DEFAULT 'auto_ingest',  -- auto_ingest / manual / rule_fallback
+    model TEXT,                         -- 实际使用的模型名；规则降级时为空
+    created_at TEXT,
+    UNIQUE (candidate_id, application_id)
+);
+
+-- ---------- 每日待办摘要（v1.8） ----------
+-- 一天一条（brief_date 唯一），幂等重算覆盖；payload 里存统计 + agent 的优先级判断。
+CREATE TABLE IF NOT EXISTS daily_briefs (
+    brief_date TEXT PRIMARY KEY,        -- YYYY-MM-DD
+    payload TEXT,                       -- JSON：计数、优先事项、生成方式
+    created_at TEXT
+);
+
+-- ---------- 邮件模板（v1.8.3） ----------
+-- 模板是**人写的**，系统只做变量替换；发送一律要 HR 确认（不做自动发送）。
+CREATE TABLE IF NOT EXISTS mail_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE,                  -- 模板名，如「初面邀约」
+    scene TEXT DEFAULT '其他通知',      -- 场景标签
+    subject TEXT,                      -- 主题模板（支持 {变量}）
+    body TEXT,                         -- 正文模板
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT, updated_at TEXT
+);
+
 -- ---------- 部门 ----------
 CREATE TABLE IF NOT EXISTS departments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -384,10 +423,33 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         # 集中在「归档」页展示，可随时取消——不是删除，历史投递全保留。
         "candidates": {
             "archived_at": "TEXT",
+            # v1.11：专业归一（学科目录条目）与其来源（catalog/模型归一）。
+            # 规则归不出来时由模型在目录里选一个**真实存在**的条目（major_llm），
+            # 打分仍由 tier.grade 的规则完成——模型只做归一，不做决定。
+            "major_canonical": "TEXT",
+            "major_via": "TEXT",
+            # v1.8.5：毕业时间（YYYY-MM 或 YYYY）。校招场景要靠它判"应届/往届未就业"，
+            # 光看工作年限不够——去年毕业还没参加工作的人，年限是 0，身份却不是应届。
+            "grad_date": "TEXT",
         },
         # v1.5：待指定投递的「建议岗位」（轮询在招岗位取最适者，只建议不归岗）
         "applications": {
             "suggested_job_id": "INTEGER",
+            # v1.8：阶段变更时间——停滞提醒（超期未推进）需要一个可比较的时间戳，
+            # 靠 audit_log 推导太脆（人工改阶段、批量导入都可能缺审计）
+            "stage_changed_at": "TEXT",
+        },
+        # v1.8 主动提案：区分「HR 问出来的」与「系统自己发现的」。
+        # 两者的确认流、留痕、执行路径完全一致，只有来源不同——
+        # 界面上要能分开看，否则 HR 无法判断该对哪些多一分警惕。
+        "proposals": {
+            "source": "TEXT DEFAULT 'hr_asked'",
+            "dedup_key": "TEXT",
+        },
+        # v1.11：模型提炼的「业务方向」（如 材料工艺 / 后端开发），与专业方向互补：
+        # 专业=学历背景，业务=实际干过的事。入库自动分析产出，卡片与档案展示。
+        "candidate_insights": {
+            "business_direction": "TEXT",
         },
     }
     for table, cols in _ADD.items():
@@ -574,8 +636,13 @@ def _enrich_job(conn: sqlite3.Connection, j: dict, with_counts: bool = True) -> 
     else:
         j["department_name"] = j.get("dept") or ""
     if with_counts:
+        # v1.8.9：只数**未归档**的投递。界面上的数字要和"点进去看到的人"对得上，
+        # 也和「重新分析」实际处理的范围一致（regrade 同样排除归档）。
         j["applications_count"] = conn.execute(
-            "SELECT COUNT(*) AS n FROM applications WHERE job_id = ?", (j["id"],)).fetchone()["n"]
+            """SELECT COUNT(*) AS n FROM applications a
+               JOIN candidates c ON c.id = a.candidate_id
+               WHERE a.job_id = ? AND COALESCE(c.archived_at, '') = ''""",
+            (j["id"],)).fetchone()["n"]
     return j
 
 
@@ -812,6 +879,42 @@ def match_job_by_subject(conn: sqlite3.Connection, subject: str) -> tuple[int | 
     return None, {}
 
 
+def match_job_by_direction(conn: sqlite3.Connection, direction: str) -> tuple[int | None, dict]:
+    """按「应聘方向」段匹配岗位（`match_job_by_subject` 的弱兜底）。
+
+    为什么需要：投递方在标题里写的方向常与岗位名不完全一致——岗位叫「工艺技术」，
+    方向写「材料工艺」；岗位叫「检验检测」，方向写「理化检测」。强匹配（岗位名
+    出现在标题里）在这种情况下落空，而**方向段是投递方明确表达的意向**，
+    不该直接丢掉。
+
+    匹配规则（仍然保守，宁可不归岗也不归错）：
+    1. 岗位标题或核心词**包含**方向段（方向是岗位名的子串）——如方向「科研」→「科学研究」；
+    2. 方向段**包含**岗位标题核心词（方向更细）——如方向「材料工艺技术」→「工艺技术」；
+    3. 两个方向都要求**共有至少 2 个连续汉字**且长度不短于 2，避免单字误撞。
+    多条命中取共有片段最长的那个；仍然命中不了就返回 None（保持待指定，只出建议）。
+    """
+    import re as _re                       # 与 _job_core_title 同一风格：就近导入
+
+    d = _re.sub(r"\s+", "", str(direction or "")).strip()
+    if len(d) < 2:
+        return None, {}
+    jobs = [j for j in list_jobs(conn, include_inactive=False) if (j.get("title") or "").strip()]
+    best, best_len = None, 0
+    for j in jobs:
+        title = _re.sub(r"\s+", "", str(j.get("title") or ""))
+        core = _re.sub(r"\s+", "", _job_core_title(title))
+        for cand in (title, core):
+            if not cand or len(cand) < 2:
+                continue
+            if cand in d or d in cand:
+                overlap = min(len(cand), len(d))
+                if overlap > best_len:
+                    best, best_len = j, overlap
+    if best:
+        return best["id"], best.get("jd_json") or {}
+    return None, {}
+
+
 # ============================================================
 # 候选人（人）
 # ============================================================
@@ -962,7 +1065,13 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
         args.append(1 if needs_review else 0)
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY COALESCE(a.score, -1) DESC, c.id DESC"
+    # 排序（v1.8.8，HR 口径）：**D 档一律沉底**，其余不看分数、按导入时间倒序。
+    # 为什么不再按分数排：分数受"是否识别出年限/技能词表命中"影响，准确性还不到
+    # 能当排序依据的程度——按分数排会让 HR 误以为"前几名就是最优"。档位里
+    # D 是唯一明确的否（学历不过线），所以只有它特殊处理；A/B/C 按投递时间排，
+    # 最新投递在最上面，符合"刚收到的先看"的实际工作方式。
+    sql += (" ORDER BY CASE WHEN COALESCE(a.tier_final, a.tier_suggested, '') = 'D'"
+            " THEN 1 ELSE 0 END, COALESCE(a.applied_at,'') DESC, c.id DESC")
     if limit:
         sql += f" LIMIT {int(limit)}"
 
@@ -1079,7 +1188,12 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         "miss": latest.get("miss") or [],
         "raw_text": (docs[0].get("raw_text") if docs else "") or "",
         "file_name": docs[0].get("file_name") if docs else None,
-        "file_path": docs[0].get("archived_path") or (docs[0].get("file_path") if docs else None),
+        # 注意：守卫必须在**取值之前**。此前写成
+        # `docs[0].get("archived_path") or (docs[0].get("file_path") if docs else None)`
+        # —— `or` 左侧先求值，`docs` 为空时 `docs[0]` 直接 IndexError，
+        # 于是"没有任何附件的候选人"（手工录入、或附件被清理过的）打开完整档案会 500。
+        "file_path": ((docs[0].get("archived_path") or docs[0].get("file_path"))
+                      if docs else None),
         "tier_effective": latest.get("tier_final") or latest.get("tier_suggested"),
     }
 
@@ -1247,18 +1361,48 @@ def set_candidate_archived(conn: sqlite3.Connection, cid: int, archived: bool,
 
     是"归档"不是"删除"：档案、投递、附件、审计全部原样保留，可随时取消归档。
     逐次写审计（archive / unarchive），谁在什么时候归档的可追溯。
+
+    v1.8.4：归档时**自动结束该候选人还在进行中的投递流程**。
+    归档的含义就是"这个人处理完了"——若留着流程挂在"新投递/初面"，
+    人才库里看不到、归档页里也不显眼，就成了没人管的孤儿数据。
+    结束了多少条放在返回值的 `_ended_applications` 里，由调用方提示给 HR。
     """
     cur = get_candidate(conn, cid)
     if not cur:
         return None
     ts = now() if archived else None
     conn.execute("UPDATE candidates SET archived_at = ? WHERE id = ?", (ts, cid))
+    ended = 0
+    if archived:
+        cur2 = conn.execute(
+            """UPDATE applications SET stage = ?, updated_at = ?
+               WHERE candidate_id = ? AND stage NOT IN (?, ?)""",
+            (STAGE_ENDED, now(), cid, STAGE_ENDED, STAGE_HIRED))
+        ended = cur2.rowcount or 0
+        if ended:
+            add_audit(conn, "candidate", str(cid), "auto_end_stage", "",
+                      f"归档时自动结束 {ended} 条进行中的投递流程", operator, role)
     add_audit(conn, "candidate", str(cid), "archive" if archived else "unarchive",
               "未归档" if archived else "已归档",
               "已归档（移入「归档」页，不再在人才库与检索中展示）" if archived
               else "取消归档（恢复在人才库与检索中展示）", operator, role)
     conn.commit()
-    return get_candidate(conn, cid)
+    out = get_candidate(conn, cid) or {}
+    out["_ended_applications"] = ended
+    return out
+
+
+def count_pending_applications(conn: sqlite3.Connection, cid: int) -> int:
+    """该候选人还有几条投递没走到终点。
+
+    用于"流程都结束了 → 自动归档"的判断：一个人可能同时在两个岗位的流程里，
+    结束其中一个不代表该归档，**必须全部到终点**才算处理完。
+    """
+    row = conn.execute(
+        """SELECT COUNT(*) AS n FROM applications
+           WHERE candidate_id = ? AND stage NOT IN (?, ?)""",
+        (int(cid), STAGE_ENDED, STAGE_HIRED)).fetchone()
+    return int(row["n"] if row else 0)
 
 
 def set_candidates_archived(conn: sqlite3.Connection, cids: list[int], archived: bool,
@@ -1638,28 +1782,278 @@ def candidate_audit(conn: sqlite3.Connection, cid: int, limit: int = 50) -> list
 # ============================================================
 
 def create_proposal(conn: sqlite3.Connection, session_id: str, tool: str, args: dict,
-                    summary: str, risk: str = "中") -> int:
+                    summary: str, risk: str = "中",
+                    source: str = "hr_asked", dedup_key: str | None = None) -> int:
+    """建一条待确认提案。
+
+    `source`：hr_asked = HR 提问后模型产生；agent_auto = 系统自己巡检发现。
+    两者**走同一条确认流**，绝不因为"是系统自己发现的"就自动执行。
+    `dedup_key`：主动提案的去重键（如 `stage_stuck:app#12`），配合
+    `recent_proposal_exists()` 防止同一件事天天提醒、把 HR 烦到忽略整个列表。
+    """
     cur = conn.execute(
-        """INSERT INTO proposals (session_id, tool, args, summary, risk, status, created_at)
-           VALUES (?,?,?,?,?,'待确认',?)""",
-        (session_id, tool, json.dumps(args, ensure_ascii=False), summary, risk, now()),
+        """INSERT INTO proposals (session_id, tool, args, summary, risk, status,
+                                  source, dedup_key, created_at)
+           VALUES (?,?,?,?,?,'待确认',?,?,?)""",
+        (session_id, tool, json.dumps(args, ensure_ascii=False), summary, risk,
+         source, dedup_key, now()),
     )
     conn.commit()
     return cur.lastrowid
+
+
+def recent_proposal_exists(conn: sqlite3.Connection, dedup_key: str, days: int = 7) -> bool:
+    """去重窗口：同一 dedup_key 在 N 天内出现过（不论是否已处理）就不再重复提。"""
+    if not dedup_key:
+        return False
+    row = conn.execute(
+        """SELECT 1 FROM proposals
+           WHERE dedup_key = ? AND created_at >= datetime('now', ?) LIMIT 1""",
+        (dedup_key, f"-{int(days)} days"),
+    ).fetchone()
+    return bool(row)
 
 
 def get_proposal(conn: sqlite3.Connection, pid: int) -> dict | None:
     return _row(conn.execute("SELECT * FROM proposals WHERE id = ?", (pid,)).fetchone())
 
 
-def list_proposals(conn: sqlite3.Connection, status: str | None = None, limit: int = 50) -> list[dict]:
+def list_proposals(conn: sqlite3.Connection, status: str | None = None, limit: int = 50,
+                   source: str | None = None) -> list[dict]:
     sql, args = "SELECT * FROM proposals", []
+    conds, cond_args = [], []
     if status:
-        sql += " WHERE status = ?"
-        args.append(status)
+        conds.append("status = ?")
+        cond_args.append(status)
+    if source:
+        conds.append("source = ?")
+        cond_args.append(source)
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
+    args.extend(cond_args)
     sql += " ORDER BY id DESC LIMIT ?"
     args.append(int(limit))
     return [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
+
+
+# ============================================================
+# 系统自动分析结果（入库即分析）
+# ============================================================
+
+def upsert_insight(conn: sqlite3.Connection, candidate_id: int, application_id: int, *,
+                   summary: str, reasons: list | None = None, risks: list | None = None,
+                   evidence: list | None = None, source: str = "auto_ingest",
+                   model: str = "", business_direction: str | None = None) -> None:
+    """写入/覆盖某条投递的分析结果（同投递只留最新一条，重分析即覆盖）。
+
+    `business_direction`：模型从简历提炼的「业务方向」（如 材料工艺 / 后端开发），
+    与专业方向互补——专业看学历背景，业务看实际干过的事。
+    """
+    conn.execute(
+        """INSERT INTO candidate_insights
+               (candidate_id, application_id, summary, reasons, risks, evidence,
+                source, model, business_direction, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT (candidate_id, application_id) DO UPDATE SET
+               summary = excluded.summary, reasons = excluded.reasons,
+               risks = excluded.risks, evidence = excluded.evidence,
+               source = excluded.source, model = excluded.model,
+               business_direction = excluded.business_direction,
+               created_at = excluded.created_at""",
+        (candidate_id, application_id, summary,
+         json.dumps(reasons or [], ensure_ascii=False),
+         json.dumps(risks or [], ensure_ascii=False),
+         json.dumps(evidence or [], ensure_ascii=False),
+         source, model, business_direction, now()),
+    )
+    conn.commit()
+
+
+def get_insight(conn: sqlite3.Connection, candidate_id: int,
+                application_id: int | None = None) -> dict | None:
+    """取分析结果；不指定投递时取该候选人最新一条。"""
+    if application_id is None:
+        row = conn.execute(
+            """SELECT * FROM candidate_insights WHERE candidate_id = ?
+               ORDER BY id DESC LIMIT 1""", (candidate_id,)).fetchone()
+    else:
+        row = conn.execute(
+            """SELECT * FROM candidate_insights
+               WHERE candidate_id = ? AND application_id = ?""",
+            (candidate_id, application_id)).fetchone()
+    if not row:
+        return None
+    return _decode_insight(dict(row))
+
+
+def insights_for(conn: sqlite3.Connection, candidate_ids: list[int]) -> dict[int, dict]:
+    """批量取多个候选人的最新分析（列表页用，一次查询避免 N+1）。"""
+    ids = [int(c) for c in candidate_ids if c is not None]
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"""SELECT * FROM candidate_insights WHERE candidate_id IN ({marks})
+            ORDER BY id ASC""", ids).fetchall()
+    out: dict[int, dict] = {}
+    for r in rows:              # ASC 遍历：后面的覆盖前面的，最终留下最新一条
+        d = _decode_insight(dict(r))
+        out[d["candidate_id"]] = d
+    return out
+
+
+def _decode_insight(d: dict) -> dict:
+    for k in ("reasons", "risks", "evidence"):
+        try:
+            d[k] = json.loads(d.get(k) or "[]")
+        except (ValueError, TypeError):
+            d[k] = []
+    return d
+
+
+# ============================================================
+# 每日待办摘要
+# ============================================================
+
+def save_brief(conn: sqlite3.Connection, brief_date: str, payload: dict) -> None:
+    """按日期存摘要（同一天重算即覆盖，保证幂等）。"""
+    conn.execute(
+        """INSERT INTO daily_briefs (brief_date, payload, created_at) VALUES (?,?,?)
+           ON CONFLICT (brief_date) DO UPDATE SET
+               payload = excluded.payload, created_at = excluded.created_at""",
+        (brief_date, json.dumps(payload, ensure_ascii=False), now()),
+    )
+    conn.commit()
+
+
+def get_brief(conn: sqlite3.Connection, brief_date: str) -> dict | None:
+    row = conn.execute("SELECT * FROM daily_briefs WHERE brief_date = ?",
+                       (brief_date,)).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        d["payload"] = json.loads(d.get("payload") or "{}")
+    except (ValueError, TypeError):
+        d["payload"] = {}
+    return d
+
+
+# ============================================================
+# 邮件模板（v1.8.3）
+# ============================================================
+
+def list_mail_templates(conn: sqlite3.Connection, enabled_only: bool = False) -> list[dict]:
+    sql = "SELECT * FROM mail_templates"
+    if enabled_only:
+        sql += " WHERE enabled = 1"
+    sql += " ORDER BY scene, id"
+    return [dict(r) for r in conn.execute(sql).fetchall()]
+
+
+def get_mail_template(conn: sqlite3.Connection, tid: int) -> dict | None:
+    row = conn.execute("SELECT * FROM mail_templates WHERE id = ?", (int(tid),)).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_mail_template(conn: sqlite3.Connection, name: str, scene: str,
+                         subject: str, body: str, tid: int | None = None) -> int:
+    """新增或更新模板。模板名唯一——重名时报错优于静默覆盖别人写的模板。"""
+    now_ = now()
+    if tid:
+        conn.execute(
+            """UPDATE mail_templates SET name=?, scene=?, subject=?, body=?, updated_at=?
+               WHERE id=?""",
+            (name, scene, subject, body, now_, int(tid)))
+        conn.commit()
+        return int(tid)
+    cur = conn.execute(
+        """INSERT INTO mail_templates (name, scene, subject, body, enabled,
+                                       created_at, updated_at)
+           VALUES (?,?,?,?,1,?,?)""",
+        (name, scene, subject, body, now_, now_))
+    conn.commit()
+    return cur.lastrowid
+
+
+def delete_mail_template(conn: sqlite3.Connection, tid: int) -> None:
+    conn.execute("DELETE FROM mail_templates WHERE id = ?", (int(tid),))
+    conn.commit()
+
+
+# 阶段口径：这两个是终点，不再需要推进
+#: 流程终点：到了这两个阶段就不再推进。
+#: 「已结束」= 正常走完或中途终止；「已入职」= 已录用。
+STAGE_ENDED = "已结束"
+STAGE_HIRED = "已入职"
+_FINISHED_STAGES = (STAGE_HIRED, STAGE_ENDED)
+
+
+def pending_workload(conn: sqlite3.Connection, stuck_days: int = 7,
+                     limit: int = 20) -> dict:
+    """待办全景：主动提案与每日摘要共用这一个查询源。
+
+    为什么不各写各的：如果提案用一套口径、摘要用另一套，两边数字对不上，
+    HR 第一反应会是"系统自己都没搞清"，信任度直接掉。**一个来源，两处消费。**
+    """
+    threshold = (datetime.now() - timedelta(days=int(stuck_days))).strftime("%Y-%m-%d %H:%M:%S")
+    base = """
+        FROM applications a
+        JOIN candidates c ON c.id = a.candidate_id
+        LEFT JOIN jobs j ON j.id = a.job_id
+        WHERE COALESCE(c.archived_at, '') = ''
+    """
+    # 1) 待确认档位（系统给了建议，HR 还没背书）
+    confirm = conn.execute(
+        f"""SELECT a.id, a.candidate_id, c.name, a.score, a.tier_suggested,
+                   a.tier_final, a.stage, a.job_id, j.title AS job_title,
+                   COALESCE(a.applied_at, a.created_at) AS since
+            {base} AND a.tier_final IS NULL AND a.status != '已确认'
+            ORDER BY a.score DESC LIMIT ?""", (int(limit),)).fetchall()
+    # 2) 待指定岗位（有建议岗位但没归岗）
+    #    这里不复用 base：需要额外 join 一次 jobs（拿"建议岗位"的标题），
+    #    FROM 子句与 base 不同，硬拼会漏 join 导致 no such column。
+    pending_job = conn.execute(
+        """SELECT a.id, a.candidate_id, c.name, a.score, a.tier_suggested,
+                  a.suggested_job_id, sj.title AS suggested_job_title,
+                  COALESCE(a.applied_at, a.created_at) AS since
+           FROM applications a
+           JOIN candidates c ON c.id = a.candidate_id
+           LEFT JOIN jobs j  ON j.id  = a.job_id
+           LEFT JOIN jobs sj ON sj.id = a.suggested_job_id
+           WHERE COALESCE(c.archived_at, '') = ''
+             AND a.job_id IS NULL AND a.suggested_job_id IS NOT NULL
+           ORDER BY a.score DESC LIMIT ?""", (int(limit),)).fetchall()
+    # 3) 停滞投递（非终点阶段、超期未动）
+    stuck = conn.execute(
+        f"""SELECT a.id, a.candidate_id, c.name, a.score, a.tier_final, a.stage,
+                   a.job_id, j.title AS job_title,
+                   COALESCE(a.stage_changed_at, a.applied_at, a.created_at) AS since
+            {base} AND a.stage NOT IN ({','.join('?' * len(_FINISHED_STAGES))})
+                  AND COALESCE(a.stage_changed_at, a.applied_at, a.created_at) <= ?
+            ORDER BY since ASC LIMIT ?""",
+        (*_FINISHED_STAGES, threshold, int(limit))).fetchall()
+    # 4) 待人工判读（解析失败，原件还在，等人看一眼）
+    review = conn.execute(
+        f"""SELECT a.id, a.candidate_id, c.name, a.stage, a.needs_review,
+                   COALESCE(a.applied_at, a.created_at) AS since
+            {base} AND a.needs_review = 1
+            ORDER BY since ASC LIMIT ?""", (int(limit),)).fetchall()
+    # 5) 高分未确认（最该先看的那批）
+    high = conn.execute(
+        f"""SELECT a.id, a.candidate_id, c.name, a.score, a.tier_suggested
+            {base} AND a.tier_final IS NULL AND a.score >= 0.85
+            ORDER BY a.score DESC LIMIT ?""", (int(limit),)).fetchall()
+
+    def rows(rs) -> list[dict]:
+        return [dict(r) for r in rs]
+
+    items = {"pending_confirm": rows(confirm), "pending_job": rows(pending_job),
+             "stuck": rows(stuck), "needs_review": rows(review),
+             "high_score": rows(high)}
+    counts = {k: len(v) for k, v in items.items()}
+    return {"stuck_days": int(stuck_days), "threshold": threshold,
+            "counts": counts, "items": items}
 
 
 def decide_proposal(conn: sqlite3.Connection, pid: int, decision: str,
@@ -2122,21 +2516,39 @@ STAGES = ["新投递", "已联系", "初面", "复面", "待offer", "已入职",
 
 
 def pool_stats(conn: sqlite3.Connection) -> dict:
-    items = list_candidates(conn)
+    """人才库**现状**统计（v1.8.9：只算未归档的人）。
+
+    为什么改口径：归档 = 从人才库收起来。统计若把归档的人算进去，
+    HR 归档完一整批人，页面上的"候选人数 / 投递数 / 各档位"纹丝不动，
+    看起来像归档没生效——和"管道里还挂着归档的人"是同一类问题。
+    需要"一共收过多少"的台账数字用 `*_total`（附件、邮件本来就是台账，不随归档增减）。
+    """
+    items = list_candidates(conn, archived=False)
+    _ARCH = "COALESCE(c.archived_at, '') = ''"
     tiers = {t: 0 for t in ("A", "B", "C", "D")}
     stages = {s: 0 for s in STAGES}
     for i in items:
         t = i.get("tier_effective")
         tiers[t] = tiers.get(t, 0) + 1
         stages[i.get("stage") or "新投递"] = stages.get(i.get("stage") or "新投递", 0) + 1
-    apps = conn.execute("SELECT COUNT(*) AS n FROM applications").fetchone()["n"]
+    apps = conn.execute(
+        f"""SELECT COUNT(*) AS n FROM applications a
+            JOIN candidates c ON c.id = a.candidate_id WHERE {_ARCH}""").fetchone()["n"]
+    apps_total = conn.execute("SELECT COUNT(*) AS n FROM applications").fetchone()["n"]
+    people_total = conn.execute(
+        """SELECT COUNT(*) AS n FROM candidates
+           WHERE merged_into IS NULL""").fetchone()["n"]
     docs = conn.execute("SELECT COUNT(*) AS n FROM documents").fetchone()["n"]
     mails = conn.execute("SELECT COUNT(*) AS n FROM email_messages").fetchone()["n"]
     pending_mails = conn.execute(
         "SELECT COUNT(*) AS n FROM email_messages WHERE processed = 0").fetchone()["n"]
     return {
         "people": len(items),
+        # 含归档的总数：回答"这些年一共收了多少人"时才用得上
+        "people_total": people_total,
+        "archived": max(0, people_total - len(items)),
         "applications": apps,
+        "applications_total": apps_total,
         "documents": docs,
         # v1.6：总览里补岗位口径——问"现在招几个岗位"过去拿不到数（没有对应字段），
         # 只能答人才库人数，属于答非所问。岗位数是招聘侧最基本的现状数字。
@@ -2162,13 +2574,19 @@ def pool_stats(conn: sqlite3.Connection) -> dict:
 
 
 def pipeline_stats(conn: sqlite3.Connection) -> dict:
-    """招聘管道视图：各阶段数量 + 停留天数 + 来源分布。"""
+    """招聘管道视图：各阶段数量 + 停留天数 + 来源分布。
+
+    v1.8.9：**排除已归档的人**。归档的含义就是"这个人这一轮处理完了、从人才库收起来"，
+    管道是"在招流程看板"——归档完一批人，管道里还挂着他们，会让 HR 以为归档没生效
+    （实测反馈）。要看历史，去「归档」页。
+    """
     rows = conn.execute(
         """SELECT a.stage, a.channel, a.applied_at, a.id, a.candidate_id,
                   c.name AS candidate_name, j.title AS job_title
-           FROM applications a LEFT JOIN candidates c ON c.id = a.candidate_id
+           FROM applications a
+           JOIN candidates c ON c.id = a.candidate_id
            LEFT JOIN jobs j ON j.id = a.job_id
-           WHERE a.candidate_id IS NOT NULL
+           WHERE COALESCE(c.archived_at, '') = ''
            ORDER BY COALESCE(a.applied_at,'') ASC""").fetchall()
     stages: dict[str, list] = {s: [] for s in STAGES}
     channels: dict[str, int] = {}

@@ -47,6 +47,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -60,14 +61,20 @@ from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 
-from . import actions, auth, db, ingest as ingest_mod, mailbox as mb, regrade, search
+from . import actions, auth, db, feedback as feedback_mod
+from . import ingest as ingest_mod, mailbox as mb, regrade, search
+from . import mail_send as mail_send_mod
+from . import mail_template as mail_template_mod
+from .agent import brief as brief_mod
 from .agent import llm
+from .agent import proactive as proactive_mod
 from .agent.loop import run_agent
 from .agent.tools import ToolCtx, catalog as tool_catalog
 from .pipeline import domains as domains_mod
 from .pipeline import majors as mj
 from .pipeline import normalize as nz
 from .pipeline import parse as parse_mod
+from .pipeline import freshness
 from .pipeline import sanitize
 from .pipeline.analyze import analyze_fit, draft_interview
 from .ui import render_page, ui_build
@@ -251,6 +258,35 @@ def api_meta(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
 # 人才库
 # ============================================================
 
+def _edu_check(item: dict, jobs_map: dict) -> dict | None:
+    """判断学历是否达到该岗位的学历线。
+
+    学历是**硬门槛**，界面不能只显示一个"本科"让人自己去跟岗位比——
+    要直接给出"够不够"的判断，不达标标红。
+
+    岗位取"已归岗 > 建议岗位"，与「对应岗位」的口径一致
+    （见 `db.resolve_candidate_job`）。**没有岗位就没有尺子**：
+    未归岗且无建议时返回 None，不给"不达标"的结论——那会是无中生有。
+    """
+    jid = item.get("job_id")
+    if not jid:
+        jid = (item.get("job_suggestion") or {}).get("job_id")
+    job = jobs_map.get(jid) if jid else None
+    if not job:
+        return None
+    need = ((job.get("jd_json") or {}).get("must") or {}).get("education_min")
+    if not need:
+        return None
+    actual = item.get("edu_level") or ""
+    a_rank = db.EDU_RANK.get(actual, 0)
+    n_rank = db.EDU_RANK.get(need, 0)
+    return {"required": need, "actual": actual or None,
+            "ok": a_rank >= n_rank,
+            # 学历未识别时既不能算达标也不能算不达标，界面要单独提示"待判定"
+            "unknown": a_rank == 0,
+            "job_title": job.get("title")}
+
+
 @app.get("/api/candidates")
 def api_candidates(tier: str | None = None, kw: str | None = None,
                    stage: str | None = None, education: str | None = None,
@@ -382,6 +418,38 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
             items = items[(cur - 1) * page_size: cur * page_size]
             paging = {"page": cur, "page_size": page_size, "total": total_after_filter,
                       "total_pages": pages}
+        # 自动分析结果（v1.8「入库即分析」）：在分页之后按当前页批量取，
+        # 只对真正会下发的那批人查库——一次 IN 查询，不做 N+1。
+        # 未分析完（后台线程还在跑）时为 None，界面显示"分析中…"，不是错误状态。
+        imap = db.insights_for(conn, [i["id"] for i in items])
+        # 档位依据（纯规则、可复现）：与"系统自动分析"并排展示，
+        # 卡片上不再单独放一个「档位解释」按钮——同一件事的两个入口只会让人犹豫点哪个。
+        # 计算很轻（实测约 5ms/人）且只对当前页做，所以直接跟着列表下发。
+        from .agent.tools import execute as _tool_execute
+        _ctx_ = _ctx(s, conn)
+        for i in items:
+            i["insight"] = imap.get(i["id"])
+            # 学历达标判断：必须放在 job_suggestion 算完之后
+            # （未归岗的人靠"建议岗位"才有尺子可比）
+            i["edu_check"] = _edu_check(i, jobs_map)
+            # 招聘对象身份：有工作经历看年限，没有就看毕业时间（应届/往届未就业）
+            i["exp_display"] = freshness.exp_label(
+                i.get("years_exp"), bool(i.get("years_exp")), i.get("grad_date"))
+            try:
+                det = json.loads(_tool_execute("explain_grade",
+                                               {"candidate_id": i["id"]}, _ctx_))
+            except Exception:                      # noqa: BLE001 — 依据拿不到不该拖垮列表
+                det = {"error": "档位依据计算失败"}
+            i["tier_detail"] = None if det.get("error") else {
+                "tier": det.get("tier_suggested"), "score": det.get("score"),
+                "breakdown": det.get("breakdown"),
+                "hit": [h.get("skill") for h in (det.get("hit") or [])],
+                "miss": det.get("miss") or [],
+                "miss_custom": det.get("miss_custom") or [],
+                "major": det.get("major_match") or {},
+                "risks": det.get("risks") or [],
+                "consistency": det.get("consistency"),
+            }
         presented = auth.present_list(items)
         out = {"count": len(presented), "items": presented,
                "my_permissions": s["permissions"],
@@ -436,10 +504,241 @@ def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias=
             "audit_snippet": db.candidate_audit(conn, cid, limit=20),
             "duplicates": db.suspicious_duplicates(conn, cid),
             "agent_runs": [],
+            # 自动分析（入库即分析）：这是**系统自己看的结论**，
+            # 与 HR 点「模型分析」得到的即时应答分开呈现，避免两者被当同一回事。
+            "insight": db.get_insight(conn, cid),
             "tier_effective": d.get("tier_effective"),
         }
     finally:
         conn.close()
+
+
+@app.post("/api/candidates/{cid}/reanalyze")
+def api_candidate_reanalyze(cid: int,
+                            x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                            x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """重跑自动分析并立刻返回结果（同步，供界面「重算」按钮用）。
+
+    与入库时那条异步钩子的区别：这里是 HR 在等结果，所以同步执行、直接回结果。
+    **仍然只写分析文本**，不碰档位——重算分析不等于重算档位。
+    """
+    from .pipeline.analyze import auto_insight
+
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    conn = db.connect(DB_PATH)
+    try:
+        d = db.candidate_detail(conn, cid)
+        if not d:
+            raise HTTPException(status_code=404, detail="未找到该候选人")
+        apps = d.get("applications") or []
+        app_row = apps[0] if apps else {}
+        app_id = app_row.get("id") or 0
+        jd, job_meta = db.resolve_candidate_job(conn, d)
+        ins = auto_insight(d, jd, app_row)
+        db.upsert_insight(conn, cid, app_id,
+                          summary=ins.get("summary") or "",
+                          reasons=ins.get("reasons"), risks=ins.get("risks"),
+                          evidence=ins.get("evidence"),
+                          source=ins.get("source") or "manual",
+                          model=ins.get("model") or "",
+                          business_direction=ins.get("business_direction"))
+        db.add_audit(conn, "candidate", str(cid), "reanalyze", "",
+                     f"{s['username']} 重跑自动分析（{ins.get('source')}）",
+                     s["username"], s["role"])
+        return {"ok": True, "job": job_meta, "insight": db.get_insight(conn, cid, app_id),
+                "note": "分析已更新。它只影响展示，不改动档位、阶段与岗位。"}
+    finally:
+        conn.close()
+
+
+@app.get("/api/candidates/{cid}/channel-compare")
+def api_channel_compare(cid: int,
+                        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """**模型通道 vs 规则通道**对照（只读、不落库、不改档位）。
+
+    为什么要这个：口径上"哪些地方用模型、哪些地方必须用规则"是有讲究的，
+    但光靠说明文字没法验证模型到底有没有增益。这里把同一份简历、同一把 JD 尺子
+    的两条通道结果并排摆出来：
+
+    - 规则通道 = 库内结论（可复核、可复现、可审计，也是自动归档/排序的依据）；
+    - 模型通道 = 现跑一次（`analyze_fit`），给出它的档位建议、亮点、风险与置信度。
+
+    两者不一致时**不做任何自动动作**，只把差异说清楚——模型是参考，不是决定。
+    模型不可用时如实返回 `reason_unavailable`，界面照实显示（不假装跑过）。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    from .agent import llm as llm_mod
+    from .pipeline.analyze import analyze_fit
+
+    conn = db.connect(DB_PATH)
+    try:
+        d = db.candidate_detail(conn, cid)
+        if not d:
+            raise HTTPException(status_code=404, detail="未找到该候选人")
+        jd, job_meta = db.resolve_candidate_job(conn, d)
+        apps = d.get("applications") or []
+        cur = apps[0] if apps else {}
+        rule = {
+            "tier": cur.get("tier_final") or cur.get("tier_suggested"),
+            "tier_final": cur.get("tier_final"),
+            "score": cur.get("score"),
+            "reasons": cur.get("reasons") or [],
+            "risks": cur.get("risks") or [],
+            "hits": cur.get("hit") or [],
+            "miss": cur.get("miss") or [],
+            "job": (job_meta or {}).get("title") or "",
+            "note": "库内规则通道结论（人才库/管道里显示的就是它，可复核可复现）",
+        }
+        cand = dict(d)
+        for k in ("score", "tier_suggested", "hits", "miss", "applied_at"):
+            if cur.get(k) is not None:
+                cand[k] = cur.get(k)
+    finally:
+        conn.close()
+
+    llm_out, why = None, None
+    st = llm_mod.status()
+    if not jd:
+        why = "该候选人还没有可用岗位（既未归岗、也没有建议岗位），没有尺子可比"
+    elif not st.get("reachable") or not st.get("model_installed"):
+        why = st.get("error") or "模型不可用"
+    else:
+        fit = analyze_fit(cand, jd)
+        if not fit:
+            why = "模型没有返回结果（见服务端日志）"
+        else:
+            llm_out = {
+                "tier": fit.get("suggested_tier"),
+                "summary": fit.get("summary") or "",
+                "highlights": fit.get("highlights") or [],
+                "risks": fit.get("risks") or [],
+                "confidence": fit.get("confidence"),
+                "model": st.get("model"),
+            }
+    diff = None
+    if llm_out and rule.get("tier"):
+        rt, lt = rule["tier"], llm_out.get("tier")
+        if rt and lt:
+            rank = {"A": 3, "B": 2, "C": 1, "D": 0}
+            diff = {"same": rt == lt,
+                    "delta": (rank.get(lt, -1) - rank.get(rt, -1)),
+                    "text": ("两条通道结论一致（%s）" % rt if rt == lt else
+                             "模型给 %s，规则给 %s —— %s" % (
+                                 lt, rt,
+                                 "模型更宽松" if rank.get(lt, -1) > rank.get(rt, -1)
+                                 else "模型更保守"))}
+    return {"ok": True, "candidate_id": cid, "job": job_meta, "rule": rule,
+            "llm": llm_out, "diff": diff, "reason_unavailable": why,
+            "model_status": {"reachable": st.get("reachable"), "model": st.get("model"),
+                             "route": (st.get("route") or {}).get("route"),
+                             "proxy_env": list((st.get("proxy_env") or {}).keys())},
+            "disclaimer": "模型通道结果**只作对照**：不写入档案、不影响档位与流程；"
+                          "规则通道才是库里生效的结论。"}
+
+
+@app.post("/api/candidates/{cid}/rename")
+def api_candidate_rename(cid: int, req: dict,
+                         x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """人工修正档案字段：姓名 / 学历 / 学校 / 专业 / 电话 / 邮箱（v1.11 起支持联系方式）。
+
+    为什么必须有这个口子：这些字段一旦识别错（姓名在图片里、学校写简称、
+    专业是自造写法、电话正则没匹配到），会连带影响去重、检索、专业方向判定与分级展示。
+    与其让算法硬猜，不如让最了解情况的 HR 一步改对——每次改动都写审计，
+    改前改后都留痕，可追溯可回退。
+    电话/邮箱是加密存储的，修改时同步更新盲索引（用于跨渠道身份比对）。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    req = req or {}
+    fields: dict = {}
+    if "name" in req:
+        name = str(req.get("name") or "").strip()
+        if not re.fullmatch(r"[\u4e00-\u9fa5·A-Za-z\s]{1,30}", name):
+            raise HTTPException(status_code=422, detail="姓名只应为 1-30 个汉字/字母")
+        fields["name"] = name
+    if "education" in req:
+        edu = str(req.get("education") or "").strip()
+        if edu and edu not in db.EDU_RANK:
+            raise HTTPException(status_code=422,
+                                detail="学历只能填：大专 / 本科 / 硕士 / 博士（或留空表示未识别）")
+        fields["edu_level"] = edu or None
+    if "school" in req:
+        fields["school"] = str(req.get("school") or "").strip() or None
+    if "major" in req:
+        fields["major"] = str(req.get("major") or "").strip() or None
+    if "phone" in req:
+        phone = str(req.get("phone") or "").strip()
+        if phone and not re.fullmatch(r"[\d\s\-+()]{7,20}", phone):
+            raise HTTPException(status_code=422, detail="电话格式不对（7-20 位数字/符号）")
+        if phone:
+            from .crypto import encrypt, blind_index
+            from .identity import normalize_phone
+            norm = normalize_phone(phone)
+            fields["phone_enc"] = encrypt(phone)
+            fields["phone_bidx"] = blind_index(phone) if norm else None
+        else:
+            fields["phone_enc"] = None
+            fields["phone_bidx"] = None
+    if "email" in req:
+        email = str(req.get("email") or "").strip()
+        if email and "@" not in email:
+            raise HTTPException(status_code=422, detail="邮箱格式不对")
+        if email:
+            from .crypto import encrypt, blind_index
+            fields["email_enc"] = encrypt(email)
+            fields["email_bidx"] = blind_index(email)
+        else:
+            fields["email_enc"] = None
+            fields["email_bidx"] = None
+    if not fields:
+        raise HTTPException(status_code=422, detail="没有要修改的字段")
+    from .crypto import decrypt
+    conn = db.connect(DB_PATH)
+    try:
+        d = db.candidate_detail(conn, cid)
+        if not d:
+            raise HTTPException(status_code=404, detail="未找到该候选人")
+        label = {"name": "姓名", "edu_level": "学历", "school": "学校", "major": "专业",
+                 "phone_enc": "电话", "email_enc": "邮箱"}
+        old_map = {"name": d.get("name") or "", "edu_level": d.get("edu_level") or "",
+                   "school": d.get("school") or "", "major": d.get("major") or "",
+                   "phone_enc": decrypt(d.get("phone_enc")) or "",
+                   "email_enc": decrypt(d.get("email_enc")) or ""}
+        changed = {k: (old_map.get(k), fields[k]) for k in fields
+                   if str(old_map.get(k) or "") != str(fields[k] or "")}
+        if not changed:
+            return {"ok": True, "id": cid, "changed": [], "note": "字段没有变化。"}
+        db.update_candidate(conn, cid, **fields)
+        before = "；".join(f"{label[k]}={v[0] or '（空）'}" for k, v in changed.items())
+        after = "；".join(f"{label[k]}={v[1] or '（空）'}" for k, v in changed.items())
+        db.add_audit(conn, "candidate", str(cid), "edit_fields", before, after,
+                     s["username"], s["role"])
+        return {"ok": True, "id": cid, "changed": sorted(changed),
+                "note": "已更正：" + "、".join(label[k] for k in changed)
+                        + "（改前改后都记在操作审计里）。"}
+    finally:
+        conn.close()
+
+
+def _end_open_applications(conn, cid: int, s: dict) -> int:
+    """把某候选人**进行中**的投递置为「已结束」（归档联动用），返回改动条数。
+
+    终态不动：`已入职` 是有价值的历史事实，不能因为归档就被改写成"已结束"；
+    `已结束` 本来就是终点，无需重复写。
+    """
+    n = 0
+    rows = conn.execute("SELECT id, stage FROM applications WHERE candidate_id = ?",
+                        (int(cid),)).fetchall()
+    for a in rows:
+        if (a["stage"] or "") in ("已入职", "已结束"):
+            continue
+        db.set_application_stage(conn, a["id"], "已结束", s["username"], s["role"])
+        n += 1
+    return n
 
 
 @app.post("/api/candidates/{cid}/archive")
@@ -454,8 +753,13 @@ def api_candidate_archive(cid: int,
         out = db.set_candidate_archived(conn, cid, True, s["username"], s["role"])
         if not out:
             raise HTTPException(status_code=404, detail="未找到该候选人")
-        return {"ok": True, "id": cid, "archived": True,
-                "note": "已归档：移入「归档」页，不再在人才库与检索中展示。"}
+        # 归档即结束流程：把还在推进中的投递一并置为「已结束」。
+        # 否则人从人才库消失了，投递却还挂在「初面」上，管道视图会永远在催它。
+        ended = _end_open_applications(conn, cid, s)
+        return {"ok": True, "id": cid, "archived": True, "ended_applications": ended,
+                "note": "已归档（移入「归档」页，不再在人才库与检索中展示）"
+                        + (f"，并自动把 {ended} 条进行中的投递置为「已结束」。"
+                           if ended else "。")}
     finally:
         conn.close()
 
@@ -889,7 +1193,15 @@ def api_set_stage(aid: int, req: StageReq, x_tp_token: str | None = Header(defau
         r = db.set_application_stage(conn, aid, req.stage, s["username"], s["role"])
         if not r:
             raise HTTPException(status_code=404, detail="未找到该投递")
-        return r
+        # 流程结束即归档：走到终点的人不该继续占着人才库列表。
+        # 「已入职」也归——他是历史战绩，同样不需要天天出现在待处理列表里。
+        archived = False
+        if req.stage in ("已结束", "已入职") and r.get("candidate_id"):
+            db.set_candidate_archived(conn, r["candidate_id"], True, s["username"], s["role"])
+            archived = True
+        return {**r, "auto_archived": archived,
+                "note": ("阶段已更新，并已自动归档该候选人"
+                         "（可在「归档」页随时取消归档）。" if archived else "")}
     finally:
         conn.close()
 
@@ -1098,12 +1410,18 @@ def api_document_file(did: int, inline: int = 0, token: str | None = None,
     # 相对路径必须按仓库根解析——否则服务换个工作目录启动就取不到原件。
     if path and not os.path.isabs(path):
         path = os.path.join(BASE, path)
-    if not path or not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail=f"原件不在磁盘上：{path or '（未记录路径）'}")
-    # 只允许发送本仓库目录下的文件，避免被构造路径读到系统文件
+    if not path:
+        raise HTTPException(status_code=404, detail="原件未记录路径")
+    # 只允许发送本仓库目录下的文件，避免被构造路径读到系统文件。
+    # 顺序要点：**先判越界、再判存在**。若反过来，构造一个仓库外但不存在的路径
+    # 会先得到 404——等于把"该文件在不在"变成了可探测的信息（存在性 oracle）；
+    # 而且自检里"构造越界路径必须被拒"这条断言，在 Windows（该路径不存在）
+    # 上会拿到 404 而不是 403，掩盖真实的越界分支是否生效。
     real = os.path.realpath(path)
     if not real.startswith(os.path.realpath(BASE) + os.sep):
         raise HTTPException(status_code=403, detail="原件路径超出允许范围，已拒绝")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=f"原件不在磁盘上：{path}")
 
     name = d.get("file_name") or os.path.basename(real)
     disposition = "inline" if inline else "attachment"
@@ -1264,12 +1582,17 @@ def api_sources_bundle(req: BundleReq,
                 path = d.get("archived_path") or d.get("file_path") or ""
                 if path and not os.path.isabs(path):
                     path = os.path.join(BASE, path)
-                if not path or not os.path.isfile(path):
-                    skipped.append(f"{d.get('file_name') or did}（原件不在磁盘上）")
+                if not path:
+                    skipped.append(f"{d.get('file_name') or did}（未记录路径）")
                     continue
+                # 同 /api/documents/{id}/file：先判越界再判存在，
+                # 否则越界文件会被记成"原件不在磁盘上"，把实情报错。
                 real = os.path.realpath(path)
                 if not real.startswith(os.path.realpath(BASE) + os.sep):
                     skipped.append(f"{d.get('file_name') or did}（路径越界，已拒绝）")
+                    continue
+                if not os.path.isfile(path):
+                    skipped.append(f"{d.get('file_name') or did}（原件不在磁盘上）")
                     continue
                 pairs.append((real, d.get("file_name") or os.path.basename(real)))
         finally:
@@ -2031,7 +2354,6 @@ class ModelCfgReq(BaseModel):
     base_url: str | None = None
     model: str | None = None
     api_key: str | None = None
-    temperature: float | None = None
 
 
 @app.get("/api/model-config")
@@ -2056,7 +2378,6 @@ def api_model_config_get(x_tp_token: str | None = Header(default=None, alias="X-
         src = "config/model.json" if key else "未配置"
     env_set = [k for k in ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY") if os.environ.get(k)]
     return {"base_url": c.get("base_url") or "", "model": c.get("model") or "",
-            "temperature": float(c.get("temperature", 0)),
             "key_masked": llm.mask_key(key), "key_set": bool(key),
             "key_source": src, "env_override": env_set,
             "note": "API Key 只显示掩码；保存写 config/secrets.json（0600，不入库不提交），"
@@ -2076,10 +2397,7 @@ def api_model_config_set(req: ModelCfgReq,
     require(s, "settings")
     if req.base_url is not None and req.base_url.strip() and not req.base_url.strip().startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="模型地址要以 http:// 或 https:// 开头")
-    if req.temperature is not None and not (0 <= req.temperature <= 2):
-        raise HTTPException(status_code=400, detail="temperature 取值范围 0–2")
-    r = llm.save_cfg(base_url=req.base_url, model=req.model,
-                     api_key=req.api_key, temperature=req.temperature)
+    r = llm.save_cfg(base_url=req.base_url, model=req.model, api_key=req.api_key)
     if not r["changed"]:
         return {"ok": True, "changed": [], "note": "没有需要保存的修改（API Key 留空 = 不修改）。"}
     conn = db.connect(DB_PATH)
@@ -2679,3 +2997,547 @@ def api_mailbox_preview(req: MailboxTestReq, limit: int = 10,
     exts = tuple(cfg.get("attachment_ext") or (".pdf", ".docx", ".doc", ".txt", ".md"))
     return mb.preview_imap(host, port, ssl_on, user, password, folder,
                            limit=int(limit or 10), exts=exts)
+
+
+# ============================================================
+# v1.8 智能化三件套：入库即分析（在 ingest 里）/ 主动提案 / 每日摘要
+# ============================================================
+
+def _brief_use_llm() -> bool:
+    """摘要是否允许调模型判断优先级。环境变量可关（自检用）。"""
+    return os.environ.get("TP_BRIEF_LLM", "1") != "0"
+
+
+def _rebuild_brief_async() -> None:
+    """后台补一次「带模型判断」的摘要（首屏先拿到规则版，不被模型超时拖住）。"""
+    try:
+        conn = db.connect(DB_PATH)
+        try:
+            payload = brief_mod.build_and_save(conn, use_llm=True)
+            print(f"[daily] 摘要已刷新（{payload['source']}）：{payload['headline']}")
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 — 后台任务失败只记录
+        print(f"[daily] 后台摘要刷新失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+
+
+@app.get("/api/brief/today")
+def api_brief_today(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                    x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """今日待办摘要。
+
+    **首屏绝不等待模型**：库里没有今天的摘要时，先用规则版秒回，
+    同时在后台跑一次带模型判断的版本，刷新后即见。
+    否则模型不可达时（连接超时 180 秒）首屏会长时间空白——那比没有摘要更糟。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    today = f"{datetime.now():%Y-%m-%d}"
+    conn = db.connect(DB_PATH)
+    try:
+        saved = db.get_brief(conn, today)
+        # 摘要结构升级（如 v1.10 起 each 条要带具体姓名）：老缓存没有新字段，
+        # 直接返回会出现"页面还是旧措辞"，所以版本不一致就重算一次。
+        if saved and (saved.get("payload") or {}).get("brief_version") == brief_mod.BRIEF_VERSION:
+            return {"ok": True, "cached": True, **(saved.get("payload") or {})}
+        payload = brief_mod.build(conn, use_llm=False)
+        db.save_brief(conn, today, payload)
+    finally:
+        conn.close()
+    if _brief_use_llm():
+        threading.Thread(target=_rebuild_brief_async, name="brief-llm", daemon=True).start()
+    return {"ok": True, "cached": False, **payload,
+            "note": "首次生成：先给出规则版，模型判断版稍后刷新可见。"}
+
+
+@app.post("/api/brief/rebuild")
+def api_brief_rebuild(use_llm: bool = False,
+                      x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                      x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """重算今日摘要。`use_llm=1` 时同步调模型（HR 主动点，愿意等）。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        payload = brief_mod.build_and_save(conn, use_llm=bool(use_llm) and _brief_use_llm())
+        return {"ok": True, **payload}
+    finally:
+        conn.close()
+
+
+@app.post("/api/proactive/scan")
+def api_proactive_scan(stuck_days: int = 7,
+                       x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """手动触发一次系统巡检，产出待确认提案。
+
+    巡检**只建提案不执行**——产出的每一条都要 HR 点确认才生效。
+    同一件事 7 天内不会重复提（去重窗口），避免把提案列表变成噪音。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        r = proactive_mod.scan_and_propose(conn, stuck_days=int(stuck_days))
+        return {"ok": True, "created_count": r["created_count"],
+                "skipped": r["skipped"], "created": r["created"],
+                "scanned": r["scanned"], "session_id": r["session_id"],
+                "note": ("已产出 %d 条待确认提案，到「提案」列表逐条确认或拒绝。"
+                         % r["created_count"]) if r["created_count"]
+                        else "本轮没有需要新建的提案（可能已提过且未超过去重窗口）。"}
+    finally:
+        conn.close()
+
+
+def _backfill_grad_date(limit: int = 500) -> int:
+    """给还没算出毕业时间的候选人补一次（以解析原文为准）。
+
+    为什么单独补：入库路径拿到的文本可能已被处理过，识别不到"毕业"字样；
+    而 `documents.raw_text` 是解析原文，一定带着教育经历。启动时补一次，
+    新导入的人下次启动也会被补齐——与"存量补分析"同一套兜底思路。
+    """
+    from .pipeline import freshness
+    conn = db.connect(DB_PATH)
+    n = 0
+    try:
+        rows = conn.execute(
+            """SELECT c.id, d.raw_text FROM candidates c
+               JOIN documents d ON d.candidate_id = c.id
+               WHERE COALESCE(c.grad_date, '') = '' AND COALESCE(d.raw_text, '') != ''
+               ORDER BY c.id LIMIT ?""", (int(limit),)).fetchall()
+        for r in rows:
+            gd = freshness.find_grad_date(r["raw_text"])
+            if gd:
+                conn.execute("UPDATE candidates SET grad_date = ? WHERE id = ?",
+                             (gd, r["id"]))
+                n += 1
+        conn.commit()
+        if n:
+            db.add_audit(conn, "candidate", "*", "backfill_grad_date", "",
+                         f"为 {n} 位候选人补齐毕业时间（用于判定应届/往届）",
+                         "system", "system")
+    finally:
+        conn.close()
+    return n
+
+
+def _backfill_insights(limit: int = 50) -> int:
+    """给"还没有分析结果"的存量投递补一次分析，返回补做条数。
+
+    为什么必须有这一步：入库钩子只对**新入库**生效，而升级到 v1.8 的已有库里
+    所有历史投递都没有分析结果——HR 打开界面会看到一片"生成中"，
+    看起来像功能没生效。这里按"最新优先"补一批，已有的自然跳过
+    （`LEFT JOIN ... IS NULL`），所以重复启动不会重复算。
+    """
+    if os.environ.get("TP_AUTO_INSIGHT", "1") == "0":
+        return 0
+    conn = db.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            """SELECT a.id, a.candidate_id FROM applications a
+               JOIN candidates c ON c.id = a.candidate_id
+               LEFT JOIN candidate_insights i
+                      ON i.candidate_id = a.candidate_id AND i.application_id = a.id
+               WHERE i.id IS NULL AND COALESCE(c.archived_at, '') = ''
+               ORDER BY a.id DESC LIMIT ?""", (int(limit),)).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return 0
+    report = {"details": [{"status": "added", "candidate_id": r[1],
+                           "application_id": r[0]} for r in rows]}
+    return ingest_mod.spawn_auto_analysis(DB_PATH, report, limit=int(limit))
+
+
+@app.on_event("startup")
+def _startup_daily_task() -> None:
+    """每日业务巡检：补存量分析 + 生成今日摘要 + 产出主动提案。
+
+    与 `_startup_purge_task` 同一套思路（不依赖外部 cron、daemon 线程随进程退出、
+    失败只打印不阻断启动），区别是**只做"看"与"提建议"，不删除任何东西**。
+
+    启动时**不阻塞**：任务丢进后台线程跑——模型不可达时单次调用要等连接超时，
+    若同步执行会把启动拖住几分钟。
+    """
+    if os.environ.get("TP_DAILY_TASK", "1") == "0":
+        return
+
+    def _run_once() -> None:
+        try:
+            g = _backfill_grad_date()
+            if g:
+                print(f"[daily] 为 {g} 位候选人补齐毕业时间")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[daily] 补齐毕业时间失败（不影响使用）：{exc}", file=sys.stderr)
+        try:
+            n = _backfill_insights()
+            if n:
+                print(f"[daily] 为 {n} 条存量投递补做分析")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[daily] 补做分析失败（不影响使用）：{exc}", file=sys.stderr)
+        try:
+            conn = db.connect(DB_PATH)
+            try:
+                if not db.get_brief(conn, f"{datetime.now():%Y-%m-%d}"):
+                    payload = brief_mod.build_and_save(conn, use_llm=_brief_use_llm())
+                    print(f"[daily] 今日摘要：{payload['headline']}（{payload['source']}）")
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[daily] 摘要生成失败（不影响使用）：{exc}", file=sys.stderr)
+        try:
+            conn = db.connect(DB_PATH)
+            try:
+                r = proactive_mod.scan_and_propose(conn)
+                if r["created_count"]:
+                    print(f"[daily] 系统巡检产出 {r['created_count']} 条待确认提案"
+                          f"（跳过 {r['skipped']} 条重复）")
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[daily] 巡检失败（不影响使用）：{exc}", file=sys.stderr)
+
+    def _loop() -> None:
+        while True:
+            time.sleep(24 * 3600)
+            _run_once()
+
+    threading.Thread(target=_loop, name="daily-task", daemon=True).start()
+    threading.Thread(target=_run_once, name="daily-first", daemon=True).start()
+
+
+# ============================================================
+# 决策反馈闭环（v1.8.2）：把 HR 的定档变成对系统的反馈
+# ============================================================
+
+@app.get("/api/feedback/report")
+def api_feedback_report(days: int = 90,
+                        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """口径偏差报告（系统建议 vs HR 决定）。
+
+    **只读**：不修改任何权重文件。样本不足时如实说明，不硬下结论。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        return {"ok": True, **feedback_mod.decision_report(conn, days=int(days))}
+    finally:
+        conn.close()
+
+
+@app.get("/api/feedback/export")
+def api_feedback_export(days: int = 90,
+                        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")):
+    """导出偏差明细 CSV。
+
+    导出要留痕：这是"数据离开系统"的动作，与查看不同——
+    谁在什么时候把候选人数据导出去了，审计里必须答得上来。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        text = feedback_mod.export_csv(conn, days=int(days))
+        db.add_audit(conn, "feedback", "report", "export", "",
+                     f"{s['username']} 导出偏差明细 CSV（最近 {days} 天）",
+                     s["username"], s["role"])
+    finally:
+        conn.close()
+    name = urllib.parse.quote(f"口径偏差明细-{datetime.now():%Y%m%d}.csv")
+    return Response(content=text, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{name}"})
+
+
+# ============================================================
+# 邮件（v1.8.3）：模板 + 草稿 + 发送
+# ============================================================
+# 口径：**生成全自动，发送一律人工确认**。界面上不提供"自动发送"开关。
+# 因此 /draft（纯计算、无副作用）与 /send（不可逆）是两个接口 ——
+# 合成一个就等于给了"不小心点一下就发出去"的机会。
+
+class MailTemplateReq(BaseModel):
+    id: int | None = None
+    name: str
+    scene: str | None = None
+    subject: str | None = None
+    body: str | None = None
+
+
+class SmtpReq(BaseModel):
+    host: str | None = None
+    port: int | None = None
+    ssl: bool | None = None
+    user: str | None = None
+    from_name: str | None = None
+    reply_to: str | None = None
+    password: str | None = None          # 写 imap.secret，不回显
+
+
+class MailDraftReq(BaseModel):
+    candidate_id: int | None = None
+    application_id: int | None = None
+    template_id: int | None = None
+    subject: str | None = None           # 没有模板时直接用这两项
+    body: str | None = None
+    runtime: dict | None = None          # 面试时间/地点等运行时变量
+
+
+class MailSendReq(BaseModel):
+    to: str
+    subject: str
+    body: str = ""                       # 纯文本正文（给了 html 时可留空，服务端会拆出来）
+    html: str | None = None              # 富文本正文（所见即所得编辑器产出的 HTML）
+    candidate_id: int | None = None
+    application_id: int | None = None
+    template_name: str | None = None
+
+
+class MailPreviewReq(BaseModel):
+    """预览请求：**只有正文**。
+
+    之前直接复用了 MailSendReq，`to`/`subject` 是必填 → 预览请求被判 422，
+    按钮点了什么都不发生（实测反馈）。预览跟收件人无关，就不该要求这些字段。
+    """
+    body: str = ""
+    html: str | None = None
+
+
+@app.get("/api/mail/templates")
+def api_mail_templates(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    _session(x_tp_token, x_tp_role)
+    conn = db.connect(DB_PATH)
+    try:
+        return {"items": db.list_mail_templates(conn),
+                "builtin_vars": mail_template_mod.BUILTIN_VARS,
+                "runtime_vars": mail_template_mod.RUNTIME_VARS,
+                "scenes": mail_template_mod.SCENES,
+                "note": "变量写在花括号里，如 {姓名}、{应聘岗位}。取不到值的变量会显示成"
+                        "【待填：xxx】，提醒你补上——不会静默留空。"}
+    finally:
+        conn.close()
+
+
+@app.post("/api/mail/templates")
+def api_mail_template_save(req: MailTemplateReq,
+                           x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                           x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """新增/更新模板。模板是人写的，系统只做变量替换。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
+    name = (req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="模板名不能为空")
+    conn = db.connect(DB_PATH)
+    try:
+        existing = [t for t in db.list_mail_templates(conn)
+                    if t["name"] == name and t["id"] != (req.id or 0)]
+        if existing:
+            raise HTTPException(status_code=400,
+                                detail=f"已有同名模板「{name}」，换个名字或直接编辑那一条")
+        tid = db.upsert_mail_template(conn, name, (req.scene or "其他通知").strip(),
+                                      req.subject or "", req.body or "", req.id)
+        db.add_audit(conn, "settings", f"mail_template#{tid}", "update", "",
+                     f"{s['username']} 保存邮件模板「{name}」", s["username"], s["role"])
+        return {"ok": True, "id": tid, "template": db.get_mail_template(conn, tid)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/mail/templates/{tid}/delete")
+def api_mail_template_delete(tid: int,
+                             x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                             x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
+    conn = db.connect(DB_PATH)
+    try:
+        t = db.get_mail_template(conn, tid)
+        if not t:
+            raise HTTPException(status_code=404, detail="模板不存在")
+        db.delete_mail_template(conn, tid)
+        db.add_audit(conn, "settings", f"mail_template#{tid}", "delete",
+                     t.get("name") or "", "", s["username"], s["role"])
+        return {"ok": True, "note": "模板已删除。已发出的邮件不受影响（发送记录里存的是当时的正文）。"}
+    finally:
+        conn.close()
+
+
+@app.get("/api/mail/smtp")
+def api_smtp_get(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                 x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """发信配置（口令只回是否已设置，不回显）。"""
+    _session(x_tp_token, x_tp_role)
+    conf = mail_send_mod.load_smtp()
+    return {**conf, "presets": mail_send_mod.SMTP_PRESETS,
+            "note": "163 邮箱需先开启 SMTP 服务并生成授权码（不是登录密码）；"
+                    "收信与发信用同一个授权码，填一次即可。"}
+
+
+@app.post("/api/mail/smtp")
+def api_smtp_save(req: SmtpReq,
+                  x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
+    updates: dict = {}
+    if req.host is not None:
+        updates["host"] = req.host.strip()
+    if req.port is not None:
+        updates["port"] = int(req.port)
+    if req.ssl is not None:
+        updates["ssl"] = bool(req.ssl)
+    if req.user is not None:
+        updates["user"] = req.user.strip()
+    if req.from_name is not None:
+        updates["from_name"] = req.from_name.strip()
+    if req.reply_to is not None:
+        updates["reply_to"] = req.reply_to.strip()
+    if updates:
+        mb.save_config({"smtp": updates})
+    if req.password:
+        mb.write_secret(req.password)
+    conf = mail_send_mod.load_smtp()
+    db_path_conn = db.connect(DB_PATH)
+    try:
+        db.add_audit(db_path_conn, "settings", "smtp", "update", "",
+                     f"{s['username']} 更新发信配置（{conf['host']}:{conf['port']}）",
+                     s["username"], s["role"])
+    finally:
+        db_path_conn.close()
+    return {"ok": True, **conf,
+            "note": "已保存。授权码不会回显，也不写进日志。"}
+
+
+@app.post("/api/mail/test-smtp")
+def api_smtp_test(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """检查发信配置是否就绪：真连一次 SMTP 并登录验证凭据，**不会真的发信**。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
+    return mail_send_mod.check_smtp()
+
+
+@app.post("/api/mail/preview")
+def api_mail_preview(req: MailPreviewReq,
+                     x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                     x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """只做一件事：把当前正文转成 HTML，给界面**实时显示收件人看到的样子**。
+
+    两种入口：① 富文本编辑器把 HTML 直接传进来（照原样回，所见即所得）；
+    ② 只给纯文本（含 `| 列 |` 表格写法）→ 转成 HTML 再回。
+    刻意**不做变量替换**（那是 `/api/mail/draft` 的活）：这里预览的就是
+    "我写了什么、发出去长什么样"，顺手替换一遍变量反而与真实发送不一致。
+    """
+    _session(x_tp_token, x_tp_role)
+    if req.html:
+        html = mail_template_mod.sanitize_email_html(req.html)
+        return {"ok": True, "html": html, "rich": True,
+                "text": mail_template_mod.html_to_text(html),
+                "note": "按 HTML 邮件发送（同时附带纯文本版本，兼容不显示 HTML 的客户端）。"}
+    text = req.body or ""
+    rich = mail_template_mod.needs_html(text)
+    return {"ok": True, "html": mail_template_mod.to_html(text), "rich": rich, "text": text,
+            "note": ("正文里检测到表格/粗体，将按 HTML 邮件发送"
+                     "（同时附带纯文本版本，兼容不显示 HTML 的客户端）。"
+                     if rich else
+                     "正文是纯文字，仍按纯文本发送。要出表格，点「插入表格」直接画。")}
+
+
+@app.post("/api/mail/draft")
+def api_mail_draft(req: MailDraftReq,
+                   x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                   x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """生成草稿（**纯计算，不发送、不留痕**）：模板 + 候选人数据 → 主题与正文。
+
+    `missing` 里是没取到值的变量——界面要把它高亮出来，提醒 HR 补填。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    conn = db.connect(DB_PATH)
+    try:
+        cand, job_title = {}, ""
+        if req.candidate_id:
+            d = db.candidate_detail(conn, req.candidate_id)
+            if not d:
+                raise HTTPException(status_code=404, detail="未找到该候选人")
+            cand = auth.present_candidate(d)       # 解密联系方式（发信要用真实邮箱）
+            jd, meta = db.resolve_candidate_job(conn, d)
+            job_title = (meta or {}).get("title") or ""
+        subject_tpl, body_tpl = req.subject or "", req.body or ""
+        tpl_name = ""
+        if req.template_id:
+            t = db.get_mail_template(conn, req.template_id)
+            if not t:
+                raise HTTPException(status_code=404, detail="模板不存在")
+            subject_tpl, body_tpl, tpl_name = t["subject"] or "", t["body"] or "", t["name"]
+        ctx = mail_template_mod.build_ctx(cand, job_title, s.get("display_name") or s["username"],
+                                          req.runtime)
+        sj = mail_template_mod.render(subject_tpl, ctx)
+        bd = mail_template_mod.render(body_tpl, ctx)
+        missing = sorted(set(sj["missing"]) | set(bd["missing"]))
+        # 富文本正文：**总是给一份 HTML**——写邮件页是所见即所得编辑器，
+        # 它需要 HTML 来填内容。两种来源：
+        #   ① 模板本身就是 HTML（复杂版式：合并单元格、居中标题）→ 原样用；
+        #   ② 极简写法（`| 列 | 列 |` 表格 / `**加粗**`）→ 转成 HTML。
+        body_text = bd["text"]
+        body_html = (body_text if mail_template_mod.looks_like_html(body_text)
+                     else mail_template_mod.to_html(body_text))
+        return {"ok": True, "template_name": tpl_name,
+                "subject": sj["text"], "body": body_text,
+                "body_html": body_html,
+                "rich": mail_template_mod.looks_like_html(body_text)
+                        or mail_template_mod.needs_html(body_text),
+                "missing": missing,
+                "to": cand.get("email") if cand.get("email") not in (None, "—", "") else "",
+                "candidate": {"id": cand.get("id"), "name": cand.get("name"),
+                              "email": cand.get("email") if cand.get("email") != "—" else "",
+                              "job": job_title},
+                "note": ("有变量没取到值，已在正文里标成【待填：xxx】，发送前请补上。"
+                         if missing else "草稿已生成，确认无误后点「确认发送」。")}
+    finally:
+        conn.close()
+
+
+@app.post("/api/mail/send")
+def api_mail_send(req: MailSendReq,
+                  x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """**真正发信**。需要 `confirm` 权限；成功与否都留痕。
+
+    内容里若还残留 `【待填：...】` 会被拦下——宁可让 HR 补一句，也不发半成品出去。
+    正文用了表格/粗体标记时按 **multipart/alternative** 发（HTML + 纯文本双版本），
+    转换只在这里做一次：模板渲染 → 转 HTML → 发送，**单一真源**，
+    避免前后端各转一遍导致"预览和收到的不是一回事"。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "confirm")
+    html_body = (mail_template_mod.sanitize_email_html(req.html) if req.html
+                 else (req.body if mail_template_mod.looks_like_html(req.body)
+                       else (mail_template_mod.to_html(req.body)
+                             if mail_template_mod.needs_html(req.body) else None)))
+    # 纯文本部分：编辑器会给 innerText，但表格会被压成制表符；统一由服务端从 HTML
+    # 拆一份"表格按 `列1 | 列2` 排"的版本，纯文本客户端读起来才是表而不是一坨。
+    plain = mail_template_mod.html_to_text(html_body) if html_body else (req.body or "")
+    if "【待填：" in (req.subject or "") or "【待填：" in plain or "【待填：" in (html_body or ""):
+        raise HTTPException(status_code=400,
+                            detail="正文里还有【待填：xxx】没补上，请先填好再发送")
+    r = mail_send_mod.send_mail(req.to, req.subject, plain, html=html_body)
+    conn = db.connect(DB_PATH)
+    try:
+        db.add_audit(conn, "mail", str(req.candidate_id or ""), "send",
+                     "", f"发送邮件给 {req.to}｜主题：{req.subject}"
+                         f"｜模板：{req.template_name or '（无）'}｜{'成功' if r.get('ok') else '失败'}",
+                     s["username"], s["role"])
+        if r.get("ok") and req.application_id:
+            db.add_note(conn, int(req.application_id),
+                        f"已发送邮件：{req.subject}（模板：{req.template_name or '无'}）",
+                        s["username"], s["role"])
+    finally:
+        conn.close()
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r.get("error") or "发送失败")
+    return {"ok": True, **r, "note": "邮件已发出，动作已写入审计。"}
