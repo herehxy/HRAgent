@@ -449,6 +449,12 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                 "major": det.get("major_match") or {},
                 "risks": det.get("risks") or [],
                 "consistency": det.get("consistency"),
+                # v1.12：档位来源（llm/rule）与规则通道对照值——界面要能说清
+                # "这条档位是模型判的还是规则判的"，以及两者是否一致。
+                "tier_source": det.get("tier_source"),
+                "tier_rule": det.get("tier_rule"), "score_rule": det.get("score_rule"),
+                "llm": det.get("llm"), "agreement": det.get("agreement"),
+                "reasons": det.get("reasons") or [],
             }
         presented = auth.present_list(items)
         out = {"count": len(presented), "items": presented,

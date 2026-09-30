@@ -6,6 +6,11 @@
     "D": { "label": "暂不匹配当前岗位", "desc": "建议转人才库 / 其他岗位，简历保留" }
   },
   "thresholds": { "A": 0.85, "B": 0.65, "C": 0.45 },
+  "llm_grading": {
+    "enabled": true,
+    "min_confidence": 0.5,
+    "_note": "v1.12 起档位由模型主导（读完 JD + 简历后给 A/B/C/D + 原文证据），thresholds 只作为规则通道的参考分口径；模型不可用或 enabled=false 时退回规则档位。自检的确定性用环境变量 TP_LLM_GRADING=0 强制纯规则。"
+  },
   "hard_shortfall_tier": "D",
   "review_flag": "待人工判读"
 }

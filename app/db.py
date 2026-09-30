@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS applications (
     reasons TEXT, risks TEXT, hits TEXT, miss TEXT, preferred_hit TEXT, breakdown TEXT,
     extract_mode TEXT,
     confidence REAL,
+    -- v1.12 档位判定改为「模型主导 + 规则交叉校验」：
+    -- tier_suggested 现在是**模型结论**（模型不可用时才是规则值），来源看 tier_source；
+    -- 规则通道结论另存 tier_rule/score_rule，用于对照展示与分歧复核；
+    -- tier_meta 存模型元信息（prompt 版本、模型名、置信度、证据核验、分歧说明）。
+    tier_rule TEXT, score_rule REAL, tier_source TEXT, tier_meta TEXT,
     created_at TEXT, updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_app_cand ON applications(candidate_id);
@@ -438,6 +443,12 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             # v1.8：阶段变更时间——停滞提醒（超期未推进）需要一个可比较的时间戳，
             # 靠 audit_log 推导太脆（人工改阶段、批量导入都可能缺审计）
             "stage_changed_at": "TEXT",
+            # v1.12：模型主导档位后，规则通道结论与模型元信息都要留档——
+            # 界面要能对照"模型判 X / 规则判 Y"，分歧时 HR 才知道该复核哪里。
+            "tier_rule": "TEXT",
+            "score_rule": "REAL",
+            "tier_source": "TEXT",
+            "tier_meta": "TEXT",
         },
         # v1.8 主动提案：区分「HR 问出来的」与「系统自己发现的」。
         # 两者的确认流、留痕、执行路径完全一致，只有来源不同——
@@ -993,6 +1004,11 @@ SELECT c.*,
        a.breakdown     AS breakdown,
        a.extract_mode  AS extract_mode,
        a.confidence    AS confidence,
+       -- v1.12：档位来源与规则通道对照值（模型判的档位 + 规则判的档位都要能到界面）
+       a.tier_rule     AS tier_rule,
+       a.score_rule    AS score_rule,
+       a.tier_source   AS tier_source,
+       a.tier_meta     AS tier_meta,
        a.resume_doc_id AS resume_doc_id,
        a.suggested_job_id AS suggested_job_id,
        j.title         AS job_title,
@@ -1276,8 +1292,9 @@ def insert_application(conn: sqlite3.Connection, rec: dict) -> int:
            (candidate_id, job_id, suggested_job_id, channel, applied_at, resume_doc_id,
             score, tier_suggested,
             tier_final, stage, status, note, needs_review, reasons, risks, hits, miss,
-            preferred_hit, breakdown, extract_mode, confidence, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            preferred_hit, breakdown, extract_mode, confidence,
+            tier_rule, score_rule, tier_source, tier_meta, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (rec.get("candidate_id"), rec.get("job_id"), rec.get("suggested_job_id"),
          rec.get("channel", "文件夹"),
          rec.get("applied_at", stamp), rec.get("resume_doc_id"), rec.get("score"),
@@ -1290,7 +1307,9 @@ def insert_application(conn: sqlite3.Connection, rec: dict) -> int:
          json.dumps(rec.get("miss", []), ensure_ascii=False),
          json.dumps(rec.get("preferred_hit", []), ensure_ascii=False),
          json.dumps(rec.get("breakdown", {}), ensure_ascii=False),
-         rec.get("extract_mode"), rec.get("confidence"), stamp, stamp),
+         rec.get("extract_mode"), rec.get("confidence"),
+         rec.get("tier_rule"), rec.get("score_rule"), rec.get("tier_source"),
+         rec.get("tier_meta"), stamp, stamp),
     )
     conn.commit()
     return cur.lastrowid

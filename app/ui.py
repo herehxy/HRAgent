@@ -509,26 +509,44 @@ function insightBlock(x){
   </div>` + '';
 }
 
-/* 档位依据（纯规则、可复现）：折叠在自动分析块里。
+/* 档位依据（v1.12：模型主导 + 规则交叉校验）：折叠在自动分析块里。
    为什么合进来：这是同一件事的两半——"模型怎么看"和"规则怎么算"。
-   拆成两个按钮，HR 得点两次才知道全貌，而其中一半（规则）本来就是确定的。 */
+   拆成两个按钮，HR 得点两次才知道全貌。
+   呈现顺序刻意是**模型结论在前、规则参考在后**：档位现在由模型定，
+   规则分只用于排序与交叉校验；两通道打架时橙色提示复核（方案 A 的核心价值）。 */
 function tierDetailBlock(x){
   const t = x.tier_detail;
   if (!t) return '';
   const bd = Object.entries(t.breakdown || {}).map(([k,v])=>`${k} ${v}`).join(' / ');
   const mj = t.major || {};
   const cons = t.consistency;
+  const llm = t.llm || {};
+  const byRule = t.tier_source === 'rule';
+  const srcTxt = byRule
+    ? '规则判断（模型未参与：未启用 / 不可用 / 被关闭）'
+    : `模型判断${llm.model?(' · '+esc(llm.model)):''}${llm.confidence==null?'':(' · 置信度 '+llm.confidence)}${llm.prompt_version?(' · 口径 '+esc(llm.prompt_version)):''}`;
+  const unver = (llm.unverified_claims || []);
+  const mis = (t.agreement === false);
   return `<details style="margin-top:6px">
     <summary class="small" style="cursor:pointer;color:#1d5fd8">
-      档位依据（纯规则，可复现） · 评分 ${t.score==null?'—':t.score} → 建议 ${esc(t.tier||'—')}</summary>
+      档位依据 · ${srcTxt} → ${esc(t.tier||'—')}${mis?'（与规则不一致，建议复核）':''}</summary>
     <div class="small" style="margin-top:4px;line-height:1.75">
-      ${bd?`分值拆解：${esc(bd)}<br>`:''}
+      ${llm.skipped?`<span style="color:#86909c">${esc(llm.why||'模型通道未启用')}</span><br>`:''}
+      ${llm.error?`<span style="color:#ff7d00">模型未判成：${esc(llm.error)}，已退回规则档位</span><br>`:''}
+      ${llm.summary?`<b>模型结论</b>：${esc(llm.summary)}<br>`:''}
+      ${(t.reasons||[]).length?`依据：${esc((t.reasons||[]).join('；'))}<br>`:''}
       命中：${(t.hit||[]).map(esc).join('、')||'—'}<br>
       缺失：${(t.miss||[]).map(esc).join('、')||'—'}
       ${(t.miss_custom||[]).length?`<br>岗位自定义要求（本体未收录、按文字比对）未命中：${esc((t.miss_custom||[]).join('、'))}`:''}
+      ${unver.length?`<br><span style="color:#ff7d00">反幻觉核验：模型声称命中但原文找不到证据（已不计入）：${esc(unver.map(u=>u.skill||u.evidence).join('、'))}</span>`:''}
       ${mj.note?`<br>专业方向：${esc(mj.note)}`:''}
-      ${cons && !cons.same?`<br><span style="color:#ff7d00">注意：库内记录与当前重算不一致
-        （库内 ${esc(cons.db_tier)} / ${cons.db_score} ↔ 当前 ${esc(t.tier)} / ${t.score}）。
+      ${mis?`<br><span style="color:#ff7d00"><b>两通道不一致</b>：模型判 ${esc(t.tier||'—')}，规则按加权分
+        ${t.score_rule==null?'—':t.score_rule} 判 ${esc(t.tier_rule||'—')}。规则只看关键词命中率，
+        它常把"技能词没对上"当成不匹配；模型读完简历可能给出不同结论——这正是需要人工复核的地方。</span>`:''}
+      <br><span style="color:#86909c">规则通道参考分 ${t.score_rule==null?(t.score==null?'—':t.score):t.score_rule}
+        （仅用于排序与交叉校验，不决定档位）${bd?('：'+esc(bd)):''}</span>
+      ${cons && !cons.same?`<br><span style="color:#ff7d00">注意：库内规则结论与当前重算不一致
+        （库内 ${esc(cons.db_tier)} / ${cons.db_score} ↔ 当前 ${esc(t.tier_rule||t.tier)} / ${t.score}）。
         ${esc(cons.note||'')}</span>`:''}
       ${(t.risks||[]).length?`<br>风险提示：${esc(t.risks.join('；'))}`:''}
     </div></details>`;
@@ -689,6 +707,17 @@ function cardHtml(x){
     ? '<span class="chip" style="color:#0a7f1f;background:#e8ffea">HR 已确认</span>'
     : '<span class="chip" style="color:#f53f3f;background:#ffece8">待确认</span>';
   const rev = x.needs_review ? '<span class="chip" style="color:#a45a00;background:#fff7e8">待人工判读</span>' : '';
+  // 档位来源标记（v1.12）：档位现在由模型判，那么"谁判的"必须写在脸上；
+  // 模型与规则打架时给橙色提醒——这两条正是 HR 决定"要不要复核这一屏"的依据。
+  const td = x.tier_detail || {};
+  const srcBadge = td.tier_source === 'llm'
+    ? `<span class="chip" style="color:#1d5fd8;background:#e8f0ff"
+         title="档位由模型读 JD + 简历后判定${td.llm && td.llm.model?('（'+esc(td.llm.model)+'）'):''}${td.llm && td.llm.prompt_version?('，口径 '+esc(td.llm.prompt_version)):''}；命中项须附原文证据，核对不过的不计入">模型判档</span>`
+    : `<span class="chip" style="color:#86909c;background:#f2f3f5"
+         title="模型通道未参与（未启用 / 不可用 / 被关闭），本档位为规则加权结果">规则判档</span>`;
+  const misBadge = (td.agreement === false)
+    ? `<span class="chip" style="color:#f53f3f;background:#ffece8"
+         title="模型判 ${esc(td.tier||'—')}，规则判 ${esc(td.tier_rule||'—')}（规则参考分 ${td.score_rule==null?'—':td.score_rule}）。规则只看关键词命中率，容易把技能词没对上当成不匹配，请人工复核。">两通道不一致</span>` : '';
   const stage = x.stage || '新投递';
   const tiers = ['A','B','C','D'].map(k=>`<option value="${k}" ${k===t?'selected':''}>${k} · ${TIER_LABELS[k]}</option>`).join('');
   const stages = STAGES.map(k=>`<option value="${k}" ${k===stage?'selected':''}>${k}</option>`).join('');
@@ -701,9 +730,10 @@ function cardHtml(x){
       <input type="checkbox" class="pickChk" value="${x.id}" style="margin-right:10px">
       <div class="avatar" style="color:${fg};background:${bg}">${esc((x.name||'?').slice(0,1))}</div>
       <div style="flex:1;min-width:0">
-        <div class="nm">${esc(x.name||'未识别')} ${rev} ${genderTag} ${jobTag}</div>
+        <div class="nm">${esc(x.name||'未识别')} ${rev} ${genderTag} ${jobTag} ${srcBadge} ${misBadge}</div>
         <div class="meta">${eduBadge(x)} · ${expBadge(x)} ·
-          ${esc(x.school||'—')}${uniTag(x.uni_tier)} · 匹配 ${(x.score==null?'—':x.score)} · 阶段 ${esc(stage)} ·
+          ${esc(x.school||'—')}${uniTag(x.uni_tier)} · 匹配 ${(x.score==null?'—':x.score)}
+          ${(td.tier_source==='llm' && td.score_rule!=null)?`（规则参考 ${td.score_rule}）`:''} · 阶段 ${esc(stage)} ·
           来源 ${esc(x.channel||'—')} · 投递 ${esc((x.applied_at||'').slice(0,10))}</div>
         <div class="meta" style="margin-top:2px"><b>联系方式</b>：${contact}</div>
       </div>
