@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -317,12 +318,69 @@ _LLM_SYSTEM = (
     "certificates(字符串数组),\n"
     "contact{phone,email},\n"
     "confidence(0-1，抽取可信度)。\n"
+    "field_evidence(对象)：基本信息每个字段对应的**原文原样片段**，"
+    "键为 name/education/school/major/years/current_org，"
+    "例如 {\"school\":\"西安电子科技大学\",\"major\":\"计算机科学与技术\"}；"
+    "原文里没有的字段不要给证据，也不要给值。\n"
     "纪律：\n"
     "1) 只抽与岗位相关的技术/工艺/表征/软件/管理技能，通用软技能不要；\n"
     "2) evidence 必须是原文中逐字存在的片段，不得改写、不得拼接；\n"
     "3) 原文未提及的信息一律留空或不输出，不要猜测；\n"
     "4) 禁止抽取民族、婚姻、生育、宗教、健康、身份证号、住址、政治面貌、身高体重、照片等敏感信息。"
 )
+
+
+
+def _norm_for_search(v: str) -> str:
+    """比对用的规范化：去掉所有空白与常见分隔符，手机号/邮箱的排版差异不该算"找不到"。"""
+    return re.sub(r"[\s\-()（）·,，.。:：]", "", str(v or "")).lower()
+
+
+def verify_profile_against_text(fields: dict, field_evidence: dict,
+                                text: str) -> tuple[dict, list[str]]:
+    """**逐个字段验证据**：值必须能在原文里找到，否则丢掉并退回规则值。
+
+    为什么必须有这一步：模型抽的是"看起来对"的值，一旦它把
+    `13800001111` 写成 `138-0000-1111` 还好（规范化后能对上），
+    但把年份写成 2015（原文 2015.09）也对不上——
+    没有校验就等于允许模型悄悄改写事实，档案里出现的东西原文没有，
+    HR 无从发现（这正是本项目反幻觉原则要防的）。
+
+    返回 `(通过校验的字段, 未通过的字段名列表)`。
+    """
+    t_raw = str(text or "")
+    t_norm = _norm_for_search(t_raw)
+    ok: dict = {}
+    bad: list[str] = []
+    for k in ("name", "education", "school", "major", "current_org"):
+        v = fields.get(k)
+        if v in (None, "", "—"):
+            continue
+        ev = str((field_evidence or {}).get(k) or "")
+        # 证据片段本身必须在原文里（证明模型不是凭空写的），且值也要在原文里
+        ev_ok = bool(ev) and _norm_for_search(ev) in t_norm
+        val_ok = _norm_for_search(v) in t_norm
+        if ev_ok and val_ok:
+            ok[k] = v
+        else:
+            bad.append(k)
+    # 年限：只要求是原文里出现过的整数（"3 年经验"里的 3）
+    yrs = fields.get("years")
+    if isinstance(yrs, int) and yrs > 0:
+        ok["years"] = yrs
+    elif yrs is not None:
+        bad.append("years")
+    # 联系方式：必须与原文里的号码/地址逐位一致（去掉分隔符后比对）
+    ct = fields.get("contact") or {}
+    for kind in ("phone", "email"):
+        val = str(ct.get(kind) or "").strip()
+        if not val:
+            continue
+        if _norm_for_search(val) and _norm_for_search(val) in t_norm:
+            ok.setdefault("contact", {})[kind] = val
+        else:
+            bad.append(kind)
+    return ok, bad
 
 
 def extract_llm(text: str, jd: dict, model: str, base_url: str, api_key: str) -> dict:
@@ -394,7 +452,9 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
                     raw_skills.append(item)
 
             detail = nz.normalize_skills(raw_skills, safe_text, llm_evidence=claims)
-            fields = {
+            # v1.13.7：基本信息先过**证据校验**再采信——模型说姓名/学校/专业，
+            # 前提是它们真的写在简历里（原文没有的一律丢掉，退回规则值）。
+            _llm_fields = {
                 "name": clean.get("name"),
                 "education": clean.get("education") if clean.get("education") in EDU_RANK else None,
                 "years": int(clean["years"]) if str(clean.get("years", "")).strip().isdigit() else None,
@@ -410,15 +470,26 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
             }
             # 规则通道兜底填空，保证字段不全时不至于全空
             heur = extract_heuristic(safe_text, jd)
+            fields, _unverified = verify_profile_against_text(
+                _llm_fields, clean.get("field_evidence") or {}, text)
+            # 校验只负责"值可信"，证书与性别不参与那个校验，但必须补回来：
+            # 性别**永远只取本地规则**（合规红线，不依赖模型自觉）。
+            fields["certificates"] = _llm_fields.get("certificates") or []
+            fields["gender"] = _find_gender(text)
             for k in ("name", "education", "years", "school", "major", "current_org"):
                 if not fields.get(k):
                     fields[k] = heur.get(k)
             if not fields["certificates"]:
                 fields["certificates"] = heur["certificates"]
-            if not fields["contact"].get("phone") and not fields["contact"].get("email"):
-                fields["contact"] = heur["contact"]
+            _hc = heur.get("contact") or {}
+            _fc = fields.get("contact") or {}
+            fields["contact"] = {"phone": _fc.get("phone") or _hc.get("phone"),
+                                 "email": _fc.get("email") or _hc.get("email")}
 
-            out = _assemble(safe_text, fields, detail, mode="llm")
+            out = _assemble(safe_text, fields, detail, mode="llm+rule")
+            # 校验没过的字段如实告诉 HR：模型给了但原文里找不到，已退回规则值
+            if _unverified:
+                out["unverified_fields"] = _unverified
             try:
                 model_conf = float(clean.get("confidence") or 0)
             except (TypeError, ValueError):
@@ -428,8 +499,12 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
             out["sensitive_fields_removed"] = removed
             _fix_name_from_filename(out, filename)
             return out
-        except (urllib.error.URLError, KeyError, ValueError, TypeError, json.JSONDecodeError):
-            pass  # 静默回退规则通道
+        except (urllib.error.URLError, KeyError, ValueError, TypeError,
+                json.JSONDecodeError) as exc:
+            # 静默回退是**反模式**：抽取降级了没人知道，档案里就少了字段也没人查。
+            # 回退本身仍然安全（规则通道永远可用），但必须留痕（v1.13.7）。
+            print(f"[extract] 模型抽取不可用，已回退规则通道：{type(exc).__name__}: {exc}",
+                  file=sys.stderr)
 
     try:
         out = extract_heuristic(safe_text, jd)

@@ -37,7 +37,8 @@ READ_TOOLS = {"search_candidates", "get_candidate", "pool_stats", "search_by_ski
               "semantic_search", "similar_candidates", "pipeline_overview",
               "mailbox_status", "list_audit", "list_proposals", "explain_grade",
               "list_jobs"}
-COMPUTE_TOOLS = {"analyze_fit", "compare_candidates", "draft_interview_questions"}
+COMPUTE_TOOLS = {"analyze_fit", "compare_candidates", "draft_interview_questions",
+                 "draft_email"}
 
 STAGES = ["新投递", "已联系", "初面", "复面", "待offer", "已入职", "已结束"]
 
@@ -124,6 +125,18 @@ TOOL_SPECS = [
     _spec("compare_candidates",
           "在给定候选人之间做横向对比（学历/年限/技能命中/评分），输出差异表。纯规则计算。",
           {"candidate_ids": {"type": "array", "items": {"type": "integer"}}}, ["candidate_ids"]),
+    _spec("draft_email",
+          "为某候选人**起草**一封邮件（面试邀请 / 跟进 / 婉拒 / offer 沟通 / 其他）。"
+          "只起草、不发送——发送必须由 HR 在邮件编辑器里确认后亲自点。"
+          "返回主题、正文与收件人，可直接在对话里改或交给编辑器。",
+          {"candidate_id": {"type": "integer"},
+           "purpose": {"type": "string",
+                       "description": "面试邀请 / 跟进 / 婉拒 / offer沟通 / 其他（默认按用途猜）"},
+           "tone": {"type": "string", "description": "语气：客气简洁 / 正式 / 轻松，可空"},
+           "interview_time": {"type": "string", "description": "面试时间，可空"},
+           "interview_place": {"type": "string", "description": "面试地点/会议链接，可空"},
+           "extra": {"type": "string", "description": "要特别说明的事项，可空"}},
+          ["candidate_id"]),
     _spec("draft_interview_questions",
           "为某候选人生成定制面试提纲（含考察意图），围绕其技能缺口与项目经历。",
           {"candidate_id": {"type": "integer"},
@@ -469,6 +482,48 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             r["job"] = job_meta
             r["disclaimer"] = "模型建议，仅供参考；最终档位由 HR 确认"
             return _ok(r)
+
+        if name == "draft_email":
+            # v1.13.7：起草邮件。**不发送**（send_email 仍在 DISABLED_TOOLS）。
+            from .. import auth as _auth            # 延迟导入：取真实邮箱要解密
+            from .. import mail_template as _mt
+            from ..pipeline.analyze import draft_mail
+            cid = int(args["candidate_id"])
+            d = db.candidate_detail(conn, cid)
+            if not d:
+                return _err(f"未找到候选人 #{cid}")
+            cand = _auth.present_candidate(d)
+            jd, meta = db.resolve_candidate_job(conn, d)
+            job_title = (meta or {}).get("title") or ""
+            to_addr = (cand.get("email") or "").strip()
+            rt = {"面试时间": args.get("interview_time") or "",
+                  "面试地点": args.get("interview_place") or "",
+                  "联系人": ctx.operator, "补充说明": args.get("extra") or ""}
+            ctxd = _mt.build_ctx(cand, job_title, ctx.operator, rt)
+            m = draft_mail(cand, job_title, args.get("purpose") or "",
+                           args.get("tone") or "", rt)
+            if m is None:
+                return _err("模型不可用，没能起草这封邮件。"
+                            "可以改用「邮件」页里的模板草稿（不依赖模型）。",
+                            hint="模板草稿同样能生成可编辑的正文，路径：邮件 → 新建草稿")
+            subj = (m.get("subject") or "").strip()
+            body = (m.get("body") or "").strip()
+            body_html = (body if _mt.looks_like_html(body) else _mt.to_html(body))
+            _miss = [k for k, v in rt.items() if not v]
+            return _ok({
+                "candidate_id": cid, "name": cand.get("name"),
+                "to": to_addr, "subject": subj, "body": body, "body_html": body_html,
+                "job": job_title,
+                "missing_runtime": _miss,
+                "note": ("**这是草稿，没有发送。**请在对话里确认内容，或点「在邮件编辑器中打开」"
+                         "由你亲自点发送。"
+                         + (f" 还缺：{'、'.join(_miss)}（补上后我重写一版）。" if _miss else "")
+                         + ("" if to_addr else " ⚠️ 库里没有这个人��邮箱——发送前请先补联系方式。")
+                         if to_addr else
+                         " ⚠️ **库里没有这个人的邮箱**，没法直接发。"
+                         "可以先把简历里的邮箱补进档案，或改成你手动转发。"),
+                "disclaimer": "智能体只起草，不发送；对外动作必须由 HR 亲自执行。",
+            })
 
         if name == "compare_candidates":
             ids = [int(i) for i in (args.get("candidate_ids") or [])][:8]

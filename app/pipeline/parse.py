@@ -18,7 +18,9 @@ from __future__ import annotations
 import os
 import re
 
-SUPPORTED = (".pdf", ".docx", ".doc", ".txt", ".md")
+# v1.13.7：加图片格式（手机拍的简历、微信里存的图片）——靠 OCR 读
+SUPPORTED = (".pdf", ".docx", ".doc", ".txt", ".md",
+             ".jpg", ".jpeg", ".png", ".webp", ".bmp")
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
 
 
@@ -31,13 +33,57 @@ def _clean(text: str) -> str:
 
 
 def _parse_pdf(path: str) -> str:
+    """PDF → 文本。**取不到文本层时逐页 OCR 兜底**（纸质扫描件走这条）。
+
+    为什么加兜底：原来只做 `page.get_text()`，扫描件返回空 → 整份简历被判
+    "解析失败"，原文为空 → 抽取/分析全都无从下手。而 OCR 函数本来就在文件里
+    （`_parse_image_ocr`），只是没人调用它——文档承诺了、代码没接上。
+    纸质简历在小公司很常见，不接 OCR 等于直接丢掉这部分候选人。
+    """
     import pymupdf
 
     doc = pymupdf.open(path)
     try:
-        return "\n".join(page.get_text() for page in doc)
+        text = "\n".join(page.get_text() for page in doc)
+        # 阈值只拦"几乎没有文本"的情况：真简历哪怕只有一页也有几百字，
+        # 而扫描件通常只有 0-10 个乱码字符。用 120 做阈值会把**短但正常**的
+        # 文本层简历也送去 OCR——装了 tesseract 时反而可能被更差的识别结果覆盖。
+        if len(_strip_spaces(text)) >= 20:
+            return text
+        # 文本层几乎为空 → 大概率是扫描件：逐页渲染成图走 OCR
+        chunks = []
+        for page in doc:
+            try:
+                pix = page.get_pixmap(dpi=200)
+                chunks.append(_ocr_image_bytes(pix.tobytes("png")))
+            except Exception:
+                continue
+        ocr_text = "\n".join(c for c in chunks if c)
+        # OCR 出来的文字比原文少很多时宁可不返回——半截文本比空文本更容易骗过人
+        return ocr_text if len(_strip_spaces(ocr_text)) >= 60 else text
     finally:
         doc.close()
+
+
+def _strip_spaces(text: str) -> str:
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+def _ocr_image_bytes(data: bytes) -> str:
+    """PNG/JPG 字节 → OCR 文本。pytesseract 或 Pillow 缺失时抛错，由上层兜底。"""
+    import io as _io
+
+    from PIL import Image
+    import pytesseract
+
+    img = Image.open(_io.BytesIO(data))
+    try:
+        return pytesseract.image_to_string(img, lang="chi_sim+eng")
+    finally:
+        try:
+            img.close()
+        except Exception:
+            pass
 
 
 def _parse_with_markitdown(path: str) -> str:
@@ -91,6 +137,12 @@ def parse_file_ex(path: str) -> tuple[str, str, bool]:
         except Exception:
             pass
         return "", "doc_failed", False
+
+    if low.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
+        try:
+            return _clean(_parse_image_ocr(path)), "tesseract", True
+        except Exception:
+            return "", "ocr_failed", False
 
     if low.endswith((".txt", ".md")):
         try:
@@ -148,6 +200,9 @@ MIME_BY_EXT = {
     ".txt": "text/plain; charset=utf-8",
     ".md": "text/markdown; charset=utf-8",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    # v1.13.7：图片简历（纸质件的手机拍图）也支持入库
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".webp": "image/webp", ".bmp": "image/bmp",
     ".doc": "application/msword",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",

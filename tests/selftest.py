@@ -330,7 +330,10 @@ def main(verbose: bool = True) -> int:
                          llm_conf={"api_key": "selftest", "model": "stub"})
         finally:
             extract_mod.extract_llm = real_llm
-        c.ok(lm["extract_mode"] == "llm", "模型通道确实被走到（未静默退回规则）", lm["extract_mode"])
+        # v1.13.7：模式记成 llm+rule（模型抽基本信息 + 规则兜底/举证），
+        # 断言的是"走了模型通道"，不是具体标签
+        c.ok(str(lm["extract_mode"]).startswith("llm"),
+             "模型通道确实被走到（未静默退回规则）", lm["extract_mode"])
         c.ok("电子束熔炼" not in lm["skills"], "模型声称但原文没有的技能不进 skills")
         c.ok("电子束熔炼" in lm["unverified_skills"], "未核验技能单独列出，供人工核对",
              "、".join(lm["unverified_skills"]))
@@ -1614,6 +1617,56 @@ def main(verbose: bool = True) -> int:
             c.ok(bool(_row_ap["applied_at"]),
                  "⑯e applied_at 传 None 时退回时间戳（NULL 会让『最新投递』排序取错行）",
                  f"applied_at={_row_ap['applied_at']}")
+
+            # ---- v1.13.7 ⑰：智能体能起草邮件，但不能发送 ----
+            from app.agent import tools as _t7
+            _spec_names = {(sp.get("function") or {}).get("name") for sp in _t7.TOOL_SPECS}
+            c.ok("draft_email" in _spec_names and "draft_email" in _t7.COMPUTE_TOOLS,
+                 "⑰ 智能体有 draft_email 工具（起草邮件）",
+                 "原话：'我无法代你发送邮件'——它连草稿都写不出来，而系统本来就有邮件能力")
+            c.ok("send_email" in _t7.DISABLED_TOOLS,
+                 "⑰b **发送仍然禁止**（红线不变：生成全自动、发送必须人工确认）")
+            c.ok("renderDraftCards" in _pgjs and "在邮件编辑器中打开" in _pgjs,
+                 "⑰c 聊天区把草稿渲染成卡片，并能一键送进邮件编辑器")
+            from app.pipeline import analyze as _an7
+            _orig_mail = _an7.llm.chat_json
+            _an7.llm.chat_json = lambda *a, **k: {
+                "subject": "面试邀请", "body": "您好，想约您聊一下。"}
+            try:
+                _dm = json.loads(_t7.execute(
+                    "draft_email", {"candidate_id": _cid_hit, "purpose": "面试邀请",
+                                    "interview_time": "2026-10-20 10:00"},
+                    ToolCtx(db_path=db_path, tiers=TIERS)))
+            finally:
+                _an7.llm.chat_json = _orig_mail
+            c.ok(_dm.get("body") and "面试邀请" in (_dm.get("subject") or ""),
+                 "⑰d draft_email 能起草出主题与正文（模型可用时）",
+                 f"subject={(_dm.get('subject') or '')[:20]}")
+            c.ok("不发送" in (_dm.get("note") or "") or "没有发送" in (_dm.get("note") or ""),
+                 "⑰e 草稿如实说明「没有发送，要 HR 自己点」",
+                 str(_dm.get("note"))[:40])
+
+            # ---- v1.13.7 ⑱：基本信息要过原文证据校验 ----
+            from app.pipeline import extract as _ex7
+            _txt7 = ("姓名：张三\n电话：13800001111\n邮箱：zhangsan@test.cn\n"
+                     "2018.09-2022.06 某大学 材料科学与工程 硕士\n"
+                     "工作：某公司 工艺工程师 3年\n技能：钛合金、真空熔铸")
+            _fields7 = {"name": "李四", "school": "不存在大学", "major": "计算机",
+                        "contact": {"phone": "13900009999"}}
+            _ev7 = {"name": "李四", "school": "不存在大学", "major": "计算机"}
+            _ok7, _bad7 = _ex7.verify_profile_against_text(_fields7, _ev7, _txt7)
+            c.ok("name" in _bad7 and "school" in _bad7 and "phone" in _bad7,
+                 "⑱ 模型编的值（原文里根本没有）被证据校验挡住并退回规则",
+                 f"未被采信的字段：{_bad7}")
+            c.ok(not _ok7.get("school") and not (_ok7.get("contact") or {}).get("phone"),
+                 "⑱b 校验不通过的字段绝不会被写进档案（不因模型说了就信）")
+            _ok8, _bad8 = _ex7.verify_profile_against_text(
+                {"name": "张三", "contact": {"phone": "138-0000-1111"}},
+                {"name": "姓名：张三"}, _txt7)
+            c.ok(_ok8.get("name") == "张三"
+                 and (_ok8.get("contact") or {}).get("phone") == "138-0000-1111",
+                 "⑱c 真实存在的值（哪怕排版有分隔符）能通过校验——校验不是一刀切",
+                 f"通过：{_ok8}")
 
             # ---- v1.13.2：**列表接口不许调模型**（性能回归点）----
             # 原来没有存储建议的老数据会在每次打开人才库时现调模型判断一次，

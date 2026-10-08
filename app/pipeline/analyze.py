@@ -165,6 +165,70 @@ def resolve_tier(cand: dict, jd: dict, fit: dict | None) -> str | None:
     return tier_from_fit(fit) or ask_tier(cand, jd)
 
 
+
+_MAIL_SYSTEM = (
+    "你是招聘邮件撰写员。给定候选人信息与用途，写一封**能直接发出去**的邮件。"
+    "要求：① 开头一行是主题（不含称呼）；② 正文用中文，段落短、不啰嗦；"
+    "③ 称呼用「{称呼}」，默认「{name} 您好」；④ 不要编造任何未给出的信息"
+    "（时间、地点、联系人若未提供就写成【待填：xxx】）；⑤ 不写「作为AI」之类的话；"
+    "⑥ 语气按给定 tone，没有就用「客气简洁」。"
+    "严格只输出 JSON：{\"subject\":\"...\",\"body\":\"...\"}。"
+)
+
+_MAIL_PURPOSE_HINT = {
+    "面试邀请": "邀请对方参加面试：说明时间地点、需要准备什么、联系人与回复期限。",
+    "跟进": "跟进上一封消息/面试：礼貌提醒并请对方确认时间或给个回复。",
+    "婉拒": "婉拒：感谢投入、说明本次未能推进（不要编具体原因）、祝后续顺利。",
+    "offer沟通": "与候选人沟通 offer：说明已发 offer、强调欢迎、给出答复期限。",
+}
+
+
+def draft_mail(cand: dict, job_title: str, purpose: str = "", tone: str = "",
+               runtime: dict | None = None) -> dict | None:
+    """**起草**一封邮件（模型生成）。不发送、不落库、不留痕。
+
+    为什么不做成"直接发"：项目红线是「生成全自动、发送必须人工确认」——
+    对外动作一旦由模型执行，就无法撤回、也无法保证措辞得当。
+    这里只产出草稿，由 HR 在邮件编辑器里预览后亲自点发送。
+    用途识别不出时按「跟进」处理，但会在返回里说明。
+    """
+    rt = dict(runtime or {})
+    hint = _MAIL_PURPOSE_HINT.get(purpose, "")
+    lines = [f"【用途】{purpose or '（HR 未说明，按跟进处理）'}",
+             f"【候选人】{cand.get('name') or '（姓名未知）'}"]
+    if job_title:
+        lines.append(f"【应聘岗位】{job_title}")
+    for k in ("面试时间", "面试地点", "联系人", "补充说明"):
+        if rt.get(k):
+            lines.append(f"【{k}】{rt[k]}")
+    lines.append("【库内信息】"
+                 + "；".join(filter(None, [
+                     f"学历：{cand.get('edu_level')}" if cand.get("edu_level") else "",
+                     f"学校：{cand.get('school')}" if cand.get("school") else "",
+                     f"专业：{cand.get('major')}" if cand.get("major") else "",
+                     f"工作年限：{cand.get('years_exp')} 年" if cand.get("years_exp") is not None else "",
+                     f"邮箱：{cand.get('email')}" if cand.get("email") else "",
+                 ])) or "（无）")
+    if hint:
+        lines.append(f"【这类邮件该写什么】{hint}")
+    lines.append(f"【语气】{tone or '客气简洁'}")
+    lines.append("【待填变量】" + "、".join(f"【待填：{k}】" for k in ("面试时间", "面试地点")
+                                          if not rt.get(k)))
+    try:
+        r = llm.chat_json(_MAIL_SYSTEM, "\n".join(lines))
+    except Exception as exc:                                # noqa: BLE001
+        print(f"[draft_mail] 模型调用失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
+    if not isinstance(r, dict):
+        return None
+    subj = str(r.get("subject") or "").strip()
+    body = str(r.get("body") or "").strip()
+    if not body:
+        return None
+    return {"subject": subj or f"关于{job_title or '招聘进展'}的沟通",
+            "body": body, "purpose": purpose or "跟进（HR 未说明用途）"}
+
+
 def analyze_fit(cand: dict, jd: dict) -> dict | None:
     try:
         return llm.chat_json(_FIT_SYSTEM, f"【岗位要求】\n{_jd_brief(jd)}\n\n【候选人】\n{_cand_brief(cand)}")

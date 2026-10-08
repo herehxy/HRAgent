@@ -1410,7 +1410,10 @@ def api_add_note(aid: int, req: NoteReq, x_tp_token: str | None = Header(default
 
 class IngestReq(BaseModel):
     source: str = "mailbox"      # mailbox | folder
-    use_llm: bool = False
+    # v1.13.7：None = 自动（模型已配置就用模型抽取基本信息，带原文证据校验）；
+    # 显式 True/False 可强制。默认不再是 False——纯规则对两栏/表格/非常规日期
+    # 的简历漏抽太厉害（HR 实测反馈），而模型抽的值有服务端证据校验兜着。
+    use_llm: bool | None = None
     folder: str | None = None
 
 
@@ -1423,8 +1426,13 @@ def api_ingest(req: IngestReq | None = Body(default=None),
     req = req or IngestReq()
     jd, tiers = _jd_tiers()
 
+    # 自动模式：模型已配置就用（抽取走模型 + 证据校验）。显式 False 时完全不调模型。
+    _use_llm = req.use_llm
+    if _use_llm is None:
+        _c0 = llm.load_cfg()
+        _use_llm = bool(_c0.get("api_key"))
     llm_conf = None
-    if req.use_llm:
+    if _use_llm:
         c = llm.load_cfg()
         llm_conf = {"api_key": c.get("api_key"), "base_url": c.get("base_url"),
                     "model": c.get("model")}
@@ -1434,13 +1442,13 @@ def api_ingest(req: IngestReq | None = Body(default=None),
         # 文件夹上传：只分析、不归岗（job_id=None = 待 HR 指定）
         folder = req.folder or cfg.get("folder_dir") or RESUME_DIR
         report = ingest_mod.ingest_dir(folder, jd, tiers, DB_PATH, cfg=cfg, job_id=None,
-                                       use_llm=req.use_llm, llm_conf=llm_conf)
+                                       use_llm=_use_llm, llm_conf=llm_conf)
         report["source"] = "folder"
         report["source_label"] = f"本地文件夹 {os.path.abspath(folder)}"
     else:
         # 邮箱：按邮件标题归岗（在 ingest_mails 内部完成），job_id 参数不参与
         report = ingest_mod.sync_mailbox(jd, tiers, DB_PATH, job_id=None,
-                                         use_llm=req.use_llm, llm_conf=llm_conf, cfg=cfg)
+                                         use_llm=_use_llm, llm_conf=llm_conf, cfg=cfg)
         ic = cfg.get("imap") or {}
         report["source"] = "mailbox"
         report["source_label"] = (f"邮箱 {ic.get('user') or '（未配置账号）'} @ "

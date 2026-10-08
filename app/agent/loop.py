@@ -33,6 +33,10 @@ SYSTEM_PROMPT = (
     "2) 你只给建议，不做决定。最终档位、是否面试、是否录用都由 HR 确认，"
     "不要声称你已经替 HR 做了决定。\n"
     "3) 你没有删除数据、淘汰候选人、对候选人发消息的权限；也不要建议这么做。\n"
+    "   但**起草**是可以的：用户要发邮件/通知时，用 draft_email 生成草稿"
+    "（面试邀请/跟进/婉拒/offer 沟通），把主题与正文给用户看，"
+    "并告诉他『这是草稿，发送需要你在邮件编辑器里点确认』——"
+    "**不要说『我无法帮你发邮件』就结束**，那是能干的活儿没干。\n"
     "4) 改档、改阶段、加标签、合并档案这类写操作，工具会返回"
     "『已提交待 HR 确认（pending_confirmation）』——此时要明确告诉用户"
     "『已提交待确认』，绝不能说『已经改好了』。\n"
@@ -129,8 +133,26 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
         })
     finally:
         conn.close()
+    # v1.13.7：把本轮起草出的邮件草稿带出去（前端渲染成卡片，一键进编辑器）。
+    # 只带草稿内容，不带任何"已发送"含义——发送仍然由 HR 在编辑器里点。
+    drafts = []
+    for _t in trace:
+        if _t.get("tool") != "draft_email":
+            continue
+        _r = _t.get("result")
+        if isinstance(_r, str):
+            try:
+                _r = json.loads(_r)
+            except Exception:
+                continue
+        if isinstance(_r, dict) and _r.get("body"):
+            drafts.append({"candidate_id": _r.get("candidate_id"), "name": _r.get("name"),
+                           "to": _r.get("to"), "subject": _r.get("subject"),
+                           "body": _r.get("body"), "job": _r.get("job"),
+                           "missing_runtime": _r.get("missing_runtime") or []})
     return {
         "answer": answer,
+        "drafts": drafts,
         "trace": trace,
         "mode": mode,
         "rounds": rounds,

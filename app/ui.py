@@ -1486,7 +1486,50 @@ async function askAgent(){
     + (r.tokens && r.tokens.total_tokens ? (' · tokens '+r.tokens.total_tokens) : '') + '</div>';
   if (extra) holder.insertAdjacentHTML('beforeend', extra);
   CHAT.push({role:'user',content:q}, {role:'assistant',content:r.answer||''});
-  if ((r.pending_proposals||[]).length) toast('智能体提交了待确认提案，请到「提案与审计」确认','warn');
+  if ((r.drafts||[]).length) renderDraftCards(holder, r.drafts);
+  if ((r.pending_proposals||[]).length) toast('智能体提交了待确认提案，请到「提案与审计」确认','warn');\n}
+
+/* 智能体起草的邮件：渲染成卡片 + 一键送进邮件编辑器（v1.13.7）。
+   为什么要有这个卡：智能体说"我无法发送邮件"时，HR 真正缺的是**能用的草稿**。
+   这里把草稿原样亮出来，HR 可以直接复制，或点按钮进编辑器改完自己点发送——
+   **智能体不发送，这是红线**。 */
+function renderDraftCards(holder, drafts){
+  let html = '';
+  drafts.forEach((d, i) => {
+    const miss = (d.missing_runtime||[]).length
+      ? `<div class="warn-txt" style="margin-top:6px">还缺：${esc((d.missing_runtime||[]).join('、'))}（补上后可以在对话里说"补上 XX 再写一版"）</div>` : '';
+    const noMail = !d.to
+      ? `<div class="bad-txt" style="margin-top:6px">库里没有这个人的邮箱，无法直接发——请先在档案里补邮箱，或改成你手动转发</div>` : '';
+    html += `<div class="card" style="background:#f7f8fa;margin-top:10px">
+      <div style="font-weight:600">📝 邮件草稿（未发送）· ${esc(d.name||'')}
+        <span class="small">收件人：${esc(d.to || '（无邮箱）')}${d.job?(' · 岗位：'+esc(d.job)):''}</span></div>
+      <div class="small" style="margin-top:6px">主题：${esc(d.subject||'')}</div>
+      <div style="margin-top:6px;white-space:pre-wrap">${esc(d.body||'')}</div>
+      ${miss}${noMail}
+      <div class="bar" style="margin-top:8px">
+        <button onclick="copyText(${JSON.stringify('')});toast('已复制主题与正文','ok')">复制正文</button>
+        <button class="btn-primary" onclick="openDraftInMailer(${i}, DRAFTS[${i}])">在邮件编辑器中打开</button>
+        <span class="small">发送仍需你在编辑器里亲自点「确认发送」</span>
+      </div></div>`;
+  });
+  DRAFTS = drafts;
+  holder.insertAdjacentHTML('beforeend', html);
+}
+let DRAFTS = [];
+async function openDraftInMailer(idx, d){
+  await viewMail();
+  try {
+    const sel = document.getElementById('mCand');
+    if (sel && d.candidate_id) sel.value = String(d.candidate_id);
+    if (typeof fillMailTo === 'function') fillMailTo();
+    const sub = document.getElementById('mSubject');
+    if (sub) sub.value = d.subject || '';
+    const ed = document.getElementById('mailEditor');
+    if (ed) ed.innerHTML = d.body_html || esc(d.body || '');
+    const pv = document.getElementById('mailPreview');
+    if (pv && d.body_html) pv.innerHTML = d.body_html;
+    toast('已填入编辑器：确认内容后由你点「确认发送」','ok');
+  } catch (e) { toast('打开编辑器失败：' + e, 'danger'); }
 }
 
 /* ------------------------------ 导入与来源 ------------------------------ */
