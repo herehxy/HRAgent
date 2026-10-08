@@ -41,6 +41,8 @@ SYSTEM_PROMPT = (
     "『已提交待 HR 确认（pending_confirmation）』——此时要明确告诉用户"
     "『已提交待确认』，绝不能说『已经改好了』。\n"
     "5) 引用技能或结论时，尽量带上简历原文证据（工具会返回 evidence 字段）。\n"
+    "7) 人是用**姓名**指人的：candidate_id 可以直接写姓名（如 '何晓宇'），系统会自动解析；"
+    "**绝对不要凭空编数字 id**——编了会直接报'未找到候选人'。\n"
     "6) 回答用简体中文，结论先行、结构化（可用编号或短列表），不要输出 JSON。"
 )
 
@@ -89,7 +91,10 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                 except ValueError:
                     args = {}
                 result = execute(fn, args, ctx)
-                trace.append({"tool": fn, "args": args, "result": result[:900],
+                # v1.13.9：邮件草稿要**完整**带回（正文会被 900 字截断，
+                # 截断了前端就渲染不出卡片）；其余工具仍然只留摘要。
+                trace.append({"tool": fn, "args": args,
+                              "result": (result if fn == "draft_email" else result[:900]),
                               "write": fn in WRITE_TOOLS,
                               "disabled": fn in DISABLED_TOOLS})
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),

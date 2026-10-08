@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import importlib
 
 # v1.13.7：加图片格式（手机拍的简历、微信里存的图片）——靠 OCR 读
@@ -120,8 +121,11 @@ def ocr_capabilities() -> dict:
             else:
                 importlib.import_module(name)
                 out[name] = True
-        except Exception:
+        except Exception as exc:                             # noqa: BLE001
             out[name] = False
+            # 留痕：打包版里 import 失败是黑箱（界面上只看到"OCR 不可用"，
+            # 没人知道是缺包还是缺 dll）。这类问题只能靠日志定位。
+            print(f"[ocr] 引擎 {name} 不可用：{type(exc).__name__}: {exc}", file=sys.stderr)
     usable = [_OCR_LABEL[n] for n in _OCR_ENGINES if out.get(n)]
     return {"engines": out, "usable": usable, "best": usable[0] if usable else None,
             "note": ("中文简历建议装 rapidocr-onnxruntime（pip install rapidocr-onnxruntime）："

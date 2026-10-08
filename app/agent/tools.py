@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from .. import db
@@ -77,7 +78,9 @@ TOOL_SPECS = [
            "limit": {"type": "integer", "description": "最多返回条数，默认 20"}}),
     _spec("get_candidate",
           "取某候选人的完整档案：基本信息、全部投递记录、技能（含原文证据）、标签。",
-          {"candidate_id": {"type": "integer"}}, ["candidate_id"]),
+          {"candidate_id": {"type": "string",
+                            "description": "候选人 id 或**姓名**（两种都行，系统自动解析）"}},
+           ["candidate_id"]),
     _spec("pool_stats",
           "人才库总览：人数、投递数、各档位分布、各阶段分布、待确认/待人工判读数量。"),
     _spec("search_by_skills",
@@ -114,7 +117,9 @@ TOOL_SPECS = [
     _spec("explain_grade",
           "解释某候选人当前档位是怎么算出来的：四项分值拆解、命中技能及其原文证据、缺失项、风险提示。"
           "纯规则计算，不调用模型，结论稳定可复现。",
-          {"candidate_id": {"type": "integer"}}, ["candidate_id"]),
+          {"candidate_id": {"type": "string",
+                            "description": "候选人 id 或**姓名**（两种都行，系统自动解析）"}},
+           ["candidate_id"]),
 
     # ------------------------------ 算 ------------------------------
     _spec("analyze_fit",
@@ -221,6 +226,43 @@ def _skill_rows(conn, cid: int) -> list[dict]:
 # 执行
 # ============================================================
 
+
+def _resolve_cid(conn, value, what: str = "候选人") -> tuple[int | None, dict | None]:
+    """把"何晓宇"或 12 解析成候选人 id。**不支持时返回 (None, 错误信息)**。
+
+    为什么要有（v1.13.9）：HR 说"给何晓宇发邮件"，模型为了调工具只能先猜一个
+    数字 id——实测它猜了 12345，整条链路断在"未找到候选人 #12345"。
+    人是用名字指人的，工具不该强迫模型先知道数据库主键。
+    精确匹配优先；命中多个时把名单返回，让模型追问而不是继续猜。
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None, {"error": f"没提供{what}（给 id 或姓名都可以）"}
+    if isinstance(value, int):
+        return int(value), None
+    v = str(value).strip()
+    if re.fullmatch(r"\d+", v):
+        return int(v), None
+    rows = conn.execute(
+        "SELECT id, name FROM candidates WHERE merged_into IS NULL AND name = ? "
+        "ORDER BY id LIMIT 2", (v,)).fetchall()
+    if len(rows) == 1:
+        return int(rows[0]["id"]), None
+    if len(rows) > 1:
+        return None, {"error": f"有 {len(rows)} 位候选人叫「{v}」",
+                      "hint": "请先用 search_candidates 确认是哪一位，再带上 id 调用"}
+    rows = conn.execute(
+        "SELECT id, name FROM candidates WHERE merged_into IS NULL AND name LIKE ? "
+        "ORDER BY id LIMIT 6", (f"%{v}%",)).fetchall()
+    if len(rows) == 1:
+        return int(rows[0]["id"]), None
+    if len(rows) > 1:
+        return None, {"error": f"有 {len(rows)} 位候选人名字里含「{v}」",
+                      "hint": "请先 search_candidates 或让用户确认是哪一位",
+                      "candidates": [{"id": r["id"], "name": r["name"]} for r in rows]}
+    return None, {"error": f"库里没有叫「{v}」的候选人",
+                  "hint": "先用 search_candidates 按姓名/技能搜一下；确实没有就让用户先导入简历"}
+
+
 def execute(name: str, args: dict, ctx: ToolCtx) -> str:
     """执行工具，返回 JSON 字符串。任何异常都转成可读错误，绝不让循环崩掉。"""
     args = args or {}
@@ -252,7 +294,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                         "candidates": [_brief(c) for c in items[:limit]]})
 
         if name == "get_candidate":
-            cid = int(args["candidate_id"])
+            cid, _cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if _cerr:
+                return _err(_cerr["error"], _cerr.get("hint"))
             d = db.candidate_detail(conn, cid)
             if not d:
                 return _err(f"未找到候选人 #{cid}")
@@ -301,7 +345,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             return _ok(res)
 
         if name == "similar_candidates":
-            res = search_mod.similar_to(conn, int(args["candidate_id"]),
+            _cid_s, _cerr_s = _resolve_cid(conn, args.get(candidate_id))
+            if _cerr_s:
+                return _err(_cerr_s[error], _cerr_s.get(hint))
+            res = search_mod.similar_to(conn, _cid_s,
                                         top_k=int(args.get("top_k") or 5))
             return _ok(res)
 
@@ -458,7 +505,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
 
         # ---------------- 算 ----------------
         if name == "analyze_fit":
-            cid = int(args["candidate_id"])
+            cid, _cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if _cerr:
+                return _err(_cerr["error"], _cerr.get("hint"))
             d = db.candidate_detail(conn, cid)
             if not d:
                 return _err(f"未找到候选人 #{cid}")
@@ -488,7 +537,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             from .. import auth as _auth            # 延迟导入：取真实邮箱要解密
             from .. import mail_template as _mt
             from ..pipeline.analyze import draft_mail
-            cid = int(args["candidate_id"])
+            cid, _cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if _cerr:
+                return _err(_cerr["error"], _cerr.get("hint"))
             d = db.candidate_detail(conn, cid)
             if not d:
                 return _err(f"未找到候选人 #{cid}")
@@ -553,7 +604,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                         "method": "纯规则对比"})
 
         if name == "draft_interview_questions":
-            cid = int(args["candidate_id"])
+            cid, _cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if _cerr:
+                return _err(_cerr["error"], _cerr.get("hint"))
             d = db.candidate_detail(conn, cid)
             if not d:
                 return _err(f"未找到候选人 #{cid}")
