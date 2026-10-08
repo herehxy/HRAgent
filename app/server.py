@@ -159,8 +159,18 @@ def _ctx(session: dict, conn=None) -> ToolCtx:
 # ============================================================
 
 @app.get("/", response_class=HTMLResponse)
-def index() -> str:
-    return render_page(auth_enabled=_auth_enabled())
+def index() -> Response:
+    """首页（**整个前端内联在这一个 HTML 里**）。
+
+    必须带 `Cache-Control: no-store`（v1.14.3）：JS 是内联的，所以浏览器一旦缓存了
+    这个 HTML，就等于缓存了旧版前端——HR 会看到"我明明改了却没反应"（当天反复遇到）。
+    这个工具是单机自用、页面只有几十 KB，不值得为它做缓存。
+    """
+    resp = HTMLResponse(render_page(auth_enabled=_auth_enabled()))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.get("/api/health")
