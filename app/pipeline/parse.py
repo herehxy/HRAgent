@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import importlib
 
 # v1.13.7：加图片格式（手机拍的简历、微信里存的图片）——靠 OCR 读
 SUPPORTED = (".pdf", ".docx", ".doc", ".txt", ".md",
@@ -97,13 +98,123 @@ def _parse_text(path: str) -> str:
         return fh.read()
 
 
-def _parse_image_ocr(path: str) -> str:
-    """图片简历 OCR。仅在装了 pytesseract 时可用，否则抛错由上层兜底。"""
-    import pytesseract  # noqa: F401  (可能未安装)
-    from PIL import Image
+#: OCR 引擎优先级（v1.13.8）：按"中文简历效果"排序，不按知名度排序。
+#: RapidOCR 是 PP-OCRv4 的 ONNX 运行时版——中文接近 PaddleOCR、模型十几 MB、
+#: 纯 CPU、pip 装完即用，最符合"本地小模型优先"的诉求。
+_OCR_ENGINES = ("rapidocr_onnxruntime", "paddleocr", "pytesseract")
 
-    with Image.open(path) as img:
+_OCR_LABEL = {"rapidocr_onnxruntime": "rapidocr(PP-OCRv4)",
+              "paddleocr": "paddleocr",
+              "pytesseract": "tesseract"}
+
+
+def ocr_capabilities() -> dict:
+    """当前机器上**实际可用**的 OCR 引擎（界面如实展示，不做承诺）。"""
+    import shutil as _sh
+    out = {}
+    for name in _OCR_ENGINES:
+        try:
+            if name == "pytesseract":
+                import pytesseract  # noqa: F401
+                out[name] = bool(_sh.which("tesseract"))
+            else:
+                importlib.import_module(name)
+                out[name] = True
+        except Exception:
+            out[name] = False
+    usable = [_OCR_LABEL[n] for n in _OCR_ENGINES if out.get(n)]
+    return {"engines": out, "usable": usable, "best": usable[0] if usable else None,
+            "note": ("中文简历建议装 rapidocr-onnxruntime（pip install rapidocr-onnxruntime）："
+                     "效果比 Tesseract 好一个档次，且不需要额外起服务。"
+                     if not usable or usable[0] != "rapidocr(PP-OCRv4)"
+                     else "已启用 RapidOCR（PP-OCRv4），中文识别质量最好的一档。")}
+
+
+def _open_for_ocr(src):
+    """bytes / 路径 → PIL.Image（由调用方负责关）。"""
+    from PIL import Image
+    import io as _io
+    if isinstance(src, (bytes, bytearray)):
+        return Image.open(_io.BytesIO(src))
+    return Image.open(src)
+
+
+def _ocr_via_rapidocr(src) -> str:
+    """RapidOCR（PP-OCRv4 的 ONNX 版）：中文效果最好的一档，纯 CPU。"""
+    import numpy as _np
+    eng = getattr(_ocr_via_rapidocr, "_c", None)
+    if eng is None:
+        from rapidocr_onnxruntime import RapidOCR
+        eng = RapidOCR()
+        _ocr_via_rapidocr._c = eng
+    img = _open_for_ocr(src)
+    try:
+        arr = _np.array(img.convert("RGB"))
+    finally:
+        try:
+            img.close()
+        except Exception:
+            pass
+    res, _ = eng(arr)
+    return "\n".join(str(r[1]) for r in (res or []) if len(r) > 1)
+
+
+def _ocr_via_paddleocr(src) -> str:
+    """PaddleOCR：中文最好，但依赖重。"""
+    import numpy as _np
+    eng = getattr(_ocr_via_paddleocr, "_c", None)
+    if eng is None:
+        from paddleocr import PaddleOCR
+        eng = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+        _ocr_via_paddleocr._c = eng
+    img = _open_for_ocr(src)
+    try:
+        arr = _np.array(img.convert("RGB"))
+    finally:
+        try:
+            img.close()
+        except Exception:
+            pass
+    lines = []
+    for page in (eng.ocr(arr, cls=True) or []):
+        for item in (page or []):
+            if len(item) >= 2 and item[1]:
+                lines.append(str(item[1][0]))
+    return "\n".join(lines)
+
+
+def _ocr_via_tesseract(src) -> str:
+    """Tesseract：最轻，但中文排版复杂的表格容易串行（兜底）。"""
+    import pytesseract  # noqa: F401
+    img = _open_for_ocr(src)
+    try:
         return pytesseract.image_to_string(img, lang="chi_sim+eng")
+    finally:
+        try:
+            img.close()
+        except Exception:
+            pass
+
+
+def _parse_image_ocr(path: str) -> str:
+    """图片/扫描件 OCR（v1.13.8：可插拔，按中文效果排序）。
+
+    依次尝试 RapidOCR → PaddleOCR → Tesseract，第一个成功的就用它。
+    全都没有 → 抛错，由上层如实标"解析失败"（**绝不返回半截文本冒充识别结果**）。
+    """
+    errs = []
+    for name in _OCR_ENGINES:
+        fn = {"rapidocr_onnxruntime": _ocr_via_rapidocr,
+              "paddleocr": _ocr_via_paddleocr,
+              "pytesseract": _ocr_via_tesseract}[name]
+        try:
+            text = fn(path)
+            if text and text.strip():
+                return text
+            errs.append(name + " 返回空")
+        except Exception as exc:                             # noqa: BLE001
+            errs.append(f"{name}: {type(exc).__name__}")
+    raise RuntimeError("没有可用的 OCR 引擎（" + "；".join(errs) + "）")
 
 
 def parse_file_ex(path: str) -> tuple[str, str, bool]:
@@ -140,7 +251,7 @@ def parse_file_ex(path: str) -> tuple[str, str, bool]:
 
     if low.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
         try:
-            return _clean(_parse_image_ocr(path)), "tesseract", True
+            return _clean(_parse_image_ocr(path)), "ocr", True
         except Exception:
             return "", "ocr_failed", False
 
@@ -184,6 +295,15 @@ def engine_capabilities() -> dict:
         caps["ocr"] = True
     except Exception:
         pass
+    # v1.13.8：OCR 变成可插拔（RapidOCR/PaddleOCR/Tesseract）后，
+    # 这里如实报告**当前真正能用哪个** + 没装时怎么装。
+    # 原来的 `caps["ocr"]=True` 只看 pytesseract 能不能 import，
+    # 装了包但没装 Tesseract 可执行文件时也会报"可用"——假的。
+    _oc = ocr_capabilities()
+    caps["ocr"] = bool(_oc["usable"])
+    caps["ocr_engines"] = _oc["usable"]
+    caps["ocr_best"] = _oc["best"]
+    caps["ocr_note"] = _oc["note"]
     caps["archive_note"] = "解析失败不影响入库：原件留档并标『待人工判读』"
     return caps
 

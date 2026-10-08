@@ -1487,7 +1487,57 @@ async function askAgent(){
   if (extra) holder.insertAdjacentHTML('beforeend', extra);
   CHAT.push({role:'user',content:q}, {role:'assistant',content:r.answer||''});
   if ((r.drafts||[]).length) renderDraftCards(holder, r.drafts);
-  if ((r.pending_proposals||[]).length) toast('智能体提交了待确认提案，请到「提案与审计」确认','warn');\n}
+  if ((r.pending_proposals||[]).length) renderProposalCards(holder, r.pending_proposals);
+}
+
+/* 待确认提案：当场就能点确认/拒绝（v1.13.8）。
+   为什么要这个：智能体写完提案只说"请到系统里确认"，多跳一步的结果就是被忽略
+   （HR 实测反馈）。提案是**唯一允许 HR 点头才生效**的东西，
+   所以点头的地方就该在消息下面，而不是另一个页面。
+   权限：没有 confirm 权限的人不显示按钮（后端也会拒），只提示去看审计页。
+   确认流只有一条：复用 POST /api/proposals/{pid}/decide，不新增写接口。 */
+const APPROVE = String.fromCharCode(97,112,112,114,111,118,101);   // approve
+const REJECT  = String.fromCharCode(114,101,106,101,99,116);           // reject
+function renderProposalCards(holder, proposals){
+  const perms = (META && META.session && META.session.permissions) || [];
+  const canConfirm = perms.indexOf('confirm') >= 0;
+  let html = '';
+  proposals.forEach(p => {
+    const acts = canConfirm
+      ? '<button class="btn-primary" onclick="decideProposal(' + p.proposal_id + ',' + APPROVE + ',this)">确认执行</button>'
+        + '<button class="btn-danger" onclick="decideProposal(' + p.proposal_id + ',' + REJECT + ',this)">拒绝</button>'
+      : '<span class="small">你没有「确认」权限，请到「提案与审计」页处理</span>';
+    html += '<div class="card" style="background:#fff8e6;margin-top:10px" id="prop-' + p.proposal_id + '">'
+      + '<div style="font-weight:600">⏳ 待确认提案 · ' + esc(p.tool || '')
+        + '<span class="small">提案 #' + p.proposal_id + (p.risk ? (' · 风险 ' + esc(p.risk)) : '') + '</span></div>'
+      + '<div style="margin-top:6px">' + esc(p.summary || '') + '</div>'
+      + '<div class="bar" style="margin-top:8px">' + acts
+        + '<span class="small">不点就不会生效——系统不会替你做决定</span></div></div>';
+  });
+  holder.insertAdjacentHTML('beforeend', html);
+}
+async function decideProposal(pid, decision, btn){
+  const card = document.getElementById('prop-' + pid);
+  const _q = decision === 'approve' ? '确认执行这条提案吗？\\n\\n它会真的改档案（写审计）。'
+                                 : '拒绝这条提案？' + BS + BS + 'n' + BS + BS + 'n拒绝也会写入审计（谁在什么时候拒的）。';
+  if (!await askConfirm(_q)) return;
+  if (btn) btn.disabled = true;
+  const r = await api('/api/proposals/' + pid + '/decide',
+    {method:'POST', body:JSON.stringify({decision: decision})});
+  if (r.__http_error || r.error){
+    toast(r.detail || r.error || '处理失败','danger');
+    if (card){ card.querySelectorAll('button').forEach(x => x.disabled = false); }
+    return;
+  }
+  if (card){
+    card.style.background = decision === 'approve' ? '#f0fbf1' : '#f5f5f5';
+    card.innerHTML = '<div style="font-weight:600">'
+      + (decision === 'approve' ? '✅ 已执行' : '🚫 已拒绝') + ' · 提案 #' + pid + '</div>'
+      + '<div class="small" style="margin-top:4px">' + esc(r.note || '') + '</div>';
+  }
+  toast(decision === 'approve' ? '已执行提案' : '已拒绝提案', 'ok');
+  refresh();
+}
 
 /* 智能体起草的邮件：渲染成卡片 + 一键送进邮件编辑器（v1.13.7）。
    为什么要有这个卡：智能体说"我无法发送邮件"时，HR 真正缺的是**能用的草稿**。
