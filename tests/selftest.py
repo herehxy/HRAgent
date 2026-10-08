@@ -1185,6 +1185,17 @@ def main(verbose: bool = True) -> int:
                      "美化作用于**整篇所有表格**（不是只处理第一张）")
                 c.ok("新建模板怎么做" in _pg,
                      "新建模板给了上手引导（打字 / 插表格 / 粘贴 / 微调）")
+                # v1.13：待指定投递必须**处处有归岗入口**。
+                # 原来「采纳建议岗位」只在系统给出建议时才渲染——模型不可用/判断不出时
+                # HR 完全没有入口（实测反馈：「所属岗位待指定情况下怎么指定岗位呢？没有入口啊」）。
+                c.ok("function assignJobPick" in _pgjs and "function assignJobFromPick" in _pgjs,
+                     "⑫ 有「手动指定岗位」入口（与系统建议无关，兜底可用）")
+                c.ok("function assignBatchPick" in _pgjs and "为勾选的人指定岗位" in _pg,
+                     "⑫b 有批量归岗入口（待指定常成批出现，逐条点太慢）")
+                c.ok("所属岗位待指定（点此指定）" in _pg,
+                     "⑫c 「所属岗位待指定」标签本身就是入口（点开即选岗位）")
+                c.ok("指定岗位</button>" in _pg,
+                     "⑫d 卡片操作栏对未归岗的候选人也给「指定岗位」按钮")
                 # ui.py 里的**非法字符串转义**同样会毁掉前端：`\\n` 会被 Python 转成真换行，
                 # 把 JS 注释断成代码、甚至让模板串吞掉后面一整段。这里把警告升级成错误拦下。
                 import warnings as _warn

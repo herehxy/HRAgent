@@ -607,8 +607,6 @@ async function viewPool(){
         <button onclick="doIngest('mailbox')">收取邮箱简历</button>
         <button onclick="doIngest('folder')">导入本地文件夹</button>
         <button onclick="exportCsv()">导出 CSV</button>
-        <button onclick="suggestPendingJobs(this)"
-                title="对「待指定」投递逐条问模型最像哪个在招岗位，结果写库固化（与启动日志里说的入口对应）。显式动作：每条约 1 秒，十几条约十几秒；点完写库，之后列表走已固化分支直接读库。">重新判断建议岗位</button>
       </div>
     </div>
     <div class="bar" style="margin-top:8px">
@@ -618,6 +616,11 @@ async function viewPool(){
       <button onclick="archiveByYearFrom('poolArchYear')">归档该年以前</button>
       <span class="small">归档的人进「归档」页，满 30 天自动彻底删除，期间可随时取消</span>
     </div>
+    <div class="bar" style="margin-top:4px">
+      <span class="small">批量归岗（勾选上面的人 → 选岗位 → 全部归岗）</span>
+      <button onclick="assignBatchPick()">为勾选的人指定岗位</button>
+    </div>
+    <div id="pickjobBatch"></div>
     ${gtip}
     ${eduWarn}
     <div class="tabs" style="margin-bottom:0">
@@ -677,11 +680,14 @@ function cardHtml(x){
          title="文件名/邮件标题里没有岗位名时，由模型判断最像哪个在招岗位；采纳后才真正归岗${sug.source==='live'?'（本条为老数据，展示时现算）':''}">建议岗位：${esc(sug.title)}${sug.reason?'（'+esc(sug.reason)+'）':''}</span>`
     : (job ? '' : ((x.job_suggestions_considered||0) > 0
         ? `<span class="chip" style="color:#86909c;background:#f2f3f5"
-             title="已对 ${x.job_suggestions_considered} 个在招岗位逐个试算，均无技能交集">与所有在招岗位均无交集，保持待指定</span>`
-        : `<span class="chip" style="color:#86909c;background:#f2f3f5">暂无在招岗位可试算，暂按默认尺子打分</span>`));
+             title="模型也没能从 ${x.job_suggestions_considered} 个在招岗位里判断出最像哪个（例如跨行业简历）">模型未判断出对应岗位</span>`
+        : `<span class="chip" style="color:#86909c;background:#f2f3f5">暂无在招岗位</span>`));
+  // 「所属岗位待指定」直接做成可点的入口：没有它，HR 只能看着标签干瞪眼——
+  // 原来"归岗"只在系统给出建议时才有按钮，模型不启用时完全没有入口（实测反馈）。
   const jobTag = job
     ? `<span class="chip job-tag">${esc(job)}</span>`
-    : `<span class="chip job-tag pending">所属岗位待指定</span>${sugChip}`;
+    : `<span class="chip job-tag pending" style="cursor:pointer" title="点击指定岗位"
+         onclick="assignJobPick(${x.id})">所属岗位待指定（点此指定）</span>${sugChip}`;
   // 性别标签：只在简历**明写**时才有值（系统不做推断），提示里说明它不参与档位判定
   const genderTag = (x.gender||'').trim()
     ? `<span class="chip" style="color:#4e5969;background:#f2f3f5" title="来自简历明写标签，不参与档位判定">${esc(x.gender)}</span>`
@@ -733,10 +739,14 @@ function cardHtml(x){
       <button onclick="reanalyze(${x.id})">重新分析</button>
       <button onclick="interview(${x.id})">面试提纲</button>
       ${sug ? `<span class="vdiv"></span>
-      <button class="btn-primary" onclick="assignJob(${x.id},${sug.job_id},'${esc(sug.title)}')">采纳建议岗位</button>` : ''}
+      <button class="btn-primary" onclick="assignJob(${x.id},${sug.job_id},'${esc(sug.title)}')">采纳建议岗位</button>
+      <button onclick="assignJobPick(${x.id})">换个岗位</button>`
+      : (job ? '' : `<span class="vdiv"></span>
+      <button class="btn-primary" onclick="assignJobPick(${x.id})">指定岗位</button>`)}
       <span class="vdiv"></span>
       <button class="btn-danger" onclick="archiveCandidate(${x.id},true)">归档</button>
     </div>
+    <div id="pickjob-${x.id}"></div>
     <div id="out-${x.id}"></div>
   </div>`;
 }
@@ -762,7 +772,10 @@ async function showDetail(cid){
   const evs = (d.skills||[]).filter(s=>s.evidence).slice(0,10).map(s=>
       `<div class="ev">${esc(s.name)}：${esc(s.evidence)}</div>`).join('');
   const apps = (d.applications||[]).map(a=>`<tr>
-      <td>#${a.id}</td><td>${esc(a.job_title||'待指定')}</td><td>${esc(a.channel||'—')}</td>
+      <td>#${a.id}</td>
+      <td>${esc(a.job_title||'待指定')}${a.job_id ? '' :
+        ` <button onclick="assignJobPick(${d.id},'pickjobD-${d.id}')">指定岗位</button>`}</td>
+      <td>${esc(a.channel||'—')}</td>
       <td>${esc((a.applied_at||'').slice(0,16))}</td>
       <td>${esc(a.tier_final||a.tier_suggested||'—')}</td><td>${esc(a.stage||'—')}</td>
       <td>${esc(a.status_display||a.status||'—')}</td></tr>`).join('');
@@ -824,6 +837,7 @@ async function showDetail(cid){
     <div class="spacer"></div><div style="font-weight:600;font-size:15px">投递记录</div>
     <table><thead><tr><th>投递</th><th>岗位</th><th>渠道</th><th>投递时间</th><th>档位</th>
       <th>阶段</th><th>状态</th></tr></thead><tbody>${apps||'<tr><td colspan="7">—</td></tr>'}</tbody></table>
+    <div id="pickjobD-${d.id}"></div>
     <div class="spacer"></div><div style="font-weight:600;font-size:15px">简历附件（原件留档，可下载）</div>
     <table><thead><tr><th>文件</th><th>解析</th><th>结果</th><th>接收时间</th><th>归档位置</th><th>操作</th></tr></thead>
       <tbody>${docs||'<tr><td colspan="6">—</td></tr>'}</tbody></table>
@@ -981,27 +995,6 @@ async function exportCsv(){
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = '人才简介清单.csv'; a.click();
   toast(`已导出 CSV（${rows.length} 人，姓名/联系方式/技能概要 + 对应岗位）`,'ok');
-}
-
-/* 重新判断建议岗位（v1.14）：补上启动日志承诺、但仓库里一直缺的显式入口。
-   列表里那条"待指定 → 现场问模型"的兜底路径已改成并发 + 缓存（首屏从十几秒
-   压到秒级），但这个按钮仍然值得有：它把结果**写库固化**，点一次之后列表
-   直接读库，不再依赖实时试算。判断不出来的如实不计，不硬凑岗位。 */
-async function suggestPendingJobs(btn){
-  if (!confirm('重新判断「待指定」投递的建议岗位？\\n\\n'
-    + '会对每条投递调用一次模型（十几条约需十几秒到半分钟），结果写库固化。\\n'
-    + '已经有建议岗位、或已归岗的投递不会重复判断。')) return;
-  const old = btn && btn.textContent;
-  if (btn){ btn.disabled = true; btn.textContent = '判断中…'; }
-  try{
-    const r = await api('/api/jobs/suggest-pending', {method:'POST',
-      body:JSON.stringify({limit:30})});
-    if (r.__http_error || r.error){ toast(r.detail||r.error||'判断失败','danger'); return; }
-    toast(r.note || '已完成','ok');
-  } finally {
-    if (btn){ btn.disabled = false; btn.textContent = old || '重新判断建议岗位'; }
-    refresh();
-  }
 }
 
 /* --------------------- 投递管道（嵌入人才库，v1.7.5 折叠 + 完整看板） ---------------------
@@ -1166,6 +1159,103 @@ async function assignJob(cid, jobId, title){
     {method:'POST', body:JSON.stringify({job_id:jobId})});
   if (r.__http_error || r.error){ toast(r.detail||r.error||'归岗失败','danger'); return; }
   toast('已归岗到「'+title+'」'+(r.note?('（'+r.note+'）'):'（已按岗位 JD 重算）'), 'ok');
+  refresh();
+}
+
+/* 手动指定岗位（v1.13）：待指定投递的**兜底入口**。
+   为什么必须有：原来卡片上的「采纳建议岗位」只在系统给出建议时才渲染，
+   模型判断不出（或模型未启用）时 HR 就**没有任何入口**把投递归到岗位——
+   只能看着"所属岗位待指定"干瞪眼（实测反馈：「没有入口啊」）。
+   这个入口与建议无关：直接从在招岗位里挑一个。
+   就地展开选择器而不是弹层：HR 还在看这个人的其他信息，弹层会挡住上下文。 */
+async function assignJobPick(cid, targetId){
+  const tid = targetId || ('pickjob-' + cid);
+  const holder = document.getElementById(tid);
+  if (!holder) return;
+  if (holder.innerHTML) { holder.innerHTML = ''; return; }   // 再点一次收起
+  holder.innerHTML = '<div class="note" style="margin-top:6px">读取在招岗位…</div>';
+  const r = await api('/api/jobs');
+  if (r.__http_error || r.error){
+    holder.innerHTML = '<div class="note" style="color:#f53f3f">读取岗位失败</div>';
+    return;
+  }
+  const jobs = (r.items || []).filter(j => j.active !== 0);
+  if (!jobs.length){
+    holder.innerHTML = '<div class="note" style="color:#ff7d00">还没有在招岗位——'
+      + '请先到「岗位管理」建一个岗位（含学历门槛与必需技能），再回来归岗。</div>';
+    return;
+  }
+  const opts = jobs.map(j => '<option value="' + j.id + '">' + esc(j.title)
+      + (j.department_name ? (' · ' + esc(j.department_name)) : '') + '</option>').join('');
+  holder.innerHTML = '<div class="bar" style="flex-wrap:wrap;margin-top:6px">'
+    + '<span class="small">归到岗位：</span>'
+    + '<select id="pickjobSel-' + cid + '" style="width:220px">' + opts + '</select>'
+    + '<button class="btn-primary" onclick="assignJobFromPick(' + cid + ')">确认归岗</button>'
+    + '<button onclick="assignJobPickClear(this)">取消</button>'
+    + '<span class="small">归岗后按该岗位的 JD 重算建议档位，动作写入审计</span>'
+    + '</div>';
+}
+/* 取消：从按钮往上找 .bar，把它的父容器（就是 pickjob 挂载点）清空。
+   不用在字符串里拼 id/引号——之前那样写转义容易被吞掉（踩过）。 */
+function assignJobPickClear(btn){
+  const bar = btn && btn.closest ? btn.closest('.bar') : null;
+  if (bar && bar.parentElement) bar.parentElement.innerHTML = '';
+}
+async function assignJobFromPick(cid){
+  const sel = document.getElementById('pickjobSel-' + cid);
+  if (!sel) return;
+  const jid = parseInt(sel.value, 10);
+  const title = sel.options[sel.selectedIndex].textContent;
+  await assignJob(cid, jid, title);
+}
+
+/* 批量指定岗位（v1.13）：待指定往往是一批来的（一批简历都没在文件名里写岗位），
+   逐条点太慢。只处理**勾选且确实待指定**的人——已归岗的会被后端拒（400），
+   提前过滤掉，免得把"失败"当成噪音报给 HR。 */
+async function assignBatchPick(){
+  const picked = archSelected();
+  if (!picked.length){ toast('先勾选要归岗的人','warn'); return; }
+  const holder = document.getElementById('pickjobBatch');
+  if (!holder) return;
+  const cands = (ITEMS||[]).filter(x => picked.indexOf(x.id) >= 0 && !x.job_title);
+  if (!cands.length){
+    holder.innerHTML = '<div class="note" style="color:#ff7d00">勾选的人里没有「待指定」的'
+      + '（已归岗的人不用再归）。</div>';
+    return;
+  }
+  const r = await api('/api/jobs');
+  if (r.__http_error || r.error){ toast('读取岗位失败','danger'); return; }
+  const jobs = (r.items || []).filter(j => j.active !== 0);
+  if (!jobs.length){
+    holder.innerHTML = '<div class="note" style="color:#ff7d00">还没有在招岗位，'
+      + '请先到「岗位管理」建岗位。</div>';
+    return;
+  }
+  const opts = jobs.map(j => '<option value="' + j.id + '">' + esc(j.title)
+      + (j.department_name ? (' · ' + esc(j.department_name)) : '') + '</option>').join('');
+  holder.innerHTML = '<div class="bar" style="flex-wrap:wrap;margin-top:6px">'
+    + '<span class="small">把勾选的 <b>' + cands.length + '</b> 位待指定的人归到：</span>'
+    + '<select id="pickjobSelBatch" style="width:220px">' + opts + '</select>'
+    + '<button class="btn-primary" onclick="assignBatchGo()">全部归岗</button>'
+    + '<button onclick="assignJobPickClear(this)">取消</button></div>';
+}
+async function assignBatchGo(){
+  const sel = document.getElementById('pickjobSelBatch');
+  if (!sel) return;
+  const jid = parseInt(sel.value, 10);
+  const title = sel.options[sel.selectedIndex].textContent;
+  const picked = archSelected();
+  const cands = (ITEMS||[]).filter(x => picked.indexOf(x.id) >= 0 && !x.job_title);
+  if (!cands.length){ toast('没有可归岗的人','warn'); return; }
+  if (!await askConfirm('把勾选的 ' + cands.length + ' 位待指定候选人归到「' + title + '」？\\n\\n'
+      + '逐个按该岗位的 JD 重算建议档位，每人的动作都写入审计。')) return;
+  let ok = 0, fail = 0;
+  for (const x of cands){
+    const r = await api('/api/candidates/' + x.id + '/assign-job',
+      {method:'POST', body:JSON.stringify({job_id: jid})});
+    if (r.__http_error || r.error) fail++; else ok++;
+  }
+  toast('已归岗 ' + ok + ' 人' + (fail ? ('，失败 ' + fail + ' 人') : ''), fail ? 'warn' : 'ok');
   refresh();
 }
 
