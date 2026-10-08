@@ -1062,32 +1062,35 @@ LEFT JOIN jobs j ON j.id = a.job_id
 
 
 def app_status_display(item: dict) -> tuple[str, str]:
-    """投递状态的**展示文案 + 下一步动作**（v1.13）。
+    """投递状态的**展示文案 + 下一步动作**（v1.14：取消"待确认"）。
 
-    为什么不能直接用 applications.status：那个字段只有「待确认 / 已确认」两个值，
-    是**入库时的默认值**而不是事实——未归岗、档位还没算出来的投递也挂着「待确认」，
-    HR 会以为"有个档位等着我确认"，点进去却发现无档可确认（实测反馈：
-    「待确认是什么意思？为什么有的会有这个标签」）。
-    按实际情况给四种标签，每个都指向一个明确动作：
+    为什么取消「待确认」：查过代码，这个状态**不驱动任何自动化**——确认与否，
+    系统后续行为完全一样（不自动推进、不自动发信、不自动归档，统计也不依赖它）。
+    它只是"你看过没有"的标记，却天天挂在绝大多数卡片上。HR 说得对：
+    **认同默认档位的人不需要任何动作**，凭什么要他点一下？
 
-      已确认 → 已完成（HR 已背书，系统不再覆盖）
-      待确认 → 去确认档位（系统已给建议档）
-      待分析 → 等模型给档位（或点「重算自动分析」）
-      待归岗 → 先归岗：未归岗不判档（学历门槛无从判定）
+    所以现在只提示**真正卡住的事**：
+      待归岗 → 没岗位就判不了档（学历门槛无从判定），先归岗
+      待分析 → 档位还没出来（模型没给结论），可点「重算自动分析」
+      待复核 → 模型给了判断、HR 还没表达过态度（**唯一带"待办"味道的**，
+                而且它提示的是"看一眼"，不是"必须做动作"）
+    其余情况返回空字符串——**不打扰**。HR 真的改了档位时，档位徽章本身就是信号。
 
-    返回 `(标签, 说明)`；`说明` 直接当界面上的 title 提示用。
-    两种调用方传进来的键名不同（列表接口是 `app_status`、完整档案的投递行是 `status`），
-    所以这里两个都认。
+    返回 `(标签, 说明)`；说明直接当界面 title 用。
+    两种调用方的键名不同（列表接口 `app_status`、完整档案投递行 `status`），都认。
     """
-    if (item.get("app_status") or item.get("status") or "") == "已确认":
-        return "已确认", "HR 已确认档位；系统不会再覆盖它（重算、新版本简历都不动）"
-    tier = item.get("tier_effective") or item.get("tier_suggested") or item.get("tier_final")
+    confirmed = (item.get("app_status") or item.get("status") or "") == "已确认"
+    tier = item.get("tier_final") or item.get("tier_suggested")
     if not item.get("job_id"):
         return "待归岗", ("这条投递还没归到岗位。未归岗不判档（学历门槛无从判定），"
                           "请先归岗或采纳系统给出的建议岗位")
-    if tier:
-        return "待确认", "系统已给出建议档位，等 HR 确认；确认后系统不再覆盖"
-    return "待分析", "已归岗，但档位还没出来（模型尚未给出结论）；可点「重算自动分析」"
+    if not tier:
+        return "待分析", "已归岗，但档位还没出来（模型尚未给出结论）；可点「重算自动分析」"
+    if not confirmed:
+        # 只在"模型给了判断、人还没看过"时提一句；不写成"必须确认"的口气
+        return "待复核", "系统给了建议档，你还没表态；认同就不用管，改档会自动记为已定档"
+    return "", ""
+
 
 
 def _attach_skills(conn: sqlite3.Connection, items: list[dict]) -> list[dict]:
@@ -2237,7 +2240,7 @@ def pending_workload(conn: sqlite3.Connection, stuck_days: int = 7,
     #    新口径 = **建议档 A 且未确认**；同时保留 `score ≥ 0.85` 分支兼容**老库**里
     #    还带着分数的历史投递（不因为口径升级就把老数据漏掉）。
     high = conn.execute(
-        f"""SELECT a.id, a.candidate_id, c.name, a.score, a.tier_suggested
+        f"""SELECT a.id, a.candidate_id, c.name, a.score, a.tier_suggested, a.stage
             {base} AND a.tier_final IS NULL
                   AND (a.tier_suggested = 'A' OR a.score >= 0.85)
             ORDER BY COALESCE(a.applied_at, a.created_at) ASC LIMIT ?""",

@@ -570,7 +570,7 @@ async function viewPool(){
   const host = document.getElementById('view');
   const n = {ALL:(pg?pg.total:(c.items||[]).length), REVIEW:0, UNCONFIRMED:0};
   const tabs = [['ALL','全部'],['A','A 优先面试'],['B','B 建议面试'],['C','C 储备'],
-                ['D','D 暂不匹配'],['REVIEW','待人工判读'],['UNCONFIRMED','待 HR 确认']];
+                ['D','D 暂不匹配'],['REVIEW','待人工判读'],['UNCONFIRMED','未复核']];
   // 性别筛选只在开关打开时出现：开关关着还摆一个筛选项，等于诱导所有人按性别筛。
   const facets = c.gender_facets || {};
   const gsel = !gfOn ? '' : `<span class="small" style="margin-left:6px">性别</span>
@@ -723,7 +723,7 @@ function cardHtml(x){
   const _st = x.status_display || '待确认';
   const _stStyle = {
     '已确认': 'color:#0a7f1f;background:#e8ffea',
-    '待确认': 'color:#f53f3f;background:#ffece8',
+    '待复核': 'color:#a45a00;background:#fff7e8',
     '待分析': 'color:#1d5fd8;background:#e8f0ff',
     '待归岗': 'color:#a45a00;background:#fff7e8',
   }[_st] || 'color:#4e5969;background:#f2f3f5';

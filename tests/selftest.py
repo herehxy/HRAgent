@@ -448,13 +448,16 @@ def main(verbose: bool = True) -> int:
         c.ok(chen["tier_final"] is None, "HR 未确认前 tier_final 为空")
         c.ok(chen["app_status"] == "待确认", "状态为『待确认』")
         # v1.13：界面上的状态标签要按**实际情况**给，不能把库里的默认值原样贴上——
-        # 未归岗的投递没有档可确认，显示"待确认"会让 HR 白点一次（实测反馈）。
+        # v1.14：取消「待确认」标签。查证：它**不驱动任何自动化**（确认与否系统
+        # 行为完全一样），认同默认档位的人不需要任何动作，这个标签却在暗示他漏了事。
+        # 现在只提示卡住的事：待归岗（没岗位判不了档）/ 待分析（档位还没出来）/
+        # 待复核（模型给了判断、人还没表态）；已确认的**不显示任何标签**（不打扰）。
         _sd = db.app_status_display
-        c.ok(_sd({"app_status": "已确认", "job_id": 1, "tier_suggested": "A"})[0] == "已确认"
-             and _sd({"app_status": "待确认", "job_id": 1, "tier_suggested": "B"})[0] == "待确认"
+        c.ok(_sd({"app_status": "已确认", "job_id": 1, "tier_suggested": "A"})[0] == ""
+             and _sd({"app_status": "待确认", "job_id": 1, "tier_suggested": "B"})[0] == "待复核"
              and _sd({"app_status": "待确认", "job_id": 1})[0] == "待分析"
              and _sd({"app_status": "待确认", "job_id": None})[0] == "待归岗",
-             "⑪ 状态标签按实际情况给：已确认 / 待确认 / 待分析（已归岗无档）/ 待归岗")
+             "⑪ 状态标签只提示卡住的事：待复核 / 待分析 / 待归岗；已确认不打扰")
         c.ok(all(_sd(x)[1] for x in ({"app_status": "待确认", "job_id": 1, "tier_suggested": "B"},
                                      {"app_status": "待确认", "job_id": None})),
              "⑪b 每个状态都带一句「下一步该做什么」（界面上悬停可见）")
@@ -3148,12 +3151,14 @@ def main(verbose: bool = True) -> int:
                  "④ 入库钩子异步写入分析结果（重复件不会写第二条）",
                  str((_got or {}).get("summary", ""))[:30])
 
-            # ⑤ 主动提案：高分未确认 → set_tier 待确认
+            # ⑤ 主动提案：A 档却还停在新投递 → **推进阶段**（v1.14：不再催"确认档位"，
+            #    那个动作没有任何后果；阶段一变，管道/看板/后续动作全跟着变）
             _r1 = _pro.scan_and_propose(_tc, session_id="auto-selftest")
-            _tier_props = [x for x in _r1["created"] if x["tool"] == "set_tier"]
-            c.ok(len(_tier_props) >= 1,
-                 "⑤ 系统巡检自己发现「高分未确认」并产出待确认提案（无人提问）",
-                 f"产出 {_r1['created_count']} 条")
+            _stage_props = [x for x in _r1["created"] if x["tool"] == "set_stage"]
+            c.ok(len(_stage_props) >= 1
+                 and not [x for x in _r1["created"] if x["tool"] == "set_tier"],
+                 "⑤ 系统巡检发现「A 档却没推进」并产出**推进阶段**提案（不再催没后果的确认）",
+                 f"产出 {_r1['created_count']} 条：{[x['tool'] for x in _r1['created']]}")
 
             _row_a = _tc.execute("SELECT tier_final, status, stage FROM applications WHERE id=?",
                                  (_aid_t,)).fetchone()
@@ -3161,7 +3166,7 @@ def main(verbose: bool = True) -> int:
                  "⑥ **提案不自动执行**：档位与阶段原封不动，等 HR 确认",
                  f"tier_final={_row_a['tier_final']} stage={_row_a['stage']}")
 
-            _pid_t = _tier_props[0]["proposal_id"] if _tier_props else 0
+            _pid_t = _stage_props[0]["proposal_id"] if _stage_props else 0
             _prow = _tc.execute("SELECT status, source FROM proposals WHERE id=?",
                                 (_pid_t,)).fetchone() if _pid_t else None
             c.ok(_prow is not None and _prow["status"] == "待确认"
@@ -3178,11 +3183,11 @@ def main(verbose: bool = True) -> int:
 
             # ⑨ HR 确认后提案才真正生效（走与对话提案同一条执行流）
             _ap = actions.apply_proposal(_t_db, _pid_t, "approve", "hr", "hr")
-            _row_b = _tc.execute("SELECT tier_final FROM applications WHERE id=?",
+            _row_b = _tc.execute("SELECT stage FROM applications WHERE id=?",
                                  (_aid_t,)).fetchone()
-            c.ok(_ap.get("ok") and _row_b["tier_final"] == "A",
+            c.ok(_ap.get("ok") and _row_b["stage"] != "新投递",
                  "⑨ HR 确认后提案才落库生效（自动化 ≠ 自动决定）",
-                 f"确认后 tier_final={_row_b['tier_final']}")
+                 f"确认后 stage={_row_b['stage']}")
 
             # ⑩ 每日摘要：统计与库内一致 + 模型不可用时如实标注规则排序
             _bf = _brief.build(_tc, use_llm=False)

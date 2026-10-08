@@ -75,29 +75,28 @@ def scan_and_propose(conn, stuck_days: int = 7, max_per_run: int = MAX_PER_RUN,
     result: dict = {"session_id": session_id, "created": [], "skipped": 0,
                     "scanned": w["counts"], "stuck_days": stuck_days}
 
-    # —— 规则 1：系统认为很合适但 HR 还没背书 → 建议定档（HR 一键确认即生效）——
-    # 口径变迁：v1.12 删掉加权打分后没有"匹配度分数"了，改用**建议档 = A**（新数据）
-    # 或历史分数 ≥ 0.85（老库兼容）。文案里也别再写"匹配度 —"——分数已经不存在，
-    # 写个破折号只会让人以为"系统算不出来还硬要提个建议"。
+    # —— 规则 1：A 档却还停在新投递 → 建议推进到初面（**有后果的动作**）——
+    # 为什么不再催"确认档位"（v1.14）：确认与否系统行为完全一样（不自动推进、
+    # 不自动发信、不自动归档），拿一个没后果的动作当待办催人，只会让 HR 学会忽略待办。
+    # 现在只催**推进阶段**：阶段一变，管道看板、停滞计时、后续动作全跟着变。
     for it in w["items"]["high_score"]:
         if len(result["created"]) >= max_per_run:
             break
         aid = it["id"]
         tier = it.get("tier_suggested")
         name = it.get("name") or f"候选人#{it.get('candidate_id')}"
-        if not tier:
+        stage = it.get("stage") or "新投递"
+        if not tier or stage != "新投递":
+            continue                      # 已经在流程里就交给规则 2（停滞推进）
+        nxt = _next_stage(stage)
+        if not nxt:
             continue
-        # v1.13.6：不再输出"匹配度 0.92"（打分已删，新数据恒为 None；
-        # 老库残留分数也不该再作为提案依据——那正是 HR 反馈"打分是噪音"的东西）
-        basis = ("模型判断为 A 档（明显匹配）" if tier == "A"
-                 else f"系统建议 {tier} 档")
         _propose_if_new(
-            conn, tool="set_tier",
-            args={"application_id": aid, "tier": tier,
-                  "note": f"系统巡检建议（{basis}）"},
-            summary=f"{name} {basis}、系统建议 {tier} 档，尚未确认——"
-                    f"确认后即定为最终档位",
-            risk="中", dedup_key=f"high_unconfirmed:app#{aid}",
+            conn, tool="set_stage",
+            args={"application_id": aid, "stage": nxt},
+            summary=f"{name} 系统判为 {tier} 档（明显匹配），但还停在「新投递」——"
+                    f"建议推进到「{nxt}」，不合适可拒绝",
+            risk="中", dedup_key=f"tierA_stage:app#{aid}",
             session_id=session_id, result=result)
 
     # —— 规则 2：阶段停滞 → 建议推进到下一阶段 ——
