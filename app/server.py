@@ -385,23 +385,21 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
             for i in pending:
                 i.setdefault("job_suggestions_considered", len(jobs_map))
         if legacy:
-            tiers_cfg = _load(TIERS_PATH)
             open_jobs = [{"id": j["id"], "title": j.get("title") or "",
                           "dept": j.get("department_name") or j.get("dept") or "",
                           "jd": j.get("jd_json") or {}}
                          for j in db.list_jobs(conn, include_inactive=False)]
             for i in legacy:
-                sugs = regrade.suggest_jobs(conn, i.get("resume_doc_id"), open_jobs, tiers_cfg)
+                # v1.12：建议岗位改由模型判断（最多一个），没有分数可排序
+                sugs = regrade.suggest_jobs(conn, i.get("resume_doc_id"), open_jobs)
                 top = sugs[0] if sugs else None
-                # 兜底路径不做档位过滤：v1.5 起"不适合"由 HR 看（卡片上标明档位），
-                # 隐掉建议反而让人以为系统没算——但会标 `source` 说明是现算的，未经入库固化。
+                # 兜底路径不做档位过滤："不适合"由 HR 看（卡片上标明档位），
+                # 隐掉建议反而让人以为系统没算——标 `source=live` 说明是现算的、未经入库固化。
                 i["job_suggestion"] = (
                     {"job_id": top["job_id"], "title": top["title"], "dept": top["dept"],
-                     "score": top["score"], "tier_suggested": top["tier_suggested"],
-                     "source": "live"}
-                    # `suggest_jobs` 返回的字段名是 `hits`（与 grade 的 `hit` 不同名），
-                    # 判定必须用它——写成 `hit` 会永远取到 None，建议全被吞掉
-                    if top and (top.get("hits") or []) else None)
+                     "reason": top.get("reason") or "",
+                     "tier_suggested": top["tier_suggested"], "source": "live"}
+                    if top else None)
                 i["job_suggestions_considered"] = len(open_jobs)
         # 「归档」页要能写清"还有几天被彻底删除"：天数由后端算，前端不自己推日期
         if want_archived:
@@ -422,11 +420,8 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
         # 只对真正会下发的那批人查库——一次 IN 查询，不做 N+1。
         # 未分析完（后台线程还在跑）时为 None，界面显示"分析中…"，不是错误状态。
         imap = db.insights_for(conn, [i["id"] for i in items])
-        # 档位依据（纯规则、可复现）：与"系统自动分析"并排展示，
-        # 卡片上不再单独放一个「档位解释」按钮——同一件事的两个入口只会让人犹豫点哪个。
-        # 计算很轻（实测约 5ms/人）且只对当前页做，所以直接跟着列表下发。
-        from .agent.tools import execute as _tool_execute
-        _ctx_ = _ctx(s, conn)
+        # 档位来源明细（v1.12）：学历门槛现算 + 库内生效档位与来源，口径与完整档案一致
+        # （见 `_tier_detail_of`）。计算很轻（约 5ms/人）且只对当前页做，直接跟着列表下发。
         for i in items:
             i["insight"] = imap.get(i["id"])
             # 学历达标判断：必须放在 job_suggestion 算完之后
@@ -435,21 +430,7 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
             # 招聘对象身份：有工作经历看年限，没有就看毕业时间（应届/往届未就业）
             i["exp_display"] = freshness.exp_label(
                 i.get("years_exp"), bool(i.get("years_exp")), i.get("grad_date"))
-            try:
-                det = json.loads(_tool_execute("explain_grade",
-                                               {"candidate_id": i["id"]}, _ctx_))
-            except Exception:                      # noqa: BLE001 — 依据拿不到不该拖垮列表
-                det = {"error": "档位依据计算失败"}
-            i["tier_detail"] = None if det.get("error") else {
-                "tier": det.get("tier_suggested"), "score": det.get("score"),
-                "breakdown": det.get("breakdown"),
-                "hit": [h.get("skill") for h in (det.get("hit") or [])],
-                "miss": det.get("miss") or [],
-                "miss_custom": det.get("miss_custom") or [],
-                "major": det.get("major_match") or {},
-                "risks": det.get("risks") or [],
-                "consistency": det.get("consistency"),
-            }
+            i["tier_detail"] = _tier_detail_of(s, conn, i)
         presented = auth.present_list(items)
         out = {"count": len(presented), "items": presented,
                "my_permissions": s["permissions"],
@@ -474,6 +455,38 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
         conn.close()
 
 
+def _tier_detail_of(s, conn, item: dict) -> dict | None:
+    """档位来源明细（v1.12）：**列表与完整档案共用一份口径**。
+
+    为什么抽出来：这个明细原先只在列表接口里拼，完整档案没有 → HR 点开档案看不到
+    "档位从哪来"，而档案才是他逐条核对的地方（实测反馈：档位来源都没分析）。
+    为什么不能拿现算值当档位答案：v1.12 规则只剩学历门槛（不达标→D），
+    现算永远给不出 A/B/C，拿它当答案会让所有学历达标的人都显示"待分析"——
+    所以要取**库内生效档位**，并把"它从哪来"一起说清楚。
+    """
+    from .agent.tools import execute as _tool_execute
+    try:
+        det = json.loads(_tool_execute("explain_grade", {"candidate_id": item["id"]},
+                                       _ctx(s, conn)))
+    except Exception:                                          # noqa: BLE001
+        return None
+    if det.get("error"):
+        return None
+    return {
+        "tier": det.get("tier_suggested"),
+        "tier_rule": det.get("tier_rule"),
+        "tier_source": det.get("tier_source"),
+        "score": det.get("score"),
+        "breakdown": det.get("breakdown"),
+        "hit": [h.get("skill") for h in (det.get("hit") or [])],
+        "miss": det.get("miss") or [],
+        "miss_custom": det.get("miss_custom") or [],
+        "major": det.get("major_match") or {},
+        "risks": det.get("risks") or [],
+        "consistency": det.get("consistency"),
+    }
+
+
 @app.get("/api/candidates/{cid}")
 def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                   x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
@@ -491,6 +504,9 @@ def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias=
         raw = d.get("raw_text") or ""
         return {
             **auth.present_candidate(d),
+            # 档位来源明细（与列表同一份口径）：完整档案是 HR 逐条核对的地方，
+            # 这里没有它就只能看到档位=B却不知道凭什么（v1.12 修）
+            "tier_detail": _tier_detail_of(s, conn, {"id": cid}),
             "skills": d.get("skills"),
             "tags": d.get("tags"),
             "applications": d.get("applications"),
@@ -599,7 +615,11 @@ def api_channel_compare(cid: int,
             "hits": cur.get("hit") or [],
             "miss": cur.get("miss") or [],
             "job": (job_meta or {}).get("title") or "",
-            "note": "库内规则通道结论（人才库/管道里显示的就是它，可复核可复现）",
+            "tier_source": ("学历门槛（规则）" if (cur.get("tier_final")
+                                                or cur.get("tier_suggested")) == "D"
+                            else "模型分析（库内上次结论）"),
+            "note": "库内生效结论（人才库/管道里显示的就是它）：学历门槛由规则判，"
+                    "档位 A/B/C 由上次的模型分析给出",
         }
         cand = dict(d)
         for k in ("score", "tier_suggested", "hits", "miss", "applied_at"):
@@ -644,8 +664,9 @@ def api_channel_compare(cid: int,
             "model_status": {"reachable": st.get("reachable"), "model": st.get("model"),
                              "route": (st.get("route") or {}).get("route"),
                              "proxy_env": list((st.get("proxy_env") or {}).keys())},
-            "disclaimer": "模型通道结果**只作对照**：不写入档案、不影响档位与流程；"
-                          "规则通道才是库里生效的结论。"}
+            "disclaimer": "这是**现跑一次**的模型判断，只作对照：不写入档案、不改档位。"
+                          "库内结论（学历门槛 + 上次模型分析）才是生效的；"
+                          "两次模型结论不同属正常波动，需要的话点「重算自动分析」刷新库内结论。"}
 
 
 @app.post("/api/candidates/{cid}/rename")
@@ -804,7 +825,8 @@ def api_route_pending(apply: int = 1,
     conn = db.connect(DB_PATH)
     try:
         return regrade.route_pending(conn, _load(TIERS_PATH), apply=bool(apply),
-                                     operator=s["username"], role=s["role"])
+                                     operator=s["username"], role=s["role"],
+                                     use_llm=_llm_enabled())
     finally:
         conn.close()
 
@@ -1021,18 +1043,19 @@ def _startup_purge_task() -> None:
                   f"（库内共 {sync['total']} 条）")
     except Exception as exc:                               # noqa: BLE001
         print(f"[ontology] 技能分类同步失败（不影响使用）：{exc}", file=sys.stderr)
-    # 顺手把存量「待指定」投递按最适岗位重算一次：老库里的分数是按默认尺子（材料类）
-    # 算的，升级后不清算的话，界面上的"错标"依旧在。只处理未归岗的投递，
-    # HR 已确认的档位不动（见 regrade.route_pending）。
+    # 顺手把存量「待指定」投递的建议岗位清理一次：老库里 `suggested_job_id` 是按
+    # "默认尺子打分最高"给的，而加权打分已在 v1.12 删除——这些旧建议不再有依据。
+    # **启动路径不调模型**（use_llm=False）：启动要快，不能为 N 条存量投递各调一次模型；
+    # 这里只把失效的旧建议清成"待指定"，HR 需要重新判断时点界面上的按钮（那次才调模型）。
     try:
         conn = db.connect(DB_PATH)
         try:
-            rep = regrade.route_pending(conn, _load(TIERS_PATH))
+            rep = regrade.route_pending(conn, _load(TIERS_PATH), use_llm=False)
         finally:
             conn.close()
         if rep.get("changed"):
-            print(f"[route] 已为 {rep['changed']} 条「待指定」投递按最适岗位重算建议"
-                  f"（在招岗位 {rep['open_jobs']} 个）")
+            print(f"[route] 已清理 {rep['changed']} 条「待指定」投递的失效岗位建议"
+                  f"（在招岗位 {rep['open_jobs']} 个）；需要重新判断请点界面上「重新判断建议岗位」")
     except Exception as exc:                               # noqa: BLE001
         print(f"[route] 存量岗位建议重算失败（不影响使用）：{exc}", file=sys.stderr)
     # 再兜底刷一次已归岗投递的技能清单（v1.6）：技能按「本体 + 岗位 JD 词表」抽取，
@@ -2751,7 +2774,8 @@ def api_job_regrade(jid: int, req: RegradeReq | None = Body(default=None),
             raise HTTPException(status_code=404, detail="未找到该岗位")
         _, tiers = _jd_tiers()
         rep = regrade.regrade_job(conn, jid, _effective_jd(j), tiers,
-                                  operator=s["username"], role=s["role"], apply=apply_now)
+                                  operator=s["username"], role=s["role"], apply=apply_now,
+                                  use_llm=_llm_enabled())
         rep["job"] = {"id": jid, "title": j.get("title"),
                       "department_name": j.get("department_name")}
         rep["jd_source"] = ("岗位自填 JD" if (j.get("jd_json") or {}).get("must")
@@ -3015,6 +3039,22 @@ def api_mailbox_preview(req: MailboxTestReq, limit: int = 10,
 def _brief_use_llm() -> bool:
     """摘要是否允许调模型判断优先级。环境变量可关（自检用）。"""
     return os.environ.get("TP_BRIEF_LLM", "1") != "0"
+
+
+def _llm_enabled() -> bool:
+    """模型通道是否可用（配置里 enabled 且自检可关）。
+
+    归岗判断与按尺子重算都会调模型；**模型不可用时不能硬猜岗位或档位**，
+    必须走"待指定 / 待分析"的如实分支（v1.12 删掉规则打分后尤其重要：
+    没有规则兜底，猜错就是纯错）。
+    """
+    if os.environ.get("TP_LLM", "1") == "0":
+        return False
+    try:
+        from .agent import llm as _llm
+        return bool((_llm.load_cfg() or {}).get("enabled", True))
+    except Exception:                                          # noqa: BLE001
+        return True
 
 
 def _rebuild_brief_async() -> None:

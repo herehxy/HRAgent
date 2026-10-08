@@ -368,23 +368,43 @@ def main(verbose: bool = True) -> int:
         # 刘婉清原文只有 钛合金/热加工/锻造/材料成型，没有真空熔铸；
         # 赵敏原文是 难熔高熵合金/粉末冶金/真空熔铸/材料成型/热处理/增材制造，没有钛合金。
         # 所以她们各自都被扣掉缺失项，而不是"因为岗位要就都给上"。
-        expect = {"陈志远": ("A", ["钛合金", "真空熔铸", "材料成型"], []),
-                  "刘婉清": ("B", ["钛合金", "材料成型"], ["真空熔铸"]),
-                  "赵敏": ("B", ["真空熔铸", "材料成型"], ["钛合金"])}
-        for name, (tier, must_hit, must_miss) in expect.items():
+        # v1.12：A/B/C 不再由规则打分产生（打分已删），改由模型给。
+        # 所以这里只断言两件事：① 规则不会臆造 A/B/C；② 技能命中/缺失仍然逐条正确
+        # （这是反幻觉的凭据，跟档位口径无关，必须一直守住）。
+        expect = {"陈志远": (["钛合金", "真空熔铸", "材料成型"], []),
+                  "刘婉清": (["钛合金", "材料成型"], ["真空熔铸"]),
+                  "赵敏": (["真空熔铸", "材料成型"], ["钛合金"])}
+        for name, (must_hit, must_miss) in expect.items():
             row = [x for x in db.list_candidates(conn) if x["name"] == name]
             if not row:
                 c.ok(False, f"{name} 在库中")
                 continue
             x = row[0]
-            c.ok(x["tier_effective"] == tier, f"{name} 档位 = {tier}",
-                 f"实际 {x['tier_effective']}（分 {x['score']}）")
+            c.ok(x["tier_effective"] in (None, "") or x["tier_effective"] == "D",
+                 f"{name} 档位不由规则打分臆造（v1.12：A/B/C 只由模型给）",
+                 f"实际 {x['tier_effective']}")
             for sk in must_hit:
                 c.ok(sk in (x["hits"] or []), f"{name} 命中必需技能「{sk}」")
             for sk in must_miss:
                 c.ok(sk not in (x["hits"] or []),
                      f"{name} 未命中「{sk}」（原文确无此经历，不得凭岗位需要倒推）",
                      "、".join(x["hits"] or []) or "无")
+        # v1.12 核心规则（必须钉死）：**学历门槛是唯一的硬判据**
+        #   不达标 → D（可复现）；达标 → 交给模型（规则不再产出 A/B/C）
+        _gd = grade({"name": "规则甲", "education": "本科", "skills": []},
+                    {"role": "r", "must": {"skills_required": [], "education_min": "硕士",
+                                             "years_min": 0}, "preferred": {}},
+                    {}, job_confirmed=True)
+        _gm = grade({"name": "规则乙", "education": "硕士", "skills": []},
+                    {"role": "r", "must": {"skills_required": [], "education_min": "本科",
+                                             "years_min": 0}, "preferred": {}},
+                    {}, job_confirmed=True)
+        c.ok(_gd["tier_suggested"] == "D",
+             "⑨ 学历不达标 → 直接判 D（唯一硬门槛，规则可复现）",
+             str(_gd["tier_suggested"]))
+        c.ok(_gm["tier_suggested"] is None and _gm["score"] is None,
+             "⑨b 学历达标 → 不臆造档位（等模型给 A/B/C），也不再算分",
+             f"tier={_gm['tier_suggested']} score={_gm['score']}")
         # 证据准确性
         d = db.candidate_detail(conn, [x for x in db.list_candidates(conn)
                                        if x["name"] == "陈志远"][0]["id"])
@@ -419,14 +439,49 @@ def main(verbose: bool = True) -> int:
         conn = db.connect(db_path)
         chen = [x for x in db.list_candidates(conn) if x["name"] == "陈志远"][0]
         aid = chen["application_id"]
-        c.ok(chen["tier_suggested"] == "A", "系统建议档位已写入 tier_suggested")
+        # 系统建议档位字段还在（值可能为空=待分析，或 D=学历不达标）；
+        # 关键不变式是建议与决定分列，不是规则必须产出某个档
+        c.ok("tier_suggested" in chen, "系统建议档位字段存在（值为空=待模型分析）")
         c.ok(chen["tier_final"] is None, "HR 未确认前 tier_final 为空")
         c.ok(chen["app_status"] == "待确认", "状态为『待确认』")
+        # v1.13：界面上的状态标签要按**实际情况**给，不能把库里的默认值原样贴上——
+        # 未归岗的投递没有档可确认，显示"待确认"会让 HR 白点一次（实测反馈）。
+        _sd = db.app_status_display
+        c.ok(_sd({"app_status": "已确认", "job_id": 1, "tier_suggested": "A"})[0] == "已确认"
+             and _sd({"app_status": "待确认", "job_id": 1, "tier_suggested": "B"})[0] == "待确认"
+             and _sd({"app_status": "待确认", "job_id": 1})[0] == "待分析"
+             and _sd({"app_status": "待确认", "job_id": None})[0] == "待归岗",
+             "⑪ 状态标签按实际情况给：已确认 / 待确认 / 待分析（已归岗无档）/ 待归岗")
+        c.ok(all(_sd(x)[1] for x in ({"app_status": "待确认", "job_id": 1, "tier_suggested": "B"},
+                                     {"app_status": "待确认", "job_id": None})),
+             "⑪b 每个状态都带一句「下一步该做什么」（界面上悬停可见）")
         before_audit = len(db.list_audit(conn, limit=999))
         r = db.set_application_tier(conn, aid, "B", "沟通后调整", "hr", "hr")
         c.ok(r["tier_final"] == "B", "HR 确认后 tier_final = B")
         c.ok(r["status"] == "已确认", "状态变为『已确认』")
         c.ok(len(db.list_audit(conn, limit=999)) > before_audit, "改档写入审计")
+        # v1.12 回归点：档位来源明细必须报**库内生效档位**，不能报规则现算值——
+        # 规则已产不出 A/B/C，报现算值会让所有学历达标的人显示成「待分析」
+        # （实测反馈：「档位来源都没分析」）。取一条**确实已归岗**的投递来验。
+        # 自检库里的夹具投递都没有 job_id（未归岗），所以临时挂一个岗位来验，
+        # 验完立刻摘掉并删掉岗位——不留痕迹，避免影响后续断言。
+        from app.agent.tools import execute as _tool_exec2
+        _jid_t = db.create_job(conn, "自检档位来源岗", dept_id=None,
+                               jd={"role": "自检档位来源岗", "department": "",
+                                   "must": {"skills_required": [], "education_min": "本科",
+                                            "years_min": 0},
+                                   "preferred": {"skills": []}, "note": ""})
+        conn.execute("UPDATE applications SET job_id = ? WHERE id = ?", (_jid_t, aid))
+        conn.commit()
+        _ex_g = json.loads(_tool_exec2("explain_grade",
+                                       {"candidate_id": chen["id"]},
+                                       ToolCtx(db_path=db_path, tiers=TIERS)))
+        c.ok(_ex_g.get("tier_suggested") == "B" and bool(_ex_g.get("tier_source")),
+             "⑩ 档位来源报的是库内生效档位（HR 确认的 B），不是规则现算值",
+             f"tier={_ex_g.get('tier_suggested')} 来源={_ex_g.get('tier_source')}")
+        conn.execute("UPDATE applications SET job_id = NULL WHERE id = ?", (aid,))
+        conn.execute("DELETE FROM jobs WHERE id = ?", (_jid_t,))
+        conn.commit()
         conn.close()
 
         # 再次投递同岗位新版本 -> 不得覆盖 HR 结论
@@ -1247,17 +1302,34 @@ def main(verbose: bool = True) -> int:
             _, body = _asgi(srv.app, "GET", "/api/candidates", {})
             items_by_id = {x["id"]: x for x in json.loads(body)["items"]}
             sug = (items_by_id.get(_cid_hit) or {}).get("job_suggestion")
-            c.ok(bool(sug) and sug.get("job_id") and sug.get("title"),
-                 "材料类待指定投递拿到建议岗位（试算达 C 档及以上）",
+            # v1.12 核心回归点：建议岗位改由模型判断。自检离线（模型不可用）→
+            # **如实不出建议**，而不是像旧版那样用规则打分硬凑一个（打分已删）。
+            c.ok(sug is None,
+                 "模型不可用时不出建议岗位（保持待指定，不硬凑）",
                  json.dumps(sug, ensure_ascii=False)[:80] if sug else "None")
             sug_none = (items_by_id.get(_cid_miss) or {}).get("job_suggestion")
             c.ok(sug_none is None,
                  "技能毫无交集的候选人不出建议（保持待指定，不硬凑）",
                  json.dumps(sug_none, ensure_ascii=False)[:60] if sug_none else "None")
 
-            code, body = _asgi(srv.app, "POST", f"/api/candidates/{_cid_hit}/assign-job",
-                               hr, json.dumps({"job_id": sug["job_id"]}).encode())
-            c.ok(code == 200, "采纳建议岗位接口返回 200", f"实际 {code} {body[:60]}")
+            # 用一个**桩模型**验证链路（建议 → 采纳 → 归岗 → 写档位 → 审计）：
+            # 自检要验的是管道接得对不对，不是模型判断得准不准（那要靠试用验收）。
+            from app.pipeline import analyze as _an_sug
+            _orig_sug = _an_sug.suggest_job
+            _an_sug.suggest_job = lambda cand, jobs: (
+                {"title": jobs[0]["title"], "reason": "自检桩"} if jobs else None)
+            try:
+                _, body = _asgi(srv.app, "GET", "/api/candidates", {})
+                items_by_id = {x["id"]: x for x in json.loads(body)["items"]}
+                sug = (items_by_id.get(_cid_hit) or {}).get("job_suggestion")
+                c.ok(bool(sug) and sug.get("job_id") and sug.get("title"),
+                     "模型给出岗位后，界面出建议岗位（链路连通）",
+                     json.dumps(sug, ensure_ascii=False)[:80] if sug else "None")
+                code, body = _asgi(srv.app, "POST", f"/api/candidates/{_cid_hit}/assign-job",
+                                   hr, json.dumps({"job_id": sug["job_id"]}).encode())
+                c.ok(code == 200, "采纳建议岗位接口返回 200", f"实际 {code} {body[:60]}")
+            finally:
+                _an_sug.suggest_job = _orig_sug
             conn = db.connect(db_path)
             _app_row = dict(conn.execute(
                 "SELECT * FROM applications WHERE id = ?", (_aid_hit,)).fetchone())
@@ -1267,9 +1339,9 @@ def main(verbose: bool = True) -> int:
             conn.close()
             c.ok(_app_row["job_id"] == sug["job_id"],
                  "采纳后投递已归到建议岗位", f"job_id={_app_row['job_id']}")
-            c.ok(_app_row["tier_suggested"] is not None and _app_row["score"] is not None,
-                 "归岗时按岗位 JD 重算了建议档位",
-                 f"{_app_row['tier_suggested']}（{_app_row['score']}）")
+            c.ok(_app_row["tier_suggested"] in (None, "D"),
+                 "归岗后档位按新口径写入（学历不达标→D；学历达标→留空待模型分析）",
+                 str(_app_row["tier_suggested"]))
             c.ok(_n_audit == 1, "采纳归岗写入审计（岗位未指定 → 归到 X）")
             # 已归岗的不能再走归岗接口（唯一写入口）
             code, body = _asgi(srv.app, "POST", f"/api/candidates/{_cid_hit}/assign-job",
@@ -1309,33 +1381,45 @@ def main(verbose: bool = True) -> int:
             _d = conn.execute("SELECT raw_text FROM documents WHERE id = ?",
                               (_doc_route,)).fetchone()
             conn.close()
-            c.ok(_sug_row is not None and _sug_row["suggested_job_id"] is not None,
-                 "待指定投递归位后落库建议岗位（老数据也能补齐）",
+            # v1.12：模型不可用时归位**不写建议**（打分已删，没有最高分岗位可挑）
+            c.ok(_sug_row is not None and _sug_row["suggested_job_id"] is None,
+                 "模型不可用时，存量待指定投递保持待指定（不硬凑建议岗位）",
                  f"suggested_job_id={_sug_row['suggested_job_id'] if _sug_row else None}")
-            if _sug_row and _sug_row["suggested_job_id"]:
-                _best_jd = [j["jd"] for j in _jobs if j["id"] == _sug_row["suggested_job_id"]][0]
-                from app.pipeline.extract import extract as _extract
-                from app.pipeline.tier import grade as _grade
-                _exp = _grade(_extract(_d["raw_text"], _best_jd), _best_jd, TIERS)
-                c.ok(abs((_sug_row["score"] or 0) - (_exp["score"] or 0)) < 1e-9
-                     and _sug_row["tier_suggested"] == _exp["tier_suggested"],
-                     "落库分数就是按建议岗位尺子算的（与默认尺子无关）",
-                     f"库内 {_sug_row['tier_suggested']}/{_sug_row['score']} vs "
-                     f"按建议岗位重算 {_exp['tier_suggested']}/{_exp['score']}")
-            # 零交集的人：不落建议岗位（不硬凑）——财会简历对材料岗也能"算"出 0.3 分，
-            # 所以判定必须看**技能命中**而不是分数
+            # 零交集的人：不落建议岗位（不硬凑）
+            # 注意断言时机：必须在**桩模型之前**取 —— 桩会盲目返回第一个岗位，
+            # 挂在桩之后断言等于在测桩、不是测系统。
             conn = db.connect(db_path)
             _miss_row = conn.execute(
                 "SELECT suggested_job_id, hits FROM applications WHERE candidate_id = ?",
                 (_cid_miss,)).fetchone()
             conn.close()
             c.ok(_miss_row is not None and _miss_row["suggested_job_id"] is None
-                 # hits 列是 JSON 文本（原始行未走 _decode），`'[]'` 在 Python 里是真值——
-                 # 必须解析后再判空，否则这条断言会"通过得莫名其妙"
                  and not json.loads(_miss_row["hits"] or "[]"),
-                 "与所有在招岗位零技能交集的人不落建议岗位（保持待指定）",
+                 "与所有在招岗位零技能交集的人不落建议岗位（模型不可用时保持待指定）",
                  f"suggested_job_id={_miss_row['suggested_job_id'] if _miss_row else None} "
                  f"hits={json.loads((_miss_row['hits'] if _miss_row else None) or '[]')}")
+
+            # 再用桩模型验证归位链路：给得出岗位 → 落库建议岗位 + 用该岗位 JD 重抽技能
+            from app.pipeline import analyze as _an_rt
+            _orig_rt = _an_rt.suggest_job
+            _an_rt.suggest_job = lambda cand, jobs: (
+                {"title": jobs[0]["title"], "reason": "自检桩"} if jobs else None)
+            try:
+                _asgi(srv.app, "POST", "/api/candidates/route-pending?apply=1", hr, b"")
+            finally:
+                _an_rt.suggest_job = _orig_rt
+            conn = db.connect(db_path)
+            _row2 = conn.execute(
+                "SELECT suggested_job_id, tier_suggested FROM applications WHERE id = ?",
+                (_aid_route,)).fetchone()
+            _open2 = db.open_jobs_with_jd(conn)
+            conn.close()
+            c.ok(_row2 is not None and _row2["suggested_job_id"] is not None,
+                 "模型给出岗位后落库建议岗位（老数据也能补齐）",
+                 f"suggested_job_id={_row2['suggested_job_id'] if _row2 else None}")
+            c.ok(_row2 is not None and _row2["tier_suggested"] in (None, "D"),
+                 "归位的档位按新口径写入（学历门槛 / 待模型分析）",
+                 f"{_row2['tier_suggested'] if _row2 else None}（在招岗位 {len(_open2)} 个）")
 
             # S6 批量归档 + 到期彻底删除（v1.5）：按年使用，第二年要能整批收起旧档案；
             # 删除必须有冷静期——**归档满 30 天才彻底删除**，未满一律拒绝。
@@ -1819,10 +1903,9 @@ def main(verbose: bool = True) -> int:
                      for k in apps_before),
                  "预演不修改任何投递的分数与档位（看完再决定）")
             item_a = [x for x in rg["items"] if x.get("name") == "重算甲"][0]
-            c.ok(item_a["changed"] is True and item_a["old_tier"] == "D"
-                 and item_a["new_tier"] in ("A", "B", "C"),
-                 "预演确实算出了差异（改成认钛合金必需技能后，命中者档位上升）",
-                 f"{item_a['old_tier']}→{item_a['new_tier']}（{item_a['old_score']}→{item_a['new_score']}）")
+            c.ok(item_a["changed"] is True and item_a["old_tier"] == "D",
+                 "预演确实算出了差异（学历达标后不再由规则定档：原 D → 待模型分析）",
+                 f"{item_a['old_tier']}→{item_a['new_tier']}（来源 {item_a.get('tier_source')}）")
             item_k = [x for x in rg["items"] if x.get("name") == "重算丙"][0]
             c.ok(item_k["kept"] is True and "已确认" in (item_k.get("note") or ""),
                  "HR 已确认过的投递被标为「只记录差异、不修改」",
@@ -1846,15 +1929,13 @@ def main(verbose: bool = True) -> int:
             _c.close()
             c.ok(rg2.get("applied") is True and rg2.get("changed", 0) >= 1,
                  "确认后重算结果真的落库", f"changed={rg2.get('changed')}")
-            c.ok(a_now[item_a["application_id"]]["tier_suggested"] == item_a["new_tier"]
-                 and abs(a_now[item_a["application_id"]]["score"] - item_a["new_score"]) < 0.001,
-                 "落库值与预演给出的差异完全一致（预演不是另一套算法）",
-                 f"{a_now[item_a['application_id']]['tier_suggested']} / "
-                 f"{a_now[item_a['application_id']]['score']}")
+            c.ok(a_now[item_a["application_id"]]["tier_suggested"] == item_a["new_tier"],
+                 "落库的档位与预演给出的完全一致（预演不是另一套算法）",
+                 str(a_now[item_a["application_id"]]["tier_suggested"]))
             c.ok(n_regrade_audit >= 1 and n_batch >= 1 and n_preview >= 1,
                  "逐条重算与整批各有审计（预演也留痕：谁看了这次重算结果）",
                  f"regrade={n_regrade_audit} batch={n_batch} preview={n_preview}")
-            c.ok(khit["tier_final"] == "A" and khit["tier_suggested"] == "B",
+            c.ok(khit["tier_final"] == "A",
                  "HR 已确认的档位在整个重算过程中没有被覆盖（tier_final 仍是 A）",
                  f"tier_final={khit['tier_final']} tier_suggested={khit['tier_suggested']}")
             # 无原文的投递：明确说"无法重算"，而不是悄悄算成 0 分
@@ -2493,9 +2574,10 @@ def main(verbose: bool = True) -> int:
                  and "Java" in [h["skill"] for h in (ex_sw.get("hit") or [])],
                  "③ 软件岗候选人命中 Java/Spring Boot 且判为对口",
                  str([h["skill"] for h in (ex_sw.get("hit") or [])]))
-            c.ok(ex_sw.get("consistency", {}).get("same") is True,
-                 "③ 档位解释与库内记录对账一致（技能刷新后不再出现 A vs D 打架）",
-                 str(ex_sw.get("consistency", {}).get("note")))
+            _cons_sw = ex_sw.get("consistency") or {}
+            c.ok(_cons_sw == {} or _cons_sw.get("same") is True,
+                 "③ 档位解释与库内记录对账一致（v1.12 只对账档位：学历门槛结论一致）",
+                 str(_cons_sw.get("note") or "库内档位为空（待模型分析），无需对账"))
 
             _, ex_mat_body = _asgi(srv.app, "POST", f"/api/candidates/{_cid_mat}/explain", hr, b"")
             ex_mat = json.loads(ex_mat_body)
@@ -3268,10 +3350,42 @@ def main(verbose: bool = True) -> int:
                  "㉒ 规则归不出的专业写法按原样判定（如实）",
                  str(_g_no["major_check"]["in_list"]))
             c.ok(_g_yes["major_check"]["in_list"] is True
-                 and _g_yes["breakdown"].get("专业方向") == 0.10,
-                 "㉓ 归一后的专业按目录命中专业方向（+0.10，打分仍在规则）",
-                 f"in_list={_g_yes['major_check']['in_list']} 分={_g_yes['breakdown'].get('专业方向')}")
-            # ④ 业务方向：模型提炼 → 存库 → 读回
+                 and not _g_yes["breakdown"],
+                 "㉓ 归一后的专业在目录内即判『对口』（v1.12 不再加分——打分已删，专业方向只作展示）",
+                 f"in_list={_g_yes['major_check']['in_list']} 拆解={_g_yes['breakdown']}")
+            # ④ 档位解析的三层兜底（实测 deepseek-flash 会漏 suggested_tier 字段）
+            from app.pipeline import analyze as _anl
+            c.ok(_anl.tier_from_fit({"suggested_tier": "B"}) == "B"
+                 and _anl.tier_from_fit({"tier": "c"}) == "C"
+                 and _anl.tier_from_fit({"档位": "A"}) == "A"
+                 and _anl.tier_from_fit({"summary": "专业对口，建议A档"}) == "A"
+                 and _anl.tier_from_fit({"summary": "整体基本匹配"}) is None,
+                 "⑯ 档位解析三层兜底：标准字段 → 异名键 → 从结论文字里取（都没有才 None）")
+            # ⑤ 都没有时**单独追问一次**——不能让待分析出现在模型已读完简历时
+            _orig_an_chat = _anl.llm.chat_json
+            _anl.llm.chat_json = lambda *a, **k: {"tier": "b"}
+            try:
+                _rt = _anl.resolve_tier(
+                    {"name": "x", "raw_text": "材料学硕士"},
+                    {"role": "r", "must": {"skills_required": ["钛合金"],
+                                             "education_min": "本科", "years_min": 0},
+                     "preferred": {}},
+                    {"summary": "整体基本匹配"})
+            finally:
+                _anl.llm.chat_json = _orig_an_chat
+            c.ok(_rt == "B", "⑰ 模型漏给档位时单独追问一次（不然会显示待分析）", str(_rt))
+            _anl.llm.chat_json = lambda *a, **k: {"tier": "Z"}   # 不合规输出
+            try:
+                _rt_bad = _anl.ask_tier({"name": "x"},
+                                        {"role": "r", "must": {"skills_required": [],
+                                                                 "education_min": "本科",
+                                                                 "years_min": 0},
+                                         "preferred": {}})
+            finally:
+                _anl.llm.chat_json = _orig_an_chat
+            c.ok(_rt_bad is None, "⑰b 追问返回不合规档位（如 Z）→ 如实 None，不硬塞", str(_rt_bad))
+
+            # ⑥ 业务方向：模型提炼 → 存库 → 读回
             _ml.llm.chat_json = lambda *a, **k: {"directions": ["材料工艺", "检测分析"]}
             try:
                 _bd = _ml.business_direction({"skills": [{"name": "钛合金"}],

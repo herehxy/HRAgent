@@ -1006,6 +1006,35 @@ LEFT JOIN jobs j ON j.id = a.job_id
 """
 
 
+def app_status_display(item: dict) -> tuple[str, str]:
+    """投递状态的**展示文案 + 下一步动作**（v1.13）。
+
+    为什么不能直接用 applications.status：那个字段只有「待确认 / 已确认」两个值，
+    是**入库时的默认值**而不是事实——未归岗、档位还没算出来的投递也挂着「待确认」，
+    HR 会以为"有个档位等着我确认"，点进去却发现无档可确认（实测反馈：
+    「待确认是什么意思？为什么有的会有这个标签」）。
+    按实际情况给四种标签，每个都指向一个明确动作：
+
+      已确认 → 已完成（HR 已背书，系统不再覆盖）
+      待确认 → 去确认档位（系统已给建议档）
+      待分析 → 等模型给档位（或点「重算自动分析」）
+      待归岗 → 先归岗：未归岗不判档（学历门槛无从判定）
+
+    返回 `(标签, 说明)`；`说明` 直接当界面上的 title 提示用。
+    两种调用方传进来的键名不同（列表接口是 `app_status`、完整档案的投递行是 `status`），
+    所以这里两个都认。
+    """
+    if (item.get("app_status") or item.get("status") or "") == "已确认":
+        return "已确认", "HR 已确认档位；系统不会再覆盖它（重算、新版本简历都不动）"
+    tier = item.get("tier_effective") or item.get("tier_suggested") or item.get("tier_final")
+    if not item.get("job_id"):
+        return "待归岗", ("这条投递还没归到岗位。未归岗不判档（学历门槛无从判定），"
+                          "请先归岗或采纳系统给出的建议岗位")
+    if tier:
+        return "待确认", "系统已给出建议档位，等 HR 确认；确认后系统不再覆盖"
+    return "待分析", "已归岗，但档位还没出来（模型尚未给出结论）；可点「重算自动分析」"
+
+
 def _attach_skills(conn: sqlite3.Connection, items: list[dict]) -> list[dict]:
     if not items:
         return items
@@ -1030,6 +1059,9 @@ def _attach_skills(conn: sqlite3.Connection, items: list[dict]) -> list[dict]:
         i["skills"] = bucket.get(i["id"], [])
         i["skill_detail"] = detail.get(i["id"], [])
         i["tier_effective"] = i.get("tier_final") or i.get("tier_suggested")
+        # 状态标签按实际情况给（待归岗 / 待分析 / 待确认 / 已确认），
+        # 不再直接把库里的默认值「待确认」原样贴上去
+        i["status_display"], i["status_hint"] = app_status_display(i)
     return items
 
 
@@ -1153,6 +1185,9 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
            FROM applications a LEFT JOIN jobs j ON j.id = a.job_id
            WHERE a.candidate_id = ? ORDER BY COALESCE(a.applied_at,'') DESC, a.id DESC""",
         (cid,)).fetchall()]
+    for _a in apps:
+        # 每条投递的状态标签同样按实际情况给（完整档案的投递记录表要用）
+        _a["status_display"], _a["status_hint"] = app_status_display(_a)
     docs = [_decode(dict(r)) for r in conn.execute(
         "SELECT * FROM documents WHERE candidate_id = ? ORDER BY id DESC", (cid,)).fetchall()]
     skills = [_decode(dict(r)) for r in conn.execute(
@@ -2004,12 +2039,17 @@ def pending_workload(conn: sqlite3.Connection, stuck_days: int = 7,
         WHERE COALESCE(c.archived_at, '') = ''
     """
     # 1) 待确认档位（系统给了建议，HR 还没背书）
+    #    v1.13 收窄：**必须真的有建议档位**才算——未归岗、或档位还没算出来的投递
+    #    没有档可确认，混进来会让「确认 X 位候选人的档位」这条待办名不副实。
+    #    排序也改按投递时间（v1.12 已删掉加权打分，score 恒为 NULL，按它排没有意义）。
     confirm = conn.execute(
         f"""SELECT a.id, a.candidate_id, c.name, a.score, a.tier_suggested,
                    a.tier_final, a.stage, a.job_id, j.title AS job_title,
                    COALESCE(a.applied_at, a.created_at) AS since
-            {base} AND a.tier_final IS NULL AND a.status != '已确认'
-            ORDER BY a.score DESC LIMIT ?""", (int(limit),)).fetchall()
+            {base} AND a.tier_final IS NULL AND a.tier_suggested IS NOT NULL
+                  AND a.status != '已确认'
+            ORDER BY COALESCE(a.applied_at, a.created_at) DESC LIMIT ?""",
+        (int(limit),)).fetchall()
     # 2) 待指定岗位（有建议岗位但没归岗）
     #    这里不复用 base：需要额外 join 一次 jobs（拿"建议岗位"的标题），
     #    FROM 子句与 base 不同，硬拼会漏 join 导致 no such column。
@@ -2040,10 +2080,16 @@ def pending_workload(conn: sqlite3.Connection, stuck_days: int = 7,
             {base} AND a.needs_review = 1
             ORDER BY since ASC LIMIT ?""", (int(limit),)).fetchall()
     # 5) 高分未确认（最该先看的那批）
+    #    v1.13：v1.12 删掉加权打分后 `score` 恒为 NULL，原来按「分数 ≥ 0.85」永远选不出人，
+    #    这条待办实际上死掉了（HR 再也看不到"很合适但没背书"的提醒）。
+    #    新口径 = **建议档 A 且未确认**；同时保留 `score ≥ 0.85` 分支兼容**老库**里
+    #    还带着分数的历史投递（不因为口径升级就把老数据漏掉）。
     high = conn.execute(
         f"""SELECT a.id, a.candidate_id, c.name, a.score, a.tier_suggested
-            {base} AND a.tier_final IS NULL AND a.score >= 0.85
-            ORDER BY a.score DESC LIMIT ?""", (int(limit),)).fetchall()
+            {base} AND a.tier_final IS NULL
+                  AND (a.tier_suggested = 'A' OR a.score >= 0.85)
+            ORDER BY COALESCE(a.applied_at, a.created_at) ASC LIMIT ?""",
+        (int(limit),)).fetchall()
 
     def rows(rs) -> list[dict]:
         return [dict(r) for r in rs]

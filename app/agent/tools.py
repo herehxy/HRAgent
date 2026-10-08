@@ -389,7 +389,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 return _err(
                     "该候选人尚无对应岗位（既未归岗、也没有可用的建议岗位），无法解释档位。",
                     hint="请在「人才库」卡片上归岗，或采纳系统给出的建议岗位。"
-                         "若系统连建议都没给，通常是该候选人与所有在招岗位的距离都超出建议阈值"
+                         "若系统连建议都没给，通常是模型也判断不出最像哪个在招岗位"
                          "（例如跨行业简历），此时只需人工确认一个岗位即可。")
             # 解释档位时同样区分"已归岗"与"只是建议岗位"：建议岗位的学历门槛
             # 不能用来判 D（v1.8.9），解释里也就不该出现按猜出来的门槛下的结论。
@@ -402,9 +402,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             _apps = d.get("applications") or []
             _db_app = next((x for x in _apps if x.get("job_id")), (_apps[0] if _apps else {}))
             consistency = None
-            if _db_app.get("score") is not None:
-                _same = (float(_db_app.get("score") or 0) == float(g["score"])
-                         and (_db_app.get("tier_suggested") or "") == g["tier_suggested"])
+            if _db_app.get("tier_suggested") is not None:
+                # v1.12：打分已删，只对账档位（学历门槛结论一致即可）
+                _same = (_db_app.get("tier_suggested") or "") == (g["tier_suggested"] or "")
                 consistency = {
                     "same": _same,
                     "db_score": _db_app.get("score"),
@@ -415,10 +415,23 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                              "库内是上次重算写下的结论。可在「部门与岗位」页对该岗位点"
                              "「重新分析」刷新库内结论。"),
                 }
+            # v1.12：**档位答案取库内生效值**——学历门槛由规则定（不达标→D）、
+            # A/B/C 由模型的自动分析给出。现算只负责"学历门槛结论 + 技能命中 + 专业方向"：
+            # 规则已经产不出 A/B/C，拿现算值当答案会让所有学历达标的人显示成"待分析"。
+            _stored = _db_app.get("tier_final") or _db_app.get("tier_suggested")
+            _rule = g["tier_suggested"]                     # 现算：None 或 D
+            if _stored == "D" or _rule == "D":
+                _src = "学历门槛（规则判定，可复现）"
+            elif _stored:
+                _src = "模型分析（自动分析给出的建议档）"
+            else:
+                _src = "待分析（模型尚未给出结论）"
             return _ok({
                 "candidate_id": cid, "name": c.get("name"),
                 "job": job_meta,
-                "tier_suggested": g["tier_suggested"], "score": g["score"],
+                "tier_suggested": _stored, "tier_rule": _rule,
+                "score": None,
+                "tier_source": _src,
                 "breakdown": g["breakdown"],
                 "reasons": g["reasons"], "risks": g["risks"],
                 "hit": [{"skill": h["skill"], "evidence": h["evidence"]} for h in g["hit_detail"]],
@@ -428,7 +441,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 "consistency": consistency,
                 "needs_review": g["needs_review"],
                 "unverified_skills": cand["unverified_skills"],
-                "method": "纯规则计算，不调用模型；分值构成：学历 0.25 / 年限 0.25 / 必需技能 0.35 / 加分项 0.15",
+                "method": ("档位：学历门槛由规则判（不达标→D），A/B/C 由模型分析给出；"
+                           "本工具不调模型，只做现算的学历门槛与技能/专业方向核对"),
             })
 
         # ---------------- 算 ----------------

@@ -40,190 +40,86 @@ def resolve_requirements(jd: dict) -> tuple[list[str], list[str]]:
 
 
 def grade(cand: dict, jd: dict, tiers_cfg: dict, job_confirmed: bool = False) -> dict:
-    """按 JD 尺子算分与档位。
+    """极简分级：学历不达标 + 已归岗 → D；其余一律 C（等模型给更准确的建议）。
 
-    `job_confirmed`：这把尺子是否来自**已经明确归岗**的投递（文件名/邮件标题里带了岗位名）。
-    它只影响一件事——**能不能判 D**：没归岗的投递，尺子可能是系统猜的"建议岗位"，
-    用猜出来的门槛把人判死是不合理的（v1.8.9 口径）。
+    v1.12 重构：删掉了整套加权打分（学历/年限/技能/加分/专业方向五维度）和
+    A/B/C 阈值分档——那些是"系统假装很精确"的产物。实际上 HR 看的是
+    模型的分析文字和业务方向，不是小数点后三位的分数。
+    本函数只做两件事：
+      1. 学历门槛检查（唯一能判 D 的条件）；
+      2. 技能命中/缺失（给模型和展示用）。
+    其余全部交给模型。模型不可用时调用方给 C（中性默认）。
+
+    `job_confirmed`：这把尺子是否来自**已明确归岗**的投递。
+    只有明确归岗的投递才判 D（用猜出来的建议岗位判死不合理）。
     """
     must = jd.get("must", {})
     pref = jd.get("preferred", {})
-    thr = tiers_cfg.get("thresholds", {"A": 0.85, "B": 0.65, "C": 0.45})
-    d_tier = tiers_cfg.get("hard_shortfall_tier", "D")
 
     reasons: list[str] = []
     risks: list[str] = []
 
-    # —— 学历 ——
+    # —— 学历：唯一的 D 判据 ——
     c_rank = EDU_RANK.get(cand.get("education") or "", 0)
     m_rank = EDU_RANK.get(must.get("education_min", "本科"), 2)
     edu_ok = c_rank >= m_rank
-    if c_rank == 0:
-        risks.append("学历未识别")
-        edu_score = 0.0
-    elif not edu_ok:
-        risks.append(f"学历低于最低线（要求 {must.get('education_min')}）")
-        edu_score = 0.0
-    else:
-        reasons.append(f"学历{cand.get('education')}达标")
-        if c_rank > m_rank:
-            reasons.append("学历高于最低线")
-        edu_score = 0.25
 
-    # —— 年限 ——
-    # `years_ok` 只在"明确不足"时才 False；**未识别（None）≠ 不满足**——
-    # 识别不出来就判 D，等于把"抽取器的无能为力"记在候选人头上，
-    # 校招简历（没有正式工作年限可写）几乎全军覆没（实测：研究生应届被初判 D）。
-    # 未识别改为：不参与淘汰、年限项不计分、整体封顶 C，并要求人工核对。
-    years = cand.get("years")
-    years_unknown = years is None
-    y_min = int(must.get("years_min", 0) or 0)
-    if years is None:
-        risks.append("工作年限未识别（不据此判不匹配，请人工核对简历）")
-        years_score = 0.0
-        years_ok = True                    # 不淘汰；靠下方封顶 C 兜住
-    elif years < y_min:
-        risks.append(f"工作年限不足（要求 {y_min} 年）")
-        years_score = round(0.12 * (years / y_min), 3) if y_min else 0.0
-        years_ok = False
-    else:
-        reasons.append(f"{years} 年经验达标")
-        years_score = 0.12 + min(0.08, 0.02 * (years - y_min))
-        years_ok = True
-
-    # —— 必需技能（缺失只提示，不淘汰；仅计已核验技能）——
-    # 不变式①：把"必须项"分成**本体已收录**与**岗位自定义（本体未收录）**两类再报缺。
-    # 为什么分：两者都确实是岗位要求，但含义不同——前者可以在界面上点开证据核对，
-    # 后者只能按文字比对、且说明"这个人不行"之前要先知道"我们本来就没收录这个词"。
-    # 合在一行报"缺必需技能"，读起来像"这人能力不足"，实际可能是本体缺口。
-    # 入参两种形态都要认（技能名字符串 / 带 evidence 的技能字典）：
-    # `major_match` 早就用 `_skill_names` 兼容了，`grade` 只认字符串——
-    # 于是"用完整档案（candidate_detail）调 grade"会直接
-    # `TypeError: unhashable type: 'dict'`。同一份数据在两个函数里两种待遇，
-    # 迟早有人在另一条路径上踩到。
+    # —— 技能命中/缺失（给模型和展示用，不计分）——
     skills = set(_skill_names(cand.get("skills")))
     ev = _evidence_map(cand)
     req, bonus_pool = resolve_requirements(jd)
     hit = [s for s in req if s in skills]
     miss = [s for s in req if s not in skills]
-    miss_onto = [s for s in miss if nz.canonical_of(s)]
-    miss_custom = [s for s in miss if not nz.canonical_of(s)]
-    must_score = 0.30 * (len(hit) / len(req)) if req else 0.30
-    if hit:
-        reasons.append(f"必需技能命中 {len(hit)}/{len(req)}")
-    if miss_onto:
-        risks.append("缺必需技能：" + "、".join(miss_onto))
-    if miss_custom:
-        risks.append("岗位自定义要求未命中（不在技能本体中，按文字比对）："
-                     + "、".join(miss_custom))
+    hit_detail = [{"skill": s, "evidence": ev.get(s, "")} for s in hit]
 
-    # —— 加分项 ——
-    certs = set(cand.get("certificates") or [])
-    pref_hits = [s for s in bonus_pool if s in skills]
-    pref_certs = [c for c in (pref.get("certificates") or []) if c in certs]
-    pref_score = min(0.15, 0.03 * (len(pref_hits) + len(pref_certs)))
-    if pref_hits or pref_certs:
-        reasons.append(f"加分项命中 {len(pref_hits) + len(pref_certs)} 项")
+    # —— 年限（给模型和展示用）——
+    years = cand.get("years")
+    y_min = int(must.get("years_min", 0) or 0)
+    years_ok = years is None or years >= y_min
 
-    score = round(edu_score + years_score + must_score + pref_score, 3)
-
-    # —— 专业方向（v1.8.6：从"只提示"升级为计入评分的一等维度）——
-    # 实战口径：**先看方向对不对，再看缺哪门技能**。一位专业高度对口的候选人，
-    # 不该因为简历里没写某门必需技能（或根本没写工作年限）就被压到 D。
-    # 权重腾挪：必需技能 0.35→0.30、年限 0.25→0.20，腾出 0.10 给专业方向；
-    # 总分上限仍是 1.00。对口 +0.10；无法判定/未设需求 +0.05（中性）；
-    # 明确不对口 +0.05 并如实提示（**不对口仍然不淘汰**，维持 v1.7 口径）。
+    # —— 专业方向（给模型和展示用）——
     major_required = (must.get("major_required")
                       or pref.get("major_required") or [])
-    # v1.11：优先用**归一后的专业**（major_canonical，学科目录条目）参与判定——
-    # 规则归不出来时由模型归一（见 pipeline/major_llm.py），打分仍在本函数内完成。
     major_check = mj.in_list(cand.get("major_canonical") or cand.get("major")
                              or cand.get("education_major"), major_required)
     major_check["via"] = cand.get("major_via") or "规则"
-    if major_check.get("in_list") is True:
-        major_score = 0.10
-        reasons.append("专业方向与岗位需求对口")
-    else:
-        major_score = 0.05
-        if major_check.get("in_list") is False:
-            risks.append("专业方向不在岗位需求清单内（不据此淘汰，供人工权衡）")
-    score = round(score + major_score, 3)
 
-    # —— 分档（v1.8.9：D 只留给「已明确归岗 + 学历不符合」）——
-    # HR 口径：自动判 D 必须同时满足两条——
-    #   ① 这条投递**已经明确归岗**（岗位来自文件名/邮件标题，不是系统猜的建议岗位）；
-    #   ② 学历**明确**低于该岗位要求。
-    # 其余情况一律不低于 C：没归岗只出建议、学历没识别出来不替人下结论、
-    # 年限不足与技能缺口只影响分数与风险提示。理由和"年限未识别不判 D"同源——
-    # 系统识别不出来 / 岗位还没定，都不是候选人"不符合"的证据。
-    cap_c = years_unknown
-    edu_hard_fail = (not edu_ok) and c_rank > 0 and job_confirmed
-    if edu_hard_fail:
-        tier = d_tier
+    # —— 分档：D 只看学历，其余一律 C（等模型给更准确的建议）——
+    tier = None
+    if not edu_ok and c_rank > 0 and job_confirmed:
+        tier = "D"
+        reasons.append(f"学历{cand.get('education')}低于要求（{must.get('education_min')}）")
         risks.append("学历不达本岗位门槛，本岗位暂不匹配；建议保留入池，供其他岗位召回")
-    else:
-        if not edu_ok:
-            cap_c = True
-            if c_rank == 0:
-                risks.append("学历未识别，无法与岗位门槛比对；不据此判 D，已标待人工判读")
-            else:
-                risks.append("按当前（建议）岗位尺子学历不足，但本投递尚未明确归岗，"
-                             "不据此判 D；采纳岗位后再定")
-        if not years_ok:
-            cap_c = True               # 年限明确不足：不判 D，但封顶 C
-        if len(miss) >= 2:
-            tier = "C"
-            reasons.append("技能缺口较大但具备相关背景，建议入储备池")
-        elif not miss and score >= thr.get("A", 0.85):
-            tier = "A"
-        elif score >= thr.get("B", 0.65) and len(miss) <= 1:
-            tier = "B"
-        else:
-            tier = "C"
-        if cap_c and tier in ("A", "B"):
-            tier = "C"
-            reasons.append("学历或年限存在未达/未识别项，按口径最高给 C；请人工核对后重新定档")
+    elif c_rank == 0:
+        tier = "C"
+        risks.append("学历未识别，请人工核对")
+    elif not edu_ok:
+        tier = "C"
+        risks.append(f"学历{cand.get('education')}低于建议岗位要求"
+                     f"（{must.get('education_min')}），但投递尚未明确归岗")
 
-    # —— 加分项缺口 ——
-    # v1.7.1 修语义：`unverified_skills` 里的东西**不是**"候选人自称但没证据的技能"，
-    # 而是"**岗位要求的**这项技能在简历原文里找不到证据"，也就是候选人**不具备**。
-    # 抽取器的词表本身就是该岗位 JD 的技能清单（见 extract._jd_terms），
-    # 命中才写 verified=1，找不到原文片段就写 verified=0——所以它和 `miss` 同源。
-    # 改造前写成"以下技能未能在原文中定位到证据，未计入命中"，读起来像"简历里写了、
-    # 只是没证据"，方向正好反了；更糟的是换过尺子的候选人名下会残留旧尺子的需求词
-    # （实测：软件岗候选人被列出"增材制造、热加工、真空熔铸"等材料类词），
-    # HR 会以为简历里真写过这些。
-    # 现在只报 `miss` 之外的部分（即未命中的**加分项**），并如实说明这是岗位要求。
-    _miss_set = set(miss)
-    unverified = [s for s in (cand.get("unverified_skills") or []) if s not in _miss_set]
-    if unverified:
-        risks.append("岗位加分技能未在原文中找到证据，未计入命中："
-                     + "、".join(unverified[:5]))
+    if hit:
+        reasons.append(f"命中技能 {len(hit)}/{len(req)}：{'、'.join(hit[:3])}")
+    if miss:
+        risks.append(f"缺技能 {'、'.join(miss[:3])}")
 
     needs_review = (not cand.get("name")) or (years is None) or (not skills)
 
     return {
-        "score": score,
-        "tier_suggested": tier,
+        "tier_suggested": tier,           # "D" 或 None（等模型给建议）
+        "score": None,                    # v1.12 移除加权打分：没有分数就是没有，不填 0 冒充
         "reasons": reasons,
         "risks": risks,
         "hit": hit,
         "miss": miss,
-        "miss_ontology": miss_onto,
-        "miss_custom": miss_custom,
-        "preferred_hit": pref_hits + pref_certs,
-        "hit_detail": [{"skill": s, "evidence": ev.get(s, "")} for s in hit],
+        "miss_ontology": [s for s in miss if nz.canonical_of(s)],
+        "miss_custom": [s for s in miss if not nz.canonical_of(s)],
+        "preferred_hit": [],
+        "hit_detail": hit_detail,
         "major_check": major_check,
-        "breakdown": {
-            "学历": round(edu_score, 3),
-            "年限": round(years_score, 3),
-            "必需技能": round(must_score, 3),
-            "加分项": round(pref_score, 3),
-            "专业方向": round(major_score, 3),
-        },
+        "breakdown": {},
         "needs_review": bool(needs_review),
     }
-
 
 # ============================================================
 # 专业大类匹配（v1.6 → v1.7 开放词表改造）

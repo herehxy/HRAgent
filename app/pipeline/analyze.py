@@ -108,12 +108,116 @@ def _jd_brief(jd: dict) -> str:
     )
 
 
+def tier_from_fit(fit: dict | None) -> str | None:
+    """从模型的分析结果里取**建议档位**（A/B/C/D）。
+
+    三层兜底（实测 deepseek-flash 有概率漏字段，不能只认那一个键）：
+      1. `suggested_tier` 直接是 A/B/C/D；
+      2. 它给了档位但键名不同（档位/tier/评级/level…）——模型偶尔自己改键名；
+      3. 完全没给字段，但结论写在 summary 里（"建议A档"、"整体评为B"）→ 从文字里取。
+    取不到返回 None，调用方会**再单独追问一次**（见 `ask_tier`）——
+    "待分析"是给模型不可用时的降级展示，不该出现在模型明明读完了简历的时候。
+    """
+    if not isinstance(fit, dict):
+        return None
+    t = str(fit.get("suggested_tier") or "").strip().upper()
+    if t in ("A", "B", "C", "D"):
+        return t
+    for k in ("tier", "档位", "建议档位", "评级", "level", "grade"):
+        v = str(fit.get(k) or "").strip().upper()
+        if v in ("A", "B", "C", "D"):
+            return v
+    import re as _re
+    blob = " ".join(str(fit.get(x) or "") for x in ("summary", "conclusion", "结论"))
+    m = _re.search(r"(?:建议|初判|评分|评为|判定为|档位)\s*[:：]?\s*([A-D])\s*档?", blob)
+    return m.group(1) if m else None
+
+
+_TIER_SYSTEM = (
+    "你是招聘档位评定员。依据岗位要求与候选人简历，给出**一个**建议档位字母。"
+    "档位口径：A=必需条件全中且明显匹配；B=基本匹配、缺1项可培养；"
+    "C=条件偏弱但有潜力；D=本岗位暂不匹配（仍保留进人才库）。"
+    "注意：学历不达标由系统直接判 D，你不用管学历。"
+    '严格只输出 JSON：{"tier":"A"} 或 {"tier":"B"} / {"tier":"C"} / {"tier":"D"}。'
+)
+
+
+def ask_tier(cand: dict, jd: dict) -> str | None:
+    """**单独追问档位**（模型在匹配分析里漏给时用）。
+
+    为什么要多花这一次调用：`deepseek-flash` 实测有概率漏掉 `suggested_tier`
+    （即使提示词标了"必填"），而档位是 HR 打开卡片第一眼要看的东西。
+    漏了就显示"待分析"，等于模型白读了一遍简历。这一次调用很短（只要一个字母），
+    成本远低于让 HR 手工判档。失败/返回不合规 → None，界面如实显示待分析。
+    """
+    try:
+        r = llm.chat_json(_TIER_SYSTEM,
+                          f"【岗位要求】\n{_jd_brief(jd)}\n\n【候选人】\n{_cand_brief(cand)}")
+    except Exception as exc:                                # noqa: BLE001
+        print(f"[ask_tier] 模型调用失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
+    t = str((r or {}).get("tier") or "").strip().upper()
+    return t if t in ("A", "B", "C", "D") else None
+
+
+def resolve_tier(cand: dict, jd: dict, fit: dict | None) -> str | None:
+    """档位解析总入口：先看分析结果里有没有，没有再单独追问一次。"""
+    return tier_from_fit(fit) or ask_tier(cand, jd)
+
+
 def analyze_fit(cand: dict, jd: dict) -> dict | None:
     try:
         return llm.chat_json(_FIT_SYSTEM, f"【岗位要求】\n{_jd_brief(jd)}\n\n【候选人】\n{_cand_brief(cand)}")
     except Exception as exc:
         print(f"[analyze_fit] 模型调用失败：{type(exc).__name__}: {exc}", file=sys.stderr)
         return None
+
+
+# ============================================================
+# 归岗判断（v1.12）：关键词匹不到时，让模型从在招岗位里选一个
+# ============================================================
+_JOB_PICK_SYSTEM = (
+    "你是招聘分诊助手。给你一份**在招岗位清单**和一份候选人简历摘要，"
+    "判断这份简历最像投递哪个岗位。只依据简历里写过的专业、技能与经历判断，不要脑补。"
+    "确实判断不出来（例如专业与技能跟清单里每个岗位都没有交集）就输出空字符串——"
+    "**宁可说不知道，也不要硬凑一个岗位**。"
+    '严格输出 JSON：{"job_title":"清单里的岗位名（必须与清单完全一致）",'
+    '"reason":"一句话依据(30字内)"}；判断不出时输出 {"job_title":""}。'
+)
+
+
+def suggest_job(cand: dict, jobs: list[dict]) -> dict | None:
+    """模型判断这份简历最像哪个在招岗位（未归岗时的建议岗位）。
+
+    v1.12 起归岗不再靠规则打分：删掉加权打分后所有岗位分数并列，
+    再按分数选最优等于按岗位 ID 挑（**随机归岗**）。新口径是
+    「关键词（文件名/邮件标题）→ 模型判断 → 待指定」，
+    本函数负责中间那一步。模型说不知道就**不出建议**——
+    硬凑一个岗位比不推荐更糟（HR 会照着建议岗位去核对，错的方向比没有方向更费时间）。
+
+    校验：模型给的岗位名必须与清单**完全一致**，自造的一律丢弃。
+    """
+    titles = [str(j.get("title") or "").strip() for j in jobs if j.get("title")]
+    if not titles or not cand:
+        return None
+    lines: list[str] = []
+    for j in jobs:
+        jd = j.get("jd") or {}
+        must = jd.get("must") or {}
+        skills = "、".join(must.get("skills_required") or []) or "未指定"
+        lines.append(f"- {j.get('title')}：最低学历{must.get('education_min') or '不限'}；"
+                     f"必需技能{skills}")
+    try:
+        r = llm.chat_json(_JOB_PICK_SYSTEM,
+                          "【在招岗位】\n" + "\n".join(lines)
+                          + "\n\n【候选人】\n" + _cand_brief(cand))
+    except Exception as exc:
+        print(f"[suggest_job] 模型调用失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
+    title = str((r or {}).get("job_title") or "").strip()
+    if title not in titles:
+        return None
+    return {"title": title, "reason": str((r or {}).get("reason") or "").strip()[:80]}
 
 
 def draft_interview(cand: dict, jd: dict, focus: str = "") -> dict | None:
@@ -208,19 +312,16 @@ def auto_insight(cand: dict, jd: dict | None, grade_result: dict | None = None) 
         fit = None
 
     if isinstance(fit, dict) and (fit.get("summary") or fit.get("highlights")):
-        # suggested_tier 兜底：模型有时把档位写在 summary 里而不是结构化字段里
-        model_tier = fit.get("suggested_tier")
-        if model_tier not in ("A", "B", "C", "D"):
-            import re as _re
-            m = _re.search(r"(?:建议|初判|评分)[^\n]*?([A-D])\s*档",
-                           fit.get("summary") or "")
-            model_tier = m.group(1) if m else None
         # **档位决策**：D（学历不达标）优先于模型建议——
-        # 学历是硬门槛，模型不能越过；其余情况模型建议优先于规则
+        # 学历是硬门槛，模型不能越过；其余情况模型判断优先（规则已不再打分）。
+        # 模型漏给档位时会**单独追问一次**（实测 deepseek-flash 有概率漏字段），
+        # 不能因为格式问题就把它的判断当没发生。
         rule_tier = (grade_result or {}).get("tier_suggested")
-        final_tier = rule_tier                                # 默认用规则
-        if rule_tier != "D" and model_tier in ("A", "B", "C", "D"):
-            final_tier = model_tier                           # 模型可用且规则非 D → 用模型
+        final_tier = rule_tier                                # 默认用规则（=学历门槛结论）
+        if rule_tier != "D":
+            model_tier = resolve_tier(cand, jd, fit)
+            if model_tier:
+                final_tier = model_tier
         return {
             "summary": (fit.get("summary") or "").strip(),
             "reasons": [x for x in (fit.get("highlights") or []) if x][:4],

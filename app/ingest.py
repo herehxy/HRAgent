@@ -310,44 +310,39 @@ def _open_jobs_with_jd(conn) -> list[dict]:
     return db.open_jobs_with_jd(conn)
 
 
-def _route_by_open_jobs(conn, text: str, tiers: dict, filename: str | None = None) -> dict | None:
-    """把简历拿**每个在招岗位**的 JD 各试算一次，返回最合适的那个（附带画像、JD 与评分）。
+def _route_by_open_jobs(conn, text: str, jd_default: dict,
+                        filename: str | None = None, use_llm: bool = False) -> dict | None:
+    """给未归岗的简历找「建议岗位」：**关键词已在上游试过**（没命中才走到这里），这一步问模型。
 
-    为什么在入库时就轮询、而不是等界面展示时再算：
-    1. **评分口径统一**——落库的 `score/tier_suggested` 就是"与最合适岗位的匹配度"，
-       详情页、导出、统计看到的是同一个数，不会出现"列表按软件岗、详情按材料岗"；
-    2. 规则通道很便宜（纯正则 + 词表，不调模型），入库时做一次即可；
-    3. 结论可复现：历史投递的分数不会因为"后来又新建了一个岗位"而悄悄变。
+    v1.12 改口径（原来轮询每个在招岗位打分、取最高分）：
+    1. 加权打分已删（HR 反馈打分是噪音），**没有分数就选不出"最高分岗位"**——
+       所有岗位并列后按 id 排序，等于随机归岗，比不推荐更糟；
+    2. 规则能回答"技能对上几项"，回答不了"这个人该去哪个团队"——后者是模型擅长的；
+    3. 成本可控：只在关键词匹不到时调**一次**（不是每个岗位各一次）。
 
-    注意**每个岗位要各自抽取一次**：技能识别用的是"本体词表 + 该岗位 JD 词表"，
-    同一份简历对材料岗与软件岗能识别出的技能本就不同（软件岗 JD 写了 Java，
-    简历里的 Java 才算命中）——因此不能"抽一次、对多岗位打分"。
+    模型说不出来 → `usable=False`，保持"待指定"由 HR 手动归岗。
     """
     jobs = _open_jobs_with_jd(conn)
     if not jobs:
         return None
-    scored: list[dict] = []
-    for j in jobs:
-        try:
-            cand = extract(text, j["jd"], use_llm=False, filename=filename)
-            gi = grade(cand, j["jd"], tiers)
-        except Exception:
-            continue                     # 某个岗位的 JD 配置有问题，不影响其他岗位
-        scored.append({**j, "cand": cand, "score": gi["score"],
-                       "tier_suggested": gi["tier_suggested"], "hit": gi.get("hit") or []})
-    if not scored:
-        return None
-    # 同分时取 id 小的，保证结果稳定可复现（不依赖字典/查询顺序）
-    scored.sort(key=lambda x: (-(x.get("score") or 0), x["id"]))
-    best = scored[0]
-    best["considered"] = len(scored)
-    # `usable`：**至少命中一项技能**才算"像得上这个岗位"。不能只看分数——
-    # 学历达标、年限够、格式完整都能把分数抬到 0.3 上下，一位做应付账款的简历
-    # 照样会被"算"出一个不高不低的分（实测：财务简历对材料岗得 0.3）。
-    # 所以判定用命中项（`hit`）而不是分数：没有一项技能交集，就不出建议——
-    # 硬凑一个岗位比不推荐更糟。
-    best["usable"] = bool(best.get("hit"))
-    return best
+    empty = {"id": None, "title": "", "jd": None, "cand": None,
+             "usable": False, "considered": len(jobs), "why": ""}
+    if not use_llm:
+        # 模型未启用时不猜岗位：宁可待指定，也不要随机塞一个
+        return {**empty, "why": "模型未启用，未做归岗判断"}
+    from .pipeline import analyze as analyze_mod
+    # 先用默认尺子抽一份画像（不调模型的抽取，便宜）——只为让模型读懂这份简历
+    cand0 = extract(text, jd_default, use_llm=False, filename=filename)
+    pick = analyze_mod.suggest_job(cand0, jobs)
+    if not pick:
+        return {**empty, "cand": cand0, "why": "模型没能判断出对应岗位"}
+    job = next((j for j in jobs if str(j.get("title") or "").strip() == pick["title"]), None)
+    if not job:
+        return {**empty, "cand": cand0, "why": "模型给出的岗位不在在招清单里（已丢弃）"}
+    # 用该岗位的 JD 尺子重抽一次：技能词表来自岗位 JD，命中口径才与岗位一致
+    cand = extract(text, job["jd"], use_llm=use_llm, filename=filename)
+    return {**job, "cand": cand, "usable": True, "considered": len(jobs),
+            "why": pick.get("reason") or ""}
 
 
 def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: bytes | None,
@@ -428,19 +423,21 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
 
     cand = extract(text, jd, use_llm=use_llm, llm_conf=llm_conf, filename=filename)
 
-    # —— 归岗口径（v1.5）：**没有岗位的投递不拿默认尺子草草打分** ——
-    # 旧做法：无岗位名（或文件夹导入）→ 用 config/jd.json 这把默认尺子（材料类）评分，
-    # 于是一位 Java 工程师被"必需技能：真空熔铸/钛合金"打成 D 档低分，
-    # 列表上完全看不出他适合什么（试用反馈："好几个明显是软件开发岗位的，标记却是材料"）。
-    # 新做法：把**每个在招岗位**的 JD 都试一遍，取分数最高的那个作为「建议岗位」，
-    # 并用它的尺子算分（命中/缺失/档位都是相对这个岗位的），落 `suggested_job_id`。
+    # —— 归岗口径（v1.12）：**没有岗位名就问模型，问不出来就待指定** ——
+    # 旧做法（v1.5–v1.11）：把每个在招岗位的 JD 各试算一遍、取分数最高者作「建议岗位」。
+    # 为什么改掉：加权打分在 v1.12 被删（HR 反馈那是噪音），**没有分数就选不出"最高分"**，
+    # 所有岗位并列后按 id 排序 → 等于随机归岗。现在改成：
+    #   ① 文件名/邮件标题里有岗位名 → 上游已直接归岗（走不到这里）；
+    #   ② 没有 → 请模型判断最像哪个在招岗位（一次调用）；
+    #   ③ 模型也说不出 → 保持待指定、不出建议，由 HR 手动归岗。
     # 岗位本身仍然不落 `job_id`——系统只建议，HR 点「采纳」才真正归岗。
-    route = _route_by_open_jobs(conn, text, tiers, filename=filename) if job_id is None else None
-    if route:
+    route = (_route_by_open_jobs(conn, text, jd, filename=filename, use_llm=use_llm)
+             if job_id is None else None)
+    if route and route.get("cand") is not None:
         # 画像用"胜出岗位"那一轮抽取的结果：技能清单里会包含该岗位 JD 写的词
         # （例如软件岗的 Java/Spring Boot），HR 点开档案看到的技能才与岗位对得上。
         cand = route["cand"]
-        g = grade(cand, route["jd"], tiers)
+        g = grade(cand, route["jd"] or jd, tiers)
     else:
         cand = extract(text, jd, use_llm=use_llm, llm_conf=llm_conf, filename=filename)
         # 只有**明确归岗**（job_id 来自文件名/邮件标题命中）时才允许判 D；
@@ -482,14 +479,17 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     if route:
         result["suggested_job"] = {"job_id": route["id"] if route["usable"] else None,
                                    "title": route["title"],
-                                   "score": route["score"],
-                                   "tier_suggested": route["tier_suggested"],
+                                   "reason": route.get("why") or "",
+                                   "tier_suggested": route.get("tier_suggested"),
                                    "considered": route["considered"]}
         result["notes"].append(
-            f"未归岗：已对 {route['considered']} 个在招岗位逐个试算，"
-            + (f"最匹配「{route['title']}」（{route['tier_suggested']}·{route['score']}），待 HR 采纳"
+            f"未归岗：文件名/邮件标题里没有岗位名（关键词匹不到），"
+            + (f"已请模型判断，最像「{route['title']}」"
+               + (f"（依据：{route['why']}）" if route.get("why") else "")
+               + "，待 HR 采纳"
                if route["usable"] else
-               f"与所有在招岗位均无技能交集（最高 {route['score']}），保持待指定、不出建议"))
+               f"模型也未判断出对应岗位（在招 {route['considered']} 个），"
+               "保持待指定、不出建议——硬凑一个岗位比不推荐更糟"))
 
     # —— 第三层去重：内容层（人）——
     cid, is_new, hint = ensure_person(conn, cand, channel, text, doc_digest=digest)

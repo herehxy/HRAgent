@@ -505,31 +505,32 @@ function insightBlock(x){
     ${(ins.reasons||[]).length ? `<div class="small">依据：${esc(ins.reasons.join('；'))}</div>` : ''}
     ${(ins.risks||[]).length ? `<div class="small">风险：${esc(ins.risks.slice(0,2).join('；'))}</div>` : ''}
     ${ev ? `<div class="small">证据：${esc(ev)}</div>` : ''}
-    ${tierDetailBlock(x)}
+    ${tierSourceLine(x)}
   </div>` + '';
 }
 
-/* 档位依据（纯规则、可复现）：折叠在自动分析块里。
-   为什么合进来：这是同一件事的两半——"模型怎么看"和"规则怎么算"。
-   拆成两个按钮，HR 得点两次才知道全貌，而其中一半（规则）本来就是确定的。 */
-function tierDetailBlock(x){
+/* 档位来源（v1.12）：原来的「档位依据（纯规则、评分拆解）」面板已删除——
+   加权打分已从系统里移除（HR 反馈那是噪音），再展示"分值拆解"等于展示一套不存在的算法。
+   现在档位只有两个来源：① 学历门槛（不达标→D，规则可复现）；② 模型分析给的 A/B/C。
+   所以这里只留一行来源说明，真正的理由在「系统自动分析」的文字里（模型给的）。
+   保留技能命中/缺失与专业方向——它们是反幻觉的凭据，不是打分的中间量。 */
+function tierSourceLine(x){
   const t = x.tier_detail;
   if (!t) return '';
-  const bd = Object.entries(t.breakdown || {}).map(([k,v])=>`${k} ${v}`).join(' / ');
   const mj = t.major || {};
-  const cons = t.consistency;
+  const src = (t.tier === 'D') ? '学历门槛（规则判定，可复现）'
+            : (t.tier ? '模型分析判断' : '待分析（模型尚未给出结论）');
+  const hits = (t.hit || []).map(esc).join('、') || '—';
+  const miss = (t.miss || []).map(esc).join('、') || '—';
   return `<details style="margin-top:6px">
     <summary class="small" style="cursor:pointer;color:#1d5fd8">
-      档位依据（纯规则，可复现） · 评分 ${t.score==null?'—':t.score} → 建议 ${esc(t.tier||'—')}</summary>
+      档位来源：${esc(src)} · 建议 ${esc(t.tier || '待分析')}</summary>
     <div class="small" style="margin-top:4px;line-height:1.75">
-      ${bd?`分值拆解：${esc(bd)}<br>`:''}
-      命中：${(t.hit||[]).map(esc).join('、')||'—'}<br>
-      缺失：${(t.miss||[]).map(esc).join('、')||'—'}
+      档位不再由分数计算：<b>学历不达标直接判 D</b>，其余档位由模型读简历后判断。<br>
+      命中技能：${hits}<br>
+      缺失技能：${miss}
       ${(t.miss_custom||[]).length?`<br>岗位自定义要求（本体未收录、按文字比对）未命中：${esc((t.miss_custom||[]).join('、'))}`:''}
       ${mj.note?`<br>专业方向：${esc(mj.note)}`:''}
-      ${cons && !cons.same?`<br><span style="color:#ff7d00">注意：库内记录与当前重算不一致
-        （库内 ${esc(cons.db_tier)} / ${cons.db_score} ↔ 当前 ${esc(t.tier)} / ${t.score}）。
-        ${esc(cons.note||'')}</span>`:''}
       ${(t.risks||[]).length?`<br>风险提示：${esc(t.risks.join('；'))}`:''}
     </div></details>`;
 }
@@ -654,12 +655,12 @@ function jumpPoolPage(){
   POOL_PAGE = n;
   refresh();
 }
-// 院校层次标签（v1.7.3）：来自 config/universities.json 名单匹配，只展示不参与评分；
+// 院校层次标签（v1.7.3）：来自 config/universities.json 名单匹配，只展示、不参与档位判定；
 // 985/211 筛选用同一个字段（uni_tier），标签与筛选口径天然一致。
 function uniTag(t){
   if (!t) return '';
   return `<span class="chip" style="color:#a45a00;background:#fff7e8"
-    title="按教育部 985/211 名单匹配院校名（含常见简称与校区后缀），仅展示标签，不参与评分">${esc(t)}</span>`;
+    title="按教育部 985/211 名单匹配院校名（含常见简称与校区后缀），仅展示标签，不参与档位判定">${esc(t)}</span>`;
 }
 function cardHtml(x){
   const t = x.tier_effective || 'D';
@@ -667,11 +668,11 @@ function cardHtml(x){
   const job = x.job_title || null;
   const sug = x.job_suggestion || null;
   // 建议岗位（v1.5）：入库时就把**每个在招岗位**的 JD 试算了一遍，取最匹配的那个，
-  // 并且卡片上的评分/档位就是**按这个岗位的尺子**算的——所以这里没有"材料类默认尺子"
+  // 并且卡片上的档位就是**按这个岗位的尺子**判的——所以这里没有"材料类默认尺子"
   // 造成的错标（一位 Java 工程师不会再被钛合金尺子打成 D 档）。
   const sugChip = (!job && sug)
     ? `<span class="chip" style="color:#1d5fd8;background:#e8f0ff"
-         title="入库时对全部在招岗位逐个试算（JD 尺子），取分数最高者；采纳后才真正归岗${sug.source==='live'?'（本条为老数据，展示时现算）':''}">建议岗位：${esc(sug.title)}（匹配 ${sug.score==null?'—':sug.score} · ${esc(sug.tier_suggested)} 档）</span>`
+         title="文件名/邮件标题里没有岗位名时，由模型判断最像哪个在招岗位；采纳后才真正归岗${sug.source==='live'?'（本条为老数据，展示时现算）':''}">建议岗位：${esc(sug.title)}${sug.reason?'（'+esc(sug.reason)+'）':''}</span>`
     : (job ? '' : ((x.job_suggestions_considered||0) > 0
         ? `<span class="chip" style="color:#86909c;background:#f2f3f5"
              title="已对 ${x.job_suggestions_considered} 个在招岗位逐个试算，均无技能交集">与所有在招岗位均无交集，保持待指定</span>`
@@ -679,15 +680,23 @@ function cardHtml(x){
   const jobTag = job
     ? `<span class="chip job-tag">${esc(job)}</span>`
     : `<span class="chip job-tag pending">所属岗位待指定</span>${sugChip}`;
-  // 性别标签：只在简历**明写**时才有值（系统不做推断），提示里说明它不参与评分
+  // 性别标签：只在简历**明写**时才有值（系统不做推断），提示里说明它不参与档位判定
   const genderTag = (x.gender||'').trim()
-    ? `<span class="chip" style="color:#4e5969;background:#f2f3f5" title="来自简历明写标签，不参与评分与分级">${esc(x.gender)}</span>`
+    ? `<span class="chip" style="color:#4e5969;background:#f2f3f5" title="来自简历明写标签，不参与档位判定">${esc(x.gender)}</span>`
     : '';
   const hits = (x.hits||[]).map(s=>`<span class="chip" style="color:#00b42a;background:#e8ffea">命中 ${esc(s)}</span>`).join('');
   const miss = (x.miss||[]).map(s=>`<span class="chip" style="color:#ff7d00;background:#fff7e8">缺 ${esc(s)}</span>`).join('');
-  const conf = (x.app_status==='已确认')
-    ? '<span class="chip" style="color:#0a7f1f;background:#e8ffea">HR 已确认</span>'
-    : '<span class="chip" style="color:#f53f3f;background:#ffece8">待确认</span>';
+  // 状态标签按**实际情况**显示，不再把库里的默认值「待确认」原样贴上：
+  // 未归岗的投递没有档位可确认（显示"待归岗"），已归岗但档位还没出来的显示"待分析"。
+  // 每个标签都指向一个明确的下一步，鼠标悬停能看到该做什么（title=status_hint）。
+  const _st = x.status_display || '待确认';
+  const _stStyle = {
+    '已确认': 'color:#0a7f1f;background:#e8ffea',
+    '待确认': 'color:#f53f3f;background:#ffece8',
+    '待分析': 'color:#1d5fd8;background:#e8f0ff',
+    '待归岗': 'color:#a45a00;background:#fff7e8',
+  }[_st] || 'color:#4e5969;background:#f2f3f5';
+  const conf = `<span class="chip" style="${_stStyle}" title="${esc(x.status_hint||'')}">${esc(_st)}</span>`;
   const rev = x.needs_review ? '<span class="chip" style="color:#a45a00;background:#fff7e8">待人工判读</span>' : '';
   const stage = x.stage || '新投递';
   const tiers = ['A','B','C','D'].map(k=>`<option value="${k}" ${k===t?'selected':''}>${k} · ${TIER_LABELS[k]}</option>`).join('');
@@ -695,7 +704,7 @@ function cardHtml(x){
   const skillChips = (x.skills||[]).slice(0,12).map(s=>`<span class="chip" style="color:#3370ff;background:#e8f0ff">${esc(s)}</span>`).join('');
   const contact = contactLine(x);
   const scoreTip = (!job && sug)
-    ? ` title="评分与档位按「建议岗位 · ${esc(sug.title)}」的 JD 尺子试算（不是材料类默认尺子）"` : '';
+    ? ` title="档位按「建议岗位 · ${esc(sug.title)}」的 JD 判断：学历不达标判 D，其余由模型给出"` : '';
   return `<div class="card">
     <div class="row1">
       <input type="checkbox" class="pickChk" value="${x.id}" style="margin-right:10px">
@@ -703,7 +712,7 @@ function cardHtml(x){
       <div style="flex:1;min-width:0">
         <div class="nm">${esc(x.name||'未识别')} ${rev} ${genderTag} ${jobTag}</div>
         <div class="meta">${eduBadge(x)} · ${expBadge(x)} ·
-          ${esc(x.school||'—')}${uniTag(x.uni_tier)} · 匹配 ${(x.score==null?'—':x.score)} · 阶段 ${esc(stage)} ·
+          ${esc(x.school||'—')}${uniTag(x.uni_tier)} · 阶段 ${esc(stage)} ·
           来源 ${esc(x.channel||'—')} · 投递 ${esc((x.applied_at||'').slice(0,10))}</div>
         <div class="meta" style="margin-top:2px"><b>联系方式</b>：${contact}</div>
       </div>
@@ -754,7 +763,7 @@ async function showDetail(cid){
       <td>#${a.id}</td><td>${esc(a.job_title||'待指定')}</td><td>${esc(a.channel||'—')}</td>
       <td>${esc((a.applied_at||'').slice(0,16))}</td>
       <td>${esc(a.tier_final||a.tier_suggested||'—')}</td><td>${esc(a.stage||'—')}</td>
-      <td>${esc(a.status||'—')}</td><td>${a.score==null?'—':a.score}</td></tr>`).join('');
+      <td>${esc(a.status_display||a.status||'—')}</td></tr>`).join('');
   const docs = (d.documents||[]).map(x=>{
       const okFile = !!x.archived_path;
       const acts = okFile
@@ -793,7 +802,7 @@ async function showDetail(cid){
       <div class="k">学历 / 身份</div><div>${eduBadge(d)} · ${expBadge(d)}</div>
       <div class="k">院校 / 专业</div><div>${esc(d.school||'—')} · ${esc(d.major||'—')}</div>
       <div class="k">性别</div><div>${(d.gender||'').trim()
-        ? esc(d.gender) + ' <span class="small">（简历明写；不参与评分与分级）</span>'
+        ? esc(d.gender) + ' <span class="small">（简历明写；不参与档位判定）</span>'
         : '<span class="small">简历未写性别（系统不做推断）</span>'}</div>
       <div class="k">联系方式</div><div>${(()=>{
         const p=contactValue(d.phone), m=contactValue(d.email);
@@ -812,7 +821,7 @@ async function showDetail(cid){
     <div style="margin-top:8px">${evs}</div>
     <div class="spacer"></div><div style="font-weight:600;font-size:15px">投递记录</div>
     <table><thead><tr><th>投递</th><th>岗位</th><th>渠道</th><th>投递时间</th><th>档位</th>
-      <th>阶段</th><th>状态</th><th>评分</th></tr></thead><tbody>${apps||'<tr><td colspan="8">—</td></tr>'}</tbody></table>
+      <th>阶段</th><th>状态</th></tr></thead><tbody>${apps||'<tr><td colspan="7">—</td></tr>'}</tbody></table>
     <div class="spacer"></div><div style="font-weight:600;font-size:15px">简历附件（原件留档，可下载）</div>
     <table><thead><tr><th>文件</th><th>解析</th><th>结果</th><th>接收时间</th><th>归档位置</th><th>操作</th></tr></thead>
       <tbody>${docs||'<tr><td colspan="6">—</td></tr>'}</tbody></table>
@@ -944,7 +953,7 @@ async function doIngest(source){
   await refresh();
 }
 async function exportCsv(){
-  // 导出内容按试用反馈定：**个人简介 + 对应岗位**，不掺内部评分口径。
+  // 导出内容按试用反馈定：**个人简介 + 对应岗位**，不掺内部判定口径。
   // 这份 CSV 是拿去用的（发给用人部门、贴进汇报、做面试排期），
   // 档位/命中/推荐理由属于系统内部判断，HR 要看在界面里看即可。
   // v1.7.1 起人才库分页展示——**导出必须拿全量**，不能只导当前页：
@@ -1443,8 +1452,7 @@ function ingestDetailHtml(r){
                 'skipped_oversize':'<span class="bad-txt">超限跳过</span>',
                 'failed':'<span class="bad-txt">异常</span>'}[d.status] || esc(d.status||'—');
     return `<tr><td>${esc(d.file||'—')}</td><td>${st}</td>
-      <td>${esc(d.name||'—')}</td><td>${esc(d.tier||'—')}</td>
-      <td>${d.score==null?'—':d.score}</td>
+      <td>${esc(d.name||'—')}</td><td>${esc(d.tier||'待分析')}</td>
       <td class="small">${esc((d.notes||[]).join('；')||'')}</td></tr>`;
   }).join('');
   const mailRows = (r.mail_details||[]).map(m=>`<tr><td>${esc(m.subject||'')}</td>
@@ -1464,7 +1472,7 @@ function ingestDetailHtml(r){
     ${mailRows?`<div style="margin-top:12px;font-weight:600">邮件处理</div>
       <table><thead><tr><th>主题</th><th>发件人</th><th>结果</th></tr></thead><tbody>${mailRows}</tbody></table>`:''}
     <div style="margin-top:12px;font-weight:600">逐份简历结果</div>
-    <table><thead><tr><th>文件</th><th>结果</th><th>姓名</th><th>档位</th><th>评分</th><th>说明</th></tr></thead>
+    <table><thead><tr><th>文件</th><th>结果</th><th>姓名</th><th>档位</th><th>说明</th></tr></thead>
       <tbody>${rows||'<tr><td colspan="6">本次没有产生逐份明细（例如邮箱里没有新邮件）</td></tr>'}</tbody></table>`;
 }
 async function previewMail(){
@@ -1494,7 +1502,8 @@ async function viewOrg(){
   document.getElementById('view').innerHTML = `
   <div class="card">
     <h2>岗位管理</h2>
-    <div class="note" style="margin-top:8px">JD 就是这个岗位的评分尺子：简历入库时按它算分。
+    <div class="note" style="margin-top:8px">JD 就是这个岗位的判断尺子：<b>学历门槛</b>由它决定（不达标判 D），
+      <b>档位 A/B/C</b>由模型按它给出的要求判断。
       <b>改了 JD 只影响之后新入库的投递，已入库的档位不会被追溯改动</b>——
       想让已有投递也按新尺子重排，点该岗位的「重新分析」：
       先给差异预览，确认后才落库，且 <b>HR 已确认过的档位一概不动</b>。
@@ -1532,7 +1541,7 @@ async function viewOrg(){
     </div>
     <div class="note" style="margin-top:8px">邮件标题里带上岗位名时，收件会自动归到对应岗位；不带则标「待指定」。</div>
     <div class="spacer"></div>
-    <table><thead><tr><th>岗位</th><th>JD（评分尺子）</th><th class="nw">投递数</th><th class="nw">状态</th><th class="nw">操作</th></tr></thead>
+    <table><thead><tr><th>岗位</th><th>JD（判断尺子）</th><th class="nw">投递数</th><th class="nw">状态</th><th class="nw">操作</th></tr></thead>
       <tbody>${jobs.map(x=>`<tr>
         <td>${esc(x.title)}</td>
         <td class="small jdsum">${jdSummary(x.jd_json)}</td>
@@ -1558,7 +1567,7 @@ async function loadMajorList(){
   el.innerHTML = d.items.map(m=>`<option value="${esc(m.name)}">${esc(m.category)}</option>`).join('');
   el.dataset.loaded = '1';
 }
-// JD 摘要：列表里一眼看出这个岗位的评分尺子是什么
+// JD 摘要：列表里一眼看出这个岗位的判断尺子是什么
 function jdSummary(jd){
   const must = (jd||{}).must || {}, pref = (jd||{}).preferred || {};
   const parts = [];
@@ -1580,7 +1589,7 @@ function jdEditorHtml(jid, jd){
   const must = jd.must || {}, pref = jd.preferred || {};
   const eduOpts = ['','大专','本科','硕士','博士'].map(v =>
     `<option value="${v}" ${v===(must.education_min||'')?'selected':''}>${v||'（不限 / 沿用默认）'}</option>`).join('');
-  return `<div class="note">JD 是评分尺子。<b>保存后只影响之后新入库的投递评分，已入库的档位保持不变。</b></div>
+  return `<div class="note">JD 是判断尺子：<b>学历门槛</b>决定是否判 D，档位 A/B/C 由模型按它判断。<b>保存后只影响之后新入库的投递，已入库的档位保持不变。</b></div>
   <div class="jdform" style="margin-top:12px">
     <label>必需技能</label>
     <input id="ejMust" value="${esc((must.skills_required||[]).join(', '))}" placeholder="逗号分隔">
@@ -1692,7 +1701,7 @@ async function regradeJob(jid, apply){
     const note = x.note ? `<div class="small warn-txt">${esc(x.note)}</div>` : '';
     return `<tr>
       <td><b>${esc(x.name||'未识别')}</b><div class="small">投递 #${x.application_id}</div></td>
-      <td class="nw">${x.old_score==null?'—':x.old_score} → ${x.new_score==null?'—':x.new_score}</td>
+      <td class="nw small">${esc(x.tier_source||'')}</td>
       <td class="nw">${diff}</td>
       <td>${why}${note}</td></tr>`;
   }).join('');
@@ -1702,7 +1711,7 @@ async function regradeJob(jid, apply){
       ｜共 ${r.total||0} 条：建议档位${r.applied?'变化':'将变化'} <b>${r.changed||0}</b> 条、
       已确认未改动 ${r.kept_hr_confirmed||0} 条、无法重算 ${r.cannot_regrade||0} 条</div>
     <div class="${r.changed? 'warn':'ok'}" style="margin-top:10px">${esc(r.note||'')}</div>
-    <table style="margin-top:12px"><thead><tr><th>候选人</th><th class="nw">评分</th>
+    <table style="margin-top:12px"><thead><tr><th>候选人</th><th class="nw">档位来源</th>
       <th class="nw">建议档位</th><th>原因 / 说明</th></tr></thead>
       <tbody>${rows||'<tr><td colspan="4">该岗位下没有投递记录</td></tr>'}</tbody></table>
     <div class="note" style="margin-top:10px">${esc(r.channel_note||'')}</div>
@@ -1737,7 +1746,7 @@ async function addJob(){
   const r = await api('/api/jobs',{method:'POST',body:JSON.stringify(body)});
   if(r.__http_error||r.error){toast(r.detail||r.error||'新增失败','danger');return;}
   const jdFilled = must.length||pref.length||edu||yv!==''||mreq.length||note;
-  toast(jdFilled?'岗位已创建，JD 已写入评分尺子':'岗位已创建（JD 沿用默认尺子）','ok');
+  toast(jdFilled?'岗位已创建，JD 已写入判断尺子':'岗位已创建（JD 沿用默认尺子）','ok');
   if((r.warnings||[]).length){
     // 学科名被填进技能栏是最常见的录入错误，且后果（全员命中 0 项）在列表上完全看不出来，
     // 所以不吞掉：直接弹出来让 HR 当场改。

@@ -67,9 +67,12 @@ def _major_of(conn: sqlite3.Connection, candidate_id) -> dict:
 
 
 def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
-                operator: str = "hr", role: str = "hr", apply: bool = True) -> dict:
+                operator: str = "hr", role: str = "hr", apply: bool = True,
+                use_llm: bool = True) -> dict:
     """把 `job_id` 下所有投递按当前 JD 重算系统建议。返回逐人差异报告。
 
+    v1.12 口径：档位不再由规则打分决定，所以重算 = **学历门槛重判 + 重新问一次模型**。
+    学历不达标直接判 D（不问模型）；达标才调模型给 A/B/C。
     `apply=False` 为预演：完整算一遍差异，但**不写任何业务数据**，
     只留一条 `regrade_preview` 审计（"谁在何时看了这次重算的结果"本身值得留痕）。
     """
@@ -108,15 +111,35 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
             cand["major_via"] = _mj.get("major_via") or "规则"
         # 按某个具体岗位重算它下面的投递：岗位明确 -> 允许按学历判 D
         g = grade(cand, jd, tiers, job_confirmed=True)
+        # **档位重算（v1.12）**：规则只给学历门槛结论（不达标=D），
+        # 达标时再问一次模型——HR 改的是 JD/尺子，档位本就该跟着新要求重新判断。
+        # 学历不达标就不问了：结论已定（D），省一次调用也避免模型把硬门槛"说上去"。
+        tier_src = "学历门槛"
+        if use_llm and g["tier_suggested"] != "D":
+            try:
+                from .pipeline import analyze as analyze_mod
+
+                cand["jd"] = jd
+                _fit = analyze_mod.analyze_fit({**cand, "jd": jd}, jd)
+                # 模型漏给档位时会单独追问一次（见 analyze.resolve_tier）
+                _mt = analyze_mod.resolve_tier(cand, jd, _fit)
+                if _mt:
+                    g["tier_suggested"] = _mt
+                    tier_src = "模型"
+                    g["reasons"] = ([f"模型判断建议 {_mt} 档"]
+                                    + [x for x in (g.get("reasons") or [])])[:4]
+            except Exception as exc:                           # noqa: BLE001
+                print(f"[regrade_job] 模型重判档位失败，保留学历结论："
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
         old_tier, new_tier = a.get("tier_suggested"), g["tier_suggested"]
-        old_score, new_score = a.get("score"), g["score"]
-        diff = (old_tier != new_tier) or (abs((old_score or 0) - (new_score or 0)) > 0.005)
+        old_score, new_score = a.get("score"), None            # v1.12 起不再有分数
+        diff = (old_tier or "") != (new_tier or "")
 
         item = {
             "application_id": a["id"], "candidate_id": a.get("candidate_id"),
             "name": a.get("candidate_name"),
             "old_score": old_score, "new_score": new_score,
-            "old_tier": old_tier, "new_tier": new_tier,
+            "old_tier": old_tier, "new_tier": new_tier, "tier_source": tier_src,
             "tier_final": a.get("tier_final"), "kept": confirmed,
             "changed": bool(diff and not confirmed),
             "reasons": g["reasons"], "risks": g["risks"],
@@ -150,8 +173,9 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
                      json.dumps(g["breakdown"], ensure_ascii=False),
                      db.now(), a["id"]))
                 db.add_audit(conn, "application", str(a["id"]), "regrade",
-                             f"{old_tier}（{old_score}）",
-                             f"JD 变更后重算为 {new_tier}（{new_score}）", operator, role)
+                             f"{old_tier or '未判档'}",
+                             f"JD 变更后重算为 {new_tier or '待分析'}（来源：{tier_src}）",
+                             operator, role)
         items.append(item)
 
     conn.commit()
@@ -169,8 +193,9 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
     return {
         "job_id": job_id, "total": len(apps), "changed": changed,
         "applied": bool(apply), "kept_hr_confirmed": kept, "cannot_regrade": no_text,
-        "channel_note": "统一走规则通道重算（不调模型），可重复、可预期；"
-                        "已确认档位不会被覆盖。",
+        "channel_note": ("学历门槛由规则重判、档位由模型重新判断"
+                          + ("（本次未调模型：模型未启用）" if not use_llm else "")
+                          + "；HR 已确认的档位不会被覆盖。"),
         "summary": summary,
         "items": items,
     }
@@ -181,48 +206,53 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
 # ============================================================
 
 def suggest_jobs(conn: sqlite3.Connection, doc_id: int | None,
-                 jobs: list[dict], tiers: dict) -> list[dict]:
-    """把一条「待指定」投递拿每个在招岗位的 JD 各打一次分，按分降序返回。
+                 jobs: list[dict]) -> list[dict]:
+    """给一条「待指定」投递出**最多一个**建议岗位（v1.12）。
 
-    与 regrade 完全同一画像口径：从简历原文重跑规则通道（extract_heuristic 不依赖 jd，
-    因此整段原文只抽取一次，再对各岗位分别 grade）。纯计算、**不写任何库**。
-    `jobs` 须为 [{"id","title","dept","jd"}, ...]（jd 已解析为 dict）。
-    原文不可用（解析失败的扫描件）时返回空列表——没有画像就没有建议，如实不猜。
+    为什么不再按分数降序返回一串候选：加权打分已删（见 tier.grade 的 v1.12 说明），
+    没有分数就没有"第二候选"的意义——真正要回答的只有一个问题："这份简历最像哪个岗位"，
+    这个交给模型；模型说不出（或原文不可用）就返回空列表，如实不猜。
+    纯计算、**不写任何库**。`jobs` 须为 [{"id","title","dept","jd"}, ...]（jd 已解析）。
     """
     if not jobs:
         return []
-    cand = None
-    out: list[dict] = []
-    for j in jobs:
-        jd = j.get("jd") or {}
-        if cand is None:
-            cand = _reprofile(conn, doc_id, jd)
-        if cand is None:
-            return []
-        g = grade(cand, jd, tiers)      # 只用于出「建议岗位」：不判 D（尺子是试算的）
-        out.append({
-            "job_id": j["id"], "title": j.get("title") or "",
-            "dept": j.get("dept") or "",
-            "score": g["score"], "tier_suggested": g["tier_suggested"],
-            "hits": g["hit"], "miss": g["miss"],
-        })
-    out.sort(key=lambda x: -(x["score"] or 0))
-    return out
+    from .pipeline import analyze as analyze_mod
+
+    cand = _reprofile(conn, doc_id, jobs[0].get("jd") or {})
+    if cand is None:
+        return []
+    pick = analyze_mod.suggest_job(cand, jobs)
+    if not pick:
+        return []
+    j = next((x for x in jobs if (x.get("title") or "").strip() == pick["title"]), None)
+    if not j:
+        return []
+    jd = j.get("jd") or {}
+    # 用该岗位的尺子重抽一次：技能词表来自岗位 JD，命中口径才与该岗位一致
+    cj = _reprofile(conn, doc_id, jd) or cand
+    g = grade(cj, jd, {})
+    return [{"job_id": j["id"], "title": j.get("title") or "", "dept": j.get("dept") or "",
+             "reason": pick.get("reason") or "", "hits": g["hit"], "miss": g["miss"],
+             "tier_suggested": g["tier_suggested"]}]
 
 
 def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
-                  operator: str = "system", role: str = "system") -> dict:
-    """给所有「待指定」投递补上**建议岗位**，并按最适岗位的尺子重算系统建议（v1.5）。
+                  operator: str = "system", role: str = "system",
+                  use_llm: bool = True) -> dict:
+    """给所有「待指定」投递补上**建议岗位**，并按该岗位的尺子重算系统建议（v1.12）。
 
     为什么需要它（而不是只靠入库时算）：
-    - **存量数据**：v1.5 之前入库的投递，`score` 是按默认尺子（材料类）算的——
-      一位 Java 工程师因此被标成 D 档低分，列表上看不出他适合什么；
-    - **岗位表变了**：新建了岗位、或改了某个岗位的 JD，"最合适的岗位"就变了。
+    - **存量数据**：早期入库的投递，`suggested_job_id` 是按"默认尺子打分最高"给的；
+      加权打分已在 v1.12 删除，这些结论需要按新口径（模型判断）重刷一遍；
+    - **岗位表变了**：新建了岗位、或改了某个岗位的 JD，"最像哪个岗位"就变了。
 
-    与「重新分析」保持同一套口径：从简历原文重跑规则通道、不调模型、
-    **绝不覆盖 HR 已确认的档位**（`tier_final` 不动，只刷新"系统建议"）。
-    `apply=False` 时只算不写（预演）。每次只对**尚未归岗**的投递生效。
+    v1.12 口径：**每份待指定简历调一次模型**判断最像哪个在招岗位（不再逐岗位打分——
+    没有分数就无法排序，逐岗位"试算"无从比较）。模型说不出来 → 保持待指定、清掉旧建议，
+    不硬凑一个岗位。**绝不覆盖 HR 已确认的档位**（`tier_final` 不动，只刷新"系统建议"）。
+    `apply=False` 时只算不写（预演）。只对**尚未归岗**的投递生效。
     """
+    from .pipeline import analyze as analyze_mod
+
     jobs = db.open_jobs_with_jd(conn)
     rows = conn.execute(
         "SELECT id, candidate_id, resume_doc_id, score, tier_suggested, suggested_job_id "
@@ -233,47 +263,52 @@ def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
     for r in rows:
         if not jobs:
             break
-        # 每个岗位各自抽取一次：技能识别用的是"本体词表 + 该岗位 JD 词表"，
-        # 同一份简历对材料岗与软件岗识别出的技能不同（见 ingest._route_by_open_jobs）
-        scored: list[dict] = []
-        for j in jobs:
-            cj = _reprofile(conn, r["resume_doc_id"], j["jd"])
-            if cj is None:
-                continue
-            try:
-                _mjr = _major_of(conn, cj.get("candidate_id"))
-                if _mjr.get("major_canonical"):
-                    cj["major_canonical"] = _mjr["major_canonical"]
-                    cj["major_via"] = _mjr.get("major_via") or "规则"
-                gi = grade(cj, j["jd"], tiers)   # 建议试算，不判 D
-            except Exception:
-                continue
-            scored.append({"job": j, "g": gi, "cand": cj})
-        if not scored:
+        # 先用默认尺子抽一次画像（只为让模型读懂这份简历），再问模型最像哪个岗位
+        cand = _reprofile(conn, r["resume_doc_id"], jobs[0].get("jd") or {})
+        if cand is None:
             no_text += 1
             items.append({"application_id": r["id"], "candidate_id": r["candidate_id"],
                           "name": None, "cannot_route": "简历原文不可用（解析失败）"})
             continue
-        scored.sort(key=lambda x: (-(x["g"]["score"] or 0), x["job"]["id"]))
-        best = scored[0]
-        j, g = best["job"], best["g"]
-        usable = bool(g.get("hit"))      # 至少要有一项技能命中，见 ingest 同口径说明
+        _mjc = _major_of(conn, r["candidate_id"])
+        if _mjc.get("major_canonical"):
+            cand["major_canonical"] = _mjc["major_canonical"]
+            cand["major_via"] = _mjc.get("major_via") or "规则"
+        pick = analyze_mod.suggest_job(cand, jobs) if use_llm else None
+        j = next((x for x in jobs
+                  if (x.get("title") or "").strip() == (pick or {}).get("title")), None)
+        if j is not None:
+            # 用该岗位的 JD 尺子重抽：技能词表来自岗位 JD，命中口径才与岗位一致
+            cj = _reprofile(conn, r["resume_doc_id"], j["jd"]) or cand
+            if _mjc.get("major_canonical"):
+                cj["major_canonical"] = _mjc["major_canonical"]
+                cj["major_via"] = _mjc.get("major_via") or "规则"
+            cand = cj
+            g = grade(cj, j["jd"], tiers, job_confirmed=False)
+            usable = True
+        else:
+            # 模型未判断出岗位：保持待指定。档位无从判定——没有岗位门槛可比
+            g = {"tier_suggested": None, "score": None,
+                 "reasons": ["未归岗：模型未判断出对应岗位" if use_llm
+                             else "未归岗：模型未启用，未做归岗判断"],
+                 "risks": [], "hit": [], "miss": [], "preferred_hit": [],
+                 "hit_detail": [], "breakdown": {}, "needs_review": False}
+            usable = False
         name = conn.execute("SELECT name FROM candidates WHERE id = ?",
                             (r["candidate_id"],)).fetchone()
         moved = (r["suggested_job_id"] != (j["id"] if usable else None)
-                 or r["tier_suggested"] != g["tier_suggested"]
-                 or (r["score"] or 0) != (g["score"] or 0))
+                 or (r["tier_suggested"] or "") != (g["tier_suggested"] or ""))
         if moved:
             changed += 1
-        item = {"application_id": r["id"], "candidate_id": r["candidate_id"],
-                "name": (name["name"] if name else None),
-                "before": {"job_id": r["suggested_job_id"], "score": r["score"],
-                           "tier": r["tier_suggested"]},
-                "after": {"job_id": j["id"] if usable else None, "title": j["title"],
-                          "score": g["score"], "tier": g["tier_suggested"],
-                          "usable": usable},
-                "considered": len(scored)}
-        items.append(item)
+        items.append({
+            "application_id": r["id"], "candidate_id": r["candidate_id"],
+            "name": (name["name"] if name else None),
+            "before": {"job_id": r["suggested_job_id"], "tier": r["tier_suggested"]},
+            "after": {"job_id": j["id"] if usable else None,
+                      "title": (j or {}).get("title") or "",
+                      "reason": (pick or {}).get("reason") or "",
+                      "tier": g["tier_suggested"], "usable": usable},
+            "considered": len(jobs)})
         if not apply:
             continue
         # 技能清单也要跟着这次归位刷新：识别用的词表变了（多了岗位 JD 的技能词），
@@ -282,7 +317,7 @@ def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
             try:
                 from . import ingest as _ingest
 
-                _ingest.persist_skills(conn, r["candidate_id"], best["cand"], None)
+                _ingest.persist_skills(conn, r["candidate_id"], cand, None)
             except Exception as exc:                           # noqa: BLE001
                 # 不静默吞：技能没刷新会让档案自相矛盾，必须留痕（缺陷 #40 的教训）
                 print(f"[route_pending] 技能刷新失败（归位结论不受影响）："
@@ -300,19 +335,19 @@ def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
              json.dumps(g["breakdown"], ensure_ascii=False),
              db.now(), r["id"]))
         if moved:
+            _why = ((f"模型从 {len(jobs)} 个在招岗位中判断最像「{j['title']}」#{j['id']}"
+                     + (f"（依据：{pick['reason']}）" if (pick or {}).get("reason") else ""))
+                    if usable else
+                    (f"模型未判断出对应岗位（在招 {len(jobs)} 个），保持待指定" if use_llm
+                     else f"模型未启用，未做归岗判断（在招 {len(jobs)} 个），保持待指定"))
             db.add_audit(conn, "application", str(r["id"]), "route_suggest",
-                         f"建议岗位 {r['suggested_job_id']} / {r['tier_suggested']}"
-                         f"（{r['score']}）",
-                         (f"对 {len(scored)} 个在招岗位逐个试算，最匹配「{j['title']}」"
-                          f"#{j['id']}：{g['tier_suggested']}（{g['score']}）" if usable else
-                          f"对 {len(scored)} 个在招岗位逐个试算，均无技能交集"
-                          f"（最高 {g['score']}），保持待指定"),
-                         operator, role)
+                         f"建议岗位 {r['suggested_job_id']} / {r['tier_suggested']}",
+                         _why, operator, role)
     if apply:
         conn.commit()
     return {"ok": True, "applied": bool(apply), "total": len(items), "changed": changed,
             "cannot_route": no_text, "open_jobs": len(jobs),
-            "note": ("按最适岗位重算系统建议；HR 已确认的档位不受影响。" if apply
+            "note": ("按模型判断重算「建议岗位」；HR 已确认的档位不受影响。" if apply
                      else "预演：只算不写。"),
             "items": items}
 
