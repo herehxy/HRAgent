@@ -677,11 +677,12 @@ function cardHtml(x){
   // 造成的错标（一位 Java 工程师不会再被钛合金尺子打成 D 档）。
   const sugChip = (!job && sug)
     ? `<span class="chip" style="color:#1d5fd8;background:#e8f0ff"
-         title="文件名/邮件标题里没有岗位名时，由模型判断最像哪个在招岗位；采纳后才真正归岗${sug.source==='live'?'（本条为老数据，展示时现算）':''}">建议岗位：${esc(sug.title)}${sug.reason?'（'+esc(sug.reason)+'）':''}</span>`
-    : (job ? '' : ((x.job_suggestions_considered||0) > 0
+         title="模型判断这份简历最像哪个在招岗位（结论已落库，展示时不再调用模型）；采纳后才真正归岗">建议岗位：${esc(sug.title)}${sug.reason?'（'+esc(sug.reason)+'）':''}</span>`
+    : (job ? '' : (x.job_suggestion_missing
         ? `<span class="chip" style="color:#86909c;background:#f2f3f5"
-             title="模型也没能从 ${x.job_suggestions_considered} 个在招岗位里判断出最像哪个（例如跨行业简历）">模型未判断出对应岗位</span>`
-        : `<span class="chip" style="color:#86909c;background:#f2f3f5">暂无在招岗位</span>`));
+             title="系统还没为这份简历判断过建议岗位（库里没有结论）。点「判断建议岗位」让模型判断一次，结论会存下来">尚未判断建议岗位</span>`
+        : `<span class="chip" style="color:#86909c;background:#f2f3f5"
+             title="模型从在招岗位里也没判断出最像哪个（例如跨行业简历）">模型未判断出对应岗位</span>`));
   // 「所属岗位待指定」直接做成可点的入口：没有它，HR 只能看着标签干瞪眼——
   // 原来"归岗"只在系统给出建议时才有按钮，模型不启用时完全没有入口（实测反馈）。
   const jobTag = job
@@ -742,6 +743,7 @@ function cardHtml(x){
       <button class="btn-primary" onclick="assignJob(${x.id},${sug.job_id},'${esc(sug.title)}')">采纳建议岗位</button>
       <button onclick="assignJobPick(${x.id})">换个岗位</button>`
       : (job ? '' : `<span class="vdiv"></span>
+      ${x.job_suggestion_missing ? `<button id="sugjob-${x.id}" onclick="suggestJob(${x.id})">判断建议岗位</button>` : ''}
       <button class="btn-primary" onclick="assignJobPick(${x.id})">指定岗位</button>`)}
       <span class="vdiv"></span>
       <button class="btn-danger" onclick="archiveCandidate(${x.id},true)">归档</button>
@@ -942,7 +944,12 @@ async function interview(cid){
   const el = document.getElementById('out-'+cid);
   el.innerHTML = '<div class="note">生成面试提纲中…</div>';
   const r = await api('/api/candidates/'+cid+'/interview', {method:'POST', body:JSON.stringify({focus:''})});
-  if (r.error){ el.innerHTML = '<div class="warn">'+esc(r.error)+(r.hint?('<br>'+esc(r.hint)):'')+'</div>'; return; }
+  if (r.error){
+    el.innerHTML = (r.need_job)
+      ? needJobHint(cid, '生成面试提纲')
+      : '<div class="warn">'+esc(r.error)+(r.hint?('<br>'+esc(r.hint)):'')+'</div>';
+    return;
+  }
   el.innerHTML = `<div class="why" style="background:#f7f8fa;padding:12px;border-radius:8px;margin-top:10px">
     ${jobLine(r.job,'面试提纲')}
     <b>面试提纲（模型生成，供参考）</b>${(r.questions||[]).map((q,i)=>
@@ -1259,6 +1266,53 @@ async function assignBatchGo(){
   refresh();
 }
 
+/* 判断建议岗位（v1.13.2）：**主动**让模型判断一次并落库。
+   为什么要做成显式动作、而不是页面加载时自动算：模型判断一次 6-8 秒且烧 token，
+   而"建议岗位"看一眼就够。原来列表接口每次打开人才库都重算一遍，
+   HR 实测「每次点人才库都很慢、还浪费 token」。现在结论存库、展示时免费读取，
+   想更新时点一下这个按钮即可（动作写审计）。 */
+async function suggestJob(cid){
+  const out = document.getElementById('out-'+cid);
+  const btn = document.getElementById('sugjob-' + cid);
+  if (btn){ btn.disabled = true; btn.textContent = '判断中…（约几秒）'; }
+  try {
+    const r = await api('/api/candidates/'+cid+'/suggest-job', {method:'POST'});
+    if (r.__http_error || r.error){
+      const msg = r.detail || r.error || '判断失败';
+      toast(msg, 'danger');
+      if (out) out.innerHTML = '<div class="note" style="color:#f53f3f">' + esc(msg) + '</div>';
+      return;
+    }
+    toast(r.job_id ? ('建议岗位：' + r.title + (r.reason ? ('（' + r.reason + '）') : ''))
+                   : r.note, r.job_id ? 'ok' : 'warn');
+    refresh();
+  } finally {
+    if (btn){ btn.disabled = false; btn.textContent = '判断建议岗位'; }
+  }
+}
+/* 未归岗时分析类功能会如实报错——但光报错没用，得给一个**能点的入口**。
+   实测反馈：没有建议岗位时"无法分析也无法修改投递岗位"。 */
+function needJobHint(cid, what){
+  return '<div class="note" style="color:#ff7d00">该候选人还没有对应岗位（既未归岗、'
+    + '也无建议岗位），' + esc(what) + '需要一个岗位当尺子。'
+    + '<div class="bar" style="margin-top:6px">'
+    + '<button class="btn-primary" onclick="needJobAssign(this,' + cid + ')">指定岗位</button>'
+    + '<button onclick="suggestJob(' + cid + ')">判断建议岗位</button>'
+    + '</div></div>';
+}
+/* 就地挂载选择器：档案页里已经有 #pickjobD-<cid> 挂载点就复用它，
+   没有（例如从卡片弹出的提示里）就现造一个挂在按钮下面——避免出现两个同名 id。 */
+function needJobAssign(btn, cid){
+  let holder = document.getElementById('pickjobD-' + cid);
+  if (!holder){
+    holder = document.createElement('div');
+    holder.id = 'pickjobD-' + cid;
+    const wrap = btn.closest('.bar').parentElement;
+    wrap.appendChild(holder);
+  }
+  holder.innerHTML = '';
+  assignJobPick(cid, holder.id);
+}
 /* ------------------------------ 智能助手 ------------------------------ */
 async function viewChat(){
   const runs = await api('/api/agent/runs?limit=1');

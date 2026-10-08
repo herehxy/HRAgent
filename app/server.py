@@ -361,14 +361,16 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
         facets["全部"] = len(items)
         if want:
             items = [i for i in items if db.gender_matches(i.get("gender"), want)]
-        # 建议岗位（v1.5）：**入库时就已对全部在招岗位逐个试算**，结论落在
-        # `applications.suggested_job_id` 上，`score / tier_suggested` 也是按那个岗位的尺子算的
-        # （见 ingest._route_by_open_jobs）——所以这里直接读库，不再二次计算：
-        # 详情页、列表、导出看到的是同一个数，历史结论也不会因"后来新建了岗位"而变。
-        # 只有 v1.5 之前入库的老数据（列为空）才走实时试算兜底。
+        # 建议岗位：**只读库，绝不在这里调模型**（v1.13.2）。
+        # 结论落在 `applications.suggested_job_id`（+ `suggested_job_reason`），
+        # 由入库时的 `ingest._route_by_open_jobs`、或 HR 主动点的「判断建议岗位」写入。
+        #
+        # 为什么把原来的"现算兜底"删掉：老数据（没有存储结论）每打开一次人才库
+        # 就会现调一次模型判断，一次 6-8 秒**且烧 token**——HR 实测反馈
+        # 「每次点击人才库页面都会重新调用模型，这完全没必要，应该存储」。
+        # 现在库里没有结论就如实留空，并在界面上给一个明确动作让 HR 决定何时判断。
         jobs_map = {j["id"]: j for j in db.list_jobs(conn, include_inactive=True)}
         pending = [i for i in items if i.get("job_id") is None]
-        legacy: list[dict] = []
         for i in pending:
             jid = i.get("suggested_job_id")
             j = jobs_map.get(jid) if jid else None
@@ -376,31 +378,15 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                 i["job_suggestion"] = {
                     "job_id": j["id"], "title": j.get("title") or "",
                     "dept": j.get("department_name") or j.get("dept") or "",
-                    "score": i.get("score"), "tier_suggested": i.get("tier_suggested"),
+                    "reason": i.get("suggested_job_reason") or "",
+                    "tier_suggested": i.get("tier_suggested"),
                     "source": "stored",
                 }
             else:
-                legacy.append(i)
-        if len(jobs_map):
-            for i in pending:
-                i.setdefault("job_suggestions_considered", len(jobs_map))
-        if legacy:
-            open_jobs = [{"id": j["id"], "title": j.get("title") or "",
-                          "dept": j.get("department_name") or j.get("dept") or "",
-                          "jd": j.get("jd_json") or {}}
-                         for j in db.list_jobs(conn, include_inactive=False)]
-            for i in legacy:
-                # v1.12：建议岗位改由模型判断（最多一个），没有分数可排序
-                sugs = regrade.suggest_jobs(conn, i.get("resume_doc_id"), open_jobs)
-                top = sugs[0] if sugs else None
-                # 兜底路径不做档位过滤："不适合"由 HR 看（卡片上标明档位），
-                # 隐掉建议反而让人以为系统没算——标 `source=live` 说明是现算的、未经入库固化。
-                i["job_suggestion"] = (
-                    {"job_id": top["job_id"], "title": top["title"], "dept": top["dept"],
-                     "reason": top.get("reason") or "",
-                     "tier_suggested": top["tier_suggested"], "source": "live"}
-                    if top else None)
-                i["job_suggestions_considered"] = len(open_jobs)
+                # 没存过结论：不猜、不现算，交给 HR 点一次（结果会落库）
+                i["job_suggestion"] = None
+                i["job_suggestion_missing"] = True
+            i["job_suggestions_considered"] = len(jobs_map)
         # 「归档」页要能写清"还有几天被彻底删除"：天数由后端算，前端不自己推日期
         if want_archived:
             meta = db.archive_meta(conn)
@@ -807,6 +793,31 @@ def api_candidate_unarchive(cid: int,
             raise HTTPException(status_code=404, detail="未找到该候选人")
         return {"ok": True, "id": cid, "archived": False,
                 "note": "已取消归档：恢复在人才库与检索中展示。"}
+    finally:
+        conn.close()
+
+
+@app.post("/api/candidates/{cid}/suggest-job")
+def api_suggest_job(cid: int,
+                    x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                    x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """**主动**判断一次「建议岗位」并落库（v1.13.2）。
+
+    为什么要有这个显式动作：列表接口原来对没有存储结论的投递会现算模型判断，
+    每打开一次人才库就等 6-8 秒、还烧 token（HR 实测反馈「完全没必要，应该存储」）。
+    现在列表只读库；想更新建议时点一次这里，结论落 `suggested_job_id` 与
+    `suggested_job_reason`，之后所有展示都是免费读取。动作写审计。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "set_stage")
+    if not _llm_enabled():
+        return {"ok": False, "error": "模型未启用，无法判断建议岗位；可直接手动「指定岗位」"}
+    conn = db.connect(DB_PATH)
+    try:
+        out = regrade.suggest_job_for_application(conn, cid, s["username"], s["role"])
+        if out.get("ok"):
+            out["job"] = db.resolve_candidate_job(conn, db.candidate_detail(conn, cid) or {})[1]
+        return out
     finally:
         conn.close()
 
@@ -2154,8 +2165,10 @@ def api_analyze(cid: int, x_tp_token: str | None = Header(default=None, alias="X
     if not d:
         raise HTTPException(status_code=404, detail="未找到该候选人")
     if not jd:
-        return {"error": "该候选人尚无对应岗位", "job": job_meta,
-                "hint": "先在人才库卡片上归岗、或采纳系统建议岗位，再生成针对该岗位的分析"}
+        # need_job 标记：让前端在报错旁边给出「指定岗位」入口——只报错不给入口，
+        # HR 会卡在"无法分析、也不知道去哪儿归岗"（实测反馈）。
+        return {"error": "该候选人尚无对应岗位", "job": job_meta, "need_job": True,
+                "hint": "分析要按岗位的 JD 来。请先归岗（或采纳建议岗位），再生成分析"}
     r = analyze_fit(d, jd)
     if r is None:
         return {"error": llm.status().get("error") or "模型不可用", "job": job_meta,
@@ -2180,8 +2193,8 @@ def api_interview(cid: int, req: FocusReq | None = Body(default=None),
     if not d:
         raise HTTPException(status_code=404, detail="未找到该候选人")
     if not jd:
-        return {"error": "该候选人尚无对应岗位", "job": job_meta,
-                "hint": "面试提纲按岗位定制，请先归岗（或采纳建议岗位）后再生成"}
+        return {"error": "该候选人尚无对应岗位", "job": job_meta, "need_job": True,
+                "hint": "面试提纲按岗位定制：请先归岗（或采纳建议岗位）后再生成"}
     r = draft_interview(d, jd, (req.focus if req else "") or "")
     if r is None:
         return {"error": llm.status().get("error") or "模型不可用", "job": job_meta}

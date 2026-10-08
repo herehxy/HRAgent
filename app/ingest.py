@@ -532,8 +532,13 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         # 仍「待指定」的投递：刷新建议岗位（新人新简历可能更匹配别的岗位，
         # 岗位表也可能新增/停用了岗位——建议是"当前在招岗位里的最适者"，本就不是定值）
         if route and existing.get("job_id") is None:
-            conn.execute("UPDATE applications SET suggested_job_id = ? WHERE id = ?",
-                         (route["id"], existing["id"]))
+            # 建议岗位与**判断理由**一起落库：列表/卡片直接读库展示，不必每次现算
+            # （现算一次 6-8 秒且烧 token，见 server 列表接口的说明）
+            conn.execute("UPDATE applications SET suggested_job_id = ?, "
+                         "suggested_job_reason = ?, updated_at = ? WHERE id = ?",
+                         (route["id"] if route["usable"] else None,
+                          (route.get("why") or None) if route["usable"] else None,
+                          db.now(), existing["id"]))
             conn.commit()
             existing = db.get_application(conn, existing["id"])
 
@@ -586,12 +591,14 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         })
     conn.execute("UPDATE applications SET resume_doc_id = ? WHERE id = ?", (doc_id, app_id))
     if route and route["usable"]:
-        conn.execute("UPDATE applications SET suggested_job_id = ? WHERE id = ?",
-                     (route["id"], app_id))
+        conn.execute("UPDATE applications SET suggested_job_id = ?, "
+                     "suggested_job_reason = ? WHERE id = ?",
+                     (route["id"], route.get("why") or None, app_id))
     conn.commit()
     db.add_audit(conn, "application", str(app_id), "ingest", "",
-                 f"入库，系统建议 {g['tier_suggested']}（{g['score']}）"
-                 + (f"，最匹配岗位「{route['title']}」#{route['id']}" if route else ""),
+                 f"入库，系统建议档位 {g['tier_suggested'] or '待分析'}"
+                 + (f"，建议岗位「{route['title']}」#{route['id']}" if route
+                    and route.get("usable") else ""),
                  "system", "system")
 
     # 归档后重新投递：档案回到人才库（原投递、附件、审计全部保留，不删除任何历史）

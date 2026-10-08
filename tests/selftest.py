@@ -1323,18 +1323,26 @@ def main(verbose: bool = True) -> int:
                  "技能毫无交集的候选人不出建议（保持待指定，不硬凑）",
                  json.dumps(sug_none, ensure_ascii=False)[:60] if sug_none else "None")
 
-            # 用一个**桩模型**验证链路（建议 → 采纳 → 归岗 → 写档位 → 审计）：
+            # 用**桩模型**验证链路（主动判断 → 落库 → 列表读库 → 采纳归岗 → 写档位 → 审计）：
             # 自检要验的是管道接得对不对，不是模型判断得准不准（那要靠试用验收）。
+            # 注意 v1.13.2 起**列表不再现算**，所以判断必须通过显式动作触发一次。
             from app.pipeline import analyze as _an_sug
             _orig_sug = _an_sug.suggest_job
             _an_sug.suggest_job = lambda cand, jobs: (
                 {"title": jobs[0]["title"], "reason": "自检桩"} if jobs else None)
             try:
+                _code_j, _body_j = _asgi(srv.app, "POST",
+                                         f"/api/candidates/{_cid_hit}/suggest-job", hr, b"")
+                _sj_ok = json.loads(_body_j)
+                c.ok(_code_j == 200 and _sj_ok.get("ok"),
+                     "⑫e 主动「判断建议岗位」接口可用",
+                     f"HTTP {_code_j} {str(_body_j)[:50]}")
                 _, body = _asgi(srv.app, "GET", "/api/candidates", {})
                 items_by_id = {x["id"]: x for x in json.loads(body)["items"]}
                 sug = (items_by_id.get(_cid_hit) or {}).get("job_suggestion")
-                c.ok(bool(sug) and sug.get("job_id") and sug.get("title"),
-                     "模型给出岗位后，界面出建议岗位（链路连通）",
+                c.ok(bool(sug) and sug.get("job_id") and sug.get("title")
+                     and sug.get("source") == "stored",
+                     "⑫f 判断结果落库后，列表**直接读库**展示（source=stored）",
                      json.dumps(sug, ensure_ascii=False)[:80] if sug else "None")
                 code, body = _asgi(srv.app, "POST", f"/api/candidates/{_cid_hit}/assign-job",
                                    hr, json.dumps({"job_id": sug["job_id"]}).encode())
@@ -1431,6 +1439,50 @@ def main(verbose: bool = True) -> int:
             c.ok(_row2 is not None and _row2["tier_suggested"] in (None, "D"),
                  "归位的档位按新口径写入（学历门槛 / 待模型分析）",
                  f"{_row2['tier_suggested'] if _row2 else None}（在招岗位 {len(_open2)} 个）")
+
+            # ---- v1.13.2：**列表接口不许调模型**（性能回归点）----
+            # 原来没有存储建议的老数据会在每次打开人才库时现调模型判断一次，
+            # 一次 6-8 秒且烧 token（HR 实测：「每次点击人才库页面都会重新调用模型，
+            # 这完全没必要，应该存储」）。这里用**会抛异常的桩**证明列表不经过模型。
+            from app.pipeline import analyze as _an_perf
+            _orig_perf = _an_perf.suggest_job
+            _an_perf.suggest_job = lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("列表接口不该调用模型！"))
+            try:
+                _code_p, _body_p = _asgi(srv.app, "GET", "/api/candidates", {})
+            finally:
+                _an_perf.suggest_job = _orig_perf
+            _items_p = (json.loads(_body_p).get("items") if _code_p == 200 else [])
+            c.ok(_code_p == 200 and isinstance(_items_p, list),
+                 "⑬ 打开人才库**不调模型**（列表只读库：不再每次刷新都等 6-8 秒、烧 token）",
+                 f"HTTP {_code_p}，{len(_items_p)} 人")
+            # 库里没存过建议的，如实留空并提示可主动判断（而不是偷偷现算）
+            _pend = [x for x in _items_p if not x.get("job_title")]
+            c.ok(all(x.get("job_suggestion") is None or x.get("job_suggestion", {}).get("source") == "stored"
+                     for x in _pend),
+                 "⑬b 建议岗位只可能来自库内存储（要么有结论、要么如实为空）",
+                 f"待指定 {len(_pend)} 人")
+            # 主动判断一次 → 结论落库（含理由），此后展示免费读取
+            _an_perf.suggest_job = lambda cand, jobs: (
+                {"title": jobs[0]["title"], "reason": "自检桩：专业对口"}
+                if jobs else None)
+            try:
+                _cid_sj = _items_p[0]["id"] if _items_p else None
+                _code_sj, _body_sj = _asgi(
+                    srv.app, "POST", f"/api/candidates/{_cid_sj}/suggest-job", hr, b"")
+            finally:
+                _an_perf.suggest_job = _orig_perf
+            _sj = json.loads(_body_sj)
+            _conn_sj = db.connect(db_path)
+            _row_sj = _conn_sj.execute(
+                "SELECT suggested_job_id, suggested_job_reason FROM applications "
+                "WHERE candidate_id = ? ORDER BY id DESC LIMIT 1", (_cid_sj,)).fetchone()
+            _conn_sj.close()
+            c.ok(_code_sj == 200 and ("ok" in _sj)
+                 and (_row_sj is None or _row_sj["suggested_job_id"] is None
+                      or _row_sj["suggested_job_reason"]),
+                 "⑬c 主动「判断建议岗位」会把结论（含理由）落库，之后展示直接读库",
+                 f"HTTP {_code_sj}：{(json.loads(_body_sj).get('note') or '')[:40]}")
 
             # S6 批量归档 + 到期彻底删除（v1.5）：按年使用，第二年要能整批收起旧档案；
             # 删除必须有冷静期——**归档满 30 天才彻底删除**，未满一律拒绝。

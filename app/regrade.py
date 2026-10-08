@@ -323,10 +323,13 @@ def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
                 print(f"[route_pending] 技能刷新失败（归位结论不受影响）："
                       f"{type(exc).__name__}: {exc}", file=sys.stderr)
         conn.execute(
-            """UPDATE applications SET suggested_job_id = ?, score = ?, tier_suggested = ?,
+            """UPDATE applications SET suggested_job_id = ?, suggested_job_reason = ?,
+               score = ?, tier_suggested = ?,
                reasons = ?, risks = ?, hits = ?, miss = ?, preferred_hit = ?, breakdown = ?,
                updated_at = ? WHERE id = ?""",
-            ((j["id"] if usable else None), g["score"], g["tier_suggested"],
+            ((j["id"] if usable else None),
+             ((pick or {}).get("reason") or None) if usable else None,
+             g["score"], g["tier_suggested"],
              json.dumps(g["reasons"], ensure_ascii=False),
              json.dumps(g["risks"], ensure_ascii=False),
              json.dumps(g["hit"], ensure_ascii=False),
@@ -350,6 +353,58 @@ def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
             "note": ("按模型判断重算「建议岗位」；HR 已确认的档位不受影响。" if apply
                      else "预演：只算不写。"),
             "items": items}
+
+
+def suggest_job_for_application(conn: sqlite3.Connection, candidate_id: int,
+                                operator: str = "hr", role: str = "hr") -> dict:
+    """为某位候选人的「待指定」投递**主动判断一次**建议岗位，并把结论落库（v1.13.2）。
+
+    为什么必须落库、而不是每次展示时现算：模型判断一次要 6-8 秒且消耗 token，
+    而"建议岗位"是看一眼就够的东西。原来的列表接口对没有存储结论的投递
+    **每次打开人才库都现调一次模型**——HR 实测反馈「每次点击人才库页面都会重新调用模型，
+    这完全没必要，应该存储」。现在改成：库里有结论就直接读（免费），
+    想更新时点一次这个动作，结论落 `suggested_job_id` + `suggested_job_reason`。
+
+    只处理**未归岗**的投递（已归岗不需要建议）。模型判断不出 →
+    清掉旧建议并如实说明，由 HR 手动「指定岗位」。
+    """
+    from .pipeline import analyze as analyze_mod
+
+    row = conn.execute(
+        "SELECT id, resume_doc_id, job_id FROM applications WHERE candidate_id = ? "
+        "ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT 1", (candidate_id,)).fetchone()
+    if not row:
+        return {"ok": False, "error": "该候选人没有投递记录"}
+    if row["job_id"]:
+        return {"ok": False, "error": "该候选人已归岗，不需要建议岗位（改归岗请用「指定岗位」）"}
+    jobs = db.open_jobs_with_jd(conn)
+    if not jobs:
+        return {"ok": False, "error": "还没有在招岗位，请先到「岗位管理」建一个岗位"}
+    cand = _reprofile(conn, row["resume_doc_id"], jobs[0].get("jd") or {})
+    if cand is None:
+        return {"ok": False, "error": "简历原文不可用（解析失败），无法判断建议岗位"}
+    _mj = _major_of(conn, candidate_id)
+    if _mj.get("major_canonical"):
+        cand["major_canonical"] = _mj["major_canonical"]
+        cand["major_via"] = _mj.get("major_via") or "规则"
+    pick = analyze_mod.suggest_job(cand, jobs)
+    j = next((x for x in jobs
+              if (x.get("title") or "").strip() == (pick or {}).get("title")), None)
+    jid = j["id"] if j else None
+    reason = ((pick or {}).get("reason") or "") if jid else ""
+    conn.execute(
+        "UPDATE applications SET suggested_job_id = ?, suggested_job_reason = ?, updated_at = ? "
+        "WHERE id = ?", (jid, reason or None, db.now(), row["id"]))
+    db.add_audit(conn, "application", str(row["id"]), "suggest_job",
+                 "（原建议已清空）" if not jid else f"建议岗位 {jid}",
+                 (f"模型判断最像「{j['title']}」：{reason}" if jid
+                  else "模型未能判断出对应岗位，保持待指定"),
+                 operator, role)
+    conn.commit()
+    return {"ok": True, "job_id": jid, "title": (j or {}).get("title") or "",
+            "reason": reason,
+            "note": ("已判断并落库：下次打开人才库直接读库，不再调用模型" if jid
+                     else "模型未能判断出对应岗位；可在卡片上手动「指定岗位」")}
 
 
 def assign_job(conn: sqlite3.Connection, application_id: int, job_id: int,

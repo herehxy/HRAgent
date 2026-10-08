@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS applications (
     candidate_id INTEGER NOT NULL,
     job_id INTEGER,
     suggested_job_id INTEGER,             -- v1.5「待指定」时的建议岗位（只建议不归岗）
+    suggested_job_reason TEXT,            -- v1.13.2 该建议的模型判断理由（落库后列表直接读）
     channel TEXT DEFAULT '文件夹',        -- 邮箱/内推/招聘会/官网/文件夹
     applied_at TEXT,
     resume_doc_id INTEGER,
@@ -435,6 +436,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         # v1.5：待指定投递的「建议岗位」（轮询在招岗位取最适者，只建议不归岗）
         "applications": {
             "suggested_job_id": "INTEGER",
+            # v1.13.2：建议岗位的**模型判断理由**。存下来是为了让列表/卡片直接读库展示，
+            # 不必每次刷新都重新问模型（实测：一次 6-8 秒且烧 token）。
+            "suggested_job_reason": "TEXT",
             # v1.8：阶段变更时间——停滞提醒（超期未推进）需要一个可比较的时间戳，
             # 靠 audit_log 推导太脆（人工改阶段、批量导入都可能缺审计）
             "stage_changed_at": "TEXT",
@@ -995,6 +999,7 @@ SELECT c.*,
        a.confidence    AS confidence,
        a.resume_doc_id AS resume_doc_id,
        a.suggested_job_id AS suggested_job_id,
+       a.suggested_job_reason AS suggested_job_reason,
        j.title         AS job_title,
        j.active        AS job_active
 FROM candidates c
