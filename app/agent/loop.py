@@ -351,8 +351,9 @@ def _rule_answer(question: str, ctx: ToolCtx, reason: str = "",
             lines.append(f"- {d.get('education') or '—'} · "
                          f"{d.get('years') if d.get('years') is not None else '—'} 年 · "
                          f"{d.get('school') or '—'} · {d.get('major') or '—'}")
-            lines.append(f"- 档位：建议 {d.get('tier_suggested') or '—'}"
-                         f"（HR 确认 {d.get('tier_final') or '未确认'}），评分 {d.get('score')}")
+            # v1.13.6：不再输出"评分 None"（打分已删，这个字段恒为空）
+            lines.append(f"- 档位：建议 {d.get('tier_suggested') or '待分析'}"
+                         f"（HR 确认 {d.get('tier_final') or '未确认'}）")
             lines.append(f"- 投递 {len(d.get('applications') or [])} 条，"
                          f"附件 {len(d.get('documents') or [])} 份")
             hits = [h for h in (d.get("hit") or [])]

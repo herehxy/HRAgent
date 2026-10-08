@@ -87,13 +87,10 @@ def scan_and_propose(conn, stuck_days: int = 7, max_per_run: int = MAX_PER_RUN,
         name = it.get("name") or f"候选人#{it.get('candidate_id')}"
         if not tier:
             continue
-        score = it.get("score")
-        if isinstance(score, (int, float)):
-            basis = f"匹配度 {score:.2f}"
-        elif tier == "A":
-            basis = "模型判断为 A 档（明显匹配）"
-        else:
-            basis = "系统判断为高匹配"
+        # v1.13.6：不再输出"匹配度 0.92"（打分已删，新数据恒为 None；
+        # 老库残留分数也不该再作为提案依据——那正是 HR 反馈"打分是噪音"的东西）
+        basis = ("模型判断为 A 档（明显匹配）" if tier == "A"
+                 else f"系统建议 {tier} 档")
         _propose_if_new(
             conn, tool="set_tier",
             args={"application_id": aid, "tier": tier,

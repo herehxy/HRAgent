@@ -415,6 +415,8 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
         imap = db.insights_for(conn, [i["id"] for i in items])
         # 档位来源明细（v1.12）：学历门槛现算 + 库内生效档位与来源，口径与完整档案一致
         # （见 `_tier_detail_of`）。计算很轻（约 5ms/人）且只对当前页做，直接跟着列表下发。
+        # 档位明细要用"岗位 JD"与"技能分类"：各查一次供整页复用（不再逐人查库）
+        _jdm, _cats = _jd_map(conn), _skill_cats(conn)
         for i in items:
             i["insight"] = imap.get(i["id"])
             # 学历达标判断：必须放在 job_suggestion 算完之后
@@ -423,7 +425,7 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
             # 招聘对象身份：有工作经历看年限，没有就看毕业时间（应届/往届未就业）
             i["exp_display"] = freshness.exp_label(
                 i.get("years_exp"), bool(i.get("years_exp")), i.get("grad_date"))
-            i["tier_detail"] = _tier_detail_of(s, conn, i)
+            i["tier_detail"] = _tier_detail_of(i, _jdm, _cats)
         presented = auth.present_list(items)
         out = {"count": len(presented), "items": presented,
                # v1.13.4：入库即分析的开关状态与待分析人数。列表页靠它渲染开关与
@@ -452,35 +454,81 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
         conn.close()
 
 
-def _tier_detail_of(s, conn, item: dict) -> dict | None:
-    """档位来源明细（v1.12）：**列表与完整档案共用一份口径**。
+def _jd_map(conn) -> dict:
+    """岗位 JD 映射（整页查一次，不逐人查）。"""
+    return {j["id"]: {"id": j["id"], "title": j.get("title") or "",
+                      "jd_json": j.get("jd_json") or {}}
+            for j in db.list_jobs(conn, include_inactive=True)}
 
-    为什么抽出来：这个明细原先只在列表接口里拼，完整档案没有 → HR 点开档案看不到
-    "档位从哪来"，而档案才是他逐条核对的地方（实测反馈：档位来源都没分析）。
-    为什么不能拿现算值当档位答案：v1.12 规则只剩学历门槛（不达标→D），
-    现算永远给不出 A/B/C，拿它当答案会让所有学历达标的人都显示"待分析"——
-    所以要取**库内生效档位**，并把"它从哪来"一起说清楚。
-    """
-    from .agent.tools import execute as _tool_execute
+
+def _skill_cats(conn) -> list:
+    """技能分类（整页查一次）。失败返回空列表——专业方向显示不出来不影响其它内容。"""
     try:
-        det = json.loads(_tool_execute("explain_grade", {"candidate_id": item["id"]},
-                                       _ctx(s, conn)))
-    except Exception:                                          # noqa: BLE001
-        return None
-    if det.get("error"):
-        return None
+        return db.skill_categories(conn)
+    except Exception:                                        # noqa: BLE001
+        return []
+
+
+def _detail_flat_item(conn, cid: int) -> dict:
+    """把完整档案的"人 + 最新投递"压成与列表同形状的一条（给 _tier_detail_of 用）。"""
+    d = db.candidate_detail(conn, cid) or {}
+    apps = d.get("applications") or []
+    a = next((x for x in apps if x.get("job_id")), apps[0] if apps else {})
     return {
-        "tier": det.get("tier_suggested"),
-        "tier_rule": det.get("tier_rule"),
-        "tier_source": det.get("tier_source"),
-        "score": det.get("score"),
-        "breakdown": det.get("breakdown"),
-        "hit": [h.get("skill") for h in (det.get("hit") or [])],
-        "miss": det.get("miss") or [],
-        "miss_custom": det.get("miss_custom") or [],
-        "major": det.get("major_match") or {},
-        "risks": det.get("risks") or [],
-        "consistency": det.get("consistency"),
+        "id": cid, "job_id": a.get("job_id"),
+        "tier_final": a.get("tier_final"), "tier_suggested": a.get("tier_suggested"),
+        "hits": a.get("hits") or [], "miss": a.get("miss") or [],
+        "risks": a.get("risks") or [],
+        "major": d.get("major"), "major_canonical": d.get("major_canonical"),
+        "edu_level": d.get("edu_level"),
+        "skills": [x.get("name") for x in (d.get("skills") or [])],
+    }
+
+
+def _tier_detail_of(item: dict, jd_map: dict, cats: list) -> dict | None:
+    """档位来源明细（v1.12 口径）：**直接读库，不再逐人调工具重算**（v1.13.6）。
+
+    为什么不再借 `explain_grade`：那个工具会为一个人重跑 grade() 与 major_match()，
+    而列表要展示的结论本来就在库里（见上方说明）。实测每人约 48ms，
+    10 人 0.5 秒、100 人 4.8 秒。
+
+    口径与之前完全一致（HR 已看过一版，不因性能改动而变化）：
+    tier = 库内生效档位（HR 确认优先）；tier_source 说清它从哪来。
+    """
+    from .pipeline.tier import major_match          # v1.13.6：major_match 在 tier.py，不在 major_llm
+    job = jd_map.get(item.get("job_id")) if item.get("job_id") else None
+    if not job:
+        return None            # 未归岗且无建议岗位：没有尺子，谈不上档位来源
+    tier = item.get("tier_final") or item.get("tier_suggested")
+    confirmed = bool(item.get("tier_final"))
+    if confirmed:
+        _src = "HR 已确认"
+    elif tier == "D":
+        _src = "学历门槛（规则判定，可复现）"
+    elif tier:
+        _src = "模型分析（自动分析给出的建议档）"
+    else:
+        _src = "待分析（模型尚未给出结论）"
+    try:
+        _mm = major_match({"skills": item.get("skills") or [],
+                           "major": item.get("major"),
+                           "major_canonical": item.get("major_canonical"),
+                           "education": item.get("edu_level")},
+                          job.get("jd_json") or {}, cats)
+    except Exception:                                        # noqa: BLE001
+        _mm = {}
+    return {
+        "tier": tier,
+        "tier_rule": "D" if (tier == "D" and not confirmed) else None,
+        "tier_source": _src,
+        "hit": item.get("hits") or [],
+        "miss": item.get("miss") or [],
+        "miss_custom": [],
+        "major": _mm,
+        "risks": item.get("risks") or [],
+        "breakdown": {},
+        "score": None,
+        "consistency": None,
     }
 
 
@@ -503,7 +551,9 @@ def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias=
             **auth.present_candidate(d),
             # 档位来源明细（与列表同一份口径）：完整档案是 HR 逐条核对的地方，
             # 这里没有它就只能看到档位=B却不知道凭什么（v1.12 修）
-            "tier_detail": _tier_detail_of(s, conn, {"id": cid}),
+            # 与列表同一份口径：直接读库算明细（不再借工具重算）
+            "tier_detail": _tier_detail_of(_detail_flat_item(conn, cid),
+                                           _jd_map(conn), _skill_cats(conn)),
             "skills": d.get("skills"),
             "tags": d.get("tags"),
             "applications": d.get("applications"),
@@ -969,7 +1019,8 @@ def api_candidates_archive_batch(req: ArchiveBatchReq,
         conn.close()
 
 
-def _purge_expired(conn=None, actor: str = "system", role: str = "system") -> dict:
+def _purge_expired(conn=None, actor: str = "system", role: str = "system",
+                   only_ids: list[int] | None = None) -> dict:
     """把归档满 30 天的档案彻底删除，并把原件移进回收目录。
 
     自有连接便于被定时任务与接口两处复用。**先移文件再删库**：万一移动失败，
@@ -978,7 +1029,8 @@ def _purge_expired(conn=None, actor: str = "system", role: str = "system") -> di
     own = conn is None
     conn = conn or db.connect(DB_PATH)
     try:
-        out = db.purge_due_candidates(conn, db.PURGE_AFTER_DAYS, actor, role)
+        out = db.purge_due_candidates(conn, db.PURGE_AFTER_DAYS, actor, role,
+                                      only_ids=only_ids)
         moved, missing = [], []
         for rel in out["files"]:
             src = rel if os.path.isabs(rel) else os.path.join(BASE, rel)
@@ -1056,10 +1108,13 @@ def api_candidate_purge(cid: int,
             raise HTTPException(status_code=409,
                                 detail=f"归档未满 {info['purge_after_days']} 天（还剩 {left} 天），"
                                        f"期间可随时取消归档；到期后系统会自动彻底删除")
-        out = _purge_expired(conn=conn, actor=s["username"], role=s["role"])
+        # **只删这个人**（v1.13.6 修：原来这里删的是"所有到期归档的人"）
+        out = _purge_expired(conn=conn, actor=s["username"], role=s["role"], only_ids=[cid])
         got = [p for p in out["people"] if p["id"] == cid]
         if not got:
-            raise HTTPException(status_code=500, detail="删除未生效，请查看审计日志")
+            raise HTTPException(status_code=409,
+                                detail="未删除：归档时间可能被并发改过，或已不在到期名单里。"
+                                       "请刷新后重试")
         return {"ok": True, "id": cid, "purged": got[0],
                 "files_moved": out["files_moved"],
                 "note": f"已彻底删除（原件移入回收目录 {REMOVED_DIR}）"}

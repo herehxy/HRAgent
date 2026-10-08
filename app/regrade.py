@@ -110,7 +110,7 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
             cand["major_canonical"] = _mj["major_canonical"]
             cand["major_via"] = _mj.get("major_via") or "规则"
         # 按某个具体岗位重算它下面的投递：岗位明确 -> 允许按学历判 D
-        g = grade(cand, jd, tiers, job_confirmed=True)
+        g = grade(cand, jd, job_confirmed=True)
         # **档位重算（v1.12）**：规则只给学历门槛结论（不达标=D），
         # 达标时再问一次模型——HR 改的是 JD/尺子，档位本就该跟着新要求重新判断。
         # 学历不达标就不问了：结论已定（D），省一次调用也避免模型把硬门槛"说上去"。
@@ -205,37 +205,6 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
 # C 方案：待指定投递的岗位建议（只建议、HR 确认才归岗）
 # ============================================================
 
-def suggest_jobs(conn: sqlite3.Connection, doc_id: int | None,
-                 jobs: list[dict]) -> list[dict]:
-    """给一条「待指定」投递出**最多一个**建议岗位（v1.12）。
-
-    为什么不再按分数降序返回一串候选：加权打分已删（见 tier.grade 的 v1.12 说明），
-    没有分数就没有"第二候选"的意义——真正要回答的只有一个问题："这份简历最像哪个岗位"，
-    这个交给模型；模型说不出（或原文不可用）就返回空列表，如实不猜。
-    纯计算、**不写任何库**。`jobs` 须为 [{"id","title","dept","jd"}, ...]（jd 已解析）。
-    """
-    if not jobs:
-        return []
-    from .pipeline import analyze as analyze_mod
-
-    cand = _reprofile(conn, doc_id, jobs[0].get("jd") or {})
-    if cand is None:
-        return []
-    pick = analyze_mod.suggest_job(cand, jobs)
-    if not pick:
-        return []
-    j = next((x for x in jobs if (x.get("title") or "").strip() == pick["title"]), None)
-    if not j:
-        return []
-    jd = j.get("jd") or {}
-    # 用该岗位的尺子重抽一次：技能词表来自岗位 JD，命中口径才与该岗位一致
-    cj = _reprofile(conn, doc_id, jd) or cand
-    g = grade(cj, jd, {})
-    return [{"job_id": j["id"], "title": j.get("title") or "", "dept": j.get("dept") or "",
-             "reason": pick.get("reason") or "", "hits": g["hit"], "miss": g["miss"],
-             "tier_suggested": g["tier_suggested"]}]
-
-
 def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
                   operator: str = "system", role: str = "system",
                   use_llm: bool = True) -> dict:
@@ -284,7 +253,7 @@ def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
                 cj["major_canonical"] = _mjc["major_canonical"]
                 cj["major_via"] = _mjc.get("major_via") or "规则"
             cand = cj
-            g = grade(cj, j["jd"], tiers, job_confirmed=False)
+            g = grade(cj, j["jd"], job_confirmed=False)
             usable = True
         else:
             # 模型未判断出岗位：保持待指定。档位无从判定——没有岗位门槛可比
@@ -448,7 +417,7 @@ def assign_job(conn: sqlite3.Connection, application_id: int, job_id: int,
         after = f"归到 {jrow['title']}（未重算：原文不可用）"
     else:
         # 归岗后重算：岗位是 HR 明确指定的 -> 允许按学历判 D
-        g = grade(cand, jd, tiers, job_confirmed=True)
+        g = grade(cand, jd, job_confirmed=True)
         # 技能清单要跟这次重算一起写库：命中用的是"本体词表 + 该岗位 JD 词表"抽出来的技能，
         # 不刷新就会出现「命中里写着 Java / Spring Boot，技能栏里却没有 Java」的
         # 自相矛盾档案。**这类"结论更新了、证据没跟上"的不一致，比算错更难发现**，

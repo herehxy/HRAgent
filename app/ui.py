@@ -740,8 +740,8 @@ function cardHtml(x){
     </div>
     <div style="margin-top:10px">${hits}${miss}${conf}</div>
     <div style="margin-top:8px">${skillChips}</div>
-    <div class="evs">${(x.hit_detail||[]).slice(0,3).map(h=>
-      `<div class="ev">证据[${esc(h.skill)}]：${esc(h.evidence)}</div>`).join('')}</div>
+    <div class="evs">${(x.skill_detail||[]).filter(k=>k.evidence).slice(0,3).map(k=>
+      `<div class="ev">证据[${esc(k.name)}]：${esc(k.evidence)}</div>`).join('')}</div>
     ${insightBlock(x)}
     <div class="why">推荐理由：${esc((x.reasons||[]).join('；')||'—')}</div>
     <div class="acts">

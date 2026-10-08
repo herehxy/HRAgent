@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 
 from . import univ as univ_mod  # noqa: PLC0415 — 院校层次识别（985/211 标签）
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS applications (
     job_id INTEGER,
     suggested_job_id INTEGER,             -- v1.5「待指定」时的建议岗位（只建议不归岗）
     suggested_job_reason TEXT,            -- v1.13.2 该建议的模型判断理由（落库后列表直接读）
+    merged_from_candidate INTEGER,        -- v1.13.6 合并来源（撤销合并时据此搬回）
     channel TEXT DEFAULT '文件夹',        -- 邮箱/内推/招聘会/官网/文件夹
     applied_at TEXT,
     resume_doc_id INTEGER,
@@ -385,27 +387,63 @@ def _migrate_v01(conn: sqlite3.Connection) -> dict | None:
     return stat
 
 
+#: 已完成建表/迁移/补列的库（进程内缓存，key 为绝对路径）。
+#: 自检会在同一进程里开另一个库，所以不能只看"有没有初始化过"。
+_INITIALIZED: set[str] = set()
+_INIT_LOCK = threading.Lock()
+#: 每个库最近一次迁移的返回值（按路径），让新连接也能读到
+_MIGRATION_BY_PATH: dict[str, dict] = {}
+
+
 def connect(db_path: str) -> sqlite3.Connection:
-    """打开连接：自动建表、自动迁移 v0.1 数据、自动补列。"""
+    """打开连接：自动建表、自动迁移 v0.1 数据、自动补列。
+
+    **建表/迁移/补列只在进程内第一次打开某个库时做**（v1.13.6）。
+    原来每次连接都重跑全套（实测每次 45ms），而列表页对每个候选人开一次连接
+    → 10 人 0.5 秒、100 人 4.8 秒。这是"打开人才库要等一下"的根因。
+
+    为什么进程内缓存是安全的：这些操作**幂等**（IF NOT EXISTS / 缺列才 ALTER）；
+    进程重启会再跑一遍，新版本加的列与表照常生效；首次并发用锁串行化，
+    避免两个线程同时 ALTER 撞车。确需运行期强制重跑时调 `_init_schema(conn)`。
+    """
     directory = os.path.dirname(os.path.abspath(db_path))
     if directory:
         os.makedirs(directory, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # 并发写保护：默认 busy_timeout=0 时，后台巡检正在写与 HR 正在点会直接
+    # 抛 database is locked；5 秒等待对本地单文件库足够。
+    conn.execute("PRAGMA busy_timeout = 5000")
+    key = os.path.abspath(db_path)
+    if key not in _INITIALIZED:
+        with _INIT_LOCK:
+            if key not in _INITIALIZED:
+                migration = _init_schema(conn)
+                if migration:
+                    _MIGRATION_BY_PATH[key] = migration
+                _INITIALIZED.add(key)
+    if key in _MIGRATION_BY_PATH:
+        _MIGRATIONS[id(conn)] = _MIGRATION_BY_PATH[key]
+    return conn
+
+
+def _init_schema(conn: sqlite3.Connection) -> dict | None:
+    """建表 + 迁移 + 补列（每个库在每个进程里执行一次）。
+
+    补列必须早于 executescript：SCHEMA 里的 `CREATE INDEX ... ON jobs(active, id)`
+    依赖新增列，而 CREATE TABLE IF NOT EXISTS 不会给老表加列。
+    executescript 之后要**再补一次**：全新库第一遍跑补列时表还不存在
+    （`ALTER TABLE` 会因"表不存在"跳过），建表之后这一遍才真正补得上。
+    **新列仍必须同时写进 SCHEMA** —— 这里只是兜底，不是"可以不写建表语句"的许可
+    （教训见缺陷 #39）。
+    """
     migration = _migrate_v01(conn)
-    # 补列必须早于 executescript：SCHEMA 里的 `CREATE INDEX ... ON jobs(active, id)`
-    # 依赖新增列，而 CREATE TABLE IF NOT EXISTS 不会给老表加列。
     _ensure_columns(conn)
     conn.executescript(SCHEMA)
-    # 再补一次：全新库第一遍跑补列时表还不存在（`ALTER TABLE` 会因"表不存在"跳过），
-    # executescript 建表之后这一遍才真正补得上。**新列仍必须同时写进 SCHEMA**——
-    # 这里只是兜底，不是"可以不写建表语句"的许可（教训见缺陷 #39）。
     _ensure_columns(conn)
     conn.commit()
-    if migration:
-        _MIGRATIONS[id(conn)] = migration
-    return conn
+    return migration
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -439,9 +477,16 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             # v1.13.2：建议岗位的**模型判断理由**。存下来是为了让列表/卡片直接读库展示，
             # 不必每次刷新都重新问模型（实测：一次 6-8 秒且烧 token）。
             "suggested_job_reason": "TEXT",
+            # v1.13.6：合并时记下"这条原本属于谁"，否则撤销合并无法把投递搬回去
+            "merged_from_candidate": "INTEGER",
             # v1.8：阶段变更时间——停滞提醒（超期未推进）需要一个可比较的时间戳，
             # 靠 audit_log 推导太脆（人工改阶段、批量导入都可能缺审计）
             "stage_changed_at": "TEXT",
+        },
+        # v1.13.6：合并来源。documents 也要有——老库不会因为 CREATE TABLE 补列，
+        # 没有这一列时拆分只能"如实说明搬不回"，等于白拆。
+        "documents": {
+            "merged_from_candidate": "INTEGER",
         },
         # v1.8 主动提案：区分「HR 问出来的」与「系统自己发现的」。
         # 两者的确认流、留痕、执行路径完全一致，只有来源不同——
@@ -929,15 +974,20 @@ def insert_candidate(conn: sqlite3.Connection, rec: dict) -> int:
         """INSERT INTO candidates
            (identity_key, name, gender, birth_year, phone_enc, email_enc, phone_bidx, email_bidx,
             edu_level, school, major, years_exp, current_org, source_first,
-            first_seen_at, last_active_at, pool_status, pii_level, blind, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            first_seen_at, last_active_at, pool_status, pii_level, blind, grad_date,
+            created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (rec.get("identity_key"), rec.get("name"), rec.get("gender"), rec.get("birth_year"),
          rec.get("phone_enc"), rec.get("email_enc"), rec.get("phone_bidx"), rec.get("email_bidx"),
          rec.get("edu_level"), rec.get("school"), rec.get("major"), rec.get("years_exp"),
          rec.get("current_org"), rec.get("source_first"),
          rec.get("first_seen_at", stamp), rec.get("last_active_at", stamp),
          rec.get("pool_status", "在池"), rec.get("pii_level", "普通"),
-         1 if rec.get("blind") else 0, stamp, stamp),
+         1 if rec.get("blind") else 0,
+         # 毕业时间（v1.13.6 补写）：ingest 明明传了却曾被静默丢弃，
+         # 导致新人"应届/往届未就业"永远判不出来——只能靠启动时的存量补写救。
+         rec.get("grad_date"),
+         stamp, stamp),
     )
     conn.commit()
     return cur.lastrowid
@@ -1246,10 +1296,12 @@ def merge_candidates(conn: sqlite3.Connection, src_id: int, dst_id: int,
     src, dst = get_candidate(conn, src_id), get_candidate(conn, dst_id)
     if not src or not dst:
         return {"ok": False, "error": "候选人不存在"}
-    conn.execute("UPDATE applications SET candidate_id = ?, updated_at = ? WHERE candidate_id = ?",
-                 (dst_id, now(), src_id))
-    conn.execute("UPDATE documents SET candidate_id = ? WHERE candidate_id = ?", (dst_id, src_id))
-    moved = {"applications": conn.total_changes}
+    # v1.13.6：搬过去的同时**记下来源**，否则"撤销合并"无法把它们搬回来
+    conn.execute("UPDATE applications SET candidate_id = ?, merged_from_candidate = ?, "
+                 "updated_at = ? WHERE candidate_id = ?",
+                 (dst_id, src_id, now(), src_id))
+    conn.execute("UPDATE documents SET candidate_id = ?, merged_from_candidate = ? "
+                 "WHERE candidate_id = ?", (dst_id, src_id, src_id))
     # 技能：冲突时保留已有，其余迁移
     conn.execute(
         """INSERT OR IGNORE INTO candidate_skills
@@ -1274,12 +1326,45 @@ def merge_candidates(conn: sqlite3.Connection, src_id: int, dst_id: int,
 
 def split_candidate(conn: sqlite3.Connection, src_id: int, operator: str = "HR",
                     role: str = "recruiter") -> dict:
-    """撤销软合并。"""
+    """撤销软合并：**把当初搬过去的投递与附件搬回来**（v1.13.6）。
+
+    为什么必须搬：合并只是"挂过去"，撤销就必须"挂回来"——否则拆分后源档案
+    变成一个没有任何投递的空壳，而它的投递永久留在主档下（实测缺陷）。
+
+    只搬**带 `merged_from_candidate = src_id` 标记**的行：那些才是当初从本档
+    搬过去的。合并发生在加标记之前的老数据没有这个痕迹 → **如实说明无法自动搬回**，
+    不假装拆干净了（HR 可以到主档手工处理）。
+
+    技能/标签不搬：它们是派生属性，本档下次分析/刷新时会重新生成。
+    """
+    # 先看合并记录（拆分要写在同一批里，避免中途失败留下半拆状态）
+    src = get_candidate(conn, src_id)
+    dst_id = (src or {}).get("merged_into")
+    moved = {"applications": 0, "documents": 0, "legacy_untracked": False}
+    if dst_id:
+        cur = conn.execute(
+            "UPDATE applications SET candidate_id = ?, merged_from_candidate = NULL, "
+            "updated_at = ? WHERE candidate_id = ? AND merged_from_candidate = ?",
+            (src_id, now(), dst_id, src_id))
+        moved["applications"] = cur.rowcount or 0
+        cur = conn.execute(
+            "UPDATE documents SET candidate_id = ?, merged_from_candidate = NULL "
+            "WHERE candidate_id = ? AND merged_from_candidate = ?", (src_id, dst_id, src_id))
+        moved["documents"] = cur.rowcount or 0
+        # 合并过、但一条都没标记 → 老数据（加标记之前合的），如实说
+        if not moved["applications"] and not moved["documents"]:
+            moved["legacy_untracked"] = bool(conn.execute(
+                "SELECT 1 FROM candidates WHERE id = ? AND merged_into = ?",
+                (src_id, dst_id)).fetchone())
     conn.execute("UPDATE candidates SET merged_into = NULL, pool_status = '在池', updated_at = ? WHERE id = ?",
                  (now(), src_id))
-    add_audit(conn, "candidate", str(src_id), "split", "已并入其他档", "恢复为独立档", operator, role)
+    _detail = (f"恢复为独立档，投递搬回 {moved['applications']} 条、附件 {moved['documents']} 份"
+               if not moved["legacy_untracked"] else
+               "恢复为独立档；注意：这次合并发生在系统记录来源之前，"
+               "投递无法自动搬回（如需归位请到主档手工处理）")
+    add_audit(conn, "candidate", str(src_id), "split", "已并入其他档", _detail, operator, role)
     conn.commit()
-    return {"ok": True, "id": src_id}
+    return {"ok": True, "id": src_id, "moved": moved, "note": _detail}
 
 
 def suspicious_duplicates(conn: sqlite3.Connection, cid: int) -> list[dict]:
@@ -1320,7 +1405,9 @@ def insert_application(conn: sqlite3.Connection, rec: dict) -> int:
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (rec.get("candidate_id"), rec.get("job_id"), rec.get("suggested_job_id"),
          rec.get("channel", "文件夹"),
-         rec.get("applied_at", stamp), rec.get("resume_doc_id"), rec.get("score"),
+         # `rec.get("applied_at", stamp)` 在 key 存在但值为 None 时会返回 None，
+         # 写成 NULL 后排序会把它甩到最后（COALESCE 到空串），档案页"最新投递"就取错行。
+         (rec.get("applied_at") or stamp), rec.get("resume_doc_id"), rec.get("score"),
          rec.get("tier_suggested"), None, rec.get("stage", "新投递"),
          rec.get("status", "待确认"), rec.get("note", ""),
          1 if rec.get("needs_review") else 0,
@@ -1389,7 +1476,11 @@ def set_application_stage(conn: sqlite3.Connection, aid: int, stage: str,
     cur = get_application(conn, aid)
     if not cur:
         return None
-    conn.execute("UPDATE applications SET stage = ?, updated_at = ? WHERE id = ?", (stage, now(), aid))
+    # stage_changed_at 一直没写入过 → 停滞待办只能回退到 applied_at，
+    # 于是"今天刚面完的人"今天就被算成停滞半年（v1.13.6 补上写入）。
+    _stamp = now()
+    conn.execute("UPDATE applications SET stage = ?, stage_changed_at = ?, updated_at = ? "
+                 "WHERE id = ?", (stage, _stamp, _stamp, aid))
     add_audit(conn, "application", str(aid), "set_stage", cur.get("stage"), stage, operator, role)
     conn.commit()
     return get_application(conn, aid)
@@ -1485,7 +1576,8 @@ PURGE_AFTER_DAYS = 30
 
 
 def purge_due_candidates(conn: sqlite3.Connection, days: int | None = None,
-                         operator: str = "system", role: str = "system") -> dict:
+                         operator: str = "system", role: str = "system",
+                         only_ids: list[int] | None = None) -> dict:
     """把**归档已满 `days` 天**的档案彻底删除（连带投递、附件记录、标签、技能、向量）。
 
     设计取舍：
@@ -1496,15 +1588,32 @@ def purge_due_candidates(conn: sqlite3.Connection, days: int | None = None,
       这样"库删了、文件还在回收目录里"——比直接 `unlink` 安全。
     - 每个被删除的人写一条 `purge` 审计（含归档时间与投递/附件数量），
       审计本身**不删除**——"谁什么时候被清掉的"必须留痕。
+
+    `only_ids`：**只删指定的几个人**（单人"彻底删除"接口用）。
+    为什么必须有这个参数：原来单人接口调的是不带过滤的本函数，
+    于是 HR 点"彻底删除"一个人，**所有**归档满 30 天的人都被一起删掉，
+    而接口只回报他要的那一个——不可逆的数据丢失，且没有任何提示。
+    批量与定时任务传 None，行为与原来一致。
     """
     days = PURGE_AFTER_DAYS if days is None else days
     if days <= 0:
         return {"purged": 0, "days": days, "people": [], "files": [], "disabled": True}
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    rows = conn.execute(
-        "SELECT id, name, archived_at FROM candidates "
-        "WHERE COALESCE(archived_at,'') != '' AND archived_at <= ? ORDER BY id",
-        (cutoff,)).fetchall()
+    if only_ids is None:
+        rows = conn.execute(
+            "SELECT id, name, archived_at FROM candidates "
+            "WHERE COALESCE(archived_at,'') != '' AND archived_at <= ? ORDER BY id",
+            (cutoff,)).fetchall()
+    else:
+        _ids = [int(x) for x in only_ids]
+        if not _ids:
+            return {"purged": 0, "days": days, "people": [], "files": []}
+        _marks = ",".join("?" * len(_ids))
+        rows = conn.execute(
+            f"SELECT id, name, archived_at FROM candidates "          # noqa: S608 — 占位符拼法固定
+            f"WHERE id IN ({_marks}) AND COALESCE(archived_at,'') != '' "
+            f"AND archived_at <= ? ORDER BY id",
+            (*_ids, cutoff)).fetchall()
     people: list[dict] = []
     files: list[str] = []
     for r in rows:

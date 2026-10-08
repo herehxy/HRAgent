@@ -394,7 +394,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             # 解释档位时同样区分"已归岗"与"只是建议岗位"：建议岗位的学历门槛
             # 不能用来判 D（v1.8.9），解释里也就不该出现按猜出来的门槛下的结论。
             _has_job = any(x.get("job_id") for x in (d.get("applications") or []))
-            g = grade(cand, jd, ctx.tiers, job_confirmed=_has_job)
+            g = grade(cand, jd, job_confirmed=_has_job)
             mm = major_match({**cand, "major": d.get("major")}, jd, db.skill_categories(conn))
             # 与库内记录对账（v1.6）：这里是"现在重算"，库里是"上次重算时写下的结论"。
             # 不一致通常是因为技能词表更新过（如本体补充了软件类技能），
@@ -407,7 +407,6 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 _same = (_db_app.get("tier_suggested") or "") == (g["tier_suggested"] or "")
                 consistency = {
                     "same": _same,
-                    "db_score": _db_app.get("score"),
                     "db_tier": _db_app.get("tier_suggested"),
                     "db_hits": _db_app.get("hits") or [],
                     "note": ("库内记录与当前重算一致" if _same else
@@ -430,7 +429,6 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 "candidate_id": cid, "name": c.get("name"),
                 "job": job_meta,
                 "tier_suggested": _stored, "tier_rule": _rule,
-                "score": None,
                 "tier_source": _src,
                 "breakdown": g["breakdown"],
                 "reasons": g["reasons"], "risks": g["risks"],

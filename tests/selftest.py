@@ -334,7 +334,7 @@ def main(verbose: bool = True) -> int:
         c.ok("电子束熔炼" not in lm["skills"], "模型声称但原文没有的技能不进 skills")
         c.ok("电子束熔炼" in lm["unverified_skills"], "未核验技能单独列出，供人工核对",
              "、".join(lm["unverified_skills"]))
-        g = grade(lm, JD, TIERS)
+        g = grade(lm, JD)
         c.ok("电子束熔炼" not in g["hit"], "未核验技能不会出现在岗位命中里")
 
         # ============================================================ E
@@ -394,11 +394,11 @@ def main(verbose: bool = True) -> int:
         _gd = grade({"name": "规则甲", "education": "本科", "skills": []},
                     {"role": "r", "must": {"skills_required": [], "education_min": "硕士",
                                              "years_min": 0}, "preferred": {}},
-                    {}, job_confirmed=True)
+                    job_confirmed=True)
         _gm = grade({"name": "规则乙", "education": "硕士", "skills": []},
                     {"role": "r", "must": {"skills_required": [], "education_min": "本科",
                                              "years_min": 0}, "preferred": {}},
-                    {}, job_confirmed=True)
+                    job_confirmed=True)
         c.ok(_gd["tier_suggested"] == "D",
              "⑨ 学历不达标 → 直接判 D（唯一硬门槛，规则可复现）",
              str(_gd["tier_suggested"]))
@@ -423,8 +423,8 @@ def main(verbose: bool = True) -> int:
         # 未归岗时尺子可能是系统猜的"建议岗位"，用猜出来的门槛判 D 不合理。
         _low = {"name": "测试员", "education": "大专", "years": 5,
                 "skills": [{"name": "钛合金", "evidence": "负责钛合金工艺"}]}
-        _g_conf = grade(_low, JD, TIERS, job_confirmed=True)
-        _g_unconf = grade(_low, JD, TIERS)
+        _g_conf = grade(_low, JD, job_confirmed=True)
+        _g_unconf = grade(_low, JD)
         c.ok(_g_conf["tier_suggested"] == "D",
              "已明确归岗 + 学历低于岗位要求 -> D", _g_conf["tier_suggested"])
         c.ok(_g_unconf["tier_suggested"] != "D",
@@ -1376,6 +1376,42 @@ def main(verbose: bool = True) -> int:
                  "归岗后档位按新口径写入（学历不达标→D；学历达标→留空待模型分析）",
                  str(_app_row["tier_suggested"]))
             c.ok(_n_audit == 1, "采纳归岗写入审计（岗位未指定 → 归到 X）")
+
+            # ---- v1.13.6 回归：单人彻底删除只删该人（原来会连带删所有到期的人）----
+            import datetime as _dt
+            _conn_pd = db.connect(db_path)
+            _old30 = (_dt.datetime.now() - _dt.timedelta(days=40)).strftime("%Y-%m-%d %H:%M:%S")
+            # 造 3 个"归档满 40 天"的候选人（含本条投递）
+            _purge_ids = []
+            for _i in range(2):
+                _c0 = db.insert_candidate(_conn_pd, {"identity_key": f"selftest:purge:{_i}",
+                                                      "name": f"到期人{_i}"})
+                _a0 = db.insert_application(_conn_pd, {"candidate_id": _c0, "job_id": None,
+                                                       "channel": "测试", "applied_at": db.now()})
+                _conn_pd.execute("UPDATE candidates SET archived_at=? WHERE id=?", (_old30, _c0))
+                _purge_ids.append(_c0)
+            _conn_pd.commit()
+            _before_left = db.count_needing_insight(_conn_pd)   # 任意一次读，确认连接可用
+            _conn_pd.close()
+            _code_pd, _body_pd = _asgi(srv.app, "POST",
+                                       f"/api/candidates/{_purge_ids[0]}/purge", hr, b"")
+            _conn_pd2 = db.connect(db_path)
+            _still = _conn_pd2.execute(
+                "SELECT COUNT(*) AS n FROM candidates WHERE id IN (?,?)",
+                (_purge_ids[0], _purge_ids[1])).fetchone()["n"]
+            _conn_pd2.close()
+            c.ok(_code_pd == 200 and _still == 1,
+                 "⑯ 单人「彻底删除」只删该人（不会连带删掉其他到期归档的人）",
+                 f"HTTP {_code_pd}，另一个人还在={_still == 1}")
+            # 清掉造出来的"到期人"：它们归档满 40 天，会让后面"无到期者应返回 0"
+            # 那条断言失败。自检库是一次性的，直接删干净。
+            _conn_pd3 = db.connect(db_path)
+            for _pid in _purge_ids:
+                for _t in ("applications", "documents"):
+                    _conn_pd3.execute(f"DELETE FROM {_t} WHERE candidate_id = ?", (_pid,))
+                _conn_pd3.execute("DELETE FROM candidates WHERE id = ?", (_pid,))
+            _conn_pd3.commit()
+            _conn_pd3.close()
             # v1.13.3：**改岗位**（HR 要求"给每个人一个修改岗位的按钮"）。
             # 原来已归岗的再归会被 400 拒掉，HR 无处纠正识别错的归属。
             _conn_ra = db.connect(db_path)          # conn 在上一段已关闭，这里单开一个
@@ -1521,6 +1557,64 @@ def main(verbose: bool = True) -> int:
             _asgi(srv.app, "POST", "/api/settings", hr,
                   json.dumps({"auto_insight_on_ingest": True}).encode())
 
+            # ---- v1.13.6 回归：撤销合并要把投递/附件搬回来 ----
+            _conn_ms = db.connect(db_path)
+            _cid_ms1 = db.insert_candidate(_conn_ms, {"identity_key": "selftest:merge:src",
+                                                      "name": "合并源"})
+            _cid_ms2 = db.insert_candidate(_conn_ms, {"identity_key": "selftest:merge:dst",
+                                                      "name": "合并主"})
+            _aid_ms = db.insert_application(_conn_ms, {"candidate_id": _cid_ms1, "job_id": None,
+                                                       "channel": "测试", "applied_at": db.now()})
+            _conn_ms.commit()
+            _conn_ms.close()
+            db.merge_candidates(db.connect(db_path), _cid_ms1, _cid_ms2, "hr", "hr")
+            _conn_ms3 = db.connect(db_path)
+            _at_dst = _conn_ms3.execute("SELECT candidate_id FROM applications WHERE id=?",
+                                         (_aid_ms,)).fetchone()["candidate_id"]
+            _conn_ms3.close()
+            c.ok(_at_dst == _cid_ms2, "⑯b 合并把投递挂到主档", f"投递现在属于 {_at_dst}")
+            db.split_candidate(db.connect(db_path), _cid_ms1, "hr", "hr")
+            _conn_ms4 = db.connect(db_path)
+            _at_src = _conn_ms4.execute("SELECT candidate_id FROM applications WHERE id=?",
+                                         (_aid_ms,)).fetchone()["candidate_id"]
+            _conn_ms4.close()
+            c.ok(_at_src == _cid_ms1,
+                 "⑯c 撤销合并把投递**搬回源档**（原来拆完源档案变空壳、投递永久留在主档）",
+                 f"投递现在属于 {_at_src}")
+
+            # ---- v1.13.6 回归：阶段变更要写 stage_changed_at ----
+            _conn_sc = db.connect(db_path)
+            _cid_sc = db.insert_candidate(_conn_sc, {"identity_key": "selftest:stage:ts",
+                                                      "name": "阶段时间"})
+            _aid_sc = db.insert_application(_conn_sc, {"candidate_id": _cid_sc, "job_id": None,
+                                                       "channel": "测试", "applied_at": db.now(),
+                                                       "stage": "新投递"})
+            _conn_sc.commit()
+            _conn_sc.close()
+            _asgi(srv.app, "POST", f"/api/applications/{_aid_sc}/stage", hr,
+                  json.dumps({"stage": "初面"}).encode())
+            _conn_sc2 = db.connect(db_path)
+            _row_sc = _conn_sc2.execute(
+                "SELECT stage, stage_changed_at FROM applications WHERE id=?",
+                (_aid_sc,)).fetchone()
+            _conn_sc2.close()
+            c.ok(_row_sc["stage"] == "初面" and _row_sc["stage_changed_at"],
+                 "⑯d 改阶段会记 stage_changed_at（停滞待办靠它，否则刚推进的人被当成停滞）",
+                 f"stage={_row_sc['stage']} stage_changed_at={_row_sc['stage_changed_at']}")
+
+            # ---- v1.13.6 回归：applied_at 显式传 None 要退回时间戳 ----
+            _conn_ap = db.connect(db_path)
+            _cid_ap = db.insert_candidate(_conn_ap, {"identity_key": "selftest:applied:none",
+                                                      "name": "投递时间空"})
+            _aid_ap = db.insert_application(_conn_ap, {"candidate_id": _cid_ap, "job_id": None,
+                                                       "channel": "测试", "applied_at": None})
+            _row_ap = _conn_ap.execute("SELECT applied_at FROM applications WHERE id=?",
+                                       (_aid_ap,)).fetchone()
+            _conn_ap.close()
+            c.ok(bool(_row_ap["applied_at"]),
+                 "⑯e applied_at 传 None 时退回时间戳（NULL 会让『最新投递』排序取错行）",
+                 f"applied_at={_row_ap['applied_at']}")
+
             # ---- v1.13.2：**列表接口不许调模型**（性能回归点）----
             # 原来没有存储建议的老数据会在每次打开人才库时现调模型判断一次，
             # 一次 6-8 秒且烧 token（HR 实测：「每次点击人才库页面都会重新调用模型，
@@ -1529,10 +1623,23 @@ def main(verbose: bool = True) -> int:
             _orig_perf = _an_perf.suggest_job
             _an_perf.suggest_job = lambda *a, **k: (_ for _ in ()).throw(
                 AssertionError("列表接口不该调用模型！"))
+            # v1.13.6：档位明细也不再逐人调 explain_grade 重算（那会每人开一次连接
+            # 并重跑 grade()+major_match()，实测每人约 48ms）。这里让它一被调用就炸，
+            # 防止以后有人为了"复用工具"又把它接回去。
+            from app.agent import tools as _tl
+            _orig_explain = _tl.execute
+
+            def _explode(name, *a, **k):
+                if name == "explain_grade":
+                    raise AssertionError("列表接口不该逐人调 explain_grade 重算档位！")
+                return _orig_explain(name, *a, **k)
+
+            _tl.execute = _explode
             try:
                 _code_p, _body_p = _asgi(srv.app, "GET", "/api/candidates", {})
             finally:
                 _an_perf.suggest_job = _orig_perf
+                _tl.execute = _orig_explain
             _items_p = (json.loads(_body_p).get("items") if _code_p == 200 else [])
             c.ok(_code_p == 200 and isinstance(_items_p, list),
                  "⑬ 打开人才库**不调模型**（列表只读库：不再每次刷新都等 6-8 秒、烧 token）",
@@ -2323,9 +2430,9 @@ def main(verbose: bool = True) -> int:
             base_cand = {"name": "张三", "education": "硕士", "years": 3,
                          "skills": ["钛合金"], "skill_detail": [{"canonical": "钛合金",
                          "verified": True, "evidence": "做过钛合金"}], "certificates": []}
-            g_m = grade({**base_cand, "gender": "男"}, JD, TIERS)
-            g_f = grade({**base_cand, "gender": "女"}, JD, TIERS)
-            g_n = grade(base_cand, JD, TIERS)
+            g_m = grade({**base_cand, "gender": "男"}, JD)
+            g_f = grade({**base_cand, "gender": "女"}, JD)
+            g_n = grade(base_cand, JD)
             c.ok(g_m["score"] == g_f["score"] == g_n["score"]
                  and g_m["tier_suggested"] == g_f["tier_suggested"] == g_n["tier_suggested"],
                  "换性别不改变评分与档位（性别不参与 grade()）",
@@ -3488,8 +3595,8 @@ def main(verbose: bool = True) -> int:
                      "preferred": {"skills": []}}
             _c_no = {"name": "测试", "education": "硕士", "years": 3,
                      "major": "材化", "skills": [{"name": "钛合金", "evidence": "钛合金"}]}
-            _g_no = grade(_c_no, _jd_m, TIERS)
-            _g_yes = grade({**_c_no, "major_canonical": "材料科学与工程"}, _jd_m, TIERS)
+            _g_no = grade(_c_no, _jd_m)
+            _g_yes = grade({**_c_no, "major_canonical": "材料科学与工程"}, _jd_m)
             c.ok(_g_no["major_check"]["in_list"] is None or _g_no["major_check"]["in_list"] is False,
                  "㉒ 规则归不出的专业写法按原样判定（如实）",
                  str(_g_no["major_check"]["in_list"]))

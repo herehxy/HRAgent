@@ -437,12 +437,12 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         # 画像用"胜出岗位"那一轮抽取的结果：技能清单里会包含该岗位 JD 写的词
         # （例如软件岗的 Java/Spring Boot），HR 点开档案看到的技能才与岗位对得上。
         cand = route["cand"]
-        g = grade(cand, route["jd"] or jd, tiers)
+        g = grade(cand, route["jd"] or jd)
     else:
         cand = extract(text, jd, use_llm=use_llm, llm_conf=llm_conf, filename=filename)
         # 只有**明确归岗**（job_id 来自文件名/邮件标题命中）时才允许判 D；
         # 用默认尺子试算的待指定投递不判 D（见 tier.grade 的 job_confirmed）。
-        g = grade(cand, jd, tiers, job_confirmed=(job_id is not None))
+        g = grade(cand, jd, job_confirmed=(job_id is not None))
 
     # —— 邮件主题 / 文件名里的结构化字段（v1.9）：**优先于正文抽取** ——
     # 投递方按「方向+学历+学校+专业+姓名+性别」的格式填写，比从正文里猜准得多。
@@ -464,9 +464,9 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         if major_note:
             result["notes"].append(major_note)
             if route:
-                g = grade(cand, route["jd"], tiers)
+                g = grade(cand, route["jd"])
             else:
-                g = grade(cand, jd, tiers, job_confirmed=(job_id is not None))
+                g = grade(cand, jd, job_confirmed=(job_id is not None))
             result["tier"] = g["tier_suggested"]
             result["score"] = g["score"]
 

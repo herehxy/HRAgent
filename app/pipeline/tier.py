@@ -39,7 +39,7 @@ def resolve_requirements(jd: dict) -> tuple[list[str], list[str]]:
     return req, bonus
 
 
-def grade(cand: dict, jd: dict, tiers_cfg: dict, job_confirmed: bool = False) -> dict:
+def grade(cand: dict, jd: dict, job_confirmed: bool = False) -> dict:
     """极简分级：学历不达标 + 已归岗 → D；其余一律 C（等模型给更准确的建议）。
 
     v1.12 重构：删掉了整套加权打分（学历/年限/技能/加分/专业方向五维度）和
@@ -74,8 +74,8 @@ def grade(cand: dict, jd: dict, tiers_cfg: dict, job_confirmed: bool = False) ->
 
     # —— 年限（给模型和展示用）——
     years = cand.get("years")
-    y_min = int(must.get("years_min", 0) or 0)
-    years_ok = years is None or years >= y_min
+    # v1.13.6：年限维度已删（只剩学历门槛这一条硬规则），原先算出来的
+    # y_min / years_ok 一次都没被用到，属于"看起来在判年限、其实没判"的误导代码。
 
     # —— 专业方向（给模型和展示用）——
     major_required = (must.get("major_required")

@@ -69,7 +69,7 @@ def _rule_priorities(workload: dict) -> list[dict]:
         detail = ""
         if len(_hs) == 1:
             _i = _hs[0]
-            detail = f"（{_i.get('score')} · {_i.get('tier_suggested')}）" if _i.get("score") is not None else ""
+            detail = ""      # v1.13.6：打分已删，不再往待办标题里塞分数
         out.append({"title": (f"确认「{who}」的档位{detail}" if who
                               else f"确认 {c['high_score']} 位高分候选人的档位"),
                     "why": "匹配度已达标但未确认，拖久了人才容易流失",
@@ -109,7 +109,7 @@ def _rule_priorities(workload: dict) -> list[dict]:
         out.append({"title": (f"确认「{who}」的档位" if who
                               else f"确认 {c['pending_confirm']} 条待确认档位"),
                     "why": "系统已给出建议档位，等 HR 背书",
-                    "action": "打开人才库逐条确认",
+                    "action": "打开人才库逐条确认档位",
                     "names": [i.get("name") for i in _pc if i.get("name")],
                     "count": c["pending_confirm"]})
     return out[:3]
@@ -126,7 +126,7 @@ def _llm_priorities(workload: dict) -> dict | None:
         "日期": f"{datetime.now():%Y-%m-%d}",
         "统计": workload["counts"],
         "停滞判定天数": workload["stuck_days"],
-        "高分未确认": _brief(workload["items"]["high_score"],
+        "建议档A未确认": _brief(workload["items"]["high_score"],
                         ["name", "score", "tier_suggested", "job_title"]),
         "停滞投递": _brief(workload["items"]["stuck"],
                        ["name", "stage", "since", "job_title"]),
