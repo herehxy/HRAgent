@@ -1190,6 +1190,12 @@ def main(verbose: bool = True) -> int:
                      and "入库即分析" in _pg
                      and "function analyzePendingBatch" in _pgjs,
                      "⑮ 入库即分析有开关，且提供手动批量补分析（带进度）")
+                # 护栏：前端读的字段名必须和后端返回的一致。
+                # 出过 isw.on（后端是 isw.enabled）→ 复选框永远画成「关」，
+                # HR 勾上去了却看着没变，以为"改不了"。这类键名错位要能被抓到。
+                c.ok("isw.enabled" in _pgjs and "isw.on" not in _pgjs,
+                     "⑮a 开关的字段名前后端一致（isw.enabled）",
+                     "前端若读 isw.on 会永远显示「关」，看起来改不动")
                 # v1.13：待指定投递必须**处处有归岗入口**。
                 # 原来「采纳建议岗位」只在系统给出建议时才渲染——模型不可用/判断不出时
                 # HR 完全没有入口（实测反馈：「所属岗位待指定情况下怎么指定岗位呢？没有入口啊」）。

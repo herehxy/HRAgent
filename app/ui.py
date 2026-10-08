@@ -613,14 +613,14 @@ async function viewPool(){
         <span class="small">入库即分析</span>
         <label class="small" style="display:flex;align-items:center;gap:4px;cursor:pointer"
                title="开启：新简历入库后自动分析一次（每人约 2-8 秒、消耗模型额度）；关掉：入库不调模型，可在下面手动批量补">
-          <input type="checkbox" ${isw.on?'checked':''}
-                 onchange="setAutoInsight(this.checked)"> ${isw.on?'开（进门就有判断）':'关（改为手动批量分析）'}
+          <input type="checkbox" ${isw.enabled?'checked':''}
+                 onchange="setAutoInsight(this.checked)"> ${isw.enabled?'开（进门就有判断）':'关（改为手动批量分析）'}
         </label>
         <button id="btnAnalyzePending" data-pending="${isw.pending}"
                 onclick="analyzePendingBatch()" ${isw.pending?'':'disabled'}>
           ${isw.pending ? ('分析待分析的人（'+isw.pending+'）') : '没有待分析的人'}
         </button>
-        <span class="small">${isw.on
+        <span class="small">${isw.enabled
           ? '每位新人入库后自动分析一次；关掉后新简历只入库不分析。'
           : '当前已关：入库不调模型，改由你按需批量补（每批 5 人，有进度）。'}</span>
       </div>
