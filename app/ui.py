@@ -723,14 +723,14 @@ function cardHtml(x){
   const _st = x.status_display || '待确认';
   const _stStyle = {
     '已确认': 'color:#0a7f1f;background:#e8ffea',
-    '待复核': 'color:#a45a00;background:#fff7e8',
+    '待确认': 'color:#a45a00;background:#fff7e8',
     '待分析': 'color:#1d5fd8;background:#e8f0ff',
     '待归岗': 'color:#a45a00;background:#fff7e8',
   }[_st] || 'color:#4e5969;background:#f2f3f5';
-  // 待复核 → 顺手给一个「复核」按钮：认同默认档位的人点一下就行，不必改档位
-  const _rev = (x.status_display === '待复核' && x.application_id)
+  // 待确认 → 顺手给一个「复核」按钮：认同默认档位的人点一下就行，不必改档位
+  const _rev = (x.status_display === '待确认' && x.application_id)
     ? ` <button class="mini" onclick="markReview(${x.application_id},false)"
-         title="认可系统给的建议档，档位不变">复核</button>` : '';
+         title="表示这个人的信息已核对完毕（不改档位）">复核</button>` : '';
   const conf = (_st
     ? `<span class="chip" style="${_stStyle}" title="${esc(x.status_hint||'')}">${esc(_st)}</span>` + _rev
     : '');
@@ -809,8 +809,8 @@ async function showDetail(cid){
       <td>${esc((a.applied_at||'').slice(0,16))}</td>
       <td>${esc(a.tier_final||a.tier_suggested||'—')}</td><td>${esc(a.stage||'—')}</td>
       <td>${esc(a.status_display||a.status||'—')}
-        <button class="mini" onclick="markReview(${a.id},${(a.status_display==='待复核')?'false':'true'})"
-          title="${(a.status_display==='待复核')?'认可系统给的建议档（档位不变）':'已复核，点此撤销'}">${(a.status_display==='待复核')?'复核':'撤销复核'}</button>
+        <button class="mini" onclick="markReview(${a.id},${(a.status_display==='待确认')?'false':'true'})"
+          title="${(a.status_display==='待确认')?'表示这个人的信息已核对完毕（不改档位）':'已复核，点此撤销复核'}">${(a.status_display==='待确认')?'复核':'撤销复核'}</button>
       </td></tr>`).join('');
   const docs = (d.documents||[]).map(x=>{
       const okFile = !!x.archived_path;
@@ -860,6 +860,19 @@ async function showDetail(cid){
           <button class="mini" onclick="copyText('${esc((p||'')+(p&&m?' / ':'')+(m||''))}')">复制</button>
           <span class="small">（库内加密存储）</span>`;
       })()}</div>
+      <div class="k">信息复核</div><div>
+        ${(()=>{
+          // 复核 = "人事确认这个人的信息已核对完毕"（与档位无关：改档位不改变复核状态）
+          const _a = (d.applications||[])[0] || {};
+          // 注意：已确认时 status_display 返回空串（不打扰），
+          // 所以这里必须读**原始** status 字段，不能拿 status_display 判断。
+          const _done = (_a.status === '已确认');
+          return `<b>${_done ? '已复核' : '未复核'}</b>
+            <button class="btn-primary" onclick="markReview(${_a.id||'null'},${_done},d)">
+              ${_done ? '撤销复核' : '我已核对过这个人的信息'}</button>
+            <span class="small">复核只表示"看过并认可"，**不会改动档位**；
+              不同意就直接改档位或拒绝。</span>`;
+        })()}</div>
       <div class="k">所属岗位</div><div>
         ${(()=>{
           // 完整档案里直接给「修改岗位」：识别错、或人换了方向，都要能纠正归属。
@@ -1370,7 +1383,7 @@ async function analyzePendingBatch(){
 /* 复核（v1.14.1）：认可系统这次给的建议档，**不改档位**。
    为什么单独一个动作：档位是 HR 的判断，复核是"我看过"。
    以前绑在一起（改档位 = 顺手置已确认），等于诱导 HR 为了消标签而改档位。 */
-async function markReview(aid, undo){
+async function markReview(aid, undo, fromDetail){
   if (!aid) { toast('这条投递还没有记录','warn'); return; }
   if (!await askConfirm(undo ? '撤销复核？\\n\\n会回到"未复核"，系统不会改档位。'
     : '确认复核这条建议？\\n\\n表示你认可系统给的建议档（**档位不会被改动**），'
@@ -1379,6 +1392,7 @@ async function markReview(aid, undo){
     {method:'POST', body:JSON.stringify({undo: !!undo})});
   if (r.__http_error || r.error){ toast(r.detail||r.error||'操作失败','danger'); return; }
   toast(r.note || '已更新', 'ok');
+  if (fromDetail){ try{ return void await showDetail(fromDetail); }catch(e){} }
   refresh();
 }
 

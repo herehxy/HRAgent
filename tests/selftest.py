@@ -475,10 +475,10 @@ def main(verbose: bool = True) -> int:
         # 待复核（模型给了判断、人还没表态）；已确认的**不显示任何标签**（不打扰）。
         _sd = db.app_status_display
         c.ok(_sd({"app_status": "已确认", "job_id": 1, "tier_suggested": "A"})[0] == ""
-             and _sd({"app_status": "待确认", "job_id": 1, "tier_suggested": "B"})[0] == "待复核"
+             and _sd({"app_status": "待确认", "job_id": 1, "tier_suggested": "B"})[0] == "待确认"
              and _sd({"app_status": "待确认", "job_id": 1})[0] == "待分析"
              and _sd({"app_status": "待确认", "job_id": None})[0] == "待归岗",
-             "⑪ 状态标签只提示卡住的事：待复核 / 待分析 / 待归岗；已确认不打扰")
+             "⑪ 状态标签只提示卡住的事：待确认 / 待分析 / 待归岗；已确认不打扰")
         c.ok(all(_sd(x)[1] for x in ({"app_status": "待确认", "job_id": 1, "tier_suggested": "B"},
                                      {"app_status": "待确认", "job_id": None})),
              "⑪b 每个状态都带一句「下一步该做什么」（界面上悬停可见）")
