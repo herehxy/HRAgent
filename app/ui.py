@@ -616,11 +616,6 @@ async function viewPool(){
       <button onclick="archiveByYearFrom('poolArchYear')">归档该年以前</button>
       <span class="small">归档的人进「归档」页，满 30 天自动彻底删除，期间可随时取消</span>
     </div>
-    <div class="bar" style="margin-top:4px">
-      <span class="small">批量归岗（勾选上面的人 → 选岗位 → 全部归岗）</span>
-      <button onclick="assignBatchPick()">为勾选的人指定岗位</button>
-    </div>
-    <div id="pickjobBatch"></div>
     ${gtip}
     ${eduWarn}
     <div class="tabs" style="margin-bottom:0">
@@ -775,8 +770,8 @@ async function showDetail(cid){
       `<div class="ev">${esc(s.name)}：${esc(s.evidence)}</div>`).join('');
   const apps = (d.applications||[]).map(a=>`<tr>
       <td>#${a.id}</td>
-      <td>${esc(a.job_title||'待指定')}${a.job_id ? '' :
-        ` <button onclick="assignJobPick(${d.id},'pickjobD-${d.id}')">指定岗位</button>`}</td>
+      <td>${esc(a.job_title||'待指定')}
+        <button onclick="assignJobPick(${d.id},'pickjobD-${d.id}',${a.id})">${a.job_id ? '修改岗位' : '指定岗位'}</button></td>
       <td>${esc(a.channel||'—')}</td>
       <td>${esc((a.applied_at||'').slice(0,16))}</td>
       <td>${esc(a.tier_final||a.tier_suggested||'—')}</td><td>${esc(a.stage||'—')}</td>
@@ -829,6 +824,17 @@ async function showDetail(cid){
           <button class="mini" onclick="copyText('${esc((p||'')+(p&&m?' / ':'')+(m||''))}')">复制</button>
           <span class="small">（库内加密存储）</span>`;
       })()}</div>
+      <div class="k">所属岗位</div><div>
+        ${(()=>{
+          // 完整档案里直接给「修改岗位」：识别错、或人换了方向，都要能纠正归属。
+          // v1.13.3 起后端支持改岗位（原来已归岗的会被 400 拒掉，HR 无处可改）。
+          const _a = (d.applications||[])[0] || {};
+          const _t = _a.job_title || '待指定';
+          const _label = (_a.job_id ? '修改岗位' : '指定岗位');
+          return `<b>${esc(_t)}</b>
+            <button onclick="assignJobPick(${d.id},'pickjobD-${d.id}',${_a.id||'null'})">${_label}</button>
+            <span class="small">改岗位后会按新岗位的 JD 重算建议档位，动作写入审计</span>`;
+        })()}</div>
       <div class="k">档案状态</div><div>${esc(d.pool_status||'—')} · 密级标记 ${esc(d.pii_level||'普通')}
         · 投递 ${(d.applications||[]).length} 次 · 附件 ${(d.documents||[]).length} 份</div>
     </div>
@@ -1158,14 +1164,23 @@ async function archiveCandidate(cid, on){
   toast(on ? (r.note || '已归档') : '已取消归档，恢复在人才库与检索中展示', 'ok');
   refresh();
 }
-// 采纳建议岗位：把待指定投递归到 HR 确认的岗位，并按该岗位 JD 重算建议档位
-async function assignJob(cid, jobId, title){
-  if (!await askConfirm('把该候选人的待指定投递归到「'+title+'」？\\n\\n'
-    + '归岗后会按该岗位的 JD 重算建议档位，动作写入审计。')) return;
+// 归岗 / 改岗位（v1.13.3 起同一个入口）：把投递归到 HR 指定的岗位，并按该岗位 JD 重算建议档位。
+// applicationId 用于"一个人有多条投递"时精确定位是哪一条（不传就取最新一条）。
+let _pickJobApp = null;        // 当前正在处理的投递 id
+let _pickJobAppTitle = null;   // 该投递的原岗位名（确认框里说清"从哪改到哪"）
+async function assignJob(cid, jobId, title, applicationId){
+  const aid = (applicationId === undefined) ? _pickJobApp : applicationId;
+  const _was = _pickJobAppTitle ? ('（原岗位：' + _pickJobAppTitle + '）') : '';
+  if (!await askConfirm('把该投递的归属岗位设为「' + title + '」' + _was + '？\\n\\n'
+    + '归岗/改岗位后按该岗位的 JD 重算建议档位，动作写入审计。')) return;
   const r = await api('/api/candidates/'+cid+'/assign-job',
-    {method:'POST', body:JSON.stringify({job_id:jobId})});
+    {method:'POST', body:JSON.stringify({job_id:jobId, application_id:aid || null})});
   if (r.__http_error || r.error){ toast(r.detail||r.error||'归岗失败','danger'); return; }
-  toast('已归岗到「'+title+'」'+(r.note?('（'+r.note+'）'):'（已按岗位 JD 重算）'), 'ok');
+  if (r.unchanged){ toast('该投递本来就属于这个岗位，未做改动','warn'); return; }
+  toast((r.old_job_title ? ('已从「'+r.old_job_title+'」改为「'+title+'」')
+                         : ('已归岗到「'+title+'」'))
+        + (r.note?('（'+r.note+'）'):'（已按岗位 JD 重算）'), 'ok');
+  _pickJobAppTitle = null;
   refresh();
 }
 
@@ -1175,10 +1190,17 @@ async function assignJob(cid, jobId, title){
    只能看着"所属岗位待指定"干瞪眼（实测反馈：「没有入口啊」）。
    这个入口与建议无关：直接从在招岗位里挑一个。
    就地展开选择器而不是弹层：HR 还在看这个人的其他信息，弹层会挡住上下文。 */
-async function assignJobPick(cid, targetId){
+async function assignJobPick(cid, targetId, applicationId){
   const tid = targetId || ('pickjob-' + cid);
   const holder = document.getElementById(tid);
   if (!holder) return;
+  _pickJobApp = applicationId || null;
+  _pickJobAppTitle = null;
+  if (!applicationId){
+    // 没指定哪条投递时，取该候选人最新一条的原岗位名（只为确认框里说清"从哪改到哪"）
+    const _cur = (ITEMS||[]).filter(x => x.id === cid)[0];
+    _pickJobAppTitle = (_cur && _cur.job_title) || null;
+  }
   if (holder.innerHTML) { holder.innerHTML = ''; return; }   // 再点一次收起
   holder.innerHTML = '<div class="note" style="margin-top:6px">读取在招岗位…</div>';
   const r = await api('/api/jobs');
@@ -1214,56 +1236,6 @@ async function assignJobFromPick(cid){
   const jid = parseInt(sel.value, 10);
   const title = sel.options[sel.selectedIndex].textContent;
   await assignJob(cid, jid, title);
-}
-
-/* 批量指定岗位（v1.13）：待指定往往是一批来的（一批简历都没在文件名里写岗位），
-   逐条点太慢。只处理**勾选且确实待指定**的人——已归岗的会被后端拒（400），
-   提前过滤掉，免得把"失败"当成噪音报给 HR。 */
-async function assignBatchPick(){
-  const picked = archSelected();
-  if (!picked.length){ toast('先勾选要归岗的人','warn'); return; }
-  const holder = document.getElementById('pickjobBatch');
-  if (!holder) return;
-  const cands = (ITEMS||[]).filter(x => picked.indexOf(x.id) >= 0 && !x.job_title);
-  if (!cands.length){
-    holder.innerHTML = '<div class="note" style="color:#ff7d00">勾选的人里没有「待指定」的'
-      + '（已归岗的人不用再归）。</div>';
-    return;
-  }
-  const r = await api('/api/jobs');
-  if (r.__http_error || r.error){ toast('读取岗位失败','danger'); return; }
-  const jobs = (r.items || []).filter(j => j.active !== 0);
-  if (!jobs.length){
-    holder.innerHTML = '<div class="note" style="color:#ff7d00">还没有在招岗位，'
-      + '请先到「岗位管理」建岗位。</div>';
-    return;
-  }
-  const opts = jobs.map(j => '<option value="' + j.id + '">' + esc(j.title)
-      + (j.department_name ? (' · ' + esc(j.department_name)) : '') + '</option>').join('');
-  holder.innerHTML = '<div class="bar" style="flex-wrap:wrap;margin-top:6px">'
-    + '<span class="small">把勾选的 <b>' + cands.length + '</b> 位待指定的人归到：</span>'
-    + '<select id="pickjobSelBatch" style="width:220px">' + opts + '</select>'
-    + '<button class="btn-primary" onclick="assignBatchGo()">全部归岗</button>'
-    + '<button onclick="assignJobPickClear(this)">取消</button></div>';
-}
-async function assignBatchGo(){
-  const sel = document.getElementById('pickjobSelBatch');
-  if (!sel) return;
-  const jid = parseInt(sel.value, 10);
-  const title = sel.options[sel.selectedIndex].textContent;
-  const picked = archSelected();
-  const cands = (ITEMS||[]).filter(x => picked.indexOf(x.id) >= 0 && !x.job_title);
-  if (!cands.length){ toast('没有可归岗的人','warn'); return; }
-  if (!await askConfirm('把勾选的 ' + cands.length + ' 位待指定候选人归到「' + title + '」？\\n\\n'
-      + '逐个按该岗位的 JD 重算建议档位，每人的动作都写入审计。')) return;
-  let ok = 0, fail = 0;
-  for (const x of cands){
-    const r = await api('/api/candidates/' + x.id + '/assign-job',
-      {method:'POST', body:JSON.stringify({job_id: jid})});
-    if (r.__http_error || r.error) fail++; else ok++;
-  }
-  toast('已归岗 ' + ok + ' 人' + (fail ? ('，失败 ' + fail + ' 人') : ''), fail ? 'warn' : 'ok');
-  refresh();
 }
 
 /* 判断建议岗位（v1.13.2）：**主动**让模型判断一次并落库。

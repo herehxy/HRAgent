@@ -1088,6 +1088,9 @@ def _startup_purge_task() -> None:
 
 class AssignJobReq(BaseModel):
     job_id: int
+    # v1.13.3：可选指定是哪一条投递（一个人可能有多条投递）；
+    # 不传就取该候选人最新一条（归岗/改岗位都用同一个入口）
+    application_id: int | None = None
 
 @app.post("/api/candidates/{cid}/assign-job")
 def api_assign_job(cid: int, req: AssignJobReq,
@@ -1098,11 +1101,20 @@ def api_assign_job(cid: int, req: AssignJobReq,
     require(s, "set_stage")
     conn = db.connect(DB_PATH)
     try:
-        row = conn.execute(
-            """SELECT id FROM applications WHERE candidate_id = ? AND job_id IS NULL
-               ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT 1""", (cid,)).fetchone()
+        # v1.13.3：**归岗与改岗位走同一个入口**。
+        # 原来只找「待指定」的投递——已归岗的人想改岗位会被 400 挡回去，
+        # HR 就没办法纠正识别错的归属（实测反馈："要能给每个人一个修改岗位的按钮"）。
+        # 现在：优先用显式指定的 application_id；否则取该候选人最新一条投递
+        # （已归岗的会被 assign_job 当成"改岗位"处理，并写 reassign_job 审计）。
+        if req.application_id:
+            row = conn.execute("SELECT id, job_id FROM applications WHERE id = ? AND candidate_id = ?",
+                               (req.application_id, cid)).fetchone()
+        else:
+            row = conn.execute(
+                """SELECT id, job_id FROM applications WHERE candidate_id = ?
+                   ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT 1""", (cid,)).fetchone()
         if not row:
-            raise HTTPException(status_code=400, detail="该候选人没有「待指定」的投递")
+            raise HTTPException(status_code=400, detail="该候选人没有可归岗的投递记录")
         job = db.get_job(conn, req.job_id)
         if not job:
             raise HTTPException(status_code=404, detail="未找到该岗位")

@@ -1190,8 +1190,11 @@ def main(verbose: bool = True) -> int:
                 # HR 完全没有入口（实测反馈：「所属岗位待指定情况下怎么指定岗位呢？没有入口啊」）。
                 c.ok("function assignJobPick" in _pgjs and "function assignJobFromPick" in _pgjs,
                      "⑫ 有「手动指定岗位」入口（与系统建议无关，兜底可用）")
-                c.ok("function assignBatchPick" in _pgjs and "为勾选的人指定岗位" in _pg,
-                     "⑫b 有批量归岗入口（待指定常成批出现，逐条点太慢）")
+                c.ok("assignBatch" not in _pgjs and "批量归岗" not in _pg,
+                     "⑫b **没有批量归岗**（HR 明确要求逐个处理，不要批量入口）")
+                c.ok("'修改岗位'" in _pg and "所属岗位</div>" in _pg
+                     and "assignJobPick(${d.id}" in _pg,
+                     "⑫b2 完整档案里有「修改岗位」入口（已归岗的也能改归属）")
                 c.ok("所属岗位待指定（点此指定）" in _pg,
                      "⑫c 「所属岗位待指定」标签本身就是入口（点开即选岗位）")
                 c.ok("指定岗位</button>" in _pg,
@@ -1362,10 +1365,34 @@ def main(verbose: bool = True) -> int:
                  "归岗后档位按新口径写入（学历不达标→D；学历达标→留空待模型分析）",
                  str(_app_row["tier_suggested"]))
             c.ok(_n_audit == 1, "采纳归岗写入审计（岗位未指定 → 归到 X）")
-            # 已归岗的不能再走归岗接口（唯一写入口）
-            code, body = _asgi(srv.app, "POST", f"/api/candidates/{_cid_hit}/assign-job",
-                               hr, json.dumps({"job_id": sug["job_id"]}).encode())
-            c.ok(code == 400, "已归岗的投递再次归岗被拒（400）", f"实际 {code}")
+            # v1.13.3：**改岗位**（HR 要求"给每个人一个修改岗位的按钮"）。
+            # 原来已归岗的再归会被 400 拒掉，HR 无处纠正识别错的归属。
+            _conn_ra = db.connect(db_path)          # conn 在上一段已关闭，这里单开一个
+            _jobs_all = db.list_jobs(_conn_ra, include_inactive=False)
+            _conn_ra.close()
+            _other = next((j for j in _jobs_all if j["id"] != sug["job_id"]), None)
+            if _other:
+                code, body = _asgi(srv.app, "POST", f"/api/candidates/{_cid_hit}/assign-job",
+                                   hr, json.dumps({"job_id": _other["id"]}).encode())
+                _rb = json.loads(body)
+                conn2 = db.connect(db_path)
+                _re_audit = conn2.execute(
+                    "SELECT COUNT(*) AS n FROM audit_log WHERE action='reassign_job' "
+                    "AND entity_id=?", (str(_aid_hit),)).fetchone()["n"]
+                _row_now = conn2.execute("SELECT job_id FROM applications WHERE id=?",
+                                         (_aid_hit,)).fetchone()
+                conn2.close()
+                c.ok(code == 200 and _rb.get("old_job_title")
+                     and _row_now["job_id"] == _other["id"],
+                     "⑫g 已归岗的投递可以**改岗位**（返回原岗位名、库里真的改了）",
+                     f"HTTP {code} {_rb.get('old_job_title')} → {_rb.get('job_title')}")
+                c.ok(_re_audit == 1, "⑫h 改岗位写 reassign_job 审计（与首次归岗可区分）",
+                     f"reassign_job 审计 {_re_audit} 条")
+                # 改成同一个岗位 → 如实返回 unchanged，不做无意义改动
+                code, body = _asgi(srv.app, "POST", f"/api/candidates/{_cid_hit}/assign-job",
+                                   hr, json.dumps({"job_id": _other["id"]}).encode())
+                c.ok(code == 200 and json.loads(body).get("unchanged") is True,
+                     "⑫i 改成同一岗位 → 如实说未改动（不制造假审计）", f"HTTP {code}")
             code, body = _asgi(srv.app, "POST", f"/api/candidates/{_cid_miss}/assign-job",
                                hr, json.dumps({"job_id": 999999}).encode())
             c.ok(code == 404, "归到不存在的岗位返回 404", f"实际 {code}")

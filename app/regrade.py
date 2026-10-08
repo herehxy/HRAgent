@@ -409,10 +409,12 @@ def suggest_job_for_application(conn: sqlite3.Connection, candidate_id: int,
 
 def assign_job(conn: sqlite3.Connection, application_id: int, job_id: int,
                jd: dict, tiers: dict, operator: str = "hr", role: str = "hr") -> dict:
-    """把「待指定」投递归到 HR 指定的岗位，并按该岗位 JD 重算系统建议。
+    """把投递归到 HR 指定的岗位（**归岗 / 改岗位通用**），并按该岗位 JD 重算系统建议。
 
-    C 方案的落库动作：只处理 `job_id IS NULL` 的投递（已归岗的走「重新分析」改尺子，
-    不在这里二次归岗，避免同一口径出现两个写入口）。归岗与重算合并写一次审计。
+    v1.13.3：**支持改岗位**（原来只允许「待指定 → 归岗」，已归岗的再归会被拒）。
+    为什么改：HR 明确要求"给每个人一个修改岗位的按钮"——识别错、或人换了方向，
+    都需要改归属；只报错不给改，等于逼 HR 去绕（实测反馈）。
+    改岗位时同样重算建议档位与技能清单，并写审计（记下"从哪改到哪"）。
     HR 已确认的档位（tier_final）不受影响——重算只更新「系统建议」字段。
     """
     row = conn.execute("SELECT * FROM applications WHERE id = ?",
@@ -420,8 +422,14 @@ def assign_job(conn: sqlite3.Connection, application_id: int, job_id: int,
     if not row:
         return {"error": "未找到该投递"}
     a = dict(row)
-    if a.get("job_id") is not None:
-        return {"error": "该投递已归属岗位，无需再次归岗"}
+    old_job_id = a.get("job_id")
+    if old_job_id == job_id:
+        return {"ok": True, "application_id": application_id, "job_id": job_id,
+                "job_title": "", "note": "该投递已经属于这个岗位，未做改动", "unchanged": True}
+    old_title = ""
+    if old_job_id:
+        _oj = conn.execute("SELECT title FROM jobs WHERE id = ?", (old_job_id,)).fetchone()
+        old_title = (_oj["title"] if _oj else f"#{old_job_id}")
     jrow = conn.execute("SELECT title, active FROM jobs WHERE id = ?",
                         (job_id,)).fetchone()
     if not jrow:
@@ -469,11 +477,14 @@ def assign_job(conn: sqlite3.Connection, application_id: int, job_id: int,
         after = (f"归到 {jrow['title']}，按岗位 JD 重算建议为 "
                  f"{g['tier_suggested']}（{g['score']}）")
     conn.commit()
-    db.add_audit(conn, "application", str(application_id), "assign_job",
-                 "岗位未指定", after, operator, role)
+    # 审计要能分清"归岗"与"改岗位"：改岗位属于**人工纠正**，不是首次归位
+    _action = "reassign_job" if old_title else "assign_job"
+    db.add_audit(conn, "application", str(application_id), _action,
+                 (f"原岗位 {old_title}" if old_title else "岗位未指定"), after, operator, role)
     conn.commit()
     return {"ok": True, "application_id": application_id, "job_id": job_id,
-            "job_title": jrow["title"], "note": note}
+            "job_title": jrow["title"], "old_job_title": old_title,
+            "changed": True, "note": note}
 
 
 def refresh_skills(conn: sqlite3.Connection, operator: str = "hr", role: str = "hr",
