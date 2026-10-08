@@ -447,6 +447,27 @@ def main(verbose: bool = True) -> int:
         c.ok("tier_suggested" in chen, "系统建议档位字段存在（值为空=待模型分析）")
         c.ok(chen["tier_final"] is None, "HR 未确认前 tier_final 为空")
         c.ok(chen["app_status"] == "待确认", "状态为『待确认』")
+        # v1.14.1：复核是**独立动作**，与档位解耦。
+        # ① 改档位**不应该**顺手把复核状态置成已确认（否则 HR 为了消标签而改档位）
+        # ② 复核不应该动档位
+        _conn_rv = db.connect(db_path)
+        _rv = db.set_application_tier(_conn_rv, aid, "B", "沟通后调整", "hr", "hr")
+        _conn_rv.close()
+        c.ok((_rv or {}).get("status") != "已确认",
+             "⑲ 改档位**不影响**复核状态（两件事解耦，HR 不用为了消标签而改档位）",
+             f"改档后 status={(_rv or {}).get('status')}")
+        _conn_rv2 = db.connect(db_path)
+        _rv2 = db.review_mark(_conn_rv2, aid, "hr", "hr")
+        c.ok((_rv2 or {}).get("status") == "已确认"
+             and (_rv2 or {}).get("tier_final") == "B",
+             "⑲b 复核只置复核状态，**不动档位**",
+             f"复核后 status={(_rv2 or {}).get('status')} 档位={(_rv2 or {}).get('tier_final')}")
+        _conn_rv3 = db.connect(db_path)
+        _rv3 = db.unreview_mark(_conn_rv3, aid, "hr", "hr")
+        _conn_rv3.close()
+        c.ok((_rv3 or {}).get("status") == "待确认" and (_rv3 or {}).get("tier_final") == "B",
+             "⑲c 复核可以撤销，档位仍不变",
+             f"撤销后 status={(_rv3 or {}).get('status')} 档位={(_rv3 or {}).get('tier_final')}")
         # v1.13：界面上的状态标签要按**实际情况**给，不能把库里的默认值原样贴上——
         # v1.14：取消「待确认」标签。查证：它**不驱动任何自动化**（确认与否系统
         # 行为完全一样），认同默认档位的人不需要任何动作，这个标签却在暗示他漏了事。
@@ -463,8 +484,12 @@ def main(verbose: bool = True) -> int:
              "⑪b 每个状态都带一句「下一步该做什么」（界面上悬停可见）")
         before_audit = len(db.list_audit(conn, limit=999))
         r = db.set_application_tier(conn, aid, "B", "沟通后调整", "hr", "hr")
-        c.ok(r["tier_final"] == "B", "HR 确认后 tier_final = B")
-        c.ok(r["status"] == "已确认", "状态变为『已确认』")
+        c.ok(r["tier_final"] == "B", "HR 改档后 tier_final = B")
+        # v1.14.1：改档位**不再**顺手把复核状态置成已确认（档位与复核解耦，
+        # 否则 HR 为了消掉「待复核」标签只能去改档位，会污染自己的判断）
+        c.ok(r["status"] != "已确认",
+             "改档位不改变复核状态（复核请走独立的复核按钮）",
+             f"status={r['status']}")
         c.ok(len(db.list_audit(conn, limit=999)) > before_audit, "改档写入审计")
         # v1.12 回归点：档位来源明细必须报**库内生效档位**，不能报规则现算值——
         # 规则已产不出 A/B/C，报现算值会让所有学历达标的人显示成「待分析」

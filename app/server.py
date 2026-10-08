@@ -1339,6 +1339,11 @@ class TierReq(BaseModel):
     note: str | None = None
 
 
+class ReviewReq(BaseModel):
+    # v1.14.1：复核可以撤销（HR 觉得"我还没想清楚"时用）
+    undo: bool = False
+
+
 class StageReq(BaseModel):
     stage: str
 
@@ -1360,6 +1365,30 @@ def api_set_tier(aid: int, req: TierReq, x_tp_token: str | None = Header(default
         if not r:
             raise HTTPException(status_code=404, detail="未找到该投递")
         return r
+    finally:
+        conn.close()
+
+
+@app.post("/api/applications/{aid}/review")
+def api_review(aid: int, req: ReviewReq, x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+               x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """**复核**这条建议（认可系统的判断，不改档位）。
+
+    与 `set_tier` 分开的理由（v1.14.1）：见 `db.review_mark` 的注释——
+    认可与改判是两件事，绑在一起会诱导 HR 为了消标签而改档位。
+    权限用 `set_stage` 级：它不改动任何结论，只是标记"我看过"。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "set_stage")
+    conn = db.connect(DB_PATH)
+    try:
+        r = (db.unreview_mark(conn, aid, s["username"], s["role"]) if req.undo
+             else db.review_mark(conn, aid, s["username"], s["role"]))
+        if not r:
+            raise HTTPException(status_code=404, detail="未找到该投递")
+        return {"ok": True, "application": r,
+                "status": r.get("status"),
+                "note": ("已撤销复核" if req.undo else "已复核：认可系统给的建议档（档位未改动）")}
     finally:
         conn.close()
 

@@ -1465,11 +1465,53 @@ def set_application_tier(conn: sqlite3.Connection, aid: int, tier: str,
         return None
     before = cur.get("tier_final") or cur.get("tier_suggested")
     note_val = cur.get("note", "") if note is None else note
+    # v1.14.1：**不再顺手把复核状态置成"已确认"**。
+    # 档位（tier_final）与复核（status）是两件独立的事——HR 可以认同系统给的 A 档
+    # 而不改任何值；以前逼着"改档位"才能消掉标签，等于诱导 HR 污染自己的判断。
+    # 复核请走独立的 review_mark()。
     conn.execute(
-        "UPDATE applications SET tier_final = ?, status = '已确认', note = ?, updated_at = ? WHERE id = ?",
+        "UPDATE applications SET tier_final = ?, note = ?, updated_at = ? WHERE id = ?",
         (tier, note_val, now(), aid),
     )
     add_audit(conn, "application", str(aid), "set_tier", str(before), str(tier), operator, role)
+    conn.commit()
+    return get_application(conn, aid)
+
+
+
+def review_mark(conn: sqlite3.Connection, aid: int, operator: str = "HR",
+                role: str = "recruiter") -> dict | None:
+    """标记「HR 已复核这条建议」（**不改档位**）。
+
+    为什么要有这个独立动作（v1.14.1）：系统给的建议档要么认可、要么改。
+    如果"认可"只能通过改档位来表达，HR 为了消掉标签就会去动档位——
+    而 HR 真正的判断（tier_final）被"顺手确认"污染了，是更坏的事。
+    所以：认可 = 点一下复核（写 review 审计）；改判 = 改档位（写 set_tier 审计）。两件事分开记。
+    """
+    cur = get_application(conn, aid)
+    if not cur:
+        return None
+    if (cur.get("status") or "") == "已确认":
+        return cur  # 已经复核过，不重复写审计
+    conn.execute("UPDATE applications SET status = '已确认', updated_at = ? WHERE id = ?",
+                 (now(), aid))
+    add_audit(conn, "application", str(aid), "review",
+              f"建议档 {cur.get('tier_suggested') or '（无）'}",
+              "HR 复核认可（未改档位）", operator, role)
+    conn.commit()
+    return get_application(conn, aid)
+
+
+def unreview_mark(conn: sqlite3.Connection, aid: int, operator: str = "HR",
+                  role: str = "recruiter") -> dict | None:
+    """撤销复核（回到"未复核"）。用于 HR 觉得"我还没想清楚"时。"""
+    cur = get_application(conn, aid)
+    if not cur:
+        return None
+    conn.execute("UPDATE applications SET status = '待确认', updated_at = ? WHERE id = ?",
+                 (now(), aid))
+    add_audit(conn, "application", str(aid), "unreview", "已复核", "撤销复核（回到未复核）",
+              operator, role)
     conn.commit()
     return get_application(conn, aid)
 

@@ -727,7 +727,13 @@ function cardHtml(x){
     '待分析': 'color:#1d5fd8;background:#e8f0ff',
     '待归岗': 'color:#a45a00;background:#fff7e8',
   }[_st] || 'color:#4e5969;background:#f2f3f5';
-  const conf = `<span class="chip" style="${_stStyle}" title="${esc(x.status_hint||'')}">${esc(_st)}</span>`;
+  // 待复核 → 顺手给一个「复核」按钮：认同默认档位的人点一下就行，不必改档位
+  const _rev = (x.status_display === '待复核' && x.application_id)
+    ? ` <button class="mini" onclick="markReview(${x.application_id},false)"
+         title="认可系统给的建议档，档位不变">复核</button>` : '';
+  const conf = (_st
+    ? `<span class="chip" style="${_stStyle}" title="${esc(x.status_hint||'')}">${esc(_st)}</span>` + _rev
+    : '');
   const rev = x.needs_review ? '<span class="chip" style="color:#a45a00;background:#fff7e8">待人工判读</span>' : '';
   const stage = x.stage || '新投递';
   const tiers = ['A','B','C','D'].map(k=>`<option value="${k}" ${k===t?'selected':''}>${k} · ${TIER_LABELS[k]}</option>`).join('');
@@ -802,7 +808,10 @@ async function showDetail(cid){
       <td>${esc(a.channel||'—')}</td>
       <td>${esc((a.applied_at||'').slice(0,16))}</td>
       <td>${esc(a.tier_final||a.tier_suggested||'—')}</td><td>${esc(a.stage||'—')}</td>
-      <td>${esc(a.status_display||a.status||'—')}</td></tr>`).join('');
+      <td>${esc(a.status_display||a.status||'—')}
+        <button class="mini" onclick="markReview(${a.id},${(a.status_display==='待复核')?'false':'true'})"
+          title="${(a.status_display==='待复核')?'认可系统给的建议档（档位不变）':'已复核，点此撤销'}">${(a.status_display==='待复核')?'复核':'撤销复核'}</button>
+      </td></tr>`).join('');
   const docs = (d.documents||[]).map(x=>{
       const okFile = !!x.archived_path;
       const acts = okFile
@@ -1358,6 +1367,21 @@ async function analyzePendingBatch(){
     refresh();
   }
 }
+/* 复核（v1.14.1）：认可系统这次给的建议档，**不改档位**。
+   为什么单独一个动作：档位是 HR 的判断，复核是"我看过"。
+   以前绑在一起（改档位 = 顺手置已确认），等于诱导 HR 为了消标签而改档位。 */
+async function markReview(aid, undo){
+  if (!aid) { toast('这条投递还没有记录','warn'); return; }
+  if (!await askConfirm(undo ? '撤销复核？\\n\\n会回到"未复核"，系统不会改档位。'
+    : '确认复核这条建议？\\n\\n表示你认可系统给的建议档（**档位不会被改动**），'
+      + '以后模型再更新判断时会重新提示你。')) return;
+  const r = await api('/api/applications/'+aid+'/review',
+    {method:'POST', body:JSON.stringify({undo: !!undo})});
+  if (r.__http_error || r.error){ toast(r.detail||r.error||'操作失败','danger'); return; }
+  toast(r.note || '已更新', 'ok');
+  refresh();
+}
+
 /* ------------------------------ 智能助手 ------------------------------ */
 async function viewChat(){
   const runs = await api('/api/agent/runs?limit=1');
