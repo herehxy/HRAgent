@@ -70,6 +70,9 @@ from .agent import llm
 from .agent import proactive as proactive_mod
 from .agent.loop import run_agent
 from .agent.tools import ToolCtx, catalog as tool_catalog
+# 模块级引用（而不是 from ... import 函数）：建议岗位的缓存键要带上"函数身份"，
+# 这样测试桩替换 / 热重载之后缓存自然失效，见 _suggest_live_many。
+from .pipeline import analyze as analyze_mod
 from .pipeline import domains as domains_mod
 from .pipeline import majors as mj
 from .pipeline import normalize as nz
@@ -287,6 +290,71 @@ def _edu_check(item: dict, jobs_map: dict) -> dict | None:
             "job_title": job.get("title")}
 
 
+# —— 建议岗位实时试算：并发 + 进程内记忆化（v1.14）——
+# 每条「待指定」投递的建议都要问一次模型（约 1 秒）。原实现是串行 for 循环：
+# 12 条待指定 = 11 次调用 ≈ 13–16 秒，而人才库界面每次操作后都会 refresh()，
+# 于是每点一下就卡十几秒、再烧一遍 token（本机部署实测）。
+# 这里只优化"怎么算"，**不改契约**：仍然返回 source='live' 的实时建议，
+# 自检里用桩模型验证"建议 → 采纳 → 归岗"链路的断言照旧成立。
+_SUGGEST_CACHE: dict[tuple, dict | None] = {}
+_SUGGEST_CACHE_LOCK = threading.Lock()
+_SUGGEST_CACHE_MAX = 500          # 进程内缓存，满了整体清空（本地单 HR 量级足够）
+
+
+def _suggest_live_many(items: list[dict], open_jobs: list[dict]) -> dict[int, dict | None]:
+    """并发算「待指定」投递的建议岗位，带进程内缓存。返回 {application_id: 建议或 None}。
+
+    缓存键 =（简历原件 id，在招岗位签名）——岗位增删/改名/停用后签名变化，自动失效，
+    不会拿旧建议糊弄人。**纯内存、不写库**（"只建议不落库、采纳才归岗"这条红线不变）。
+    单条失败只影响它自己（返回 None = 如实不出建议），不拖垮整个列表。
+    """
+    import concurrent.futures as _cf
+
+    # 缓存签名 =（判岗位用的函数身份, 当前模型名, 在招岗位签名）：
+    #   · 函数身份：hot-reload / 测试桩替换 `analyze.suggest_job` 时自动失效——
+    #     自检第二节正是靠桩模型验证"建议→采纳→归岗"链路，不能被上一节的负结果挡住；
+    #   · 模型名：HR 在设置页换模型后，旧结论该重算；
+    #   · 岗位签名：岗位增删/改名/停用后失效。
+    cfg_model = ((llm.load_cfg() or {}).get("model") or "")
+    sig = (id(analyze_mod.suggest_job), cfg_model,
+           tuple((j["id"], j.get("title") or "") for j in open_jobs))
+    out: dict[int, dict | None] = {}
+    todo: list[tuple[dict, tuple]] = []
+    for i in items:
+        key = (i.get("resume_doc_id"), sig)
+        with _SUGGEST_CACHE_LOCK:
+            if key in _SUGGEST_CACHE:
+                out[i["id"]] = _SUGGEST_CACHE[key]
+                continue
+        todo.append((i, key))
+    if not todo:
+        return out
+
+    def _one(pair: tuple[dict, tuple]) -> tuple[int, tuple, dict | None]:
+        it, key = pair
+        # 每个线程用自己的连接：sqlite3 连接默认不允许跨线程使用
+        c = db.connect(DB_PATH)
+        try:
+            sugs = regrade.suggest_jobs(c, it.get("resume_doc_id"), open_jobs)
+            return it["id"], key, (sugs[0] if sugs else None)
+        except Exception:                      # noqa: BLE001 — 单条失败不影响别人
+            return it["id"], key, None
+        finally:
+            c.close()
+
+    with _cf.ThreadPoolExecutor(max_workers=min(6, len(todo))) as ex:
+        for app_id, key, top in ex.map(_one, todo):
+            out[app_id] = top
+            # 正负结果都缓存：缓存键已包含"函数身份 + 模型名"，桩替换/换模型都会失效，
+            # 所以"判不出来"不会长期粘住，而重复渲染（界面每次操作都 refresh）
+            # 也不必反复问模型——这是本机部署实测的主要资源浪费点。
+            with _SUGGEST_CACHE_LOCK:
+                if len(_SUGGEST_CACHE) >= _SUGGEST_CACHE_MAX:
+                    _SUGGEST_CACHE.clear()
+                _SUGGEST_CACHE[key] = top
+    return out
+
+
 @app.get("/api/candidates")
 def api_candidates(tier: str | None = None, kw: str | None = None,
                    stage: str | None = None, education: str | None = None,
@@ -389,10 +457,9 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                           "dept": j.get("department_name") or j.get("dept") or "",
                           "jd": j.get("jd_json") or {}}
                          for j in db.list_jobs(conn, include_inactive=False)]
+            _live = _suggest_live_many(legacy, open_jobs)
             for i in legacy:
-                # v1.12：建议岗位改由模型判断（最多一个），没有分数可排序
-                sugs = regrade.suggest_jobs(conn, i.get("resume_doc_id"), open_jobs)
-                top = sugs[0] if sugs else None
+                top = _live.get(i["id"])
                 # 兜底路径不做档位过滤："不适合"由 HR 看（卡片上标明档位），
                 # 隐掉建议反而让人以为系统没算——标 `source=live` 说明是现算的、未经入库固化。
                 i["job_suggestion"] = (
@@ -2638,6 +2705,61 @@ def api_dept_activate(did: int, x_tp_token: str | None = Header(default=None, al
         if not r:
             raise HTTPException(status_code=404, detail="未找到该部门")
         return {"ok": True, "department": r}
+    finally:
+        conn.close()
+
+
+class SuggestPendingReq(BaseModel):
+    limit: int = 30
+
+
+@app.post("/api/jobs/suggest-pending")
+def api_suggest_pending(req: SuggestPendingReq | None = Body(default=None),
+                        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """给「待指定」投递**一次性**重新判断建议岗位，并写库固化（显式动作，会调模型）。
+
+    为什么要有这个入口：启动时会清掉失效的旧建议并提示"需要重新判断请点界面上
+    「重新判断建议岗位」"——但原仓库里**这个按钮和接口都不存在**，唯一让建议回来的
+    路径是列表请求里的实时试算（十几秒）。本接口把这件事变成 HR 可主动触发、
+    结果落库的一次性动作：算完写 `suggested_job_id`（+审计），之后列表走"已固化"
+    分支直接读库（毫秒级）。模型判断不出来的**如实不计**，不硬凑岗位。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "set_stage")
+    limit = int(((req.limit if req else 30) or 30))
+    conn = db.connect(DB_PATH)
+    try:
+        open_jobs = [{"id": j["id"], "title": j.get("title") or "",
+                      "dept": j.get("department_name") or j.get("dept") or "",
+                      "jd": j.get("jd_json") or {}}
+                     for j in db.list_jobs(conn, include_inactive=False)]
+        if not open_jobs:
+            return {"ok": True, "checked": 0, "picked": 0, "skipped": 0,
+                    "note": "当前没有在招岗位，无法判断建议岗位。"}
+        rows = conn.execute(
+            """SELECT id, candidate_id, resume_doc_id FROM applications
+               WHERE job_id IS NULL AND suggested_job_id IS NULL
+               ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT ?""",
+            (limit,)).fetchall()
+        batch = [{"id": r["id"], "resume_doc_id": r["resume_doc_id"]} for r in rows]
+        live = _suggest_live_many(batch, open_jobs)
+        picked = skipped = 0
+        for r in rows:
+            top = live.get(r["id"])
+            if not top:
+                skipped += 1
+                continue
+            conn.execute("UPDATE applications SET suggested_job_id = ?, updated_at = ? "
+                         "WHERE id = ?", (top["job_id"], db.now(), r["id"]))
+            conn.commit()
+            db.add_audit(conn, "application", str(r["id"]), "suggest_job", "",
+                         f"重新判断建议岗位：{top.get('title')}"
+                         f"（{top.get('reason') or '模型判断'}）", s["username"], s["role"])
+            picked += 1
+        return {"ok": True, "checked": len(rows), "picked": picked, "skipped": skipped,
+                "note": f"已判断 {len(rows)} 条：{picked} 条给出建议岗位并已写库、"
+                        f"{skipped} 条模型也判断不出（保持待指定，可人工指定岗位）。"}
     finally:
         conn.close()
 

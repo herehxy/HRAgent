@@ -607,6 +607,8 @@ async function viewPool(){
         <button onclick="doIngest('mailbox')">收取邮箱简历</button>
         <button onclick="doIngest('folder')">导入本地文件夹</button>
         <button onclick="exportCsv()">导出 CSV</button>
+        <button onclick="suggestPendingJobs(this)"
+                title="对「待指定」投递逐条问模型最像哪个在招岗位，结果写库固化（与启动日志里说的入口对应）。显式动作：每条约 1 秒，十几条约十几秒；点完写库，之后列表走已固化分支直接读库。">重新判断建议岗位</button>
       </div>
     </div>
     <div class="bar" style="margin-top:8px">
@@ -979,6 +981,27 @@ async function exportCsv(){
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = '人才简介清单.csv'; a.click();
   toast(`已导出 CSV（${rows.length} 人，姓名/联系方式/技能概要 + 对应岗位）`,'ok');
+}
+
+/* 重新判断建议岗位（v1.14）：补上启动日志承诺、但仓库里一直缺的显式入口。
+   列表里那条"待指定 → 现场问模型"的兜底路径已改成并发 + 缓存（首屏从十几秒
+   压到秒级），但这个按钮仍然值得有：它把结果**写库固化**，点一次之后列表
+   直接读库，不再依赖实时试算。判断不出来的如实不计，不硬凑岗位。 */
+async function suggestPendingJobs(btn){
+  if (!confirm('重新判断「待指定」投递的建议岗位？\\n\\n'
+    + '会对每条投递调用一次模型（十几条约需十几秒到半分钟），结果写库固化。\\n'
+    + '已经有建议岗位、或已归岗的投递不会重复判断。')) return;
+  const old = btn && btn.textContent;
+  if (btn){ btn.disabled = true; btn.textContent = '判断中…'; }
+  try{
+    const r = await api('/api/jobs/suggest-pending', {method:'POST',
+      body:JSON.stringify({limit:30})});
+    if (r.__http_error || r.error){ toast(r.detail||r.error||'判断失败','danger'); return; }
+    toast(r.note || '已完成','ok');
+  } finally {
+    if (btn){ btn.disabled = false; btn.textContent = old || '重新判断建议岗位'; }
+    refresh();
+  }
 }
 
 /* --------------------- 投递管道（嵌入人才库，v1.7.5 折叠 + 完整看板） ---------------------
