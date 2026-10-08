@@ -189,6 +189,11 @@ const TIER_COLOR = {A:['#00b42a','#e8ffea'],B:['#3370ff','#e8f0ff'],
 const STAGES = ['新投递','已联系','初面','复面','待offer','已入职','已结束'];
 
 let META = null;
+/** 搜索模式：kw=关键词（字面）｜sem=语义（按意思）。
+ *  v1.14：语义检索的函数一直存在但界面上没有入口（孤儿函数），HR 反馈"没有语义检索入口"，
+ *  这里把它接回同一个搜索栏。语义走的是向量检索，**只用于找人，不参与档位判定**。 */
+let SEARCH_MODE = 'kw';
+let _semDegraded = false;   // 语义检索是否正在降级（提示只在真正用到时才出现）
 let TOKEN = localStorage.getItem('tp_token') || '';
 let VIEW = 'pool', TAB = 'ALL', KW = '', CHAT = [], ITEMS = [], CUR = null, LAST_INGEST = null;
 // 性别筛选：**默认不筛**（空串）。开关在设置里默认关闭，关着时后端也会忽略这个参数。
@@ -598,9 +603,15 @@ async function viewPool(){
   <div class="panel">
     <div class="flexbetween">
       <div class="bar">
-        <input id="kwBox" placeholder="搜索姓名 / 院校 / 专业 / 技能" style="width:280px" value="${esc(KW)}"
-               onkeydown="if(event.key==='Enter'){KW=this.value;poolPageReset();refresh()}">
-        <button class="btn-primary" onclick="KW=document.getElementById('kwBox').value;poolPageReset();refresh()">搜索</button>
+        <input id="kwBox" placeholder="${SEARCH_MODE==='sem'?'语义检索：用一句话描述你想找的人（如：会钛合金焊接的硕士）':'搜索姓名 / 院校 / 专业 / 技能'}"
+               style="width:${SEARCH_MODE==='sem'?'360px':'280px'}" value="${esc(KW)}"
+               onkeydown="if(event.key==='Enter'){doSearch()}">
+        <select onchange="SEARCH_MODE=this.value;poolPageReset();refresh()"
+                title="关键词=姓名/院校/专业/技能的字面匹配；语义=按意思找（简历措辞不同也能命中）">
+          <option value="kw" ${SEARCH_MODE==='sem'?'':'selected'}>关键词</option>
+          <option value="sem" ${SEARCH_MODE==='sem'?'selected':''}>语义</option>
+        </select>
+        <button class="btn-primary" onclick="doSearch()">搜索</button>
         <button onclick="KW='';GENDER='';EDU_MIN='';UNIV='';poolPageReset();refresh()">清空</button>
         ${gsel}${eduSel}${uniSel}
       </div>
@@ -2180,6 +2191,11 @@ async function doSkillSearch(){
       <div class="acts"><button onclick="showDetail(${x.candidate_id})">完整档案</button></div>
       </div>`).join('')||'<div class="card" style="margin-top:8px">没有同时具备这些技能的人。可切换为「具备其一」再试。</div>'}`;
 }
+async function doSearch(){
+  KW = document.getElementById('kwBox').value || '';
+  if (SEARCH_MODE === 'sem') return doSemSearch();
+  poolPageReset(); refresh();
+}
 async function doSemSearch(){
   const q = document.getElementById('semInput').value || '';
   const out = document.getElementById('semOut');
@@ -2187,8 +2203,16 @@ async function doSemSearch(){
   out.innerHTML = '<div class="note">检索中…</div>';
   const r = await api('/api/search/semantic?q='+encodeURIComponent(q)+'&top_k=8');
   if (r.__http_error){ out.innerHTML = '<div class="danger">'+esc(r.detail||'失败')+'</div>'; return; }
-  out.innerHTML = `<div class="note">索引模型 ${esc(r.model||'—')}${r.error?('｜'+esc(r.error)):''}
-    ${r.note?('｜'+esc(r.note)):''}</div>
+  // v1.14：降级提示只在**真正用到语义检索时**才说，且要说清后果与出路。
+  // 原来每次都把「embeddinggemma:latest · 服务不可达（降级中）」挂在结果顶部，
+  // 对十几人的库这是噪音，看起来像系统故障（HR 反馈）。
+  _semDegraded = !!r.error;
+  out.innerHTML = '<div class="note">索引：' + esc(r.model || '—')
+    + (r.error
+      ? ('｜<b>已降级为本地哈希向量</b>：只按字面重叠匹配，简历措辞不同就找不到。'
+         + '<span class="small">想要真正的语义匹配，可在电脑上跑一个本地向量模型'
+         + '（如 Ollama + bge-m3，仍不出内网、不外传简历）。</span>')
+      : (r.note ? ('｜' + esc(r.note)) : '')) + '</div>' + `
     <table><thead><tr><th>相似度</th><th>姓名</th><th>学历/年限</th><th>档位</th><th>联系方式</th><th>技能</th><th></th></tr></thead>
     <tbody>${(r.results||[]).map(x=>`<tr>
       <td>${x.score}</td><td>${esc(x.name||'未识别')}</td>
@@ -3180,11 +3204,15 @@ async function viewSys(){
         ${META.model.base_url?('<br><span class="small">'+esc(META.model.base_url)+'</span>'):''}
         ${META.model.error?('<br><span class="small">'+esc(META.model.error)+'</span>'):''}</div>
       <div class="k">向量模型</div><div>${esc(META.search.model||'—')} · ${META.search.dim||0} 维 ·
-        ${META.search.reachable?'服务可达':'<span style="color:#f53f3f">服务不可达（降级中）</span>'} ·
+        ${META.search.reachable
+          ? '服务可达'
+          : '<span style="color:#86909c">未启用</span>（用本地哈希向量，零成本、不联网）'} ·
         已索引 ${META.search.indexed||0} 人
         ${(META.search.index_model && META.search.index_model !== META.search.model)
-          ? ('<br><span class="small">索引实际使用 <b>'+esc(META.search.index_model)+'</b>'
-             + '——配置的向量模型没连上时自动退回本地哈希向量，检索质量会下降</span>')
+          ? ('<br><span class="small">索引实际使用 <b>'+esc(META.search.index_model)+'</b>。'
+             + '这不是故障：哈希向量只匹配字面相近（"钛合金焊接"能命中、"金属连接"命中不了），'
+             + '十几到几百人的库用技能检索 + 关键词基本够用；'
+             + '真要语义检索再配一个本地向量模型（bge-m3 / gte-small），简历不出内网。</span>')
           : ''}
         ${META.search.error?('<br><span class="small">'+esc(META.search.error)+'</span>'):''}</div>
       <div class="k">解析能力</div><div>PyMuPDF ${META.parse.pymupdf?'✓':'✗'} ·

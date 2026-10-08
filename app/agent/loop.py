@@ -125,10 +125,27 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
               rounds: int, usage: dict, started: float,
               model: str | None = None) -> dict:
     latency = int((time.time() - started) * 1000)
+    # v1.14：**只回传本轮产生的提案**。
+    # 原来取的是全库「待确认」，于是每轮对话下面都挂着一堆不相干的历史提案——
+    # HR 点进去发现是上周的事。要按"本轮工具调用创建了哪些 proposal_id"来过滤。
+    _mine: set[int] = set()
+    for _t in trace:
+        _r = _t.get("result")
+        if isinstance(_r, str):
+            try:
+                _r = json.loads(_r)
+            except Exception:
+                continue
+        if isinstance(_r, dict) and _r.get("proposal_id"):
+            try:
+                _mine.add(int(_r["proposal_id"]))
+            except (TypeError, ValueError):
+                pass
     proposals = []
     conn = db.connect(ctx.db_path)
     try:
-        proposals = db.list_proposals(conn, status="待确认", limit=20)
+        _all = db.list_proposals(conn, status="待确认", limit=20)
+        proposals = [p for p in _all if int(p["id"]) in _mine] if _mine else []
         db.log_agent_run(conn, {
             "session_id": ctx.session_id, "question": question, "answer": answer[:4000],
             "model": model, "tool_calls": [{"tool": t["tool"], "args": t["args"]} for t in trace],
