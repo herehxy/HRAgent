@@ -109,9 +109,16 @@ def _jd_tiers() -> tuple[dict, dict]:
 # 而不是默认就能用的筛选条件。性别本身**永远不进入 `tier.grade()`**。
 GENDER_FILTER_KEY = "gender_filter_enabled"
 
+# 「入库即分析」开关（v1.13.4）。**产品默认开**：进门就有判断是这个工具的卖点；
+# 但它每次都会调模型（一次 2-8 秒 + 额度），所以必须给 HR 一个显式开关，
+# 让他按自己的额度与节奏决定"入库就分析"还是"攒一批手动补"。
+# 关掉不影响任何其它功能：分析结论照样写 candidate_insights，只是改由 HR 点按钮触发。
+AUTO_INSIGHT_KEY = "auto_insight_on_ingest"
+
 
 def _settings(conn) -> dict:
-    return {"gender_filter_enabled": bool(db.get_setting(conn, GENDER_FILTER_KEY, False))}
+    return {"gender_filter_enabled": bool(db.get_setting(conn, GENDER_FILTER_KEY, False)),
+            "auto_insight_on_ingest": bool(db.get_setting(conn, AUTO_INSIGHT_KEY, True))}
 
 
 def _auth_enabled() -> bool:
@@ -419,6 +426,10 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
             i["tier_detail"] = _tier_detail_of(s, conn, i)
         presented = auth.present_list(items)
         out = {"count": len(presented), "items": presented,
+               # v1.13.4：入库即分析的开关状态与待分析人数。列表页靠它渲染开关与
+               # "分析待分析的人（N）"按钮——顺带带上是��为了不多发一个请求。
+               "insight_switch": {"enabled": bool(db.get_setting(conn, AUTO_INSIGHT_KEY, True)),
+                                  "pending": db.count_needing_insight(conn)},
                "my_permissions": s["permissions"],
                "archived_view": want_archived,
                "gender_facets": facets if allowed else None,
@@ -818,6 +829,68 @@ def api_suggest_job(cid: int,
         if out.get("ok"):
             out["job"] = db.resolve_candidate_job(conn, db.candidate_detail(conn, cid) or {})[1]
         return out
+    finally:
+        conn.close()
+
+
+class InsightBatchReq(BaseModel):
+    # 一次最多分析多少人（前端循环调用）。上限 20：再多单请求会超时，
+    # 而且模型连着调 20 次也让 HR 等太久没有反馈。
+    limit: int = 5
+
+
+@app.post("/api/insights/analyze-pending")
+def api_analyze_pending(req: InsightBatchReq,
+                        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """**手动批量补分析**（"入库即分析"关掉时用，v1.13.4）。
+
+    口径与自动入库分析**完全一致**（都走 `ingest_mod.analyze_one`）——这是刻意的：
+    两条路一旦各写一套，日后必然漂移，"手动分析出来的"和"自动分析的"口径不同，
+    比没有开关更难解释。
+
+    为什么同步而不是后台：模型一次 2-8 秒，前端要能显示"已分析 5/12"；
+    后台跑的话 HR 只能等，不知道进度。前端循环调用直到 remaining=0。
+    分析只写分析结论与「系统建议档位」；**不动 HR 已确认的档位、阶段与岗位**。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "set_stage")
+    if not _llm_enabled():
+        return {"ok": False, "analyzed": 0, "remaining": 0,
+                "error": "模型未启用，无法分析；可在「模型设置」里配置后再试"}
+    limit = max(1, min(int(req.limit or 5), 20))
+    conn = db.connect(DB_PATH)
+    try:
+        targets = db.candidates_needing_insight(conn, limit=limit)
+        done: list[dict] = []
+        failed: list[dict] = []
+        for t in targets:
+            try:
+                ins = ingest_mod.analyze_one(conn, t["candidate_id"], t["application_id"],
+                                             source="manual_batch")
+                if ins:
+                    done.append({"candidate_id": t["candidate_id"], "name": t.get("name"),
+                                 "tier": ins.get("suggested_tier")})
+                else:
+                    failed.append({"candidate_id": t["candidate_id"], "name": t.get("name"),
+                                   "why": "无分析结果"})
+            except Exception as exc:                        # noqa: BLE001 — 单条失败不中断整批
+                print(f"[analyze-pending] 候选人#{t['candidate_id']} 失败："
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                failed.append({"candidate_id": t["candidate_id"], "name": t.get("name"),
+                               "why": type(exc).__name__})
+        conn.commit()
+        remaining = db.count_needing_insight(conn)
+        db.add_audit(conn, "insight", "batch", "analyze_pending",
+                     f"待分析 {len(targets)} 人（上限 {limit}）",
+                     f"成功 {len(done)} / 失败 {len(failed)}，剩余 {remaining}",
+                     s["username"], s["role"])
+        conn.commit()
+        return {"ok": True, "analyzed": len(done), "failed": len(failed),
+                "remaining": remaining, "done": done, "errors": failed[:10],
+                "note": (f"已分析 {len(done)} 人"
+                         + (f"，失败 {len(failed)} 人" if failed else "")
+                         + (f"，还剩 {remaining} 人待分析" if remaining else "，全部完成"))}
     finally:
         conn.close()
 
@@ -2386,6 +2459,8 @@ def api_domains_import(req: DomainImportReq,
 
 class SettingsReq(BaseModel):
     gender_filter_enabled: bool | None = None
+    # v1.13.4：入库即分析开关（默认开）。关掉后入库不自动调模型，改由 HR 手动批量补。
+    auto_insight_on_ingest: bool | None = None
 
 
 @app.get("/api/settings")
@@ -2488,20 +2563,31 @@ def api_settings_set(req: SettingsReq,
         before = _settings(conn)
         if req.gender_filter_enabled is not None:
             db.set_setting(conn, GENDER_FILTER_KEY, bool(req.gender_filter_enabled))
+        if getattr(req, "auto_insight_on_ingest", None) is not None:
+            db.set_setting(conn, AUTO_INSIGHT_KEY, bool(req.auto_insight_on_ingest))
         after = _settings(conn)
         on_before = bool(before.get("gender_filter_enabled"))
         on_after = bool(after.get("gender_filter_enabled"))
+        _ai_before = bool(before.get("auto_insight_on_ingest"))
+        _ai_after = bool(after.get("auto_insight_on_ingest"))
         if before != after:
-            db.add_audit(conn, "settings", GENDER_FILTER_KEY, "update",
-                         f"gender_filter_enabled={on_before}",
-                         f"gender_filter_enabled={on_after}",
-                         s["username"], s["role"])
-        if on_after and not on_before:
-            note = "性别筛选已开启（已写入审计）。它只改变列表的筛选条件，不参与任何评分或分级。"
-        elif on_before and not on_after:
-            note = "性别筛选已关闭，列表恢复为全部候选人。"
-        else:
-            note = "设置未变化。"
+            for _k, _b, _a in (("gender_filter_enabled", on_before, on_after),
+                               ("auto_insight_on_ingest", _ai_before, _ai_after)):
+                if _b != _a:
+                    db.add_audit(conn, "settings", _k, "update",
+                                 f"{_k}={_b}", f"{_k}={_a}",
+                                 s["username"], s["role"])
+        _changed = []
+        if on_after != on_before:
+            _changed.append("性别筛选已开启（已写入审计）。它只改变列表的筛选条件，"
+                            "不参与任何评分或分级。" if on_after
+                            else "性别筛选已关闭，列表恢复为全部候选人。")
+        if _ai_after != _ai_before:
+            _changed.append("入库即分析已开启：新简历入库后自动分析一次（每人约 2-8 秒、"
+                            "消耗模型额度）。" if _ai_after
+                            else "入库即分析已关闭：新简历入库不再自动调模型，"
+                                 "可在人才库点「分析待分析的人」批量补上（已写入审计）。")
+        note = " ".join(_changed) if _changed else "设置未变化。"
         return {"ok": True, **after, "changed": before != after, "note": note}
     finally:
         conn.close()

@@ -1185,6 +1185,11 @@ def main(verbose: bool = True) -> int:
                      "美化作用于**整篇所有表格**（不是只处理第一张）")
                 c.ok("新建模板怎么做" in _pg,
                      "新建模板给了上手引导（打字 / 插表格 / 粘贴 / 微调）")
+                # ---- v1.13.4「入库即分析」可开关 ----
+                c.ok("function setAutoInsight" in _pgjs
+                     and "入库即分析" in _pg
+                     and "function analyzePendingBatch" in _pgjs,
+                     "⑮ 入库即分析有开关，且提供手动批量补分析（带进度）")
                 # v1.13：待指定投递必须**处处有归岗入口**。
                 # 原来「采纳建议岗位」只在系统给出建议时才渲染——模型不可用/判断不出时
                 # HR 完全没有入口（实测反馈：「所属岗位待指定情况下怎么指定岗位呢？没有入口啊」）。
@@ -1466,6 +1471,49 @@ def main(verbose: bool = True) -> int:
             c.ok(_row2 is not None and _row2["tier_suggested"] in (None, "D"),
                  "归位的档位按新口径写入（学历门槛 / 待模型分析）",
                  f"{_row2['tier_suggested'] if _row2 else None}（在招岗位 {len(_open2)} 个）")
+
+            # ---- v1.13.4：入库即分析开关 ----
+            # 关掉后入库不应排队分析，并如实回报"跳过了多少人"
+            _code_sw, _body_sw = _asgi(srv.app, "POST", "/api/settings", hr,
+                                       json.dumps({"auto_insight_on_ingest": False}).encode())
+            _sw = json.loads(_body_sw)
+            c.ok(_code_sw == 200 and _sw.get("auto_insight_on_ingest") is False
+                 and "入库即分析" in (_sw.get("note") or ""),
+                 "⑮b 开关能关且如实回话（note 说清关掉后要手动补）",
+                 f"HTTP {_code_sw} note={(_sw.get('note') or '')[:44]}")
+            # 手动批量：给两个"没有分析结论"的投递，用桩模型补上
+            from app.pipeline import analyze as _an_mb
+            _orig_mb = _an_mb.analyze_fit
+            _an_mb.analyze_fit = lambda cand, jd: {
+                "suggested_tier": "B", "summary": "自检桩：匹配",
+                "highlights": ["桩"], "risks": [], "confidence": 0.7,
+                "model": "stub"}
+            try:
+                _swneed0 = 0
+                _swconn = db.connect(db_path)
+                _swneed0 = db.count_needing_insight(_swconn)
+                _swconn.close()
+                _swcode, _swbody = _asgi(srv.app, "POST", "/api/insights/analyze-pending",
+                                           hr, json.dumps({"limit": 20}).encode())
+                _swres = json.loads(_swbody)
+            finally:
+                _an_mb.analyze_fit = _orig_mb
+            c.ok(_swcode == 200 and _swres.get("ok"),
+                 "⑮c 手动批量补分析接口可用",
+                 f"HTTP {_swcode} {_swres.get('note') or _swres.get('error')}")
+            c.ok(_swneed0 == 0 or (_swres.get("analyzed", 0) + _swres.get("remaining", 0)) <= _swneed0,
+                 "⑮d 批量补分析后，待分析人数不增（要么补掉、要么如实剩着）",
+                 f"待分析 {_swneed0} → 已分析 {_swres.get('analyzed')} / 剩余 {_swres.get('remaining')}")
+            # 列表接口要回带开关状态（前端靠它渲染，不用再发一个请求）
+            _code_ls, _body_ls = _asgi(srv.app, "GET", "/api/candidates", {})
+            _ls = json.loads(_body_ls)
+            _isw = _ls.get("insight_switch") or {}
+            c.ok(_isw.get("enabled") is False and isinstance(_isw.get("pending"), int),
+                 "⑮e 列表接口回带开关状态与待分析人数（读路径不做模型调用）",
+                 f"{_isw}")
+            # 开关改回默认开，别影响后续段落
+            _asgi(srv.app, "POST", "/api/settings", hr,
+                  json.dumps({"auto_insight_on_ingest": True}).encode())
 
             # ---- v1.13.2：**列表接口不许调模型**（性能回归点）----
             # 原来没有存储建议的老数据会在每次打开人才库时现调模型判断一次，

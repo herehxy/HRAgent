@@ -561,6 +561,7 @@ async function viewPool(){
   ITEMS = c.items || [];
   const pg = c.paging || null;              // 后端算好的页码/总数（页大小不影响统计口径）
   const gf = c.gender_filter || {}, gfOn = !!gf.enabled;
+  const isw = c.insight_switch || {enabled: true, pending: 0};   // v1.13.4 入库即分析开关
   const host = document.getElementById('view');
   const n = {ALL:(pg?pg.total:(c.items||[]).length), REVIEW:0, UNCONFIRMED:0};
   const tabs = [['ALL','全部'],['A','A 优先面试'],['B','B 建议面试'],['C','C 储备'],
@@ -607,6 +608,21 @@ async function viewPool(){
         <button onclick="doIngest('mailbox')">收取邮箱简历</button>
         <button onclick="doIngest('folder')">导入本地文件夹</button>
         <button onclick="exportCsv()">导出 CSV</button>
+      </div>
+      <div class="bar" style="margin-top:4px">
+        <span class="small">入库即分析</span>
+        <label class="small" style="display:flex;align-items:center;gap:4px;cursor:pointer"
+               title="开启：新简历入库后自动分析一次（每人约 2-8 秒、消耗模型额度）；关掉：入库不调模型，可在下面手动批量补">
+          <input type="checkbox" ${isw.on?'checked':''}
+                 onchange="setAutoInsight(this.checked)"> ${isw.on?'开（进门就有判断）':'关（改为手动批量分析）'}
+        </label>
+        <button id="btnAnalyzePending" data-pending="${isw.pending}"
+                onclick="analyzePendingBatch()" ${isw.pending?'':'disabled'}>
+          ${isw.pending ? ('分析待分析的人（'+isw.pending+'）') : '没有待分析的人'}
+        </button>
+        <span class="small">${isw.on
+          ? '每位新人入库后自动分析一次；关掉后新简历只入库不分析。'
+          : '当前已关：入库不调模型，改由你按需批量补（每批 5 人，有进度）。'}</span>
       </div>
     </div>
     <div class="bar" style="margin-top:8px">
@@ -971,12 +987,18 @@ async function doIngest(source){
   if (r.__http_error || r.error){ toast(r.detail||r.error||'收取失败','danger'); return; }
   const num = k => (r[k]==null?0:r[k]);
   const ix = r.index || {};
+  // v1.13.4：入库即分析关着时，如实告诉 HR"这几个人没分析"——不能让人以为分析过了。
+  // 静默入库最坏：HR 打开一看没有分析结果，以为功能坏了。
+  if (num('insight_skipped') > 0){
+    toast(`已入库，但有 ${num('insight_skipped')} 人未分析`
+      + `（"入库即分析"当前是关的）——可在上方点「分析待分析的人」批量补上`,'warn');
+  }
   toast(`完成：新增 ${num('added')}，新版本 ${num('merged_versions')}，`
     + `跳过重复 ${num('skipped_dup')}，无附件 ${num('no_attachment')}，`
     + `解析失败(仍入库) ${num('parse_failed')}，超限跳过 ${num('skipped_oversize')}，`
     + `异常 ${num('failed')}`
     + `｜源：${r.source_label||label}`
-    + `｜索引：新增 ${ix.indexed==null?0:ix.indexed} 条（跳过 ${ix.skipped==null?0:ix.skipped} 条）`,
+    + `｜索引：新增 ${ix.indexed==null?0:ix.indexed} 条（跳过 ${ix.skipped==null?0:ix.skipped} 条）`
     (r.failed || r.skipped_oversize) ? 'warn':'ok');
   LAST_INGEST = r;                       // 明细留在「导入与来源」页看
   await refresh();
@@ -1284,6 +1306,46 @@ function needJobAssign(btn, cid){
   }
   holder.innerHTML = '';
   assignJobPick(cid, holder.id);
+}
+/* 「入库即分析」开关 + 手动批量补分析（v1.13.4）
+
+   为什么要开关：入库即分析每次都会调模型（一次 2-8 秒、消耗额度）。
+   有的人想"进门就有判断"，有的人想"先攒一批、月底一次性补"——两种都得支持，
+   所以做成开关而不是二选一写死。
+
+   手动批量是**循环调用**接口（每次 5 人）而不是一次性全量：
+   模型一次 2-8 秒，一次性 30 人 = 几分钟黑屏等待，且 HTTP 容易超时；
+   分批能显示"已分析 5/12"的进度，HR 看得见它在动。 */
+async function setAutoInsight(on){
+  const r = await api('/api/settings', {method:'POST',
+    body:JSON.stringify({auto_insight_on_ingest: !!on})});
+  if (r.__http_error || r.error){ toast(r.detail||r.error||'保存失败','danger'); return; }
+  toast(r.note || '已保存','ok');
+  refresh();
+}
+async function analyzePendingBatch(){
+  const btn = document.getElementById('btnAnalyzePending');
+  if (!btn || btn.disabled) return;
+  const total0 = parseInt((btn.dataset.pending || '0'), 10);
+  btn.disabled = true;
+  let guard = 0;
+  try {
+    for(;;){
+      const r = await api('/api/insights/analyze-pending',
+        {method:'POST', body:JSON.stringify({limit: 5})});
+      if (r.__http_error || r.error){
+        toast(r.detail || r.error || '分析失败','danger'); break;
+      }
+      const done = r.analyzed || 0, left = r.remaining || 0;
+      btn.textContent = left ? ('分析中…已处理 ' + (total0 - left) + '/' + total0)
+                             : '正在刷新…';
+      if (r.note) toast(r.note, left ? 'info' : 'ok');
+      if (!left || !done || ++guard > 40) break;   // guard：防止后端一直返回 left>0 时死循环
+    }
+  } finally {
+    btn.disabled = false;
+    refresh();
+  }
 }
 /* ------------------------------ 智能助手 ------------------------------ */
 async function viewChat(){

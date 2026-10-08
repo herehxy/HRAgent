@@ -1909,6 +1909,44 @@ def upsert_insight(conn: sqlite3.Connection, candidate_id: int, application_id: 
     conn.commit()
 
 
+def candidates_needing_insight(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
+    """列出**还没有分析结论**的投递（"手动批量补分析"用，v1.13.4）。
+
+    口径：每个人的**最新一条投递**，且它在 `candidate_insights` 里没有记录。
+    为什么要它：把"入库即分析"做成可关的开关后，如果不给一条明确的补分析路径，
+    库里就会积一批"从没分析过"的档案，而且没人知道——直到有人问"为什么这个人没有分析"。
+    同一条投递只列一次（避免一人多投递时重复出现）。
+
+    排序按投递时间从早到晚：先补最早进来的（等得最久的）。
+    """
+    rows = conn.execute(
+        """SELECT a.id AS application_id, a.candidate_id, c.name, a.job_id,
+                  COALESCE(a.applied_at, a.created_at) AS since
+             FROM applications a
+             JOIN candidates c ON c.id = a.candidate_id
+             WHERE COALESCE(c.archived_at, '') = ''
+               AND a.id = (SELECT id FROM applications WHERE candidate_id = c.id
+                           ORDER BY COALESCE(applied_at, '') DESC, id DESC LIMIT 1)
+               AND NOT EXISTS (SELECT 1 FROM candidate_insights i
+                               WHERE i.candidate_id = a.candidate_id
+                                 AND i.application_id = a.id)
+             ORDER BY since ASC LIMIT ?""", (int(limit),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_needing_insight(conn: sqlite3.Connection) -> int:
+    """待分析人数（只算数量，用于列表页显示按钮上的数字）。"""
+    return int(conn.execute(
+        """SELECT COUNT(*) AS n FROM applications a
+             JOIN candidates c ON c.id = a.candidate_id
+            WHERE COALESCE(c.archived_at, '') = ''
+              AND a.id = (SELECT id FROM applications WHERE candidate_id = c.id
+                          ORDER BY COALESCE(applied_at, '') DESC, id DESC LIMIT 1)
+              AND NOT EXISTS (SELECT 1 FROM candidate_insights i
+                              WHERE i.candidate_id = a.candidate_id
+                                AND i.application_id = a.id)""").fetchone()["n"])
+
+
 def get_insight(conn: sqlite3.Connection, candidate_id: int,
                 application_id: int | None = None) -> dict | None:
     """取分析结果；不指定投递时取该候选人最新一条。"""

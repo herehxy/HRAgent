@@ -846,6 +846,50 @@ def _insight_targets(report: dict) -> list[dict]:
     return out
 
 
+def analyze_one(conn, candidate_id: int, application_id: int,
+                source: str = "auto_ingest") -> dict | None:
+    """给一位候选人跑一次分析并落库，返回落库的 insight（失败返回 None）。
+
+    **自动与手动共用这一份逻辑**（v1.13.4）："入库即分析"开关关掉后，HR 手动批量
+    触发走的是同一段代码——不然两条路会各自漂移，最后"手动分析出来的"和
+    "自动分析的"口径不一致，那比没有开关更糟。
+    分析只写 `candidate_insights` 与「系统建议档位」，**不动 HR 已确认的档位、
+    不动阶段、不动岗位**。
+    """
+    from .pipeline.analyze import auto_insight     # 延迟导入，避免模块环
+    cand = db.candidate_detail(conn, candidate_id)
+    if not cand:
+        return None
+    apps = cand.get("applications") or []
+    app_row = next((a for a in apps if a.get("id") == application_id),
+                   apps[0] if apps else {})
+    # 未归岗时 jd 为 None —— 不硬套默认尺子，但仍产出简历画像
+    jd, _meta = db.resolve_candidate_job(conn, cand)
+    ins = auto_insight(cand, jd, app_row)
+    if not ins:
+        return None
+    db.upsert_insight(conn, candidate_id, application_id,
+                      summary=ins.get("summary") or "",
+                      reasons=ins.get("reasons"),
+                      risks=ins.get("risks"),
+                      evidence=ins.get("evidence"),
+                      source=ins.get("source") or source,
+                      model=ins.get("model") or "",
+                      business_direction=ins.get("business_direction"))
+    # 模型建议档位 → 更新 tier_suggested（HR 未确认时才更新）
+    mt = ins.get("suggested_tier")
+    if mt and mt in ("A", "B", "C", "D") and application_id:
+        ar = conn.execute("SELECT tier_suggested, tier_final FROM applications WHERE id=?",
+                          (application_id,)).fetchone()
+        if ar and not ar["tier_final"] and ar["tier_suggested"] != mt:
+            conn.execute("UPDATE applications SET tier_suggested=?, updated_at=? WHERE id=?",
+                         (mt, db.now(), application_id))
+            conn.commit()
+            print(f"[analyze] 候选人#{candidate_id} 档位 {ar['tier_suggested']} → {mt}（模型）",
+                  file=sys.stderr)
+    return ins
+
+
 def spawn_auto_analysis(db_path: str, report: dict, limit: int = 20) -> int:
     """把入库结果排入后台分析队列，返回排队条数。
 
@@ -855,53 +899,39 @@ def spawn_auto_analysis(db_path: str, report: dict, limit: int = 20) -> int:
     2) **不碰档位**：只写候选人的分析文本（`candidate_insights`），
        档位/阶段/岗位一律不动——自动分析不等于自动决定；
     3) **失败只记录**：单条失败不影响其余，也不会让入库报错；
-    4) **可用 `TP_AUTO_INSIGHT=0` 关闭**：自检需要确定性，
-       不能让后台线程在断言之间偷偷写库。
+    4) **可用 `TP_AUTO_INSIGHT=0` 关闭**（自检用），也可用**产品开关**
+       `auto_insight_on_ingest` 关闭（v1.13.4，HR 自己在界面上关）。
+       关掉时把**跳过条数**写进 report，让入库结果如实说明"这几个人没分析"，
+       并提示可手动批量触发——不能让人误以为"已经分析过了"。
     """
     if os.environ.get("TP_AUTO_INSIGHT", "1") == "0":
         return 0
-    targets = _insight_targets(report)[:max(0, int(limit))]
+    targets_all = _insight_targets(report)
+    # 产品开关：默认开（保持既有行为）；关掉时入库不自动调模型
+    try:
+        _c = db.connect(db_path)
+        _on = bool(db.get_setting(_c, "auto_insight_on_ingest", True))
+        _c.close()
+    except Exception as exc:                               # noqa: BLE001
+        print(f"[auto_insight] 读开关失败，按默认开启处理："
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        _on = True
+    if not _on:
+        report["insight_skipped"] = len(targets_all)
+        return 0
+    targets = targets_all[:max(0, int(limit))]
     if not targets:
         return 0
 
     def _work() -> None:
-        from .pipeline.analyze import auto_insight     # 延迟导入，避免模块环
         conn = db.connect(db_path)                     # sqlite 连接不能跨线程复用
         try:
             for t in targets:
-                cid, app_id = t["candidate_id"], t["application_id"]
                 try:
-                    cand = db.candidate_detail(conn, cid)
-                    if not cand:
-                        continue
-                    # 分数/档位/理由都在**投递**上而非候选人上，取对应那条投递
-                    apps = cand.get("applications") or []
-                    app_row = next((a for a in apps if a.get("id") == app_id),
-                                   apps[0] if apps else {})
-                    # 未归岗时 jd 为 None —— 不硬套默认尺子，但仍产出简历画像
-                    jd, _meta = db.resolve_candidate_job(conn, cand)
-                    ins = auto_insight(cand, jd, app_row)
-                    db.upsert_insight(conn, cid, app_id,
-                                      summary=ins.get("summary") or "",
-                                      reasons=ins.get("reasons"),
-                                      risks=ins.get("risks"),
-                                      evidence=ins.get("evidence"),
-                                      source=ins.get("source") or "auto_ingest",
-                                      model=ins.get("model") or "",
-                                      business_direction=ins.get("business_direction"))
-                    # 模型建议档位 → 更新 tier_suggested（HR 未确认时才更新）
-                    _mt = ins.get("suggested_tier")
-                    if _mt and _mt in ("A","B","C","D") and app_id:
-                        _ar = conn.execute("SELECT tier_suggested, tier_final FROM applications WHERE id=?",
-                                           (app_id,)).fetchone()
-                        if _ar and not _ar["tier_final"] and _ar["tier_suggested"] != _mt:
-                            conn.execute("UPDATE applications SET tier_suggested=?, updated_at=? WHERE id=?",
-                                         (_mt, db.now(), app_id))
-                            conn.commit()
-                            print(f"[auto_insight] 候选人#{cid} 档位 {_ar['tier_suggested']} → {_mt}（模型）",
-                                  file=sys.stderr)
+                    analyze_one(conn, t["candidate_id"], t["application_id"],
+                                source="auto_ingest")
                 except Exception as exc:               # noqa: BLE001 — 单条失败不扩散
-                    print(f"[auto_insight] 候选人#{cid} 分析失败："
+                    print(f"[auto_insight] 候选人#{t['candidate_id']} 分析失败："
                           f"{type(exc).__name__}: {exc}", file=sys.stderr)
         finally:
             conn.close()
