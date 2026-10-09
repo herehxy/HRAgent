@@ -150,6 +150,13 @@ _PAGE = """<!DOCTYPE html>
   .arch-card:hover{border-color:var(--accent);background:var(--accent-soft)}
   .arch-card.on{border-color:var(--accent);background:var(--accent-soft)}
   .arch-card.on b{color:var(--accent-ink)}
+  /* 字典标签 + × 删除（v1.21）：让"删除"有明确入口 */
+  .dict-tags{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:2px}
+  .dict-tag{display:inline-flex;align-items:center;gap:4px;font-size:12px;
+    padding:2px 6px 2px 8px;border:1px solid var(--line);border-radius:var(--r-chip);
+    background:var(--surface-2);color:var(--ink-2)}
+  .dict-tag b{cursor:pointer;color:var(--ink-3);font-weight:600;padding:0 2px}
+  .dict-tag b:hover{color:var(--bad)}
   .chip-skill{color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line)}
   .chip-unverified{color:var(--ink-3);background:transparent;border:1px dashed var(--line-2)}
   /* 投递管道的一行式条目（v1.15）：密度优先，字号与行高都比正文小一号 */
@@ -729,19 +736,20 @@ async function viewPool(){
       ${(()=>{
         // v1.20：原来是一个年份输入框（打字/上下箭头）——容易打错成 1、2、3，
         // 也不可能出现负数，但**不友好**。改成卡片式，一眼点选、默认当年。
+        // v1.21：改成**下拉框**（上一版做成了卡片行，HR 要的是下拉）。
+        // 默认当年，选项"某年及以前"，不会出现负数或乱值；也能自己输入年份。
         const y = new Date().getFullYear();
-        const cards = [];
-        for (let i=0;i<4;i++) cards.push({y: y-i, t: y-i+' 年及以前'});
-        cards.push({y: 2019, t: '2019 年及以前（更早）'});
-        return `<div class="arch-cards">${cards.map(c=>
-          `<div class="arch-card${c.y===y?' on':''}" data-year="${c.y}"
-               onclick="pickArchYear(this)">
-             <b>${c.y}</b><span>${c.t}</span></div>`).join('')}
-        </div>
-        <div class="bar" style="margin-top:6px">
-          <button id="btnArchByYear" class="btn-primary"
-                  onclick="archiveByYear()">归档 2026 年及以前的投递</button>
-          <span class="small">默认当年。点上面的卡片换年份</span>
+        const ys = [];
+        for (let i=0;i<4;i++) ys.push(y-i);
+        ys.push(2019);
+        return `<div class="bar" style="margin-top:6px">
+          <select id="poolArchYear" style="width:200px" onchange="pickArchYear(this.value)">
+            ${ys.map(v=>`<option value="${v}"${v===y?' selected':''}>${v} 年及以前</option>`).join('')}
+            ${ys.indexOf(y)<0?`<option value="${y}" selected>${y} 年及以前</option>`:''}
+          </select>
+          <button id="btnArchByYear" class="btn-primary" onclick="archiveByYear()">
+            归档 ${y} 年及以前的投递</button>
+          <span class="small">默认 ${y} 年（当年）。要归档更早的年在下拉里选</span>
         </div>`;
       })()}
 
@@ -1350,13 +1358,13 @@ async function archiveBatch(ids, archived){
   toast(`已${verb} ${r.changed} 人${r.skipped?`（跳过 ${r.skipped} 人）`:''}`,'ok');
   refresh();
 }
-let ARCH_YEAR = new Date().getFullYear();   // v1.20：默认当年，卡片点选
-function pickArchYear(el){
-  ARCH_YEAR = parseInt(el.dataset.year) || ARCH_YEAR;
-  document.querySelectorAll('.arch-card').forEach(x=>x.classList.remove('on'));
-  el.classList.add('on');
+let ARCH_YEAR = new Date().getFullYear();   // v1.21：默认当年，下拉选择
+function pickArchYear(v){
+  const y = parseInt(v, 10);
+  if (!y || y < 1990 || y > 2100) return;      // 挡掉明显不合理的输入
+  ARCH_YEAR = y;
   const b = document.getElementById('btnArchByYear');
-  if (b) b.textContent = '归档 ' + ARCH_YEAR + ' 年及以前的投递';
+  if (b) b.textContent = '归档 ' + y + ' 年及以前的投递';
 }
 async function archiveByYear(){
   const y = ARCH_YEAR;
@@ -2450,6 +2458,7 @@ function mailVarChanged(key){
   // ② 方式 → 线上面试才要会议号；现场面试把会议号清掉并隐藏
   if (key === '面试方式'){
     const mode = (document.getElementById('mv_面试方式')||{}).value || '';
+    // 只认"含线上"两个字；其它写法（如"腾讯会议"）按现场处理，不擅自推断
     const online = mode.indexOf('线上') >= 0;
     const box = document.getElementById('mv_会议号');
     const hint = document.getElementById('hintMeet');
@@ -2457,12 +2466,18 @@ function mailVarChanged(key){
     if (hint) hint.style.display = online ? '' : 'none';
     if (!online && box) box.value = '';
   }
-  // ③ 联系人 → 自动带出电话（字典联动，不用手抄）
+  // ③ 联系人 → 自动带出电话（字典联动，不用手抄）。
+  //    现在是组合框（可手打），所以按"输入的名字"去字典里找电话；
+  //    手打了字典外的名字就找不到电话——这是如实反馈，不编号码。
   if (key === '联系人'){
-    const sel = document.getElementById('mv_联系人');
-    const opt = sel && sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex] : null;
+    const inp = document.getElementById('mv_联系人');
     const tel = document.getElementById('mv_联系电话');
-    if (tel) tel.value = (opt && opt.dataset.phone) || '';
+    if (!inp || !tel) return;
+    const who = (inp.value || '').trim();
+    const hit = (IDICT.contacts||[]).find(
+      c => c.name === who || (c.dept + ' · ' + c.name) === who);
+    tel.value = hit ? (hit.phone || '') : '';
+    tel.placeholder = hit ? '' : '字典里没这个人，请手动填写';
   }
 }
 
@@ -2482,27 +2497,35 @@ async function viewMail(){
     `<option value="${t.id}">${esc(t.name)}${t.scene?('（'+esc(t.scene)+'）'):''}</option>`).join('');
   // v1.20：这些字段不该是"带灰色提示的文本框"——那是让 HR 凭记忆敲键盘。
   // 按 key 分派成真控件：日期/时段/地点/单位/方式/会议号/联系人联动。
-  const _sel = (key, list, ph) => `<select id="mv_${esc(key)}" style="width:70%"
-      onchange="mailVarChanged('${esc(key)}')">
-      <option value="">${esc(ph||'请选择')}</option>
-      ${(list||[]).map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('')}
-    </select>`;
+  // v1.21：**组合框**——点右边能下拉选，也能直接打字。
+  // 原生 <input list> 实现，零 JS 依赖；值照样进模板变量。
+  const _dlId = k => 'dl_' + String(k).replace(/[^\\w一-龥]/g, '');
+  const _combo = (key, list, ph) => `
+    <input id="mv_${esc(key)}" list="${_dlId(key)}" style="width:70%"
+      placeholder="${esc(ph||'可直接选择，或自己输入')}"
+      oninput="mailVarChanged('${esc(key)}')" onchange="mailVarChanged('${esc(key)}')">
+    <datalist id="${_dlId(key)}">
+      ${(list||[]).map(x=>`<option value="${esc(x)}"></option>`).join('')}
+    </datalist>`;
   const _contactOpts = (IDICT.contacts||[]).map(
     c => `<option value="${esc(c.name)}" data-phone="${esc(c.phone||'')}"
             data-dept="${esc(c.dept||'')}">${esc(c.dept?c.dept+' · ':'')}${esc(c.name)}</option>`).join('');
   const FIELD_UI = {
     '面试时间': () => `<input id="mv_面试时间" type="date" style="width:70%"
         onchange="mailVarChanged('面试时间')">`,
-    '面试时段': () => _sel('面试时段', IDICT.slots, '请选择时段'),
-    '面试地点': () => _sel('面试地点', IDICT.rooms, '请选择会议室'),
-    '面试单位': () => _sel('面试单位', IDICT.units, '请选择面试单位'),
-    '面试方式': () => _sel('面试方式', IDICT.modes, '请选择面试方式'),
+    '面试时段': () => _combo('面试时段', IDICT.slots, '如 09:00-10:00'),
+    '面试地点': () => _combo('面试地点', IDICT.rooms, '选1519，或直接输入别的会议室'),
+    '面试单位': () => _combo('面试单位', IDICT.units, '选单位，或直接输入'),
+    '面试方式': () => _combo('面试方式', IDICT.modes, '现场面试 / 线上面试'),
     '会议号': () => `<input id="mv_会议号" style="width:70%" placeholder="线上面试的会议号或入会链接">
         <div class="small" id="hintMeet" style="color:var(--bad);display:none">
           选了线上面试就要填会议号，否则候选人收不到入会方式</div>`,
-    '联系人': () => `<select id="mv_联系人" style="width:70%" onchange="mailVarChanged('联系人')">
-        <option value="">请选择联系人</option>${_contactOpts}</select>
-      <div class="small">联系人在「系统配置 → 面试字典」里维护</div>`,
+    '联系人': () => `
+      <input id="mv_联系人" list="dl_联系人" style="width:70%"
+        placeholder="点选或直接输入姓名"
+        oninput="mailVarChanged('联系人')" onchange="mailVarChanged('联系人')">
+      <datalist id="dl_联系人">${_contactOpts}</datalist>
+      <div class="small">选好后自动带出电话；也可以直接手打。字典在「系统配置 → 面试字典」维护。</div>`,
     '联系电话': () => `<input id="mv_联系电话" style="width:70%" readonly
         placeholder="选联系人后自动带出">`,
   };
@@ -3408,10 +3431,26 @@ async function testMailCfg(){
 
 /* ------------------------------ 系统说明 ------------------------------ */
 function _dictList(name, items, ph){
+  const cur = items || [];
+  // v1.21：给出**真正的删除入口**（原来只有"保存"，
+  // HR 看不到东西从哪儿去掉）。标签点 × 就删，改完再保存落盘。
+  const tags = cur.length
+    ? `<div class="dict-tags">${cur.map((x,i)=>
+        `<span class="dict-tag">${esc(x)}<b onclick="dictDel('${esc(name)}',${i})"
+          title="点 × 从字典里去掉">×</b></span>`).join('')}</div>`
+    : '<div class="small" style="color:var(--ink-3)">（还没有内容）</div>';
   return `<div class="k" style="vertical-align:top">${esc(name)}</div><div>
-    <div class="small" style="margin-bottom:4px">每行一个（回车换行）</div>
-    <textarea id="dict_${esc(name)}" style="width:100%;min-height:96px"
-      placeholder="${esc(ph)}">${esc((items||[]).join('\\n'))}</textarea></div>`;
+      ${tags}
+      <textarea id="dict_${esc(name)}" style="width:100%;min-height:88px;margin-top:6px"
+        placeholder="${esc(ph)}">${esc(cur.join('\\n'))}</textarea></div>`;
+}
+function dictDel(name, idx){
+  const box = document.getElementById('dict_'+name);
+  if (!box) return;
+  const arr = box.value.split(/\\r?\\n/).map(x=>x.trim()).filter(Boolean);
+  arr.splice(idx, 1);
+  box.value = arr.join('\\n');
+  renderDictBox();
 }
 function renderDictBox(){
   const box = document.getElementById('dictBox');
@@ -3425,6 +3464,9 @@ function renderDictBox(){
     ${_dictList('面试时段', d.slots, '09:00-10:00')}
     ${_dictList('面试方式', d.modes, '现场面试')}
   </div>
+  <div class="note" style="margin-top:6px">
+    下面是当前生效的项，点 <b>×</b> 删掉；在上面的框里直接改字也可以。
+    新增：在对应框里另起一行写上再点「保存字典」——<b>每行一个</b>。</div>
   <div class="kv" style="margin-top:10px">
     <div class="k" style="vertical-align:top">联系人</div><div>
       <div class="small" style="margin-bottom:4px">每行一条，格式：<b>部门|姓名|电话</b>
