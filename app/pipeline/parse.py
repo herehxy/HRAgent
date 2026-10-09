@@ -71,16 +71,80 @@ def _strip_spaces(text: str) -> str:
     return re.sub(r"\s+", "", str(text or ""))
 
 
+# RapidOCR 实例缓存：初始化要 1-2 秒，每页新建一次会把多页扫描件拖慢十几秒
+_OCR_RT: dict = {}
+
+
+def _ocr_with_rapidocr(img):
+    """RapidOCR（PP-OCRv4 的 ONNX 运行时版，打包内置，纯 CPU、离线可用）。"""
+    eng = _OCR_RT.get("rapid")
+    if eng is None:
+        from rapidocr_onnxruntime import RapidOCR
+        eng = RapidOCR()
+        _OCR_RT["rapid"] = eng
+    # RapidOCR 只接受 str路径 / bytes / numpy.ndarray —— 传 PIL.Image 会 LoadImageError
+    import numpy as _np
+    res = eng(_np.array(img))
+    # 1.2.x 返回 (result, elapse)；result 是 [[box, text, score], ...]
+    if isinstance(res, tuple):
+        res = res[0]
+    parts = []
+    for line in (res or []):
+        if isinstance(line, (list, tuple)) and len(line) >= 2 and str(line[1]).strip():
+            parts.append(str(line[1]).strip())
+    return "\n".join(parts)
+
+
+def _ocr_with_paddleocr(img):
+    import paddleocr                                        # noqa: F401
+    from paddleocr import PaddleOCR
+    eng = _OCR_RT.get("paddle")
+    if eng is None:
+        eng = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+        _OCR_RT["paddle"] = eng
+    res = eng.ocr(img, cls=True)
+    parts = []
+    for page in (res or []):
+        for line in (page or []):
+            if isinstance(line, (list, tuple)) and len(line) >= 2:
+                parts.append(str(line[1][0]).strip())
+    return "\n".join(parts)
+
+
+def _ocr_with_tesseract(img):
+    import pytesseract
+    return pytesseract.image_to_string(img, lang="chi_sim+eng")
+
+
 def _ocr_image_bytes(data: bytes) -> str:
-    """PNG/JPG 字节 → OCR 文本。pytesseract 或 Pillow 缺失时抛错，由上层兜底。"""
+    """PNG/JPG 字节 → OCR 文本。
+
+    **按 `_OCR_ENGINES` 的优先级依次尝试**（rapidocr → paddleocr → tesseract），
+    第一个跑通就用它的结果。这段以前只写死调 pytesseract，而 pytesseract 不在
+    打包产物里 → 扫描件识别永远空（异常还被上层静默吞掉）。
+    全部引擎都失败才抛错，并把原因写 stderr。
+    """
     import io as _io
 
     from PIL import Image
-    import pytesseract
 
     img = Image.open(_io.BytesIO(data))
+    img = img.convert("RGB")
+    runners = (("rapidocr_onnxruntime", _ocr_with_rapidocr),
+               ("paddleocr", _ocr_with_paddleocr),
+               ("pytesseract", _ocr_with_tesseract))
+    errors = []
     try:
-        return pytesseract.image_to_string(img, lang="chi_sim+eng")
+        for name, fn in runners:
+            try:
+                text = fn(img)
+            except Exception as exc:                          # noqa: BLE001
+                errors.append(f"{name}: {type(exc).__name__}: {exc}")
+                continue
+            if text and text.strip():
+                return text
+            errors.append(f"{name}: 返回空")
+        raise RuntimeError("所有 OCR 引擎都没出结果 -> " + " | ".join(errors))
     finally:
         try:
             img.close()

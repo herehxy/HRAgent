@@ -1324,6 +1324,33 @@ def main(verbose: bool = True) -> int:
                      f"合并后 {len(_mg18)} 条")
                 c.ok(_eh("今天天气不错") == [],
                      "㉖ 没有就不抽（缺 = 未识别，不等于『没有』）")
+                # ---- v1.18.1：OCR 实现与能力上报必须一致 ----
+                # 坑： 按import 可用性报 rapidocr 可用（确实在包里），
+                # 但真正干活的  只调 pytesseract——**没打包**，
+                # 每次 ModuleNotFoundError 被上层静默吞掉 → 扫描件识别永远是空的。
+                # 这里用一张现画的图跑真 OCR，断言**真有中文输出**。
+                from PIL import Image as _I, ImageDraw as _D, ImageFont as _F
+                import io as _io2
+                _im = _I.new("RGB", (900, 420), "white")
+                _dr = _D.Draw(_im)
+                _fp = "C:/Windows/Fonts/msyh.ttc"
+                if os.path.exists(_fp):
+                    _fnt = _F.truetype(_fp, 30)
+                    _dr.text((50, 40), "姓名：钱思远", font=_fnt, fill="black")
+                    _dr.text((50, 110), "学历：硕士  材料科学与工程", font=_fnt, fill="black")
+                    _dr.text((50, 180), "获国家奖学金（一等）", font=_fnt, fill="black")
+                    _buf = _io2.BytesIO()
+                    _im.save(_buf, format="PNG")
+                    from app.pipeline import parse as _pp
+                    try:
+                        _ocr_txt = _pp._ocr_image_bytes(_buf.getvalue()) or ""
+                    except Exception:
+                        _ocr_txt = ""
+                    c.ok("钱思远" in _ocr_txt,
+                         "㉙ OCR 真的能识别中文（实现与能力上报一致）",
+                         f"识别到 {len(_ocr_txt)} 字：{_ocr_txt[:24]}")
+                else:
+                    c.ok(True, "㉙ OCR 断言跳过（本机无中文字体，无法造测试图）")
                 c.ok("荣誉 / 论文 / 专利" in _pgjs,
                      "㉗ 完整档案里有荣誉/论文/专利区块")
                 c.ok("pipeExpand" in _pgjs and "goStageFilter" in _pgjs
