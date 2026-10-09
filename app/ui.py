@@ -157,6 +157,16 @@ _PAGE = """<!DOCTYPE html>
     background:var(--surface-2);color:var(--ink-2)}
   .dict-tag b{cursor:pointer;color:var(--ink-3);font-weight:600;padding:0 2px}
   .dict-tag b:hover{color:var(--bad)}
+  /* 字典逐项列表（v1.21.2）：每项一行 + × 删除 + 输入框添加 */
+  .dict-list{border:1px solid var(--line);border-radius:var(--r-ctl);
+    max-height:190px;overflow:auto;background:var(--surface)}
+  .dict-row{display:flex;align-items:center;gap:8px;padding:4px 9px;font-size:13px}
+  .dict-row:nth-child(odd){background:var(--surface-2)}
+  .dict-row span{flex:1;min-width:0}
+  .dict-row b{cursor:pointer;color:var(--ink-3);font-weight:600;padding:0 4px;flex:none}
+  .dict-row b:hover{color:var(--bad)}
+  .dict-add{display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap}
+  .dict-add input{flex:1;min-width:120px}
   .chip-skill{color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line)}
   .chip-unverified{color:var(--ink-3);background:transparent;border:1px dashed var(--line-2)}
   /* 投递管道的一行式条目（v1.15）：密度优先，字号与行高都比正文小一号 */
@@ -737,18 +747,18 @@ async function viewPool(){
         // v1.20：原来是一个年份输入框（打字/上下箭头）——容易打错成 1、2、3，
         // 也不可能出现负数，但**不友好**。改成卡片式，一眼点选、默认当年。
         // v1.21：改成**下拉框**（上一版做成了卡片行，HR 要的是下拉）。
-        // 默认当年，选项"某年及以前"，不会出现负数或乱值；也能自己输入年份。
+        // 默认当年，选项是"某年以前"（**不含该年**：后端是 year < before_year）；不会出现负数或乱值。
         const y = new Date().getFullYear();
         const ys = [];
         for (let i=0;i<4;i++) ys.push(y-i);
         ys.push(2019);
         return `<div class="bar" style="margin-top:6px">
           <select id="poolArchYear" style="width:200px" onchange="pickArchYear(this.value)">
-            ${ys.map(v=>`<option value="${v}"${v===y?' selected':''}>${v} 年及以前</option>`).join('')}
-            ${ys.indexOf(y)<0?`<option value="${y}" selected>${y} 年及以前</option>`:''}
+            ${ys.map(v=>`<option value="${v}"${v===y?' selected':''}>${v} 年以前</option>`).join('')}
+            ${ys.indexOf(y)<0?`<option value="${y}" selected>${y} 年以前</option>`:''}
           </select>
           <button id="btnArchByYear" class="btn-primary" onclick="archiveByYear()">
-            归档 ${y} 年及以前的投递</button>
+            归档 ${y} 年以前的投递</button>
           <span class="small">默认 ${y} 年（当年）。要归档更早的年在下拉里选</span>
         </div>`;
       })()}
@@ -1364,7 +1374,7 @@ function pickArchYear(v){
   if (!y || y < 1990 || y > 2100) return;      // 挡掉明显不合理的输入
   ARCH_YEAR = y;
   const b = document.getElementById('btnArchByYear');
-  if (b) b.textContent = '归档 ' + y + ' 年及以前的投递';
+  if (b) b.textContent = '归档 ' + y + ' 年以前的投递';
 }
 async function archiveByYear(){
   const y = ARCH_YEAR;
@@ -3430,67 +3440,108 @@ async function testMailCfg(){
 }
 
 /* ------------------------------ 系统说明 ------------------------------ */
-function _dictList(name, items, ph){
+function _dictRows(name, items){
+  // 逐项一行 + × 删除（点一下直接从字典里去掉并落盘）
   const cur = items || [];
-  // v1.21：给出**真正的删除入口**（原来只有"保存"，
-  // HR 看不到东西从哪儿去掉）。标签点 × 就删，改完再保存落盘。
-  const tags = cur.length
-    ? `<div class="dict-tags">${cur.map((x,i)=>
-        `<span class="dict-tag">${esc(x)}<b onclick="dictDel('${esc(name)}',${i})"
-          title="点 × 从字典里去掉">×</b></span>`).join('')}</div>`
-    : '<div class="small" style="color:var(--ink-3)">（还没有内容）</div>';
-  return `<div class="k" style="vertical-align:top">${esc(name)}</div><div>
-      ${tags}
-      <textarea id="dict_${esc(name)}" style="width:100%;min-height:88px;margin-top:6px"
-        placeholder="${esc(ph)}">${esc(cur.join('\\n'))}</textarea></div>`;
+  if (!cur.length) return '<div class="small" style="color:var(--ink-3)">（还没有内容，用下面的框添加）</div>';
+  return `<div class="dict-list">${cur.map((x,i)=>`
+    <div class="dict-row"><span>${esc(x)}</span>
+      <b onclick="dictDel('${esc(name)}',${i})" title="点 × 从字典里去掉">×</b></div>`).join('')}</div>`;
 }
-function dictDel(name, idx){
-  const box = document.getElementById('dict_'+name);
-  if (!box) return;
-  const arr = box.value.split(/\\r?\\n/).map(x=>x.trim()).filter(Boolean);
-  arr.splice(idx, 1);
-  box.value = arr.join('\\n');
+function _dictList(name, items, ph){
+  return `<div class="k" style="vertical-align:top">${esc(name)}</div><div>
+      ${_dictRows(name, items)}
+      <div class="dict-add">
+        <input id="new_${esc(name)}" placeholder="${esc(ph||'输入新的一项，回车添加')}"
+               onkeydown="if(event.key==='Enter'){dictAdd('${esc(name)}');}">
+        <button class="mini" onclick="dictAdd('${esc(name)}')">添加</button>
+      </div>
+    </div>`;
+}
+function _dictPayload(){
+  // 从各字典的当前列表读（不再是 textarea——那是兜底编辑区）
+  return {
+    units: (window._dictData.units||[]).slice(),
+    rooms: (window._dictData.rooms||[]).slice(),
+    slots: (window._dictData.slots||[]).slice(),
+    modes: (window._dictData.modes||[]).slice(),
+    contacts: (window._dictData.contacts||[]).slice(),
+  };
+}
+async function dictSave(next, msg){
+  const r = await api('/api/interview-dict', {method:'POST', body:JSON.stringify(next)});
+  if (r.__http_error || r.error){ toast(r.detail || r.error || '保存失败','danger'); return; }
+  window._dictData = r.dict || next;
+  IDICT = window._dictData;
   renderDictBox();
+  toast(msg || '已保存','ok');
+}
+async function dictDel(name, idx){
+  const next = _dictPayload();
+  if (!next[name] || idx >= next[name].length) return;
+  const gone = next[name][idx];
+  next[name].splice(idx, 1);
+  await dictSave(next, '已删除「' + gone + '」');
+}
+async function dictAdd(name){
+  const inp = document.getElementById('new_'+name);
+  const v = (inp && inp.value || '').trim();
+  if (!v) { if (inp) inp.focus(); return; }
+  const next = _dictPayload();
+  if ((next[name]||[]).indexOf(v) >= 0){ toast('已经有这一项了','warn'); return; }
+  next[name] = (next[name]||[]).concat([v]);
+  await dictSave(next, '已添加「' + v + '」');
+}
+async function dictContactDel(idx){
+  const next = _dictPayload();
+  next.contacts.splice(idx, 1);
+  await dictSave(next, '已删除该联系人');
+}
+async function dictContactAdd(){
+  const d = (document.getElementById('new_c_dept')||{}).value || '';
+  const n = (document.getElementById('new_c_name')||{}).value || '';
+  const p = (document.getElementById('new_c_phone')||{}).value || '';
+  if (!d.trim() && !n.trim()){ toast('至少填部门或姓名','warn'); return; }
+  const next = _dictPayload();
+  next.contacts.push({dept:d.trim(), name:n.trim(), phone:p.trim()});
+  await dictSave(next, '已添加联系人');
 }
 function renderDictBox(){
   const box = document.getElementById('dictBox');
-  if (!box) return;
+  if (!box){ return; }          // 页面还没渲染好——静默返回是本项目吃过亏的地方
   const d = IDICT || {};
-  const contacts = (d.contacts||[]).map(c =>
-    `${c.dept||''}|${c.name||''}|${c.phone||''}`).join('\\n');
+  window._dictData = {units:d.units||[], rooms:d.rooms||[], slots:d.slots||[],
+                      modes:d.modes||[], contacts:(d.contacts||[]).map(c=>({
+                        dept:c.dept||'', name:c.name||'', phone:c.phone||''}))};
+  const cs = window._dictData.contacts;
   box.innerHTML = `<div class="kv">
-    ${_dictList('面试单位', d.units, '西北有色院材料研究中心')}
-    ${_dictList('会议室', d.rooms, '创新大楼1519会议室')}
-    ${_dictList('面试时段', d.slots, '09:00-10:00')}
-    ${_dictList('面试方式', d.modes, '现场面试')}
+    ${_dictList('面试单位', window._dictData.units, '如：材料研究中心')}
+    ${_dictList('会议室', window._dictData.rooms, '如：创新大楼1519会议室')}
+    ${_dictList('面试时段', window._dictData.slots, '如：08:00-09:00')}
+    ${_dictList('面试方式', window._dictData.modes, '如：现场面试')}
   </div>
-  <div class="note" style="margin-top:6px">
-    下面是当前生效的项，点 <b>×</b> 删掉；在上面的框里直接改字也可以。
-    新增：在对应框里另起一行写上再点「保存字典」——<b>每行一个</b>。</div>
-  <div class="kv" style="margin-top:10px">
+  <div class="kv" style="margin-top:12px">
     <div class="k" style="vertical-align:top">联系人</div><div>
-      <div class="small" style="margin-bottom:4px">每行一条，格式：<b>部门|姓名|电话</b>
-        （样例：人力资源部|张老师|029-8888XXXX）</div>
-      <textarea id="dict_contacts" style="width:100%;min-height:96px"
-        placeholder="人力资源部|张老师|029-8888XXXX">${esc(contacts)}</textarea></div>
+      ${cs.length ? `<div class="dict-list">${cs.map((c,i)=>`
+        <div class="dict-row"><span>${esc(c.dept||'')}${c.dept&&c.name?' · ':''}${esc(c.name||'')}
+          <span class="small">${esc(c.phone||'')}</span></span>
+          <b onclick="dictContactDel(${i})" title="点 × 去掉这位联系人">×</b></div>`).join('')}</div>`
+        : '<div class="small" style="color:var(--ink-3)">（还没有联系人）</div>'}
+      <div class="dict-add">
+        <input id="new_c_dept" placeholder="部门" style="width:26%">
+        <input id="new_c_name" placeholder="姓名" style="width:20%">
+        <input id="new_c_phone" placeholder="电话" style="width:30%">
+        <button class="mini" onclick="dictContactAdd()">添加联系人</button>
+      </div>
+      <div class="small" style="margin-top:4px">联系人在写邮件时选人即可自动带出电话。</div>
+    </div>
   </div>`;
 }
+
 async function saveDict(){
-  const val = id => (document.getElementById('dict_'+id)||{}).value || '';
-  const lines = v => v.split(/\\r?\\n/).map(x=>x.trim()).filter(Boolean);
-  const contacts = lines(val('contacts')).map(l=>{
-    const p = l.split('|');
-    return {dept:(p[0]||'').trim(), name:(p[1]||'').trim(), phone:(p[2]||'').trim()};
-  }).filter(c=>c.dept || c.name);
-  const body = {units: lines(val('面试单位')), rooms: lines(val('会议室')),
-                slots: lines(val('面试时段')), modes: lines(val('面试方式')),
-                contacts};
-  const r = await api('/api/interview-dict', {method:'POST', body:JSON.stringify(body)});
-  if (r.__http_error || r.error){ toast(r.detail || r.error || '保存失败','danger'); return; }
-  IDICT = r.dict || body;
-  const el = document.getElementById('dictMsg');
-  if (el) el.textContent = '已保存（写邮件页的下拉框下次打开就是新的）';
-  toast('面试字典已保存','ok');
+  // 现在增删都自动落盘了；这个按钮保留给"批量编辑"用——
+  // 逐项增删不需要点它。
+  await dictSave(_dictPayload(), '面试字典已保存');
 }
 
 async function viewSys(){
@@ -3498,7 +3549,6 @@ async function viewSys(){
     api('/api/policy'), api('/api/model-config'),
     api('/api/interview-dict').catch(()=>({}))]);
   IDICT = dict || {};
-  renderDictBox();
   const a = pol.access || {}, pii = a.pii_protection || {};
   document.getElementById('view').innerHTML = `
   <div class="panel"><h2>系统配置</h2>
@@ -3597,6 +3647,8 @@ async function viewSys(){
   renderSmtpCfgInto('smtpCfgBox');       // 发信（SMTP）
   renderTplMgrInto('tplMgrBox');         // 邮件模板管理
   renderImportCfgInto('importCfgBox');   // 来源目录 / 文件清单 / 历史导入记录
+  renderDictBox();   // 必须在 innerHTML 之后调用
+
 }
 
 /* 口径偏差（决策反馈闭环）：把"系统建议 vs HR 决定"的偏差摊开给 HR 看。
