@@ -265,6 +265,8 @@ let GENDER = '';
 // 初筛下拉（v1.7.3）：最低学历（≥门槛）与院校层次（985/211）。
 // 都是岗位相关的硬条件，与性别筛选不同，不需要开关约束。
 let EDU_MIN = '', UNIV = '';
+let STAGE_F = '';          // v1.16.1：阶段筛选（管道"看全部"跳过来时用）
+const PIPE_ALL = {};      // 管道里手动展开的列：{阶段名: true}
 // 人才库分页（v1.7.1）：每页 10 人。切档位 / 搜索 / 清空都会把页码拨回第 1 页——
 // 否则"在第 3 页改了搜索词"会落在一个不存在的页上（后端会兜底夹到末页，但那不是用户想要的）。
 // 导出 CSV 不分页：另发一次不带 page 参数的请求拿全量，见 exportCsv。
@@ -626,6 +628,7 @@ async function viewPool(){
       + '&kw=' + encodeURIComponent(KW) + '&gender=' + encodeURIComponent(GENDER)
       + '&education=' + encodeURIComponent(EDU_MIN)
       + '&univ=' + encodeURIComponent(UNIV)
+      + '&stage=' + encodeURIComponent(STAGE_F)
       + '&page=' + POOL_PAGE + '&page_size=' + POOL_SIZE),
     api('/api/pipeline')
   ]);
@@ -653,6 +656,13 @@ async function viewPool(){
       ${[['','不限'],['大专','大专及以上'],['本科','本科及以上'],['硕士','硕士及以上'],['博士','博士']]
         .map(([v,l])=>`<option value="${v}" ${EDU_MIN===v?'selected':''}>${l}</option>`).join('')}
     </select>`;
+  // v1.16.1：阶段筛选。管道里"还有 N 人 · 看全部"跳过来时靠它落地——
+  // 后端 /api/candidates 早就支持 stage 参数，只是界面一直没给入口。
+  const stageSel = `<span class="small" style="margin-left:6px">阶段</span>
+    <select onchange="STAGE_F=this.value;poolPageReset();refresh()">
+      <option value="">不限</option>
+      ${STAGES.map(k=>`<option value="${k}" ${STAGE_F===k?'selected':''}>${k}</option>`).join('')}
+    </select>`;
   const uniSel = `<span class="small" style="margin-left:6px">院校</span>
     <select onchange="UNIV=this.value;poolPageReset();refresh()">
       <option value="">不限</option>
@@ -679,7 +689,7 @@ async function viewPool(){
         </select>
         <button class="btn-primary" onclick="doSearch()">搜索</button>
         <button onclick="KW='';GENDER='';EDU_MIN='';UNIV='';poolPageReset();refresh()">清空</button>
-        ${gsel}${eduSel}${uniSel}
+        ${gsel}${eduSel}${uniSel}${stageSel}
       </div>
       <div class="bar">
         <button onclick="doIngest('mailbox')">收取邮箱简历</button>
@@ -1137,6 +1147,16 @@ async function exportCsv(){
    数据仍是 /api/pipeline 一份；折叠态记在 PIPE_OPEN，refresh 重渲染后不丢。 */
 const PIPE_PER_COL = 15;   // 每列最多显示多少人（v1.15）：看板是"看积压"，不是"浏览全部"
 const _PIPE_STAGES = STAGES.filter(s=>s!=='已入职' && s!=='已结束');   // 在招流程阶段
+function pipeExpand(stage){
+  PIPE_ALL[stage] = !PIPE_ALL[stage];
+  refresh();
+}
+function goStageFilter(stage){
+  STAGE_F = stage; TAB = 'ALL'; POOL_PAGE = 0;
+  refresh();
+  toast('已按阶段「' + stage + '」筛选人才库', 'ok');
+}
+
 function pipeToggle(){ PIPE_OPEN = !PIPE_OPEN; refresh(); }
 function pipeBoardHtml(p){
   const order = (p && p.stage_order) || STAGES;
@@ -1162,8 +1182,12 @@ function pipeBoardHtml(p){
     const v = st[s] || {count:0, items:[], overdue:0};
     // 每条压成**一行**（v1.15）：几百人时每条占 3 行根本没法看。
     // 姓名 · 岗位 · 天数（超期红） · 行内推进下拉——下拉是常用动作，不能砍。
-    const _shown = (v.items||[]).slice(0, PIPE_PER_COL);
-    const _more = (v.items||[]).length - _shown.length;
+    // v1.16.1：超出 15 人时给**两个真出口**——就地展开，或跳人才库按阶段筛。
+    // 原来只有一行灰字提示，而人才库当时并没有阶段筛选器，等于给了个死路。
+    const _all = v.items||[];
+    const _expandAll = !!PIPE_ALL[s];
+    const _shown = _expandAll ? _all : _all.slice(0, PIPE_PER_COL);
+    const _more = _all.length - _shown.length;
     const rows = _shown.map(i=>`
       <div class="it pipe-it" style="color:var(--ink-2)">
         <span class="pipe-nm" title="点击打开完整档案"
@@ -1175,7 +1199,16 @@ function pipeBoardHtml(p){
           ${STAGES.map(k=>`<option value="${k}" ${k===s?'selected':''}>${k}</option>`).join('')}
         </select>`:''}
       </div>`).join('') || '<div class="it">—</div>'
-      + (_more>0 ? `<div class="it pipe-more">还有 ${_more} 人 · 去人才库按阶段筛</div>` : '');
+      + (_more>0
+          ? `<div class="it pipe-more">还有 ${_more} 人 ·
+              <a href="javascript:void(0)" onclick="pipeExpand('${esc(s)}')"
+                 title="就在这一列里把剩下的也显示出来">在本列展开</a> ·
+              <a href="javascript:void(0)" onclick="goStageFilter('${esc(s)}')"
+                 title="跳到人才库，只看「${esc(s)}」阶段的人">去人才库筛选</a></div>`
+          : (_all.length>PIPE_PER_COL && _expandAll
+              ? `<div class="it pipe-more">已展开全部 ${_all.length} 人 ·
+                   <a href="javascript:void(0)" onclick="pipeExpand('${esc(s)}')">收起</a></div>`
+              : ''));
     return `<div class="pcol"><div class="h"><span>${esc(s)}</span>
       <span style="color:${v.overdue?'var(--bad)':'var(--ink-3)'}">${v.count}${v.overdue?(' / 超期'+v.overdue):''}</span></div>
       ${rows}</div>`;
@@ -1183,7 +1216,7 @@ function pipeBoardHtml(p){
   return `<div class="card" id="pipeCard" style="margin-bottom:12px">${head}
     <div class="cols" style="margin-top:10px">${cols}</div>
     <div class="small" style="color:var(--ink-3);margin-top:8px"
-         title="点姓名打开完整档案；行内下拉可直接推进阶段（写审计）；停留超过 15 天标红">每列最多显示 ${PIPE_PER_COL} 人 · 点姓名看档案 · 行内下拉推进阶段 · 超 15 天标红</div>
+         title="点姓名打开完整档案；行内下拉可直接推进阶段（写审计）；停留超过 15 天标红">每列最多显示 ${PIPE_PER_COL} 人（超出可展开或去人才库按阶段筛）· 点姓名看档案 · 超 15 天标红</div>
   </div>`;
 }
 

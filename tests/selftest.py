@@ -1262,6 +1262,14 @@ def main(verbose: bool = True) -> int:
                      "⑳d 动作层已登记这 9 个（否则 HR 点确认执行会报『未支持的 tool』）",
                      f"缺：{sorted({'assign_job','suggest_job','mark_review','set_archive','archive_batch','split_candidate','create_job','update_job_jd','regrade_job'} - _branches16)}")
 
+                # ---- v1.16.1：超出 15 人时要给**真能点的出口** ----
+                # 原来只有一行灰字"去人才库按阶段筛"，但人才库**没有阶段筛选器**，
+                # 那是句空话。现在两条路都通：就地展开 / 跳人才库按阶段筛。
+                c.ok("pipeExpand" in _pgjs and "goStageFilter" in _pgjs
+                     and "在本列展开" in _pgjs and "去人才库筛选" in _pgjs,
+                     "㉒ 管道超出 15 人时给出可点出口（展开 / 去人才库筛选），不是一句提示")
+                c.ok("&stage=" in _pgjs and "STAGE_F" in _pgjs,
+                     "㉓ 人才库真的有阶段筛选入口（否则看全部仍是死路）")
                 c.ok("isw.enabled" in _pgjs and "isw.on" not in _pgjs,
                      "⑮a 开关的字段名前后端一致（isw.enabled）",
                      "前端若读 isw.on 会永远显示「关」，看起来改不动")
