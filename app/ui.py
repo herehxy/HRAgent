@@ -868,7 +868,7 @@ async function showDetail(cid){
           // 所以这里必须读**原始** status 字段，不能拿 status_display 判断。
           const _done = (_a.status === '已确认');
           return `<b>${_done ? '已复核' : '未复核'}</b>
-            <button class="btn-primary" onclick="markReview(${_a.id||'null'},${_done},d)">
+            <button class="btn-primary" onclick="markReview(${_a.id||'null'},${_done},${cid})">
               ${_done ? '撤销复核' : '我已核对过这个人的信息'}</button>
             <span class="small">复核只表示"看过并认可"，**不会改动档位**；
               不同意就直接改档位或拒绝。</span>`;

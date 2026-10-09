@@ -1234,6 +1234,11 @@ def main(verbose: bool = True) -> int:
                      "⑫ 有「手动指定岗位」入口（与系统建议无关，兜底可用）")
                 c.ok("assignBatch" not in _pgjs and "批量归岗" not in _pg,
                      "⑫b **没有批量归岗**（HR 明确要求逐个处理，不要批量入口）")
+                # 护栏：inline onclick 里**不能传渲染函数的局部变量**（如 showDetail 里的 d）——
+                # onclick 在全局作用域求值，取不到局部变量 → ReferenceError → 点了没反应。
+                # 正确做法是把值插值进 HTML（${cid}），变成字面量。
+                c.ok(",d)" not in _pgjs,
+                     "⑳ 页面里没有把局部变量 d 传给 onclick（踩过：按钮点了没反应）")
                 c.ok("'修改岗位'" in _pg and "所属岗位</div>" in _pg
                      and "assignJobPick(${d.id}" in _pg,
                      "⑫b2 完整档案里有「修改岗位」入口（已归岗的也能改归属）")
