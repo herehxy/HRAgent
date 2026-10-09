@@ -28,11 +28,38 @@ RUNTIME_VARS = [
     {"key": "面试地点", "desc": "如 创新大楼 1519 会议室"},
     {"key": "面试单位", "desc": "如 数字化中心"},
     {"key": "面试方式", "desc": "如 现场面试 / 线上面试"},
+    # v1.20：会议号。**只在选"线上面试"时**才要求填（现场面试留空即可，
+    # 模板里那一行会随方式一起消失/ 保留空白）。
+    {"key": "会议号", "desc": "线上面试的会议号或入会链接"},
     {"key": "联系人", "desc": "如 人力资源部 张老师"},
     {"key": "联系电话", "desc": "留给候选人的联系电话"},
 ]
 
 _VAR_RE = re.compile(r"\{([^{}\n]{1,15})\}")
+
+
+# 条件块：<!--IF:变量==值-->…<!--ENDIF--> / <!--IF:变量-->…<!--ENDIF-->
+# 不满足就**整块删除**——现场面试不该看到"腾讯会议：xxx"这一行。
+_IF_RE = re.compile(
+    r"<!--IF:(?P<var>[^{}]{1,20}?)(?:==(?P<val>[^<>]{1,40}?))?-->(?P<body>.*?)<!--ENDIF-->",
+    re.S)
+
+
+def _apply_conditions(text: str, ctx: dict) -> str:
+    def one(m):
+        var = m.group("var").strip()
+        want = m.group("val")
+        val = str(ctx.get(var) or "").strip()
+        keep = (val == want.strip()) if want is not None else bool(val)
+        return m.group("body") if keep else ""
+    # 反复套用：允许嵌套（内层先判）
+    out = text or ""
+    for _ in range(3):
+        new = _IF_RE.sub(one, out)
+        if new == out:
+            break
+        out = new
+    return out
 
 
 def render(text: str, ctx: dict) -> dict:
@@ -56,7 +83,10 @@ def render(text: str, ctx: dict) -> dict:
             used.append(key)
         return str(val)
 
-    return {"text": _VAR_RE.sub(sub, text or ""), "missing": missing, "used": used}
+    # 顺序很重要：先删掉不满足的条件块，再替换 {} 变量——
+    # 否则被删掉的块里的变量还会被算成"待填"。
+    return {"text": _VAR_RE.sub(sub, _apply_conditions(text or "", ctx)),
+            "missing": missing, "used": used}
 
 
 def build_ctx(candidate: dict | None, job_title: str = "", hr_name: str = "",

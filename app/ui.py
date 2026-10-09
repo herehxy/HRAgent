@@ -141,6 +141,15 @@ _PAGE = """<!DOCTYPE html>
   .pipe-day.is-over{color:var(--bad);font-weight:600}
   .pipe-sel{flex:none;padding:1px 2px;font-size:11px;border-radius:3px;max-width:5.5em}
   .pipe-more{font-size:11px;color:var(--ink-3);padding-top:4px}
+  /* 归档年份卡片（v1.20）：比数字输入框友好，也不会出现负数/乱值 */
+  .arch-cards{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  .arch-card{border:1px solid var(--line);border-radius:var(--r-ctl);padding:6px 12px;
+    cursor:pointer;line-height:1.35;background:var(--surface);min-width:104px}
+  .arch-card b{display:block;font-size:14px}
+  .arch-card span{font-size:11px;color:var(--ink-3)}
+  .arch-card:hover{border-color:var(--accent);background:var(--accent-soft)}
+  .arch-card.on{border-color:var(--accent);background:var(--accent-soft)}
+  .arch-card.on b{color:var(--accent-ink)}
   .chip-skill{color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line)}
   .chip-unverified{color:var(--ink-3);background:transparent;border:1px dashed var(--line-2)}
   /* 投递管道的一行式条目（v1.15）：密度优先，字号与行高都比正文小一号 */
@@ -717,8 +726,24 @@ async function viewPool(){
     <div class="bar" style="margin-top:8px">
       <span class="small" title="按年使用：新一年开始时把旧简历整批收起（归档不等于删除，满 30 天才彻底清理，期间可随时取消）">批量归档</span>
       <button onclick="archiveBatch(null,true)">归档勾选的人</button>
-      <input id="poolArchYear" type="number" placeholder="年份 2025" style="width:130px">
-      <button onclick="archiveByYearFrom('poolArchYear')">归档该年以前</button>
+      ${(()=>{
+        // v1.20：原来是一个年份输入框（打字/上下箭头）——容易打错成 1、2、3，
+        // 也不可能出现负数，但**不友好**。改成卡片式，一眼点选、默认当年。
+        const y = new Date().getFullYear();
+        const cards = [];
+        for (let i=0;i<4;i++) cards.push({y: y-i, t: y-i+' 年及以前'});
+        cards.push({y: 2019, t: '2019 年及以前（更早）'});
+        return `<div class="arch-cards">${cards.map(c=>
+          `<div class="arch-card${c.y===y?' on':''}" data-year="${c.y}"
+               onclick="pickArchYear(this)">
+             <b>${c.y}</b><span>${c.t}</span></div>`).join('')}
+        </div>
+        <div class="bar" style="margin-top:6px">
+          <button id="btnArchByYear" class="btn-primary"
+                  onclick="archiveByYear()">归档 2026 年及以前的投递</button>
+          <span class="small">默认当年。点上面的卡片换年份</span>
+        </div>`;
+      })()}
 
     </div>
     ${gtip}
@@ -1325,10 +1350,16 @@ async function archiveBatch(ids, archived){
   toast(`已${verb} ${r.changed} 人${r.skipped?`（跳过 ${r.skipped} 人）`:''}`,'ok');
   refresh();
 }
-async function archiveByYear(elId){
-  const el = document.getElementById(elId || 'archYear') || document.getElementById('poolArchYear');
-  const y = parseInt((el||{}).value || '0');
-  if (!y){ toast('请先填年份，例如 2026 表示归档 2026 年以前的投递','warn'); return; }
+let ARCH_YEAR = new Date().getFullYear();   // v1.20：默认当年，卡片点选
+function pickArchYear(el){
+  ARCH_YEAR = parseInt(el.dataset.year) || ARCH_YEAR;
+  document.querySelectorAll('.arch-card').forEach(x=>x.classList.remove('on'));
+  el.classList.add('on');
+  const b = document.getElementById('btnArchByYear');
+  if (b) b.textContent = '归档 ' + ARCH_YEAR + ' 年及以前的投递';
+}
+async function archiveByYear(){
+  const y = ARCH_YEAR;
   if (!await askConfirm(`把「最后一条投递早于 ${y} 年」的档案整批归档（当前还在人才库里的）。\\n\\n`
       + `归档后在「归档」页可见，满 30 天会被彻底删除。继续？`)) return;
   const r = await api('/api/candidates/archive-batch', {method:'POST',
@@ -2403,12 +2434,43 @@ async function doSemSearch(){
 /* 口径：生成全自动、发送必须人工确认。页面上刻意不提供"自动发送"开关。
    模板是 HR 写的固定措辞，系统只做 {变量} 替换；取不到值就标成【待填：xxx】。 */
 let MAIL_TPL = [];
+let IDICT = {};          // 面试字典（单位/会议室/时段/联系人）
 // 变量清单（内置 + 运行时）：模板编辑时渲染成可点的按钮，HR 不用记变量名
 let MAIL_VARS = {builtin: [], runtime: []};
 
+function mailVarChanged(key){
+  // ① 日期 → 自动算出星期几，HR 不用手填"（周三）"
+  if (key === '面试时间'){
+    const v = document.getElementById('mv_面试时间');
+    if (!v || !v.value) return;
+    const d = new Date(v.value + 'T00:00:00');
+    const wk = ['周日','周一','周二','周三','周四','周五','周六'][d.getDay()];
+    v.dataset.weekday = wk;
+  }
+  // ② 方式 → 线上面试才要会议号；现场面试把会议号清掉并隐藏
+  if (key === '面试方式'){
+    const mode = (document.getElementById('mv_面试方式')||{}).value || '';
+    const online = mode.indexOf('线上') >= 0;
+    const box = document.getElementById('mv_会议号');
+    const hint = document.getElementById('hintMeet');
+    if (box) box.style.display = online ? '' : 'none';
+    if (hint) hint.style.display = online ? '' : 'none';
+    if (!online && box) box.value = '';
+  }
+  // ③ 联系人 → 自动带出电话（字典联动，不用手抄）
+  if (key === '联系人'){
+    const sel = document.getElementById('mv_联系人');
+    const opt = sel && sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex] : null;
+    const tel = document.getElementById('mv_联系电话');
+    if (tel) tel.value = (opt && opt.dataset.phone) || '';
+  }
+}
+
 async function viewMail(){
-  const [tpl, smtp, cands] = await Promise.all([
-    api('/api/mail/templates'), api('/api/mail/smtp'), api('/api/candidates')]);
+  const [tpl, smtp, cands, dict] = await Promise.all([
+    api('/api/mail/templates'), api('/api/mail/smtp'), api('/api/candidates'),
+    api('/api/interview-dict').catch(()=>({}))]);
+  IDICT = dict || {};
   MAIL_TPL = tpl.items || [];
   MAIL_VARS = {builtin: tpl.builtin_vars || [], runtime: tpl.runtime_vars || []};
   const conf = smtp || {};
@@ -2418,9 +2480,37 @@ async function viewMail(){
   ).join('');
   const tlist = MAIL_TPL.map(t =>
     `<option value="${t.id}">${esc(t.name)}${t.scene?('（'+esc(t.scene)+'）'):''}</option>`).join('');
-  const rvars = (tpl.runtime_vars || []).map(v =>
-    `<div class="k">${esc(v.key)}</div><div><input id="mv_${esc(v.key)}" style="width:70%"
-       placeholder="${esc(v.desc)}"></div>`).join('');
+  // v1.20：这些字段不该是"带灰色提示的文本框"——那是让 HR 凭记忆敲键盘。
+  // 按 key 分派成真控件：日期/时段/地点/单位/方式/会议号/联系人联动。
+  const _sel = (key, list, ph) => `<select id="mv_${esc(key)}" style="width:70%"
+      onchange="mailVarChanged('${esc(key)}')">
+      <option value="">${esc(ph||'请选择')}</option>
+      ${(list||[]).map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('')}
+    </select>`;
+  const _contactOpts = (IDICT.contacts||[]).map(
+    c => `<option value="${esc(c.name)}" data-phone="${esc(c.phone||'')}"
+            data-dept="${esc(c.dept||'')}">${esc(c.dept?c.dept+' · ':'')}${esc(c.name)}</option>`).join('');
+  const FIELD_UI = {
+    '面试时间': () => `<input id="mv_面试时间" type="date" style="width:70%"
+        onchange="mailVarChanged('面试时间')">`,
+    '面试时段': () => _sel('面试时段', IDICT.slots, '请选择时段'),
+    '面试地点': () => _sel('面试地点', IDICT.rooms, '请选择会议室'),
+    '面试单位': () => _sel('面试单位', IDICT.units, '请选择面试单位'),
+    '面试方式': () => _sel('面试方式', IDICT.modes, '请选择面试方式'),
+    '会议号': () => `<input id="mv_会议号" style="width:70%" placeholder="线上面试的会议号或入会链接">
+        <div class="small" id="hintMeet" style="color:var(--bad);display:none">
+          选了线上面试就要填会议号，否则候选人收不到入会方式</div>`,
+    '联系人': () => `<select id="mv_联系人" style="width:70%" onchange="mailVarChanged('联系人')">
+        <option value="">请选择联系人</option>${_contactOpts}</select>
+      <div class="small">联系人在「系统配置 → 面试字典」里维护</div>`,
+    '联系电话': () => `<input id="mv_联系电话" style="width:70%" readonly
+        placeholder="选联系人后自动带出">`,
+  };
+  const rvars = (tpl.runtime_vars || []).map(v => {
+    const f = FIELD_UI[v.key];
+    return `<div class="k">${esc(v.key)}</div><div>${f ? f() :
+      `<input id="mv_${esc(v.key)}" style="width:70%" placeholder="${esc(v.desc)}">`}</div>`;
+  }).join('');
   const varChips = [...(tpl.builtin_vars||[]), ...(tpl.runtime_vars||[])]
     .map(v => `<code title="${esc(v.desc)}">{${esc(v.key)}}</code>`).join(' ');
 
@@ -3317,9 +3407,56 @@ async function testMailCfg(){
 }
 
 /* ------------------------------ 系统说明 ------------------------------ */
+function _dictList(name, items, ph){
+  return `<div class="k" style="vertical-align:top">${esc(name)}</div><div>
+    <div class="small" style="margin-bottom:4px">每行一个（回车换行）</div>
+    <textarea id="dict_${esc(name)}" style="width:100%;min-height:96px"
+      placeholder="${esc(ph)}">${esc((items||[]).join('\n'))}</textarea></div>`;
+}
+function renderDictBox(){
+  const box = document.getElementById('dictBox');
+  if (!box) return;
+  const d = IDICT || {};
+  const contacts = (d.contacts||[]).map(c =>
+    `${c.dept||''}|${c.name||''}|${c.phone||''}`).join('\n');
+  box.innerHTML = `<div class="kv">
+    ${_dictList('面试单位', d.units, '西北有色院材料研究中心')}
+    ${_dictList('会议室', d.rooms, '创新大楼1519会议室')}
+    ${_dictList('面试时段', d.slots, '09:00-10:00')}
+    ${_dictList('面试方式', d.modes, '现场面试')}
+  </div>
+  <div class="kv" style="margin-top:10px">
+    <div class="k" style="vertical-align:top">联系人</div><div>
+      <div class="small" style="margin-bottom:4px">每行一条，格式：<b>部门|姓名|电话</b>
+        （样例：人力资源部|张老师|029-8888XXXX）</div>
+      <textarea id="dict_contacts" style="width:100%;min-height:96px"
+        placeholder="人力资源部|张老师|029-8888XXXX">${esc(contacts)}</textarea></div>
+  </div>`;
+}
+async function saveDict(){
+  const val = id => (document.getElementById('dict_'+id)||{}).value || '';
+  const lines = v => v.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  const contacts = lines(val('contacts')).map(l=>{
+    const p = l.split('|');
+    return {dept:(p[0]||'').trim(), name:(p[1]||'').trim(), phone:(p[2]||'').trim()};
+  }).filter(c=>c.dept || c.name);
+  const body = {units: lines(val('面试单位')), rooms: lines(val('会议室')),
+                slots: lines(val('面试时段')), modes: lines(val('面试方式')),
+                contacts};
+  const r = await api('/api/interview-dict', {method:'POST', body:JSON.stringify(body)});
+  if (r.__http_error || r.error){ toast(r.detail || r.error || '保存失败','danger'); return; }
+  IDICT = r.dict || body;
+  const el = document.getElementById('dictMsg');
+  if (el) el.textContent = '已保存（写邮件页的下拉框下次打开就是新的）';
+  toast('面试字典已保存','ok');
+}
+
 async function viewSys(){
-  const [pol, mc] = await Promise.all([
-    api('/api/policy'), api('/api/model-config')]);
+  const [pol, mc, dict] = await Promise.all([
+    api('/api/policy'), api('/api/model-config'),
+    api('/api/interview-dict').catch(()=>({}))]);
+  IDICT = dict || {};
+  renderDictBox();
   const a = pol.access || {}, pii = a.pii_protection || {};
   document.getElementById('view').innerHTML = `
   <div class="panel"><h2>系统配置</h2>
@@ -3329,6 +3466,17 @@ async function viewSys(){
   <!--顺序原则（v1.15）：**需要填写/填错会出问题**的排最前（邮箱、SMTP、导入来源），
        可选与只读的往后（模板是写作素材，红线/数据存放只需读）。
        HR 的原话：「所有需要填写的配置的部分尽量往前面放」。 -->
+  <div class="panel"><h2>面试字典（单位 / 会议室 / 时段 / 联系人）</h2>
+    <div class="note">写邮件时的「面试单位、面试地点、面试时段、联系人」都从这份字典出，
+      可以直接在这里增删。内置了西北有色院本部各研究所与人事处/财务处/数字化中心，
+      以及创新大楼 1519 会议室——<b>换成你们自己的单位只要改这里，不用改代码</b>。
+      联系人填好后，写邮件时选人就会自动带出电话。</div>
+    <div id="dictBox"></div>
+    <div class="bar" style="margin-top:8px">
+      <button class="btn-primary" onclick="saveDict()">保存字典</button>
+      <span class="small" id="dictMsg"></span>
+    </div>
+  </div>
   <div id="mailCfgBox"></div>
   <div id="smtpCfgBox"></div>
   <div id="importCfgBox"></div>

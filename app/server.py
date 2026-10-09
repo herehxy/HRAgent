@@ -345,6 +345,78 @@ async def api_upload(request: Request, name: str = Query(...),
                     "那就是 OCR 识别出来的文字，可逐字核对。"}
 
 
+# ---- 面试字典（v1.20）：单位 / 会议室 / 时段 / 联系人，可在线增删 ----
+INTERVIEW_PATH = os.path.join(BASE, "config", "interview.json")
+
+
+#: 兜底字典：config/interview.json 缺失时用这份，保证下拉框**不会是空的**
+#: （空下拉框比没有下拉框更糟——HR 会以为功能坏了）。
+_INTERVIEW_FALLBACK = {
+    "modes": ["现场面试", "线上面试"],
+    "slots": ["09:00-10:00", "10:00-11:00", "14:00-15:00", "15:00-16:00"],
+    "rooms": ["创新大楼1519会议室"],
+    "units": ["人事处", "财务处", "数字化中心"],
+    "contacts": [{"dept": "人力资源部", "name": "张老师", "phone": "029-8888XXXX"}],
+}
+
+
+def _load_interview_dict() -> dict:
+    try:
+        with open(INTERVIEW_PATH, encoding="utf-8") as fh:
+            d = json.load(fh)
+        # 文件在但某一项是空数组时也回退，别让下拉框开天窗
+        for k, v in _INTERVIEW_FALLBACK.items():
+            if not d.get(k):
+                d[k] = v
+        return d
+    except (OSError, ValueError):
+        return dict(_INTERVIEW_FALLBACK)
+
+
+@app.get("/api/interview-dict")
+def api_interview_dict() -> dict:
+    """面试字典（只读）。前端下拉框按这个渲染。"""
+    return _load_interview_dict()
+
+
+@app.post("/api/interview-dict")
+def api_interview_dict_save(req: dict = Body(...),
+                            x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                            x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """保存面试字典。**只接受白名单里的几个键**，别的一律忽略——
+    免得这个口��被用来往配置文件里塞别的东西。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "ingest")
+    cur = _load_interview_dict()
+    for key in ("modes", "slots", "rooms", "units"):
+        if isinstance(req.get(key), list):
+            vals = [str(x).strip() for x in req[key] if str(x).strip()]
+            # 去重但保持顺序（HR 是按"最常用的排前面"来维护的）
+            seen, out = set(), []
+            for v in vals:
+                if v not in seen:
+                    seen.add(v)
+                    out.append(v)
+            cur[key] = out
+    if isinstance(req.get("contacts"), list):
+        rows = []
+        for c in req["contacts"]:
+            if not isinstance(c, dict):
+                continue
+            dept = str(c.get("dept") or "").strip()
+            name = str(c.get("name") or "").strip()
+            phone = str(c.get("phone") or "").strip()
+            if not (dept or name):
+                continue
+            rows.append({"dept": dept, "name": name, "phone": phone})
+        cur["contacts"] = rows
+    tmp = INTERVIEW_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(cur, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, INTERVIEW_PATH)
+    return {"ok": True, "dict": cur}
+
+
 @app.get("/api/candidates")
 def api_candidates(tier: str | None = None, kw: str | None = None,
                    stage: str | None = None, education: str | None = None,
