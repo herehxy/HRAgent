@@ -446,7 +446,7 @@ def main(verbose: bool = True) -> int:
         # 关键不变式是建议与决定分列，不是规则必须产出某个档
         c.ok("tier_suggested" in chen, "系统建议档位字段存在（值为空=待模型分析）")
         c.ok(chen["tier_final"] is None, "HR 未确认前 tier_final 为空")
-        c.ok(chen["app_status"] == "待确认", "状态为『待确认』")
+        c.ok(chen["app_status"] == "待确认", "库里的状态值为『待确认』（展示层叫『待复核』")
         # v1.14.1：复核是**独立动作**，与档位解耦。
         # ① 改档位**不应该**顺手把复核状态置成已确认（否则 HR 为了消标签而改档位）
         # ② 复核不应该动档位
@@ -472,13 +472,14 @@ def main(verbose: bool = True) -> int:
         # v1.14：取消「待确认」标签。查证：它**不驱动任何自动化**（确认与否系统
         # 行为完全一样），认同默认档位的人不需要任何动作，这个标签却在暗示他漏了事。
         # 现在只提示卡住的事：待归岗（没岗位判不了档）/ 待分析（档位还没出来）/
-        # 待复核（模型给了判断、人还没表态）；已确认的**不显示任何标签**（不打扰）。
+        # 展示标签：待复核 / 已分析 / 待归岗 / 已复核。
+        # 注意区分：**库里的 status 值**仍是「待确认/已确认」，展示层才叫「待复核/已复核」。
         _sd = db.app_status_display
-        c.ok(_sd({"app_status": "已确认", "job_id": 1, "tier_suggested": "A"})[0] == ""
-             and _sd({"app_status": "待确认", "job_id": 1, "tier_suggested": "B"})[0] == "待确认"
+        c.ok(_sd({"app_status": "已确认", "job_id": 1, "tier_suggested": "A"})[0] == "已复核"
+             and _sd({"app_status": "待确认", "job_id": 1, "tier_suggested": "B"})[0] == "待复核"
              and _sd({"app_status": "待确认", "job_id": 1})[0] == "待分析"
              and _sd({"app_status": "待确认", "job_id": None})[0] == "待归岗",
-             "⑪ 状态标签只提示卡住的事：待确认 / 待分析 / 待归岗；已确认不打扰")
+             "⑪ 状态标签：待复核 / 待分析 / 待归岗；复核后显示「已复核」")
         c.ok(all(_sd(x)[1] for x in ({"app_status": "待确认", "job_id": 1, "tier_suggested": "B"},
                                      {"app_status": "待确认", "job_id": None})),
              "⑪b 每个状态都带一句「下一步该做什么」（界面上悬停可见）")

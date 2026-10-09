@@ -28,8 +28,37 @@ _PAGE = """<!DOCTYPE html>
 <meta name="tp-build" content="__UI_BUILD__">
 <title>企业人才库智能体</title>
 <style>
+  /* Hallmark · macrostructure: dense-tool · 单强调色（墨绿）· 纸墨中性 · 分隔线优先于卡片堆叠
+     Hallmark · pre-emit critique: P4 H4 E4 S4 R4 V4
+     刻意违反 Gate 1（display font 不用 system default）：本机只有雅黑/等线、无中文衬线体；
+     高密度内部工具里字的可读性优先于"不像 AI"。身份感由色彩与结构承担。*/
+  :root{
+    /* 纸与墨。HR 要求「页面不要底色」→ body 纯白，面与面靠**边框**区分，不靠底色 */
+    --paper:#ffffff;        /* 页面底：纯白 */
+    --surface:#ffffff;      /* 卡片/面板：也是白，靠 1px 边框立起来 */
+    --surface-2:#f5f5f4;    /* 次级面（表头、代码块、hover） */
+    --ink:#1c1b19;          /* 主文字 */
+    --ink-2:#4a4844;        /* 次要文字（对白 ≥7:1） */
+    --ink-3:#6b675f;        /* 弱化文字（对白 ≥4.6:1，原来 #86909c 只有 3.5:1 不达标） */
+    --line:#e4e2dd;         /* 分隔线 */
+    --line-2:#d3d0c9;
+    /* 唯一强调色：**天蓝**（HR 定的）。面积控制在 5% 以内（Hallmark Gate 23）——
+       只给「可点 / 当前 / 进行中」，卡片与 chip 一律中性。 */
+    --accent:#3d8fd1;       /* 天蓝：用于边框、选中线、focus */
+    --accent-ink:#16628f;   /* 深天蓝：用于文字（链接/按钮字），对白 ≥5:1 */
+    --accent-soft:#e8f2fb; /* 浅天蓝：按钮底、选中底 */
+    --focus:#16628f;        /* 焦点环 */
+    /* 状态色只用于状态，不做装饰 */
+    --ok:#2c6a45; --warn:#8a5a1b; --bad:#9c3226;
+    --ok-soft:#e7f0e8; --warn-soft:#f7efe0; --bad-soft:#f8e9e5;
+    /* 圆角：统一收敛 */
+    --r-card:6px; --r-ctl:4px; --r-chip:3px;
+  }
+
+  /* Gate 34：窄屏不允许横向滚动。clip 而非 hidden——后者会破坏 sticky/fixed */
+  html,body{overflow-x:clip}
   *{box-sizing:border-box}
-  body{margin:0;background:#f7f8fa;color:#1d2129;
+  body{margin:0;background:var(--surface-2);color:var(--ink);
        font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;
        font-size:15px;line-height:1.7}
   /* 大屏适配（v1.7.1）：笔记本（<1600 宽）保持原样；24 寸及以上显示器整体放大，
@@ -42,102 +71,112 @@ _PAGE = """<!DOCTYPE html>
   @media (min-width:2000px){ body{zoom:1.3} }
   /* 飞书式布局：左侧固定导航 + 右侧内容区 */
   .layout{display:flex;min-height:100vh;align-items:stretch}
-  .side{width:220px;flex:0 0 220px;background:#fff;border-right:1px solid #e5e6eb;
+  .side{width:220px;flex:0 0 220px;background:#fff;border-right:1px solid var(--line);
     padding:20px 12px 14px;position:sticky;top:0;height:100vh;
     display:flex;flex-direction:column;box-sizing:border-box}
   .brand{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;
     padding:4px 10px 18px;white-space:nowrap}
-  .brand img.logo{width:30px;height:30px;border-radius:8px;flex:0 0 auto;display:block}
-  .logo{width:30px;height:30px;border-radius:8px;background:#3370ff;color:#fff;
+  .brand img.logo{width:30px;height:30px;border-radius:var(--r-ctl);flex:0 0 auto;display:block}
+  .logo{width:30px;height:30px;border-radius:var(--r-ctl);background:var(--accent);color:var(--surface);
     display:flex;align-items:center;justify-content:center;font-size:15px;flex:0 0 auto}
   .nav{flex:1;overflow:auto}
-  .navitem{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;
-    cursor:pointer;color:#4e5969;font-size:14px;margin-bottom:2px;white-space:nowrap}
+  .navitem{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--r-ctl);
+    cursor:pointer;color:var(--ink-2);font-size:14px;margin-bottom:2px;white-space:nowrap}
   .navitem svg{width:17px;height:17px;flex:0 0 auto}
-  .navitem:hover{background:#f2f3f5;color:#1d2129}
-  .navitem.on{background:#e8f0ff;color:#1d5fd8;font-weight:500}
-  .sidefoot{font-size:12px;color:#86909c;padding:10px 12px 0;border-top:1px solid #f2f3f5}
+  .navitem:hover{background:var(--surface-2);color:var(--ink)}
+  .navitem.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:500}
+  .sidefoot{font-size:12px;color:var(--ink-3);padding:10px 12px 0;border-top:1px solid var(--surface-2)}
   .main{flex:1;min-width:0;padding:24px 30px 60px}
   .main-inner{max-width:1240px;margin:0 auto}
   h1{font-size:22px;font-weight:600;margin:0}
   h2{font-size:17px;font-weight:600;margin:0 0 12px}
-  .sub{color:#86909c;font-size:13px;margin-top:4px}
-  .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-  .vdiv{width:1px;height:22px;background:#e5e6eb;display:inline-block;flex:none}
-  .glbl{font-size:13px;color:#86909c;flex:none}
-  input,select,textarea{padding:7px 12px;border:1px solid #e5e6eb;border-radius:6px;
-    font-size:14px;color:#1d2129;background:#fff;font-family:inherit}
-  button{padding:6px 14px;border:1px solid #e5e6eb;border-radius:6px;background:#fff;
-    font-size:14px;color:#1d2129;cursor:pointer;font-family:inherit}
-  button:hover{color:#3370ff;border-color:#c0d0ff;background:#f5f8ff}
+  .sub{color:var(--ink-3);font-size:13px;margin-top:4px}
+  .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;line-height:1.5}
+  .vdiv{width:1px;height:22px;background:var(--line);display:inline-block;flex:none}
+  .glbl{font-size:13px;color:var(--ink-3);flex:none}
+  input,select,textarea{padding:7px 12px;border:1px solid var(--line);border-radius:var(--r-ctl);
+    font-size:14px;color:var(--ink);background:var(--surface);font-family:inherit}
+  button{padding:6px 14px;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--surface);
+    font-size:14px;color:var(--ink);cursor:pointer;font-family:inherit}
+  /* Gate 26/39：交互元素必须八态齐全。这里补齐最关键的 focus-visible——
+     原来键盘 Tab 过去**完全看不见焦点**，对键盘用户等于不可用。
+     focus 用 outline 而不是 border（border 会改变几何、引起布局跳动）。 */
+  button:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-visible,
+  [tabindex]:focus-visible,.tab:focus-visible,.navitem:focus-visible{
+    outline:2px solid var(--focus);outline-offset:1px}
+  button:active{transform:translateY(.5px)}
+  button:hover{color:var(--accent);border-color:#c0d0ff;background:#f5f8ff}
   button:disabled{opacity:.5;cursor:not-allowed}
-  .btn-primary{background:#3370ff;border-color:#3370ff;color:#fff}
-  .btn-primary:hover{background:#245bdb;border-color:#245bdb;color:#fff}
-  .btn-ok{background:#00b42a;border-color:#00b42a;color:#fff}
-  .btn-ok:hover{background:#0a8f24;border-color:#0a8f24;color:#fff}
-  .btn-danger{background:#fff;border-color:#fbaca3;color:#cb2634}
-  .btn-danger:hover{background:#ffece8;border-color:#f53f3f;color:#cb2634}
+  /* 主按钮：浅天蓝底 + 深天蓝字。HR 反馈过"深底浅字看不清"（国产字体渲染下更糊），
+     浅底深字在低亮度屏上对比度更稳（WCAG 1A1）。 */
+  .btn-primary{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink)}
+  .btn-primary:hover{background:#dcecf9;border-color:var(--accent-ink);color:var(--accent-ink)}
+  .btn-ok{background:var(--ok);border-color:var(--ok);color:var(--surface)}
+  .btn-ok:hover{background:var(--ok);border-color:var(--ok);color:var(--surface)}
+  .btn-danger{background:var(--surface);border-color:var(--line-2);color:var(--bad)}
+  .btn-danger:hover{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
   td button{padding:3px 10px;font-size:13px}
-  .card{background:#fff;border:1px solid #e5e6eb;border-radius:12px;padding:16px 18px;margin-bottom:12px}
-  .panel{background:#fff;border:1px solid #e5e6eb;border-radius:12px;padding:18px 20px;margin-bottom:14px}
-  .grid-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px;margin:16px 0}
-  .stat{background:#fff;border:1px solid #e5e6eb;border-radius:10px;padding:12px 14px}
-  .stat .k{color:#86909c;font-size:13px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:16px 18px;margin-bottom:12px}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:18px 20px;margin-bottom:14px}
+  .grid-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(124px,1fr));gap:0;margin:18px 0}
+  .stat{padding:10px 14px;border-left:1px solid var(--line)}
+  .stat:first-child{border-left:0;padding-left:2px}
+  .stat .k{color:var(--ink-3);font-size:13px}
   .stat .v{font-size:26px;font-weight:600;margin-top:2px}
   .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:16px 0 12px}
-  .tab{padding:7px 15px;border:1px solid #e5e6eb;border-radius:6px;background:#fff;cursor:pointer;font-size:14px;color:#4e5969}
-  .tab:hover{color:#3370ff;border-color:#c0d0ff}
-  .tab.on{background:#e8f0ff;border-color:#3370ff;color:#1d5fd8;font-weight:500}
-  .chip{font-size:13px;padding:2px 9px;border-radius:10px;display:inline-block;margin:0 4px 4px 0}
-  .badge{font-size:13px;padding:3px 10px;border-radius:6px;font-weight:500}
-  .row1{display:flex;align-items:center;gap:14px}
+  .tab{padding:7px 15px;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--surface);cursor:pointer;font-size:14px;color:var(--ink-2)}
+  .tab:hover{color:var(--accent);border-color:#c0d0ff}
+  .tab.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink);font-weight:500}
+  .chip{font-size:13px;padding:2px 9px;border-radius:var(--r-card);display:inline-block;margin:0 4px 4px 0}
+  .badge{font-size:13px;padding:3px 10px;border-radius:var(--r-ctl);font-weight:500}
+  .row1{display:flex;align-items:center;gap:14px;line-height:1.5}
   .avatar{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;
     justify-content:center;font-size:17px;font-weight:600;flex:0 0 auto}
-  .nm{font-size:17px;font-weight:600}
-  .meta{font-size:13px;color:#86909c;margin-top:3px}
-  .acts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}
-  .why{font-size:14px;color:#4e5969;margin-top:10px;line-height:1.75}
-  .ev{font-size:13px;color:#86909c;background:#f7f8fa;border-left:2px solid #c9cdd4;
+  .nm{font-size:18px;font-weight:600;letter-spacing:-.01em}
+  .meta{font-size:13px;color:var(--ink-3);margin-top:3px}
+  .acts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px;line-height:1.5}
+  .why{font-size:14px;color:var(--ink-2);margin-top:10px;line-height:1.75}
+  .ev{font-size:13px;color:var(--ink-3);background:var(--surface-2);border-left:2px solid var(--line-2);
     padding:5px 9px;margin:4px 0;border-radius:0 4px 4px 0}
   .modal{position:fixed;inset:0;background:rgba(29,33,41,.45);display:none;align-items:center;
     justify-content:center;padding:22px;z-index:20}
   .modal.on{display:flex}
-  .sheet{background:#fff;border-radius:12px;max-width:920px;width:100%;max-height:88vh;
+  .sheet{background:var(--surface);border-radius:var(--r-card);max-width:920px;width:100%;max-height:88vh;
     overflow:auto;padding:22px 24px}
-  pre{white-space:pre-wrap;word-break:break-word;font-size:14px;color:#4e5969;line-height:1.8;
-    background:#f7f8fa;padding:14px;border-radius:8px;margin:0}
+  pre{white-space:pre-wrap;word-break:break-word;font-size:14px;color:var(--ink-2);line-height:1.8;
+    background:var(--surface-2);padding:14px;border-radius:var(--r-ctl);margin:0}
   table{width:100%;border-collapse:collapse;font-size:14px}
-  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #f2f3f5;vertical-align:top}
-  th{color:#86909c;font-weight:500;background:#fafbfc}
-  .note{color:#86909c;font-size:13px;line-height:1.75}
-  .warn{background:#fff7e8;border:1px solid #ffe4ba;color:#a45a00;border-radius:8px;padding:10px 13px;font-size:14px}
-  .info{background:#e8f0ff;border:1px solid #d3e0ff;color:#1d5fd8;border-radius:8px;padding:10px 13px;font-size:14px}
-  .danger{background:#ffece8;border:1px solid #ffd2c8;color:#cb2634;border-radius:8px;padding:10px 13px;font-size:14px}
-  .ok{background:#e8ffea;border:1px solid #c9f2cd;color:#0a7f1f;border-radius:8px;padding:10px 13px;font-size:14px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--surface-2);vertical-align:top}
+  th{color:var(--ink-3);font-weight:500;background:#fafbfc}
+  .note{color:var(--ink-3);font-size:13px;line-height:1.75}
+  .warn{background:var(--warn-soft);border:1px solid #ffe4ba;color:var(--warn);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
+  .info{background:var(--accent-soft);border:1px solid #d3e0ff;color:var(--accent-ink);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
+  .danger{background:var(--bad-soft);border:1px solid #ffd2c8;color:var(--bad);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
+  .ok{background:var(--ok-soft);border:1px solid #c9f2cd;color:var(--ok);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
   .chatlog{margin-top:12px;max-height:440px;overflow:auto;display:flex;flex-direction:column;gap:9px}
-  .msg{font-size:15px;line-height:1.75;padding:10px 13px;border-radius:9px;white-space:pre-wrap}
-  .msg.user{background:#e8f0ff;align-self:flex-end;max-width:78%}
-  .msg.assistant{background:#f7f8fa;max-width:94%}
-  .trace{font-size:13px;color:#86909c;margin-top:8px;border-top:1px dashed #e5e6eb;padding-top:8px}
+  .msg{font-size:15px;line-height:1.75;padding:10px 13px;border-radius:var(--r-card);white-space:pre-wrap}
+  .msg.user{background:var(--accent-soft);align-self:flex-end;max-width:78%}
+  .msg.assistant{background:var(--surface-2);max-width:94%}
+  .trace{font-size:13px;color:var(--ink-3);margin-top:8px;border-top:1px dashed var(--line);padding-top:8px}
   .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
-  .pcol{background:#fff;border:1px solid #e5e6eb;border-radius:10px;padding:12px 14px}
-  .pcol .h{display:flex;justify-content:space-between;font-size:14px;color:#4e5969;font-weight:600}
-  .pcol .it{font-size:13px;color:#86909c;margin-top:6px;border-top:1px dashed #f2f3f5;padding-top:6px}
+  .pcol{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:12px 14px}
+  .pcol .h{display:flex;justify-content:space-between;font-size:14px;color:var(--ink-2);font-weight:600}
+  .pcol .it{font-size:13px;color:var(--ink-3);margin-top:6px;border-top:1px dashed var(--surface-2);padding-top:6px}
   .flexbetween{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
-  .small{font-size:12px;color:#86909c}
+  .small{font-size:12px;color:var(--ink-3)}
   .kv{display:grid;grid-template-columns:140px 1fr;gap:6px 12px;font-size:14px}
-  .kv .k{color:#86909c}
+  .kv .k{color:var(--ink-3)}
   .spacer{height:10px}
-  .job-tag{color:#1d5fd8;background:#e8f0ff}
-  .job-tag.pending{color:#a45a00;background:#fff7e8}
+  .job-tag{color:var(--accent-ink);background:var(--accent-soft)}
+  .job-tag.pending{color:var(--warn);background:var(--warn-soft)}
   .contact{font-size:14px}
-  .contact a{color:#1d5fd8;text-decoration:none;border-bottom:1px dashed #b8ccff}
+  .contact a{color:var(--accent-ink);text-decoration:none;border-bottom:1px dashed #b8ccff}
   .contact a:hover{color:#0e42d2;border-bottom-style:solid}
-  button.mini{font-size:12px;padding:1px 7px;margin-left:6px;border-radius:6px}
-  .srcbox{background:#f7f8fa;border:1px solid #e5e6eb;border-radius:8px;padding:10px 12px;font-size:14px}
+  button.mini{font-size:12px;padding:1px 7px;margin-left:6px;border-radius:var(--r-ctl)}
+  .srcbox{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-ctl);padding:10px 12px;font-size:14px}
   .srcbox code{background:#eef1f6;padding:1px 6px;border-radius:5px;font-size:13px}
   .jdform{display:grid;grid-template-columns:150px 1fr;gap:8px 12px;align-items:center;margin-top:6px}
-  .jdform label{color:#4e5969;font-size:14px}
+  .jdform label{color:var(--ink-2);font-size:14px}
   .jdform input,.jdform textarea,.jdform select{width:100%}
   /* 岗位表的 JD 摘要可能很长，限宽后把「投递数/状态/操作」挤窄了会换行，
      所以 JD 列限宽 + 其余列禁止折行 */
@@ -147,14 +186,14 @@ _PAGE = """<!DOCTYPE html>
   /* 邮件正文：**所见即所得**编辑器（白底、贴近收件人看到的样式）。
      表格样式必须写在这里：编辑器里看到的边框/内边距，就是收件人看到的样子
      （发出去的 HTML 也带同样的内联样式，见 mail_template.to_html 与编辑器产物）。 */
-  .richeditor{border:1px solid #e5e6eb;border-radius:8px;padding:12px;background:#fff;
+  .richeditor{border:1px solid var(--line);border-radius:var(--r-ctl);padding:12px;background:var(--surface);
     min-height:240px;max-height:460px;overflow:auto;line-height:1.75;font-size:14px;
     font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif}
-  .richeditor:focus{outline:none;border-color:#3370ff}
+  .richeditor:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
   .richeditor table{border-collapse:collapse;margin:8px 0}
-  .richeditor th,.richeditor td{border:1px solid #d0d5dd;padding:6px 10px;min-width:64px}
+  .richeditor th,.richeditor td{border:1px solid var(--line-2);padding:6px 10px;min-width:64px}
   .richeditor th{background:#f2f4f7;font-weight:600}
-  .ok-txt{color:#0a7f1f}.warn-txt{color:#a45a00}.bad-txt{color:#f53f3f}
+  .ok-txt{color:var(--ok)}.warn-txt{color:var(--warn)}.bad-txt{color:var(--bad)}
 </style></head>
 <body>
 <div class="layout">
@@ -184,8 +223,8 @@ const AUTH_ENABLED = __AUTH_ENABLED__;
 // 验收脚本用它确认"页面里跑的就是服务端当前这版"，防止静默地验了缓存里的旧代码。
 const UI_BUILD = '__UI_BUILD__';
 const TIER_LABELS = {A:'优先面试',B:'建议面试',C:'储备',D:'暂不匹配当前岗位'};
-const TIER_COLOR = {A:['#00b42a','#e8ffea'],B:['#3370ff','#e8f0ff'],
-                    C:['#ff7d00','#fff7e8'],D:['#86909c','#f2f3f5']};
+const TIER_COLOR = {A:['var(--ok)','var(--ok-soft)'],B:['var(--accent)','var(--accent-soft)'],
+                    C:['var(--warn)','var(--warn-soft)'],D:['var(--ink-3)','var(--surface-2)']};
 const STAGES = ['新投递','已联系','初面','复面','待offer','已入职','已结束'];
 
 let META = null;
@@ -309,7 +348,7 @@ function contactValue(v){
 }
 function contactLine(x){
   const p = contactValue(x && x.phone), m = contactValue(x && x.email);
-  if (!p && !m) return '<span class="small" style="color:#86909c">未识别到联系方式</span>';
+  if (!p && !m) return '<span class="small" style="color:var(--ink-3)">未识别到联系方式</span>';
   const joined = (p||'') + (p&&m?' / ':'') + (m||'');
   return `<span class="contact">`
     + (p ? `<a href="tel:${esc(p)}" title="点击拨号">${esc(p)}</a>` : '')
@@ -330,8 +369,10 @@ async function boot(){
   await refresh();
 }
 
-const VIEWS = [['brief','今日待办'],['pool','人才库'],['archive','归档'],
-               ['chat','智能助手'],['org','岗位管理'],['mail','写邮件'],
+// 侧栏顺序（v1.15）：写邮件提到人才库之后——它是日常最高频动作之一，
+// 归档沉到靠后（一年用一次，不该占黄金位）。
+const VIEWS = [['brief','今日待办'],['pool','人才库'],['mail','写邮件'],
+               ['chat','智能助手'],['org','岗位管理'],['archive','归档'],
                ['sys','系统配置']];
 // 侧栏导航图标：内联 SVG（stroke 跟随文字色），不引外部图标库
 const _I = p => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -382,12 +423,12 @@ function renderStats(s){
   if (!s || s.__http_error) return;
   const t = s.tiers || {};
   document.getElementById('stats').innerHTML =
-    card('候选人数', s.people, '#1d2129') + card('A 优先面试', t.A||0, '#00b42a') +
-    card('B 建议面试', t.B||0, '#3370ff') + card('C 储备', t.C||0, '#ff7d00') +
-    card('D 暂不匹配', t.D||0, '#86909c') +
-    card('待 HR 确认', s.pending, '#f53f3f') + card('待人工判读', s.needs_review, '#ff7d00') +
-    card('投递数', s.applications, '#1d2129') + card('简历附件', s.documents, '#1d2129') +
-    card('待确认提案', s.proposals_pending, '#f53f3f');
+    card('候选人数', s.people, 'var(--ink)') + card('A 优先面试', t.A||0, 'var(--ok)') +
+    card('B 建议面试', t.B||0, 'var(--accent)') + card('C 储备', t.C||0, 'var(--warn)') +
+    card('D 暂不匹配', t.D||0, 'var(--ink-3)') +
+    card('待 HR 确认', s.pending, 'var(--bad)') + card('待人工判读', s.needs_review, 'var(--warn)') +
+    card('投递数', s.applications, 'var(--ink)') + card('简历附件', s.documents, 'var(--ink)') +
+    card('待确认提案', s.proposals_pending, 'var(--bad)');
 }
 function card(k,v,c){ return `<div class="stat"><div class="k">${k}</div><div class="v" style="color:${c}">${v==null?'—':v}</div></div>`; }
 
@@ -410,7 +451,7 @@ async function viewBrief(){
   <div class="panel">
     <h2>今日待办 <span class="small">${esc(b.date||'')} · ${
       b.cached ? '已生成' : '初次生成（模型判断版稍后可用）'}</span></h2>
-    <div style="font-size:16px;font-weight:600;color:#1d5fd8;margin:6px 0 4px">
+    <div style="font-size:16px;font-weight:600;color:var(--accent-ink);margin:6px 0 4px">
       ${esc(b.headline||'')}</div>
     <div class="small">${esc(b.note||'')}</div>
     <div class="bar" style="margin-top:10px">
@@ -462,9 +503,9 @@ async function rebuildBrief(){
 function expBadge(x){
   const e = x.exp_display;
   if (!e) return (x.years_exp==null ? '—' : x.years_exp + ' 年');
-  const color = e.kind === 'fresh' ? '#00b42a'
-              : e.kind === 'past_idle' ? '#ff7d00'
-              : e.kind === 'unknown' ? '#86909c' : '#1d2129';
+  const color = e.kind === 'fresh' ? 'var(--ok)'
+              : e.kind === 'past_idle' ? 'var(--warn)'
+              : e.kind === 'unknown' ? 'var(--ink-3)' : 'var(--ink)';
   return `<span style="color:${color}" title="${esc(e.note||'')}">${esc(e.label)}</span>`;
 }
 
@@ -476,12 +517,12 @@ function eduBadge(x){
   if (!e) return esc(raw);
   if (e.unknown){
     return `<span title="简历里没识别出学历，无法与岗位要求（${esc(e.required)}）比对">` +
-           `${esc(raw)} <span style="color:#ff7d00">? 待判定</span></span>`;
+           `${esc(raw)} <span style="color:var(--warn)">? 待判定</span></span>`;
   }
   if (e.ok){
-    return `${esc(raw)} <span class="small" style="color:#00b42a">✓ 达 ${esc(e.required)} 线</span>`;
+    return `${esc(raw)} <span class="small" style="color:var(--ok)"> 达 ${esc(e.required)} 线</span>`;
   }
-  return `<span style="color:#f53f3f;font-weight:600" ` +
+  return `<span style="color:var(--bad);font-weight:600" ` +
          `title="岗位【${esc(e.job_title||'')}】要求 ${esc(e.required)} 及以上">` +
          `${esc(raw)} ✗ 低于要求（${esc(e.required)}）</span>`;
 }
@@ -492,7 +533,7 @@ function eduBadge(x){
 function insightBlock(x){
   const ins = x.insight;
   if (!ins){
-    return `<div class="small" style="color:#86909c;margin-top:8px">` +
+    return `<div class="small" style="color:var(--ink-3);margin-top:8px">` +
       `自动分析生成中…（稍后刷新，或点「重算自动分析」）</div>`;
   }
   const src = ins.source === 'rule_fallback' ? '规则降级（模型不可用）'
@@ -500,13 +541,13 @@ function insightBlock(x){
             : ins.source === 'manual'        ? '手动重算' : '进门即分析';
   const ev = (ins.evidence||[]).slice(0,2)
     .map(e => `[${e.skill}] ${(e.quote||'').slice(0,28)}`).join(' ｜ ');
-  return `<div style="margin-top:10px;background:#f2f7ff;border-left:3px solid #3370ff;
+  return `<div style="margin-top:10px;background:#f2f7ff;border-left:3px solid var(--accent);
                       padding:8px 10px;border-radius:0 6px 6px 0">
     <b>系统自动分析</b> <span class="small">${esc(src)}${ins.model?' · '+esc(ins.model):''}</span>
     <div style="margin-top:4px">${esc(ins.summary||'')}</div>
     ${ins.business_direction ? `<div class="small" style="margin-top:4px">业务方向：
-      <b style="color:#1d5fd8">${esc(ins.business_direction)}</b>
-      <span class="small" style="color:#86909c">（模型从简历提炼，仅展示）</span></div>` : ''}
+      <b style="color:var(--accent-ink)">${esc(ins.business_direction)}</b>
+      <span class="small" style="color:var(--ink-3)">（模型从简历提炼，仅展示）</span></div>` : ''}
     ${(ins.reasons||[]).length ? `<div class="small">依据：${esc(ins.reasons.join('；'))}</div>` : ''}
     ${(ins.risks||[]).length ? `<div class="small">风险：${esc(ins.risks.slice(0,2).join('；'))}</div>` : ''}
     ${ev ? `<div class="small">证据：${esc(ev)}</div>` : ''}
@@ -528,7 +569,7 @@ function tierSourceLine(x){
   const hits = (t.hit || []).map(esc).join('、') || '—';
   const miss = (t.miss || []).map(esc).join('、') || '—';
   return `<details style="margin-top:6px">
-    <summary class="small" style="cursor:pointer;color:#1d5fd8">
+    <summary class="small" style="cursor:pointer;color:var(--accent-ink)">
       档位来源：${esc(src)} · 建议 ${esc(t.tier || '待分析')}</summary>
     <div class="small" style="margin-top:4px;line-height:1.75">
       档位不再由分数计算：<b>学历不达标直接判 D</b>，其余档位由模型读简历后判断。<br>
@@ -670,7 +711,7 @@ function pgBar(pg){
     <input id="pgJump" type="number" min="1" max="${pg.total_pages}" placeholder="页码"
            style="width:70px" onkeydown="if(event.key==='Enter')jumpPoolPage()">
     <button onclick="jumpPoolPage()">跳转</button>
-    <span class="small" style="color:#86909c">导出 CSV 不受分页影响，始终导出当前筛选的全部人</span>
+    <span class="small" style="color:var(--ink-3)">导出 CSV 不受分页影响，始终导出当前筛选的全部人</span>
   </div>`;
 }
 // 跳转指定页：只做正数校验，越界交给后端夹取（page 会被夹到 [1, total_pages]），
@@ -686,7 +727,7 @@ function jumpPoolPage(){
 // 985/211 筛选用同一个字段（uni_tier），标签与筛选口径天然一致。
 function uniTag(t){
   if (!t) return '';
-  return `<span class="chip" style="color:#a45a00;background:#fff7e8"
+  return `<span class="chip" style="color:var(--warn);background:var(--warn-soft)"
     title="按教育部 985/211 名单匹配院校名（含常见简称与校区后缀），仅展示标签，不参与档位判定">${esc(t)}</span>`;
 }
 function cardHtml(x){
@@ -698,12 +739,12 @@ function cardHtml(x){
   // 并且卡片上的档位就是**按这个岗位的尺子**判的——所以这里没有"材料类默认尺子"
   // 造成的错标（一位 Java 工程师不会再被钛合金尺子打成 D 档）。
   const sugChip = (!job && sug)
-    ? `<span class="chip" style="color:#1d5fd8;background:#e8f0ff"
+    ? `<span class="chip" style="color:var(--accent-ink);background:var(--accent-soft)"
          title="模型判断这份简历最像哪个在招岗位（结论已落库，展示时不再调用模型）；采纳后才真正归岗">建议岗位：${esc(sug.title)}${sug.reason?'（'+esc(sug.reason)+'）':''}</span>`
     : (job ? '' : (x.job_suggestion_missing
-        ? `<span class="chip" style="color:#86909c;background:#f2f3f5"
+        ? `<span class="chip" style="color:var(--ink-3);background:var(--surface-2)"
              title="系统还没为这份简历判断过建议岗位（库里没有结论）。点「判断建议岗位」让模型判断一次，结论会存下来">尚未判断建议岗位</span>`
-        : `<span class="chip" style="color:#86909c;background:#f2f3f5"
+        : `<span class="chip" style="color:var(--ink-3);background:var(--surface-2)"
              title="模型从在招岗位里也没判断出最像哪个（例如跨行业简历）">模型未判断出对应岗位</span>`));
   // 「所属岗位待指定」直接做成可点的入口：没有它，HR 只能看着标签干瞪眼——
   // 原来"归岗"只在系统给出建议时才有按钮，模型不启用时完全没有入口（实测反馈）。
@@ -713,20 +754,20 @@ function cardHtml(x){
          onclick="assignJobPick(${x.id})">所属岗位待指定（点此指定）</span>${sugChip}`;
   // 性别标签：只在简历**明写**时才有值（系统不做推断），提示里说明它不参与档位判定
   const genderTag = (x.gender||'').trim()
-    ? `<span class="chip" style="color:#4e5969;background:#f2f3f5" title="来自简历明写标签，不参与档位判定">${esc(x.gender)}</span>`
+    ? `<span class="chip" style="color:var(--ink-2);background:var(--surface-2)" title="来自简历明写标签，不参与档位判定">${esc(x.gender)}</span>`
     : '';
-  const hits = (x.hits||[]).map(s=>`<span class="chip" style="color:#00b42a;background:#e8ffea">命中 ${esc(s)}</span>`).join('');
-  const miss = (x.miss||[]).map(s=>`<span class="chip" style="color:#ff7d00;background:#fff7e8">缺 ${esc(s)}</span>`).join('');
+  const hits = (x.hits||[]).map(s=>`<span class="chip" style="color:var(--ok);background:var(--ok-soft)">命中 ${esc(s)}</span>`).join('');
+  const miss = (x.miss||[]).map(s=>`<span class="chip" style="color:var(--warn);background:var(--warn-soft)">缺 ${esc(s)}</span>`).join('');
   // 状态标签按**实际情况**显示，不再把库里的默认值「待确认」原样贴上：
   // 未归岗的投递没有档位可确认（显示"待归岗"），已归岗但档位还没出来的显示"待分析"。
   // 每个标签都指向一个明确的下一步，鼠标悬停能看到该做什么（title=status_hint）。
   const _st = x.status_display || '待确认';
   const _stStyle = {
-    '已确认': 'color:#0a7f1f;background:#e8ffea',
-    '待确认': 'color:#a45a00;background:#fff7e8',
-    '待分析': 'color:#1d5fd8;background:#e8f0ff',
-    '待归岗': 'color:#a45a00;background:#fff7e8',
-  }[_st] || 'color:#4e5969;background:#f2f3f5';
+    '已确认': 'color:var(--ok);background:var(--ok-soft)',
+    '待确认': 'color:var(--warn);background:var(--warn-soft)',
+    '待分析': 'color:var(--accent-ink);background:var(--accent-soft)',
+    '待归岗': 'color:var(--warn);background:var(--warn-soft)',
+  }[_st] || 'color:var(--ink-2);background:var(--surface-2)';
   // 待确认 → 顺手给一个「复核」按钮：认同默认档位的人点一下就行，不必改档位
   const _rev = (x.status_display === '待确认' && x.application_id)
     ? ` <button class="mini" onclick="markReview(${x.application_id},false)"
@@ -734,11 +775,11 @@ function cardHtml(x){
   const conf = (_st
     ? `<span class="chip" style="${_stStyle}" title="${esc(x.status_hint||'')}">${esc(_st)}</span>` + _rev
     : '');
-  const rev = x.needs_review ? '<span class="chip" style="color:#a45a00;background:#fff7e8">待人工判读</span>' : '';
+  const rev = x.needs_review ? '<span class="chip" style="color:var(--warn);background:var(--warn-soft)">待人工判读</span>' : '';
   const stage = x.stage || '新投递';
   const tiers = ['A','B','C','D'].map(k=>`<option value="${k}" ${k===t?'selected':''}>${k} · ${TIER_LABELS[k]}</option>`).join('');
   const stages = STAGES.map(k=>`<option value="${k}" ${k===stage?'selected':''}>${k}</option>`).join('');
-  const skillChips = (x.skills||[]).slice(0,12).map(s=>`<span class="chip" style="color:#3370ff;background:#e8f0ff">${esc(s)}</span>`).join('');
+  const skillChips = (x.skills||[]).slice(0,12).map(s=>`<span class="chip chip-skill">${esc(s)}</span>`).join('');
   const contact = contactLine(x);
   const scoreTip = (!job && sug)
     ? ` title="档位按「建议岗位 · ${esc(sug.title)}」的 JD 判断：学历不达标判 D，其余由模型给出"` : '';
@@ -784,7 +825,7 @@ async function setTier(aid, tier){
   if (!aid) { toast('该候选人暂无投递记录', 'warn'); return; }
   const r = await api('/api/applications/'+aid+'/tier', {method:'POST', body:JSON.stringify({tier:tier})});
   if (r.__http_error || r.error){ toast(r.detail||r.error||'改档失败','danger'); return; }
-  toast('已确认档位：'+tier+'（已写入审计）','ok'); refresh();
+  refresh();   // 卡片上的档位徽章就地变了，不再弹 toast（Hallmark Gate 16）
 }
 async function setStage(aid, stage){
   if (!aid) return;
@@ -797,8 +838,8 @@ async function showDetail(cid){
   const d = await api('/api/candidates/'+cid);
   if (d.__http_error){ toast(d.detail||'读取失败','danger'); return; }
   document.getElementById('mTitle').textContent = (d.name||'未识别') + ' · 完整档案';
-  const skills = (d.skills||[]).map(s=>`<span class="chip" style="color:${s.verified?'#3370ff':'#86909c'};
-      background:${s.verified?'#e8f0ff':'#f2f3f5'}">${esc(s.name)}${s.verified?'':'(未核验)'}</span>`).join('');
+  const skills = (d.skills||[]).map(s=>`<span class="chip" style="color:${s.verified?'var(--accent)':'var(--ink-3)'};
+      background:${s.verified?'var(--accent-soft)':'var(--surface-2)'}">${esc(s.name)}${s.verified?'':'(未核验)'}</span>`).join('');
   const evs = (d.skills||[]).filter(s=>s.evidence).slice(0,10).map(s=>
       `<div class="ev">${esc(s.name)}：${esc(s.evidence)}</div>`).join('');
   const apps = (d.applications||[]).map(a=>`<tr>
@@ -974,25 +1015,25 @@ function jobLine(job, what){
 //   现在把"依据强弱"和"靠什么判的"一起摆出来，HR 才知道该信几分。
 function majorBlock(mm){
   if (!mm || !mm.verdict) return '';
-  const color = mm.verdict==='错配' ? '#f53f3f' : (mm.verdict==='对口' ? '#00b42a' : '#ff7d00');
+  const color = mm.verdict==='错配' ? 'var(--bad)' : (mm.verdict==='对口' ? 'var(--ok)' : 'var(--warn)');
   const list = c => Object.entries(c||{}).sort((a,b)=>b[1]-a[1]).map(([k,v])=>k+'（'+v+'）').join('、')||'—';
   const conf = mm.confidence || '';
-  const confColor = conf==='高' ? '#00b42a' : (conf==='中' ? '#ff7d00' : '#f53f3f');
+  const confColor = conf==='高' ? 'var(--ok)' : (conf==='中' ? 'var(--warn)' : 'var(--bad)');
   const chName = {大类:'按技能大类', 专业:'按专业维度', 词面:'按文字比对', 无:'无可用依据'}[mm.channel] || mm.channel || '';
   const mc = mm.major_check || {};
-  const inList = mc.in_list === true ? '<b style="color:#00b42a">在清单内</b>'
-               : mc.in_list === false ? '<b style="color:#f53f3f">不在清单内</b>'
-               : '<b style="color:#86909c">未识别</b>';
+  const inList = mc.in_list === true ? '<b style="color:var(--ok)">在清单内</b>'
+               : mc.in_list === false ? '<b style="color:var(--bad)">不在清单内</b>'
+               : '<b style="color:var(--ink-3)">未识别</b>';
   const un = mm.unclassified || {};
   return `<div style="margin-top:8px;padding-top:8px;border-top:1px dashed #ddd">
     <b style="color:${color}">专业方向匹配：${esc(mm.verdict)}</b>`
-    + (conf?`<span class="chip" style="margin-left:6px;color:${confColor};background:${conf==='高'?'#e8ffea':(conf==='中'?'#fff7e8':'#ffece8')}">置信度 ${esc(conf)}</span>`:'')
+    + (conf?`<span class="chip" style="margin-left:6px;color:${confColor};background:${conf==='高'?'var(--ok-soft)':(conf==='中'?'var(--warn-soft)':'var(--bad-soft)')}">置信度 ${esc(conf)}</span>`:'')
     + (chName?`<span class="small">（${esc(chName)}）</span>`:'')
     + (mm.major_label?`<span class="small">｜专业：${esc(mm.major_label)}</span>`:'')
     + `<br><span class="small">岗位侧重 ${esc(list(mm.job_categories))}｜候选人技能 ${esc(list(mm.cand_categories))}</span>`
-    + ((un.job||un.cand)?`<br><span class="small" style="color:#86909c">本体未收录：岗位侧 ${un.job||0} 项、候选人侧 ${un.cand||0} 项——它不计入「侧重」统计，但已进入文字比对通道</span>`:'')
+    + ((un.job||un.cand)?`<br><span class="small" style="color:var(--ink-3)">本体未收录：岗位侧 ${un.job||0} 项、候选人侧 ${un.cand||0} 项——它不计入「侧重」统计，但已进入文字比对通道</span>`:'')
     + ((mc.required||[]).length?`<br><span class="small">专业需求：${esc((mc.required||[]).join('、'))} → 候选人专业 ${inList}</span>`:'')
-    + (mc.via && mc.via !== '规则' ? `<br><span class="small" style="color:#1d5fd8">专业已由模型归一到学科目录（来源：${esc(mc.via)}），按归一结果判定，可复核</span>` : '')
+    + (mc.via && mc.via !== '规则' ? `<br><span class="small" style="color:var(--accent-ink)">专业已由模型归一到学科目录（来源：${esc(mc.via)}），按归一结果判定，可复核</span>` : '')
     + `<br><span class="small">${esc(mm.note)}</span></div>`;
 }
 async function interview(cid){
@@ -1005,7 +1046,7 @@ async function interview(cid){
       : '<div class="warn">'+esc(r.error)+(r.hint?('<br>'+esc(r.hint)):'')+'</div>';
     return;
   }
-  el.innerHTML = `<div class="why" style="background:#f7f8fa;padding:12px;border-radius:8px;margin-top:10px">
+  el.innerHTML = `<div class="why" style="background:var(--surface-2);padding:12px;border-radius:var(--r-ctl);margin-top:10px">
     ${jobLine(r.job,'面试提纲')}
     <b>面试提纲（模型生成，供参考）</b>${(r.questions||[]).map((q,i)=>
       `<div style="margin-top:6px"><b>${i+1}. ${esc(q.q)}</b>
@@ -1081,16 +1122,16 @@ function pipeBoardHtml(p){
   // 折叠行：在招流程各阶段人数，一段一行放下（超期红字提醒），已入职/已结束不计
   const counts = _PIPE_STAGES.map(s=>{
     const v = st[s] || {count:0, overdue:0};
-    return `<span style="color:${v.overdue?'#f53f3f':'#1d5fd8'}"
+    return `<span style="color:${v.overdue?'var(--bad)':'var(--accent-ink)'}"
       title="${esc(s)}：${v.count} 人${v.overdue?('，超期 '+v.overdue):''}">${esc(s)} ${v.count}${v.overdue?('（超期 '+v.overdue+'）'):''}</span>`;
-  }).join('<span style="color:#c9cdd4"> · </span>');
+  }).join('<span style="color:var(--line-2)"> · </span>');
   const head = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <b>投递管道</b>
-      <span class="small" style="color:#4e5969">在流程中 ${openTotal} 条</span>
+      <span class="small" style="color:var(--ink-2)">在流程中 ${openTotal} 条</span>
       <span style="flex:1"></span>
       <button id="pipeBtn" class="${PIPE_OPEN?'':'btn-primary'}" onclick="pipeToggle()">${PIPE_OPEN?'收起 ▲':'展开 ▼'}</button>
     </div>
-    <div class="bar" style="margin-top:8px;flex-wrap:wrap;gap:6px 10px">${counts || '<span class="small" style="color:#86909c">各阶段暂无人</span>'}</div>`;
+    <div class="bar" style="margin-top:8px;flex-wrap:wrap;gap:6px 10px">${counts || '<span class="small" style="color:var(--ink-3)">各阶段暂无人</span>'}</div>`;
   if (!PIPE_OPEN) return `<div class="card" id="pipeCard" style="margin-bottom:12px">${head}</div>`;
   const chans = Object.entries((p && p.channels) || {})
     .sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${esc(k)} ${v}`).join(' · ');
@@ -1098,12 +1139,12 @@ function pipeBoardHtml(p){
     const v = st[s] || {count:0, items:[], overdue:0};
     // 每条：姓名（点开完整档案）· 岗位 · 投递天数 · 超期红字 · 行内推进阶段下拉
     const rows = (v.items||[]).map(i=>`
-      <div class="it" style="color:#4e5969">
-        <span style="cursor:pointer;color:#1d5fd8" title="点击打开完整档案"
+      <div class="it" style="color:var(--ink-2)">
+        <span style="cursor:pointer;color:var(--accent-ink)" title="点击打开完整档案"
               onclick="showDetail(${i.candidate_id})">${esc(i.candidate_name||'未识别')}</span>
         ${i.job_title?(' · '+esc(i.job_title)):''}
         <br>${esc((i.applied_at||'').slice(0,10))} 起 ${i.days} 天
-        ${i.days>=15?'<span style="color:#f53f3f">超期</span>':''}
+        ${i.days>=15?'<span style="color:var(--bad)">超期</span>':''}
         ${i.application_id?`<br><select onchange="setStage(${i.application_id},this.value)"
           title="把这条投递推进到所选阶段（与卡片上的阶段下拉是同一个接口，写入审计）"
           style="margin-top:2px;max-width:110px">
@@ -1111,12 +1152,12 @@ function pipeBoardHtml(p){
         </select>`:''}
       </div>`).join('') || '<div class="it">—</div>';
     return `<div class="pcol"><div class="h"><span>${esc(s)}</span>
-      <span style="color:${v.overdue?'#f53f3f':'#86909c'}">${v.count}${v.overdue?(' / 超期'+v.overdue):''}</span></div>
+      <span style="color:${v.overdue?'var(--bad)':'var(--ink-3)'}">${v.count}${v.overdue?(' / 超期'+v.overdue):''}</span></div>
       ${rows}</div>`;
   }).join('');
   return `<div class="card" id="pipeCard" style="margin-bottom:12px">${head}
     <div class="cols" style="margin-top:10px">${cols}</div>
-    <div class="small" style="color:#86909c;margin-top:8px">点姓名打开完整档案；行内下拉可直接推进阶段（写审计）。停留超过 15 天红字标出。
+    <div class="small" style="color:var(--ink-3);margin-top:8px">点姓名打开完整档案；行内下拉可直接推进阶段（写审计）。停留超过 15 天红字标出。
       已入职 / 已结束的投递不在此看板，可在候选人卡片的阶段下拉里查看与推进。</div>
   </div>`;
 }
@@ -1148,8 +1189,8 @@ async function viewArchive(){
     const expiring = left!=null && left<=7;
     const expired = left===0;
     const leftTxt = left==null ? ''
-      : (expired ? `<span class="chip" style="color:#f53f3f;background:#ffece8">已满 30 天，可彻底删除</span>`
-                 : `<span class="chip" style="color:${expiring?'#f53f3f':'#4e5969'};background:${expiring?'#ffece8':'#f2f3f5'}"
+      : (expired ? `<span class="chip" style="color:var(--bad);background:var(--bad-soft)">已满 30 天，可彻底删除</span>`
+                 : `<span class="chip" style="color:${expiring?'var(--bad)':'var(--ink-2)'};background:${expiring?'var(--bad-soft)':'var(--surface-2)'}"
                       title="到期后自动彻底删除，原件移入回收目录">还有 ${left} 天彻底删除（${esc(am.purge_at||'')}）</span>`);
     return `<div class="card">
       <div class="row1">
@@ -1260,12 +1301,12 @@ async function assignJobPick(cid, targetId, applicationId){
   holder.innerHTML = '<div class="note" style="margin-top:6px">读取在招岗位…</div>';
   const r = await api('/api/jobs');
   if (r.__http_error || r.error){
-    holder.innerHTML = '<div class="note" style="color:#f53f3f">读取岗位失败</div>';
+    holder.innerHTML = '<div class="note" style="color:var(--bad)">读取岗位失败</div>';
     return;
   }
   const jobs = (r.items || []).filter(j => j.active !== 0);
   if (!jobs.length){
-    holder.innerHTML = '<div class="note" style="color:#ff7d00">还没有在招岗位——'
+    holder.innerHTML = '<div class="note" style="color:var(--warn)">还没有在招岗位——'
       + '请先到「岗位管理」建一个岗位（含学历门槛与必需技能），再回来归岗。</div>';
     return;
   }
@@ -1307,7 +1348,7 @@ async function suggestJob(cid){
     if (r.__http_error || r.error){
       const msg = r.detail || r.error || '判断失败';
       toast(msg, 'danger');
-      if (out) out.innerHTML = '<div class="note" style="color:#f53f3f">' + esc(msg) + '</div>';
+      if (out) out.innerHTML = '<div class="note" style="color:var(--bad)">' + esc(msg) + '</div>';
       return;
     }
     toast(r.job_id ? ('建议岗位：' + r.title + (r.reason ? ('（' + r.reason + '）') : ''))
@@ -1320,7 +1361,7 @@ async function suggestJob(cid){
 /* 未归岗时分析类功能会如实报错——但光报错没用，得给一个**能点的入口**。
    实测反馈：没有建议岗位时"无法分析也无法修改投递岗位"。 */
 function needJobHint(cid, what){
-  return '<div class="note" style="color:#ff7d00">该候选人还没有对应岗位（既未归岗、'
+  return '<div class="note" style="color:var(--warn)">该候选人还没有对应岗位（既未归岗、'
     + '也无建议岗位），' + esc(what) + '需要一个岗位当尺子。'
     + '<div class="bar" style="margin-top:6px">'
     + '<button class="btn-primary" onclick="needJobAssign(this,' + cid + ')">指定岗位</button>'
@@ -1391,7 +1432,8 @@ async function markReview(aid, undo, fromDetail){
   const r = await api('/api/applications/'+aid+'/review',
     {method:'POST', body:JSON.stringify({undo: !!undo})});
   if (r.__http_error || r.error){ toast(r.detail||r.error||'操作失败','danger'); return; }
-  toast(r.note || '已更新', 'ok');
+  // 静默成功（Gate 16）：复核后档案就地刷新，用户看得见结果，不需要再弹一次提示
+  _pickJobAppTitle = null;
   if (fromDetail){ try{ return void await showDetail(fromDetail); }catch(e){} }
   refresh();
 }
@@ -1556,8 +1598,8 @@ function renderProposalCards(holder, proposals){
       ? '<button class="btn-primary" onclick="decideProposal(' + p.proposal_id + ',' + APPROVE + ',this)">确认执行</button>'
         + '<button class="btn-danger" onclick="decideProposal(' + p.proposal_id + ',' + REJECT + ',this)">拒绝</button>'
       : '<span class="small">你没有「确认」权限，请到「提案与审计」页处理</span>';
-    html += '<div class="card" style="background:#fff8e6;margin-top:10px" id="prop-' + p.proposal_id + '">'
-      + '<div style="font-weight:600">⏳ 待确认提案 · ' + esc(p.tool || '')
+    html += '<div class="card" style="background:var(--surface)8e6;margin-top:10px" id="prop-' + p.proposal_id + '">'
+      + '<div style="font-weight:600">待确认提案 · ' + esc(p.tool || '')
         + '<span class="small">提案 #' + p.proposal_id + (p.risk ? (' · 风险 ' + esc(p.risk)) : '') + '</span></div>'
       + '<div style="margin-top:6px">' + esc(p.summary || '') + '</div>'
       + '<div class="bar" style="margin-top:8px">' + acts
@@ -1581,11 +1623,10 @@ async function decideProposal(pid, decision, btn){
   if (card){
     card.style.background = decision === 'approve' ? '#f0fbf1' : '#f5f5f5';
     card.innerHTML = '<div style="font-weight:600">'
-      + (decision === 'approve' ? '✅ 已执行' : '🚫 已拒绝') + ' · 提案 #' + pid + '</div>'
+      + (decision === 'approve' ? '已执行' : '已拒绝') + ' · 提案 #' + pid + '</div>'
       + '<div class="small" style="margin-top:4px">' + esc(r.note || '') + '</div>';
   }
-  toast(decision === 'approve' ? '已执行提案' : '已拒绝提案', 'ok');
-  refresh();
+  refresh();   // 提案卡片就地变成"已执行/已拒绝"，不再弹 toast
 }
 
 /* 智能体起草的邮件：渲染成卡片 + 一键送进邮件编辑器（v1.13.7）。
@@ -1599,8 +1640,8 @@ function renderDraftCards(holder, drafts){
       ? `<div class="warn-txt" style="margin-top:6px">还缺：${esc((d.missing_runtime||[]).join('、'))}（补上后可以在对话里说"补上 XX 再写一版"）</div>` : '';
     const noMail = !d.to
       ? `<div class="bad-txt" style="margin-top:6px">库里没有这个人的邮箱，无法直接发——请先在档案里补邮箱，或改成你手动转发</div>` : '';
-    html += `<div class="card" style="background:#f7f8fa;margin-top:10px">
-      <div style="font-weight:600">📝 邮件草稿（未发送）· ${esc(d.name||'')}
+    html += `<div class="card" style="background:var(--surface-2);margin-top:10px">
+      <div style="font-weight:600">邮件草稿（未发送）· ${esc(d.name||'')}
         <span class="small">收件人：${esc(d.to || '（无邮箱）')}${d.job?(' · 岗位：'+esc(d.job)):''}</span></div>
       <div class="small" style="margin-top:6px">主题：${esc(d.subject||'')}</div>
       <div style="margin-top:6px;white-space:pre-wrap">${esc(d.body||'')}</div>
@@ -1647,7 +1688,7 @@ async function renderImportCfgInto(boxId){
       <td><input type="checkbox" class="fileChk" data-name="${esc(x.name)}"
            data-doc="${x.document_id||''}"></td>
       <td>${esc(x.name)}${x.over_limit
-          ? `<span class="chip" style="color:#f53f3f;background:#ffece8">超 ${lim}MB，导入会跳过</span>`:''}</td>
+          ? `<span class="chip" style="color:var(--bad);background:var(--bad-soft)">超 ${lim}MB，导入会跳过</span>`:''}</td>
       <td>${fmtSize(x.size)}</td>
       <td>${esc(x.mtime||'')}</td>
       <td>${x.indexed?'<span class="ok-txt">已入库</span>'+(x.candidate?('（'+esc(x.candidate)+'）'):'')
@@ -1834,7 +1875,7 @@ async function previewMail(){
       <td>${esc(m.subject)}</td><td class="small">${esc(m.from)}</td>
       <td class="small">${esc((m.date||'').slice(0,31))}</td>
       <td class="small">${(m.attachments||[]).map(a=>esc(a)).join('、')||'—'}
-        ${m.has_resume?'<span class="chip" style="color:#00b42a;background:#e8ffea">含简历</span>':''}</td>
+        ${m.has_resume?'<span class="chip" style="color:var(--ok);background:var(--ok-soft)">含简历</span>':''}</td>
       </tr>`).join('')||'<tr><td colspan="4">邮箱里没有邮件</td></tr>'}</tbody></table>`;
 }
 
@@ -1889,7 +1930,7 @@ async function viewOrg(){
         <td>${esc(x.title)}</td>
         <td class="small jdsum">${jdSummary(x.jd_json)}</td>
         <td class="nw">${x.applications_count||0}</td>
-        <td class="nw">${x.active?'<span class="chip" style="color:#0a7f1f;background:#e8ffea">开放</span>':'<span class="chip" style="color:#86909c;background:#f2f3f5">已停用</span>'}</td>
+        <td class="nw">${x.active?'<span class="chip" style="color:var(--ok);background:var(--ok-soft)">开放</span>':'<span class="chip" style="color:var(--ink-3);background:var(--surface-2)">已停用</span>'}</td>
         <td class="nw"><button onclick="editJd(${x.id})">查看 / 编辑 JD</button>
           <button onclick="regradeJob(${x.id})"
             title="按当前 JD 重算该岗位已有投递的建议档位">重新分析</button>
@@ -1921,7 +1962,7 @@ function jdSummary(jd){
   if ((must.major_required||[]).length) parts.push('专业：' + must.major_required.join('、'));
   if ((jd||{}).note) parts.push('有职责说明');
   return parts.length ? esc(parts.join(' ｜ '))
-    : '<span style="color:#86909c">沿用默认尺子</span>';
+    : '<span style="color:var(--ink-3)">沿用默认尺子</span>';
 }
 // 技能输入切分：逗号 / 顿号 / 分号都认（与后端 _split_skills 同一口径）
 function splitSkills(raw){
@@ -2031,13 +2072,13 @@ async function regradeJob(jid, apply){
     } else if (x.kept && (x.old_tier!==x.new_tier)){
       // 已确认档位变了差异：如实呈现，但明确标出"未修改"
       diff = `<span class="small">建议 ${esc(x.old_tier||'—')} → ${esc(x.new_tier||'—')}
-        <span class="chip" style="color:#86909c;background:#f2f3f5">HR 已确认，未改动</span></span>`;
+        <span class="chip" style="color:var(--ink-3);background:var(--surface-2)">HR 已确认，未改动</span></span>`;
     } else if (x.changed){
       diff = `<b style="color:${tcol(x.old_tier)}">${esc(x.old_tier||'—')}</b>
         → <b style="color:${tcol(x.new_tier)}">${esc(x.new_tier||'—')}</b>
         <span class="small">（建议档位${r.applied?'已更新':'将更新'}）</span>`;
     } else {
-      diff = '<span class="small" style="color:#86909c">无变化</span>';
+      diff = '<span class="small" style="color:var(--ink-3)">无变化</span>';
     }
     const why = x.changed && (x.reasons||[]).length
       ? `<div class="small">${esc((x.reasons||[]).slice(0,2).join('；'))}</div>` : '';
@@ -2111,7 +2152,7 @@ async function renderPropsInto(boxId){
   const all = p.items || [];
   const auto = all.filter(x=>x.source==='agent_auto' && x.status==='待确认');
   const srcTag = x => x.source === 'agent_auto'
-    ? '<span style="color:#1d5fd8;font-weight:500">系统巡检</span>'
+    ? '<span style="color:var(--accent-ink);font-weight:500">系统巡检</span>'
     : '<span class="small">对话产生</span>';
   box.innerHTML = `
   <div class="panel"><h2>待确认提案</h2>
@@ -2133,7 +2174,7 @@ async function renderPropsInto(boxId){
             onclick="decide(${x.id},'reject')">拒绝</button>`:'—'}</td>
         </tr>`).join('')||'<tr><td colspan="8">暂无提案</td></tr>'}</tbody></table>
   </div>
-  <details style="margin-top:12px"><summary class="small" style="cursor:pointer;color:#1d5fd8">
+  <details style="margin-top:12px"><summary class="small" style="cursor:pointer;color:var(--accent-ink)">
     操作审计（最近 40 条）· 谁在何时看了谁的简历、改了什么档、确认了什么提案，全部留痕</summary>
     <table style="margin-top:8px"><thead><tr><th>时间</th><th>对象</th><th>动作</th><th>变更前</th><th>变更后</th>
       <th>操作人</th></tr></thead>
@@ -2186,7 +2227,7 @@ async function renderSearchInto(boxId){
           导入新简历后会自动建立增量索引（只处理新增/变更的人），无需手动重建。</div></div>
       <div class="bar"><button onclick="go('sys')">导入与来源配置在系统配置 →</button>
         <button onclick="refresh()">刷新索引状态</button>
-        <span class="badge" style="background:#f2f3f5;color:#86909c">${esc(s.model||'')}</span></div>
+        <span class="badge" style="background:var(--surface-2);color:var(--ink-3)">${esc(s.model||'')}</span></div>
     </div>
   </div>
   <div class="card">
@@ -2224,7 +2265,7 @@ async function doSkillSearch(){
       <div class="nm">${esc(x.name||'未识别')} <span class="small">#${x.candidate_id}</span></div>
       <div class="meta">${esc(x.education||'—')} · ${x.years==null?'—':x.years+' 年'} · 档 ${esc(x.tier||'—')}</div>
       <div class="meta" style="margin-top:2px"><b>联系方式</b>：${contactLine(x)}</div>
-      <div style="margin-top:6px">${(x.skills||[]).map(k=>`<span class="chip" style="color:#3370ff;background:#e8f0ff">${esc(k)}</span>`).join('')}</div>
+      <div style="margin-top:6px">${(x.skills||[]).map(k=>`<span class="chip" style="color:var(--accent);background:var(--accent-soft)">${esc(k)}</span>`).join('')}</div>
       ${Object.entries(x.evidence||{}).map(([k,v])=>`<div class="ev">证据[${esc(k)}]：${esc(v)}</div>`).join('')}
       <div class="acts"><button onclick="showDetail(${x.candidate_id})">完整档案</button></div>
       </div>`).join('')||'<div class="card" style="margin-top:8px">没有同时具备这些技能的人。可切换为「具备其一」再试。</div>'}`;
@@ -2293,11 +2334,11 @@ async function viewMail(){
     <div class="note"><b>发送必须由你点确认</b>，系统不做自动发送。
       变量取不到值会标成 <code>【待填：xxx】</code>，不会静默留空。<br>发信账号：${conf.user
         ? `<b>${esc(conf.user)}</b>（${esc(conf.host)}:${conf.port}，${conf.ssl?'SSL':'STARTTLS'}）`
-        : '<span style="color:#f53f3f">未配置</span>'}
+        : '<span style="color:var(--bad)">未配置</span>'}
       <button onclick="checkSmtp()" style="margin-left:6px">检查发信配置</button>
       <span id="smtpMsg" class="small"></span></div>
     <div class="small" style="margin-top:8px">收发信配置（邮箱账号、授权码、来源目录、模板管理）都在
-      <a href="javascript:go('sys')" style="color:#1d5fd8">系统配置</a> 里。</div>
+      <a href="javascript:go('sys')" style="color:var(--accent-ink)">系统配置</a> 里。</div>
   </div>
   <div class="card"><h2>第一步 · 选人、选模板</h2>
     <div class="kv">
@@ -2858,9 +2899,9 @@ async function genMailDraft(){
   if (ed) ed.innerHTML = r.body_html || '<p><br></p>';
   if (r.to) document.getElementById('mTo').textContent = '将发往：' + r.to;
   msg.innerHTML = (r.missing || []).length
-    ? `<span style="color:#f53f3f">有变量没取到值：${esc(r.missing.join('、'))}
+    ? `<span style="color:var(--bad)">有变量没取到值：${esc(r.missing.join('、'))}
        —— 正文里已标成【待填：xxx】，发送前请补上（填了对应变量再点一次生成也行）。</span>`
-    : `<span style="color:#00b42a">${esc(r.note||'')}</span>`;
+    : `<span style="color:var(--ok)">${esc(r.note||'')}</span>`;
 }
 
 async function checkSmtp(){
@@ -2868,10 +2909,10 @@ async function checkSmtp(){
   msg.textContent = '检查中…';
   const r = await api('/api/mail/test-smtp', {method:'POST'});
   if (r.__http_error || r.error){
-    msg.innerHTML = `<span style="color:#f53f3f">${esc(r.detail||r.error||'检查失败')}</span>`;
+    msg.innerHTML = `<span style="color:var(--bad)">${esc(r.detail||r.error||'检查失败')}</span>`;
     return;
   }
-  msg.innerHTML = `<span style="color:#00b42a">${esc(r.note||'配置可用')}</span>`;
+  msg.innerHTML = `<span style="color:var(--ok)">${esc(r.note||'配置可用')}</span>`;
 }
 
 async function sendMailConfirm(){
@@ -2914,7 +2955,7 @@ function tplFormHtml(t){
         ${richEditorHtml('tplEditor', 260)}
         <div class="small" style="margin-top:6px">变量点一下就插到光标处（发送时自动替换成真实信息）：</div>
         <div class="bar" id="tplVarChips" style="flex-wrap:wrap;gap:4px 6px;margin-top:4px"></div>
-        <div class="small" style="margin-top:8px;color:#4e5969">
+        <div class="small" style="margin-top:8px;color:var(--ink-2)">
           <b>新建模板怎么做：</b>① 正文直接打字；
           ② 要表格点<b>「插入表格」</b>（插好即自动统一成公文样式）；
           ③ 也可以从<b>邮箱 / Word 复制现成表格直接粘进来</b>——粘完会自动统一边框、表头底色与行高；
@@ -3189,10 +3230,13 @@ async function viewSys(){
     <div class="note">收发信邮箱、简历来源目录、邮件模板都在这里集中配置。
       导入动作在「人才库」页有按钮，这里只管配置。</div>
   </div>
+  <!--顺序原则（v1.15）：**需要填写/填错会出问题**的排最前（邮箱、SMTP、导入来源），
+       可选与只读的往后（模板是写作素材，红线/数据存放只需读）。
+       HR 的原话：「所有需要填写的配置的部分尽量往前面放」。 -->
   <div id="mailCfgBox"></div>
   <div id="smtpCfgBox"></div>
-  <div id="tplMgrBox"></div>
   <div id="importCfgBox"></div>
+  <div id="tplMgrBox"></div>
   <div class="panel"><h2>红线（写死在设计里）</h2>
     ${(pol.red_lines||[]).map(x=>`<div class="ok" style="margin-bottom:6px">${esc(x)}</div>`).join('')}
   </div>
@@ -3244,7 +3288,7 @@ async function viewSys(){
       <div class="k">向量模型</div><div>${esc(META.search.model||'—')} · ${META.search.dim||0} 维 ·
         ${META.search.reachable
           ? '服务可达'
-          : '<span style="color:#86909c">未启用</span>（用本地哈希向量，零成本、不联网）'} ·
+          : '<span style="color:var(--ink-3)">未启用</span>（用本地哈希向量，零成本、不联网）'} ·
         已索引 ${META.search.indexed||0} 人
         ${(META.search.index_model && META.search.index_model !== META.search.model)
           ? ('<br><span class="small">索引实际使用 <b>'+esc(META.search.index_model)+'</b>。'
@@ -3253,10 +3297,10 @@ async function viewSys(){
              + '真要语义检索再配一个本地向量模型（bge-m3 / gte-small），简历不出内网。</span>')
           : ''}
         ${META.search.error?('<br><span class="small">'+esc(META.search.error)+'</span>'):''}</div>
-      <div class="k">解析能力</div><div>PyMuPDF ${META.parse.pymupdf?'✓':'✗'} ·
-        MarkItDown ${META.parse.markitdown?'✓':'✗'} · OCR ${META.parse.ocr?'✓':'✗（图片简历将标『待人工判读』）'}</div>
+      <div class="k">解析能力</div><div>PyMuPDF ${META.parse.pymupdf?'':'✗'} ·
+        MarkItDown ${META.parse.markitdown?'':'✗'} · OCR ${META.parse.ocr?'':'✗（图片简历将标『待人工判读』）'}</div>
       <div class="k">邮箱接入</div><div>模式 ${esc(META.mailbox.mode||'—')} ·
-        只读 ${META.mailbox.readonly?'✓':'✗'} · 附件白名单 ${esc((META.mailbox.attachment_ext||[]).join(' '))}
+        只读 ${META.mailbox.readonly?'':'✗'} · 附件白名单 ${esc((META.mailbox.attachment_ext||[]).join(' '))}
         · 单个附件上限 ${META.mailbox.max_attachment_mb==null?20:META.mailbox.max_attachment_mb} MB
         · 同岗重复投递归并为新版本（${META.mailbox.same_job_reapply_days} 天内）</div>
       <div class="k">岗位</div><div>${(META.jobs||[]).length} 个（含已停用）</div>
@@ -3289,7 +3333,7 @@ async function loadFeedback(){
   const rows = T.map(s => `<tr><td><b>${s}</b></td>${T.map(f => {
     const n = ((r.matrix||{})[s]||{})[f] || 0;
     const diag = s === f;
-    const bg = diag ? '#e8ffe8' : (n ? '#fff1f0' : '');
+    const bg = diag ? '#e8ffe8' : (n ? 'var(--surface)1f0' : '');
     return `<td style="${bg?('background:'+bg+';'):''}${diag?'font-weight:600':''}">${n||'—'}</td>`;
   }).join('')}</tr>`).join('');
   const attr = (r.attribution||[]).map(a =>
@@ -3298,8 +3342,8 @@ async function loadFeedback(){
     <div class="kv" style="margin-bottom:10px">
       <div class="k">样本</div><div>最近 ${r.days} 天已确认 <b>${r.total}</b> 份</div>
       <div class="k">一致性</div><div>${r.consistency}% —— 一致 ${r.same} ｜
-        <span style="color:${r.high?'#ff7d00':'#86909c'}">系统偏高 ${r.high}</span> ｜
-        <span style="color:${r.low?'#ff7d00':'#86909c'}">系统偏低 ${r.low}</span></div>
+        <span style="color:${r.high?'var(--warn)':'var(--ink-3)'}">系统偏高 ${r.high}</span> ｜
+        <span style="color:${r.low?'var(--warn)':'var(--ink-3)'}">系统偏低 ${r.low}</span></div>
     </div>
     <table style="width:auto">
       <thead><tr><th>建议 ↓ / 实际 →</th>${T.map(x=>`<th>${x}</th>`).join('')}</tr></thead>
