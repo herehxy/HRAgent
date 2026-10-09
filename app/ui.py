@@ -694,6 +694,11 @@ async function viewPool(){
       <div class="bar">
         <button onclick="doIngest('mailbox')">收取邮箱简历</button>
         <button onclick="doIngest('folder')">导入本地文件夹</button>
+        <button onclick="document.getElementById('upFile').click()"
+                title="手机拍的纸质简历照片、扫描件，直接选文件上传入库（不用先改配置目录）">上传简历照片/文件</button>
+        <input id="upFile" type="file" multiple hidden
+               accept=".jpg,.jpeg,.png,.bmp,.webp,.pdf,.docx,.doc,.txt"
+               onchange="doUpload(this.files)">
         <button onclick="exportCsv()">导出 CSV</button>
       </div>
       <div class="bar" style="margin-top:4px">
@@ -1101,6 +1106,24 @@ async function interview(cid){
     <div class="small" style="margin-top:8px">提纲按「该候选人对应岗位」的必需技能与职责生成；
       未归岗的投递建议先归岗或采纳建议岗位，否则题目会缺少针对性。</div></div>`;
 }
+async function doUpload(files){
+  const arr = Array.from(files||[]).filter(f =>
+    /[.](jpe?g|png|bmp|webp|pdf|docx?|txt)$/i.test(f.name));
+  if (!arr.length){ toast('没有可上传的文件（支持图片 / PDF / Word / txt）','warn'); return; }
+  let ok = 0, fail = 0;
+  for (const f of arr){
+    try{
+      // 裸字节上传：文件名走 query。不引 multipart 依赖（打包产物里没有它）
+      const r = await fetch('/api/upload?name=' + encodeURIComponent(f.name),
+        {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:f});
+      const j = await r.json();
+      if (r.ok && !j.error){ ok++; } else { fail++; }
+    }catch(e){ fail++; }
+  }
+  toast(ok + ' 份已入库' + (fail ? ('，'+fail+' 份失败') : ''), fail ? 'warn' : 'ok');
+  refresh();
+}
+
 async function doIngest(source){
   const label = source==='mailbox' ? '邮箱' : '本地文件夹';
   toast('正在收取简历…（'+label+'）','info');

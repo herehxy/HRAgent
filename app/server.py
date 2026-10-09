@@ -47,6 +47,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import time as _time
 import re
 import shutil
 import sys
@@ -57,7 +58,7 @@ import uuid
 import zipfile
 from datetime import datetime
 
-from fastapi import Body, FastAPI, Header, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Request, Query
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 
@@ -302,6 +303,46 @@ def _edu_check(item: dict, jobs_map: dict) -> dict | None:
             # 学历未识别时既不能算达标也不能算不达标，界面要单独提示"待判定"
             "unknown": a_rank == 0,
             "job_title": job.get("title")}
+
+
+@app.post("/api/upload")
+async def api_upload(request: Request, name: str = Query(...),
+                     x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                     x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """上传一个简历文件（裸字节，文件名放?name=）。
+
+    为什么不用 multipart：打包产物里没有 python-multipart，引入依赖会让
+    "能不能跑"取决于打包有没有收进去——而这条路径恰恰是**离线兜底**，
+    不能再引入任何"看心情装上"的依赖。一个文件一个请求，前端循环即可。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "ingest")
+    import os as _os
+    from . import ingest as _ing
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="文件是空的")
+    inbox = _os.path.join(BASE, "data", "inbox")
+    _os.makedirs(inbox, exist_ok=True)
+    # 文件名只留 basename，去掉路径分隔符（防目录穿越）
+    safe = _os.path.basename(name or "resume").strip() or "resume"
+    for ch in ("\\", "/", ":", "*", "?", "\"", "<", ">", "|"):
+        safe = safe.replace(ch, "_")
+    stamp = _time.strftime("%Y%m%d_%H%M%S")
+    dest = _os.path.join(inbox, f"{stamp}_{safe}")
+    i = 1
+    while _os.path.exists(dest):
+        dest = _os.path.join(inbox, f"{stamp}_{i}_{safe}")
+        i += 1
+    with open(dest, "wb") as fh:
+        fh.write(body)
+    jd, tiers = _jd_tiers()
+    rep = _ing.ingest_dir(inbox, jd, tiers, DB_PATH, job_id=None, use_llm=False)
+    return {"ok": True, "stored": _os.path.basename(dest),
+            "bytes": len(body), "index": rep.get("index"),
+            "notes": rep.get("notes") or [],
+            "hint": "到人才库里点开这个人的完整档案，看「简历原文」那一段——"
+                    "那就是 OCR 识别出来的文字，可逐字核对。"}
 
 
 @app.get("/api/candidates")
