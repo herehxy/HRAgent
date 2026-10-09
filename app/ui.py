@@ -3411,14 +3411,14 @@ function _dictList(name, items, ph){
   return `<div class="k" style="vertical-align:top">${esc(name)}</div><div>
     <div class="small" style="margin-bottom:4px">每行一个（回车换行）</div>
     <textarea id="dict_${esc(name)}" style="width:100%;min-height:96px"
-      placeholder="${esc(ph)}">${esc((items||[]).join('\n'))}</textarea></div>`;
+      placeholder="${esc(ph)}">${esc((items||[]).join('\\n'))}</textarea></div>`;
 }
 function renderDictBox(){
   const box = document.getElementById('dictBox');
   if (!box) return;
   const d = IDICT || {};
   const contacts = (d.contacts||[]).map(c =>
-    `${c.dept||''}|${c.name||''}|${c.phone||''}`).join('\n');
+    `${c.dept||''}|${c.name||''}|${c.phone||''}`).join('\\n');
   box.innerHTML = `<div class="kv">
     ${_dictList('面试单位', d.units, '西北有色院材料研究中心')}
     ${_dictList('会议室', d.rooms, '创新大楼1519会议室')}
@@ -3435,7 +3435,7 @@ function renderDictBox(){
 }
 async function saveDict(){
   const val = id => (document.getElementById('dict_'+id)||{}).value || '';
-  const lines = v => v.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  const lines = v => v.split(/\\r?\\n/).map(x=>x.trim()).filter(Boolean);
   const contacts = lines(val('contacts')).map(l=>{
     const p = l.split('|');
     return {dept:(p[0]||'').trim(), name:(p[1]||'').trim(), phone:(p[2]||'').trim()};
