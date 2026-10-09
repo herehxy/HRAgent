@@ -28,7 +28,13 @@ from ..pipeline import normalize as nz
 from ..pipeline.analyze import analyze_fit, draft_interview
 from ..pipeline.tier import grade, major_match
 
-WRITE_TOOLS = {"set_stage", "set_tier", "add_tag", "merge_candidates", "add_note"}
+WRITE_TOOLS = {"set_stage", "set_tier", "add_tag", "merge_candidates", "add_note",
+               # v1.16 补齐：这些动作以前只有界面能点，agent 调不到
+               "assign_job", "suggest_job", "mark_review",
+               "set_archive", "archive_batch", "split_candidate",
+               "create_job", "update_job_jd", "regrade_job"}
+# ingest_resumes / export_resumes **不在** WRITE_TOOLS：它们是直接执行的
+# （取数据、给下载指引），标成"写·需确认"会让界面与实际行为不一致。
 
 # 明确拒绝的工具名（不提供实现，但出现在提示里会被拦下并告知用户）
 DISABLED_TOOLS = {"send_email", "send_message", "export_external", "delete_candidate",
@@ -148,6 +154,69 @@ TOOL_SPECS = [
            "focus": {"type": "string", "description": "HR 特别关注的点，可空"}}, ["candidate_id"]),
 
     # ------------------------------ 写（提案） ------------------------------
+    _spec("ingest_resumes",
+          "收取/导入简历（邮箱或本地文件夹）。会真的读文件、真的入库。",
+          {"source": {"type": "string", "description": "mailbox（收邮箱）/ folder（本地目录）"},
+           "folder": {"type": "string", "description": "source=folder 时的目录路径，可空（用配置的）"}},
+          ["source"]),
+    _spec("assign_job",
+          "把某人的投递归到指定岗位（未归岗=归岗，已归岗=改岗位），并按该岗位 JD 重算建议档位。",
+          {"candidate_id": {"type": "string", "description": "候选人 id 或姓名"},
+           "job": {"type": "string", "description": "岗位 id 或岗位名（模糊匹配也可以）"},
+           "application_id": {"type": "integer", "description": "有多条投递时指定哪条，可空"}},
+          ["candidate_id", "job"]),
+    _spec("suggest_job",
+          "让模型判断这条待指定投递最像哪个在招岗位（只判断、只落库建议，不归岗）。",
+          {"candidate_id": {"type": "string", "description": "候选人 id 或姓名"}},
+          ["candidate_id"]),
+    _spec("mark_review",
+          "标记「HR 已核对过这个人的信息」（复核）。**不改档位**，与档位判断分开记。",
+          {"candidate_id": {"type": "string", "description": "候选人 id 或姓名"},
+           "undo": {"type": "boolean", "description": "true=撤销复核"}},
+          ["candidate_id"]),
+    _spec("set_archive",
+          "归档 / 取消归档某个候选人（归档不是删除：档案、附件、审计全保留，随时可恢复）。",
+          {"candidate_id": {"type": "string", "description": "候选人 id 或姓名"},
+           "archived": {"type": "boolean", "description": "true=归档，false=取消归档"}},
+          ["candidate_id", "archived"]),
+    _spec("archive_batch",
+          "批量归档/取消归档。**先用 search_candidates 看清楚要处理谁**，再调用。",
+          {"candidate_ids": {"type": "array", "items": {"type": "integer"}},
+           "archived": {"type": "boolean", "description": "true=归档，false=取消归档"}},
+          ["candidate_ids", "archived"]),
+    _spec("split_candidate",
+          "撤销合并：把被并入另一档的人恢复成独立档案，投递与附件搬回本档。",
+          {"candidate_id": {"type": "string", "description": "被合并的那个候选人 id 或姓名"}},
+          ["candidate_id"]),
+    _spec("create_job",
+          "新建岗位（名字 + 可选 JD）。",
+          {"title": {"type": "string"},
+           "must_skills": {"type": "array", "items": {"type": "string"},
+                           "description": "必需技能"},
+           "education_min": {"type": "string", "description": "学历门槛：中专/大专/本科/硕士/博士"},
+           "years_min": {"type": "integer", "description": "年限门槛，可空"},
+           "note": {"type": "string", "description": "职责/备注，可空"}},
+          ["title"]),
+    _spec("update_job_jd",
+          "改某个岗位的 JD（必需技能/学历门槛/年限门槛）。**只影响之后新入库或重算的投递**。",
+          {"job_id": {"type": "integer"},
+           "must_skills": {"type": "array", "items": {"type": "string"}},
+           "education_min": {"type": "string"},
+           "years_min": {"type": "integer"},
+           "note": {"type": "string"}},
+          ["job_id"]),
+    _spec("regrade_job",
+          "按岗位当前 JD 重算该岗位下所有投递的建议档位。**默认只预演**（不写库）；"
+          "apply=true 也只是生成待确认提案，HR 点头后才落库。",
+          {"job_id": {"type": "integer"},
+           "apply": {"type": "boolean", "description": "true=确认写入；默认只预演"}},
+          ["job_id"]),
+    _spec("export_resumes",
+          "导出简历原件（打包 zip）或导出人才清单 CSV，返回下载方式。",
+          {"candidate_ids": {"type": "array", "items": {"type": "integer"},
+                             "description": "为空则导出全部在库的人"},
+           "what": {"type": "string", "description": "resumes=简历原件包（默认）/ csv=人才清单"}},
+          []),
     _spec("set_stage",
           "【需 HR 确认】把某条投递推进到新阶段（新投递/已联系/初面/复面/待offer/已入职/已结束）。"
           "本工具只生成待确认提案，不会直接改库。",
@@ -261,6 +330,64 @@ def _resolve_cid(conn, value, what: str = "候选人") -> tuple[int | None, dict
                       "candidates": [{"id": r["id"], "name": r["name"]} for r in rows]}
     return None, {"error": f"库里没有叫「{v}」的候选人",
                   "hint": "先用 search_candidates 按姓名/技能搜一下；确实没有就让用户先导入简历"}
+
+
+def _jd_tiers() -> tuple[dict, dict]:
+    """取当前生效的 JD 与档位配置（与接口层同一套口径）。
+
+    **不 import server**（会造成循环依赖：server → tools → server），
+    所以自己读 config 下的两个文件；路径算法与 server 一致（仓库根/config）。
+    """
+    import json as _json
+    import os as _os
+    _base = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    def _rd(_n):
+        try:
+            with open(_os.path.join(_base, "config", _n), encoding="utf-8") as _f:
+                return _json.load(_f)
+        except (OSError, ValueError):
+            return {}
+    return _rd("jd.json"), _rd("tiers.json")
+
+
+def _jd_from_args(args: dict) -> dict:
+    """把工具参数拼成一份 JD（只填传了的字段，不猜）。"""
+    must = {}
+    sk = args.get("must_skills")
+    if isinstance(sk, list) and sk:
+        must["skills_required"] = [str(x).strip() for x in sk if str(x).strip()]
+    edu = (args.get("education_min") or "").strip()
+    if edu:
+        must["education_min"] = edu
+    try:
+        yrs = int(args.get("years_min") or 0)
+    except (TypeError, ValueError):
+        yrs = 0
+    if yrs:
+        must["years_min"] = yrs
+    jd = {"role": (args.get("title") or "").strip(), "must": must, "preferred": {"skills": []}}
+    note = (args.get("note") or "").strip()
+    if note:
+        jd["note"] = note
+    return jd
+
+
+def _merge_jd_args(jd: dict, args: dict) -> None:
+    """把参数里**传了**的字段并进已有 JD（没传的保持原样，不清空）。"""
+    sk = args.get("must_skills")
+    if isinstance(sk, list):
+        jd.setdefault("must", {})["skills_required"] = [str(x).strip() for x in sk if str(x).strip()]
+    edu = (args.get("education_min") or "").strip()
+    if edu:
+        jd.setdefault("must", {})["education_min"] = edu
+    if args.get("years_min") is not None:
+        try:
+            jd.setdefault("must", {})["years_min"] = int(args["years_min"] or 0)
+        except (TypeError, ValueError):
+            pass
+    note = (args.get("note") or "").strip()
+    if note:
+        jd["note"] = note
 
 
 def execute(name: str, args: dict, ctx: ToolCtx) -> str:
@@ -623,6 +750,205 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             return _ok(r)
 
         # ---------------- 写（提案）----------------
+        if name == "ingest_resumes":
+            # 导入是**真的读文件**，不是提案：它本身没有"改档案"的歧义，
+            # 且 HR 明确要求 agent 能主动收简历。归档/改档仍然走提案。
+            from . import ingest as _ing
+            src = (args.get("source") or "mailbox").strip()
+            if src not in ("mailbox", "folder"):
+                return _err(f"source 只能是 mailbox 或 folder（收到的是 {src}）")
+            _conn_jd = _jd_tiers()
+            if src == "folder":
+                folder = (args.get("folder") or "").strip()
+                if not folder:
+                    return _err("source=folder 需要给 folder 路径",
+                                hint="可以去「系统配置 → 导入与来源」看已配置的目录")
+                rep = _ing.ingest_dir(folder, _conn_jd[0], _conn_jd[1], ctx.db_path,
+                                      job_id=None, use_llm=False)
+            else:
+                rep = _ing.sync_mailbox(_conn_jd[0], _conn_jd[1], ctx.db_path, job_id=None,
+                                        use_llm=False)
+            return _ok({"source": src, "index": rep.get("index"),
+                        "note": "已入库。新人默认进「待指定」，可在人才库点「指定岗位」，"
+                                "或让我帮你判断（suggest_job）。"
+                                "是否自动分析由「入库即分析」开关控制。"})
+
+        if name == "assign_job":
+            cid, cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if cerr:
+                return _err(cerr["error"], cerr.get("hint"))
+            jobs = db.list_jobs(conn, include_inactive=False)
+            kw = (args.get("job") or "").strip()
+            j = next((x for x in jobs if str(x["id"]) == kw), None)
+            if not j:
+                cands = [x for x in jobs if kw and (kw in (x.get("title") or "")
+                                                     or kw in (x.get("department_name") or ""))]
+                if len(cands) == 1:
+                    j = cands[0]
+                elif len(cands) > 1:
+                    return _err(f"有 {len(cands)} 个岗位匹配「{kw}」",
+                                hint="请给岗位 id 或更完整的岗位名",
+                                jobs=[{"id": x["id"], "title": x.get("title")} for x in cands[:6]])
+                else:
+                    return _err(f"没有匹配「{kw}」的在招岗位",
+                                hint="先用 list_jobs 看有哪些岗位，或 create_job 新建")
+            d = db.candidate_detail(conn, cid) or {}
+            apps = d.get("applications") or []
+            if args.get("application_id"):
+                aid = int(args["application_id"])
+            else:
+                _a0 = next((a for a in apps if a.get("job_id") is None),
+                           apps[0] if apps else None)
+                if not _a0:
+                    return _err("这个人还没有投递记录，无法归岗")
+                aid = _a0["id"]
+            cur_job = next((a.get("job_title") or "待指定"
+                            for a in apps if a.get("id") == aid), "待指定")
+            return _propose(conn, ctx, "assign_job",
+                            {"application_id": aid, "job_id": j["id"]},
+                            f"把 {(d.get('name') or '#'+str(cid))} 的投递 #{aid} "
+                            f"从「{cur_job}」归到「{j.get('title')}」")
+
+        if name == "suggest_job":
+            cid, cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if cerr:
+                return _err(cerr["error"], cerr.get("hint"))
+            from .. import regrade as _rg2
+            r = _rg2.suggest_job_for_application(conn, cid, ctx.operator, ctx.role)
+            if not r.get("ok"):
+                return _err(r.get("error") or "判断失败",
+                            hint="确认模型可用、且这个人确实还没归岗")
+            return _ok({"candidate_id": cid, "suggested_job": r.get("title"),
+                        "reason": r.get("reason"), "note": r.get("note"),
+                        "next": "确认后用 assign_job 归岗（会再提案，等 HR 点头）"})
+
+        if name == "mark_review":
+            cid, cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if cerr:
+                return _err(cerr["error"], cerr.get("hint"))
+            d = db.candidate_detail(conn, cid) or {}
+            apps = d.get("applications") or []
+            if not apps:
+                return _err("这个人还没有投递记录")
+            aid = apps[0]["id"]
+            cur = apps[0].get("status")
+            undo = bool(args.get("undo"))
+            if (cur == "已确认") == (not undo):
+                return _ok({"candidate_id": cid, "unchanged": True,
+                            "note": "已经是你要的状态了，无需改动"})
+            return _propose(conn, ctx, "mark_review",
+                            {"candidate_id": cid, "undo": undo},
+                            ("撤销" if undo else "标记") + f" {d.get('name') or '#'+str(cid)} "
+                            + ("的复核" if undo else "「信息已核对完毕」"))
+
+        if name == "set_archive":
+            cid, cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if cerr:
+                return _err(cerr["error"], cerr.get("hint"))
+            d = db.get_candidate(conn, cid) or {}
+            archived = bool(args.get("archived"))
+            left = ((d.get("archive") or {}).get("days_left"))
+            return _propose(conn, ctx, "set_archive",
+                            {"candidate_id": cid, "archived": archived},
+                            ("归档" if archived else "取消归档") + f" {d.get('name') or '#'+str(cid)}"
+                            + (f"（归档已满 {left} 天，**执行后会被彻底删除**，原件移入回收目录）"
+                               if archived and left == 0 else ""))
+
+        if name == "archive_batch":
+            ids = [int(x) for x in (args.get("candidate_ids") or [])][:200]
+            if not ids:
+                return _err("candidate_ids 为空",
+                            hint="先用 search_candidates 找到要处理的人，再把 id 传进来")
+            archived = bool(args.get("archived"))
+            names = []
+            due = 0
+            for _i in ids:
+                _c = db.get_candidate(conn, _i) or {}
+                names.append(_c.get("name") or f"#{_i}")
+                if archived and ((_c.get("archive") or {}).get("days_left")) == 0:
+                    due += 1
+            return _propose(conn, ctx, "archive_batch",
+                            {"ids": ids, "archived": archived},
+                            f"{'归档' if archived else '取消归档'} {len(ids)} 人："
+                            + "、".join(names[:8]) + ("…" if len(names) > 8 else "")
+                            + (f"；其中 **{due} 人归档已满 30 天，执行后会被彻底删除**"
+                               if due else ""))
+
+        if name == "split_candidate":
+            cid, cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if cerr:
+                return _err(cerr["error"], cerr.get("hint"))
+            c = db.get_candidate(conn, cid) or {}
+            _cn = c.get("name") or cid
+            _into = c.get("merged_into")
+            if not _into:
+                return _err(f"{_cn} 不是被合并进来的档案，无需拆分")
+            return _propose(conn, ctx, "split_candidate", {"candidate_id": cid},
+                            f"撤销合并：把 {_cn} 从 #{_into} 拆回独立档（投递与附件会搬回本档）")
+
+        if name == "create_job":
+            title = (args.get("title") or "").strip()
+            if not title:
+                return _err("岗位名不能为空")
+            if any((j.get("title") or "") == title for j in db.list_jobs(conn, include_inactive=True)):
+                return _err(f"已经有叫「{title}」的岗位了", hint="要改它的 JD 请用 update_job_jd")
+            jd = _jd_from_args(args)
+            return _propose(conn, ctx, "create_job", {"title": title, "jd": jd},
+                            f"新建岗位「{title}」"
+                            + (f"，必需技能 {'、'.join(jd['must']['skills_required'])}"
+                               if jd["must"].get("skills_required") else "")
+                            + (f"，学历门槛 {jd['must']['education_min']}"
+                               if jd["must"].get("education_min") else ""),
+                            risk="中")
+
+        if name == "update_job_jd":
+            jid = int(args["job_id"])
+            job = db.get_job(conn, jid)
+            if not job:
+                return _err(f"未找到岗位 #{jid}", hint="用 list_jobs 看现有岗位")
+            jd = dict(job.get("jd_json") or {})
+            _merge_jd_args(jd, args)
+            return _propose(conn, ctx, "update_job_jd", {"job_id": jid, "jd": jd},
+                            f"改岗位「{job.get('title')}」的 JD：必需技能 "
+                            f"{'、'.join(jd.get('must', {}).get('skills_required') or []) or '（未改）'}"
+                            f"，学历门槛 {jd.get('must', {}).get('education_min') or '（未改）'}"
+                            "。已有投递的档位不会自动变，要不要重算请另行确认。",
+                            risk="中")
+
+        if name == "regrade_job":
+            jid = int(args["job_id"])
+            job = db.get_job(conn, jid)
+            if not job:
+                return _err(f"未找到岗位 #{jid}", hint="用 list_jobs 看现有岗位")
+            apply_ = bool(args.get("apply"))
+            from .. import regrade as _rg
+            if apply_:
+                # 落库也必须等 HR 点头：重算会改一批人的系统建议档位。
+                return _propose(conn, ctx, "regrade_job",
+                                {"job_id": jid, "apply": True},
+                                f"按当前 JD 重算岗位「{job.get('title')}」下**所有**投递的"
+                                f"建议档位（HR 已确认的档位不会被覆盖）",
+                                risk="中")
+            rep = _rg.regrade_job(conn, jid, job.get("jd_json") or {},
+                                 _jd_tiers()[1], apply=False,
+                                 operator=ctx.operator, role=ctx.role)
+            return _ok({"job": job.get("title"), "applied": False,
+                        "changed": rep.get("changed"), "kept": rep.get("kept"),
+                        "items": (rep.get("items") or [])[:20],
+                        "note": ("**这是预演，没有改任何档位**。"
+                                 "确认这些差异没问题后，再调一次 apply=true 才会生成待确认提案。")})
+
+        if name == "export_resumes":
+            what = (args.get("what") or "resumes").strip()
+            ids = [int(x) for x in (args.get("candidate_ids") or [])][:500]
+            if what == "csv":
+                return _ok({"what": "csv", "count": len(ids) or None,
+                            "note": "人才清单 CSV 请在人才库页点「导出 CSV」——"
+                                    "导出在浏览器本地生成，不需要我代劳"})
+            return _ok({"what": "resumes", "candidate_ids": ids,
+                        "note": f"简历原件打包 {len(ids) or '全部'} 份，"
+                                f"请在「人才库」勾选后点「批量下载选中」"})
+
         if name == "set_stage":
             aid = int(args["application_id"])
             app = db.get_application(conn, aid)

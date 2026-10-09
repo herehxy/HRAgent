@@ -13,6 +13,20 @@ from __future__ import annotations
 from . import auth, db
 
 
+
+def _tiers() -> dict:
+    """读 config/tiers.json（动作层要用；不 import server 以免循环依赖）。"""
+    import json as _json
+    import os as _os
+    _p = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                       "config", "tiers.json")
+    try:
+        with open(_p, encoding="utf-8") as _f:
+            return _json.load(_f)
+    except (OSError, ValueError):
+        return {}
+
+
 def apply_proposal(db_path: str, proposal_id: int, decision: str,
                    operator: str = "HR", role: str = "recruiter") -> dict:
     """执行或拒绝一条提案。decision: approve / reject。"""
@@ -62,6 +76,85 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             aid = int(args["application_id"])
             db.add_note(conn, aid, args["note"], operator, role)
             result["after"] = {"application_id": aid, "note": args["note"]}
+
+        elif tool == "assign_job":
+            # 归岗 / 改岗位：统一走 regrade.assign_job（已支持两种情形）
+            if not auth.can(role, "set_stage"):
+                return _denied(conn, p, operator, role, "set_stage")
+            from . import regrade as _rg
+            jid = int(args["job_id"])
+            job = db.get_job(conn, jid)
+            if not job:
+                return {"ok": False, "error": f"未找到岗位 #{jid}"}
+            r = _rg.assign_job(conn, int(args["application_id"]), jid,
+                               job.get("jd_json") or {}, _tiers(), operator, role)
+            if not r.get("ok"):
+                return {"ok": False, "error": r.get("error")}
+            result["after"] = {"job_id": jid, "job_title": r.get("job_title")}
+
+        elif tool == "suggest_job":
+            if not auth.can(role, "set_stage"):
+                return _denied(conn, p, operator, role, "set_stage")
+            from . import regrade as _rg
+            r = _rg.suggest_job_for_application(conn, int(args["candidate_id"]), operator, role)
+            if not r.get("ok"):
+                return {"ok": False, "error": r.get("error")}
+            result["after"] = {"job_id": r.get("job_id"), "title": r.get("title")}
+
+        elif tool == "mark_review":
+            if not auth.can(role, "set_stage"):
+                return _denied(conn, p, operator, role, "set_stage")
+            cid = int(args["candidate_id"])
+            d = db.candidate_detail(conn, cid) or {}
+            apps = d.get("applications") or []
+            if not apps:
+                return {"ok": False, "error": "该候选人没有投递记录"}
+            fn = db.unreview_mark if args.get("undo") else db.review_mark
+            r = fn(conn, apps[0]["id"], operator, role)
+            result["after"] = {"candidate_id": cid, "status": (r or {}).get("status")}
+
+        elif tool == "set_archive":
+            if not auth.can(role, "archive"):
+                return _denied(conn, p, operator, role, "archive")
+            cid = int(args["candidate_id"])
+            db.set_candidate_archived(conn, cid, bool(args.get("archived")), operator, role)
+            result["after"] = {"candidate_id": cid, "archived": bool(args.get("archived"))}
+
+        elif tool == "archive_batch":
+            if not auth.can(role, "archive"):
+                return _denied(conn, p, operator, role, "archive")
+            r = db.set_candidates_archived(conn, [int(x) for x in (args.get("ids") or [])],
+                                           bool(args.get("archived")), operator, role)
+            result["after"] = {"changed": r.get("changed"), "skipped": r.get("skipped")}
+
+        elif tool == "split_candidate":
+            if not auth.can(role, "merge"):
+                return _denied(conn, p, operator, role, "merge")
+            r = db.split_candidate(conn, int(args["candidate_id"]), operator, role)
+            result["after"] = {"candidate_id": int(args["candidate_id"]), "split": bool(r.get("ok"))}
+
+        elif tool == "create_job":
+            if not auth.can(role, "set_stage"):
+                return _denied(conn, p, operator, role, "set_stage")
+            jid = db.create_job(conn, args["title"], dept_id=None, jd=args.get("jd") or {})
+            result["after"] = {"job_id": jid, "title": args["title"]}
+
+        elif tool == "update_job_jd":
+            if not auth.can(role, "set_stage"):
+                return _denied(conn, p, operator, role, "set_stage")
+            jid = int(args["job_id"])
+            db.update_job_jd(conn, jid, args.get("jd") or {}, operator=operator, role=role)
+            result["after"] = {"job_id": jid}
+
+        elif tool == "regrade_job":
+            if not auth.can(role, "set_stage"):
+                return _denied(conn, p, operator, role, "set_stage")
+            from . import regrade as _rg
+            jid = int(args["job_id"])
+            job = db.get_job(conn, jid) or {}
+            r = _rg.regrade_job(conn, jid, job.get("jd_json") or {}, _tiers(),
+                                 apply=bool(args.get("apply")), operator=operator, role=role)
+            result["after"] = {"job_id": jid, "changed": r.get("changed")}
 
         elif tool == "merge_candidates":
             if not auth.can(role, "merge"):

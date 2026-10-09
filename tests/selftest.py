@@ -144,6 +144,16 @@ def _asgi(app, method: str, url: str, headers: dict | None = None,
     return captured["status"], captured["body"].decode("utf-8", "replace")
 
 
+
+def _actions_src() -> str:
+    """读 app/actions.py 源码（断言"动作层是否登记了某个 tool"用）。"""
+    import os
+    p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "app", "actions.py")
+    with open(p, encoding="utf-8") as fh:
+        return fh.read()
+
+
 def main(verbose: bool = True) -> int:
     # 让"模型不可用"成为确定条件：指向一个必然拒绝连接的端口
     os.environ["LLM_BASE_URL"] = "http://127.0.0.1:9/v1"
@@ -1225,6 +1235,33 @@ def main(verbose: bool = True) -> int:
                 # 护栏：前端读的字段名必须和后端返回的一致。
                 # 出过 isw.on（后端是 isw.enabled）→ 复选框永远画成「关」，
                 # HR 勾上去了却看着没变，以为"改不了"。这类键名错位要能被抓到。
+                # ---- v1.16：agent 补齐"以前调不到"的 11 个能力 ----
+                from app.agent import tools as _t16
+                from app import actions as _a16
+                import re as _re16
+                _names16 = {sp["function"]["name"] for sp in _t16.TOOL_SPECS}
+                _want16 = {"ingest_resumes", "assign_job", "suggest_job", "mark_review",
+                           "set_archive", "archive_batch", "split_candidate",
+                           "create_job", "update_job_jd", "regrade_job", "export_resumes"}
+                c.ok(_want16 <= _names16,
+                     "㉑ agent 补齐了导入/归岗/建议岗/复核/归档/批量归档/拆分/建岗/改JD/重算/导出",
+                     f"还缺：{sorted(_want16 - _names16)}")
+                _prop16 = _want16 - {"ingest_resumes", "export_resumes"}
+                c.ok(_prop16 <= _t16.WRITE_TOOLS
+                     and not ({"ingest_resumes", "export_resumes"} & _t16.WRITE_TOOLS),
+                     "⑳b 提案类动作都归入写工具；导入/导出是取数据，不标成『需确认』",
+                     f"WRITE_TOOLS 缺：{sorted(_prop16 - _t16.WRITE_TOOLS)}")
+                c.ok("send_email" in _t16.DISABLED_TOOLS
+                     and "send_message" in _t16.DISABLED_TOOLS,
+                     "⑳c **红线没被漏掉**：发邮件/发消息仍然禁止由 agent 执行")
+                _branches16 = set(_re16.findall(r'tool == "(\w+)"',
+                                                _actions_src()))
+                c.ok({"assign_job", "suggest_job", "mark_review", "set_archive",
+                      "archive_batch", "split_candidate", "create_job",
+                      "update_job_jd", "regrade_job"} <= _branches16,
+                     "⑳d 动作层已登记这 9 个（否则 HR 点确认执行会报『未支持的 tool』）",
+                     f"缺：{sorted({'assign_job','suggest_job','mark_review','set_archive','archive_batch','split_candidate','create_job','update_job_jd','regrade_job'} - _branches16)}")
+
                 c.ok("isw.enabled" in _pgjs and "isw.on" not in _pgjs,
                      "⑮a 开关的字段名前后端一致（isw.enabled）",
                      "前端若读 isw.on 会永远显示「关」，看起来改不动")
