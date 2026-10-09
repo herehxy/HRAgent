@@ -129,6 +129,31 @@ _PAGE = """<!DOCTYPE html>
   .tab.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink);font-weight:500}
   .chip{font-size:13px;padding:2px 9px;border-radius:var(--r-card);display:inline-block;margin:0 4px 4px 0}
   .badge{font-size:13px;padding:3px 10px;border-radius:var(--r-ctl);font-weight:500}
+  /* chip 两态：已核验技能 / 未核验技能。上一轮漏插了这段，导致这两个类名没有样式 */
+  /* 投递管道的一行式条目（v1.15）：密度优先，字号与行高都比正文小一号 */
+  .pipe-it{display:flex;align-items:center;gap:6px;line-height:1.55;font-size:12px;
+    padding:3px 0;border-bottom:1px solid var(--surface-2)}
+  .pipe-it:last-of-type{border-bottom:0}
+  .pipe-nm{cursor:pointer;color:var(--accent-ink);white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis;max-width:8em}
+  .pipe-job{color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+  .pipe-day{color:var(--ink-3);flex:none;font-variant-numeric:tabular-nums}
+  .pipe-day.is-over{color:var(--bad);font-weight:600}
+  .pipe-sel{flex:none;padding:1px 2px;font-size:11px;border-radius:3px;max-width:5.5em}
+  .pipe-more{font-size:11px;color:var(--ink-3);padding-top:4px}
+  .chip-skill{color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line)}
+  .chip-unverified{color:var(--ink-3);background:transparent;border:1px dashed var(--line-2)}
+  /* 投递管道的一行式条目（v1.15）：密度优先，字号与行高都比正文小一号 */
+  .pipe-it{display:flex;align-items:center;gap:6px;line-height:1.55;font-size:12px;
+    padding:3px 0;border-bottom:1px solid var(--surface-2)}
+  .pipe-it:last-of-type{border-bottom:0}
+  .pipe-nm{cursor:pointer;color:var(--accent-ink);white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis;max-width:8em}
+  .pipe-job{color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+  .pipe-day{color:var(--ink-3);flex:none;font-variant-numeric:tabular-nums}
+  .pipe-day.is-over{color:var(--bad);font-weight:600}
+  .pipe-sel{flex:none;padding:1px 2px;font-size:11px;border-radius:3px;max-width:5.5em}
+  .pipe-more{font-size:11px;color:var(--ink-3);padding-top:4px}
   .row1{display:flex;align-items:center;gap:14px;line-height:1.5}
   .avatar{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;
     justify-content:center;font-size:17px;font-weight:600;flex:0 0 auto}
@@ -664,25 +689,22 @@ async function viewPool(){
       <div class="bar" style="margin-top:4px">
         <span class="small">入库即分析</span>
         <label class="small" style="display:flex;align-items:center;gap:4px;cursor:pointer"
-               title="开启：新简历入库后自动分析一次（每人约 2-8 秒、消耗模型额度）；关掉：入库不调模型，可在下面手动批量补">
+               title="开启：新简历入库后自动分析一次（每人约 2-8 秒、消耗模型额度）；关掉：入库不调模型，改由你按需批量补">
           <input type="checkbox" ${isw.enabled?'checked':''}
                  onchange="setAutoInsight(this.checked)"> ${isw.enabled?'开（进门就有判断）':'关（改为手动批量分析）'}
         </label>
         <button id="btnAnalyzePending" data-pending="${isw.pending}"
                 onclick="analyzePendingBatch()" ${isw.pending?'':'disabled'}>
-          ${isw.pending ? ('分析待分析的人（'+isw.pending+'）') : '没有待分析的人'}
+          ${isw.pending ? ('分析待分析的人（'+isw.pending+'）') : '无需补充分析'}
         </button>
-        <span class="small">${isw.enabled
-          ? '每位新人入库后自动分析一次；关掉后新简历只入库不分析。'
-          : '当前已关：入库不调模型，改由你按需批量补（每批 5 人，有进度）。'}</span>
       </div>
     </div>
     <div class="bar" style="margin-top:8px">
-      <span class="small">批量归档（按年使用：新一年开始把旧简历收起来）</span>
+      <span class="small" title="按年使用：新一年开始时把旧简历整批收起（归档不等于删除，满 30 天才彻底清理，期间可随时取消）">批量归档</span>
       <button onclick="archiveBatch(null,true)">归档勾选的人</button>
-      <input id="poolArchYear" type="number" placeholder="年份，如 2025" style="width:130px">
+      <input id="poolArchYear" type="number" placeholder="年份 2025" style="width:130px">
       <button onclick="archiveByYearFrom('poolArchYear')">归档该年以前</button>
-      <span class="small">归档的人进「归档」页，满 30 天自动彻底删除，期间可随时取消</span>
+
     </div>
     ${gtip}
     ${eduWarn}
@@ -1113,6 +1135,7 @@ async function exportCsv(){
    行内带**阶段推进下拉**（原页的流程操作不丢），点姓名直接打开该人的完整档案。
    已入职 / 已结束是终态，不占看板（也不占折叠行），要看去候选人卡片上按阶段看。
    数据仍是 /api/pipeline 一份；折叠态记在 PIPE_OPEN，refresh 重渲染后不丢。 */
+const PIPE_PER_COL = 15;   // 每列最多显示多少人（v1.15）：看板是"看积压"，不是"浏览全部"
 const _PIPE_STAGES = STAGES.filter(s=>s!=='已入职' && s!=='已结束');   // 在招流程阶段
 function pipeToggle(){ PIPE_OPEN = !PIPE_OPEN; refresh(); }
 function pipeBoardHtml(p){
@@ -1137,28 +1160,30 @@ function pipeBoardHtml(p){
     .sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${esc(k)} ${v}`).join(' · ');
   const cols = _PIPE_STAGES.map(s=>{
     const v = st[s] || {count:0, items:[], overdue:0};
-    // 每条：姓名（点开完整档案）· 岗位 · 投递天数 · 超期红字 · 行内推进阶段下拉
-    const rows = (v.items||[]).map(i=>`
-      <div class="it" style="color:var(--ink-2)">
-        <span style="cursor:pointer;color:var(--accent-ink)" title="点击打开完整档案"
+    // 每条压成**一行**（v1.15）：几百人时每条占 3 行根本没法看。
+    // 姓名 · 岗位 · 天数（超期红） · 行内推进下拉——下拉是常用动作，不能砍。
+    const _shown = (v.items||[]).slice(0, PIPE_PER_COL);
+    const _more = (v.items||[]).length - _shown.length;
+    const rows = _shown.map(i=>`
+      <div class="it pipe-it" style="color:var(--ink-2)">
+        <span class="pipe-nm" title="点击打开完整档案"
               onclick="showDetail(${i.candidate_id})">${esc(i.candidate_name||'未识别')}</span>
-        ${i.job_title?(' · '+esc(i.job_title)):''}
-        <br>${esc((i.applied_at||'').slice(0,10))} 起 ${i.days} 天
-        ${i.days>=15?'<span style="color:var(--bad)">超期</span>':''}
-        ${i.application_id?`<br><select onchange="setStage(${i.application_id},this.value)"
-          title="把这条投递推进到所选阶段（与卡片上的阶段下拉是同一个接口，写入审计）"
-          style="margin-top:2px;max-width:110px">
+        ${i.job_title?`<span class="pipe-job">${esc(i.job_title)}</span>`:''}
+        <span class="pipe-day${i.days>=15?' is-over':''}">${i.days}天</span>
+        ${i.application_id?`<select class="pipe-sel" onchange="setStage(${i.application_id},this.value)"
+          title="推进到所选阶段（写入审计）">
           ${STAGES.map(k=>`<option value="${k}" ${k===s?'selected':''}>${k}</option>`).join('')}
         </select>`:''}
-      </div>`).join('') || '<div class="it">—</div>';
+      </div>`).join('') || '<div class="it">—</div>'
+      + (_more>0 ? `<div class="it pipe-more">还有 ${_more} 人 · 去人才库按阶段筛</div>` : '');
     return `<div class="pcol"><div class="h"><span>${esc(s)}</span>
       <span style="color:${v.overdue?'var(--bad)':'var(--ink-3)'}">${v.count}${v.overdue?(' / 超期'+v.overdue):''}</span></div>
       ${rows}</div>`;
   }).join('');
   return `<div class="card" id="pipeCard" style="margin-bottom:12px">${head}
     <div class="cols" style="margin-top:10px">${cols}</div>
-    <div class="small" style="color:var(--ink-3);margin-top:8px">点姓名打开完整档案；行内下拉可直接推进阶段（写审计）。停留超过 15 天红字标出。
-      已入职 / 已结束的投递不在此看板，可在候选人卡片的阶段下拉里查看与推进。</div>
+    <div class="small" style="color:var(--ink-3);margin-top:8px"
+         title="点姓名打开完整档案；行内下拉可直接推进阶段（写审计）；停留超过 15 天标红">每列最多显示 ${PIPE_PER_COL} 人 · 点姓名看档案 · 行内下拉推进阶段 · 超 15 天标红</div>
   </div>`;
 }
 
