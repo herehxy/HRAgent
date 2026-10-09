@@ -38,7 +38,7 @@ from .identity import build_identity_key
 from .pipeline import freshness
 from .pipeline import parse as parse_mod
 from .pipeline import sanitize
-from .pipeline.extract import extract
+from .pipeline.extract import extract, extract_honors
 from .pipeline import subject_meta as subject_meta_mod
 from .pipeline import major_llm as major_llm_mod
 from .pipeline import majors as majors_mod
@@ -507,6 +507,23 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         db.update_candidate(conn, cid,
                             major_canonical=cand["major_canonical"],
                             major_via=cand.get("major_via") or "规则")
+    # v1.17：奖学金/荣誉/论文/专利（规则抽取 + 原文片段）。只在有内容时写库，
+    # 免得每次导入都把空数组刷进 honors_json。
+    # v1.18：优先用**模型那次分析**里已经抽好的荣誉（，
+    # 每条都过了"证据必须逐字在原文里"的校验）；拿不到才退回规则抽取。
+    try:
+        _hon = cand.get("honors") or extract_honors(text)
+        if not isinstance(_hon, list):
+            _hon = extract_honors(text)
+    except Exception as exc:                                # noqa: BLE001
+        _hon = []
+        print(f"[ingest] 荣誉抽取失败（不影响入库）：{type(exc).__name__}: {exc}",
+              file=sys.stderr)
+    if _hon:
+        import json as _json
+        db.update_candidate(conn, cid,
+                            honors_json=_json.dumps(_hon, ensure_ascii=False))
+        result["notes"].append(f"识别到荣誉/论文/专利 {len(_hon)} 项")
 
     if is_new:
         apply_tags(conn, cid, cand, channel, text)

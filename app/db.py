@@ -470,6 +470,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             # v1.8.5：毕业时间（YYYY-MM 或 YYYY）。校招场景要靠它判"应届/往届未就业"，
             # 光看工作年限不够——去年毕业还没参加工作的人，年限是 0，身份却不是应届。
             "grad_date": "TEXT",
+            # v1.17：奖学金/荣誉/论文/专利
+            "honors_json": "TEXT",
         },
         # v1.5：待指定投递的「建议岗位」（轮询在招岗位取最适者，只建议不归岗）
         "applications": {
@@ -482,6 +484,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             # v1.8：阶段变更时间——停滞提醒（超期未推进）需要一个可比较的时间戳，
             # 靠 audit_log 推导太脆（人工改阶段、批量导入都可能缺审计）
             "stage_changed_at": "TEXT",
+            # v1.17：奖学金/荣誉/论文/专利（规则抽取 + 原文片段）
+            "honors_json": "TEXT",
         },
         # v1.13.6：合并来源。documents 也要有——老库不会因为 CREATE TABLE 补列，
         # 没有这一列时拆分只能"如实说明搬不回"，等于白拆。
@@ -1049,6 +1053,7 @@ SELECT c.*,
        a.confidence    AS confidence,
        a.resume_doc_id AS resume_doc_id,
        a.suggested_job_id AS suggested_job_id,
+       sj2.title          AS suggested_job_title,
        a.suggested_job_reason AS suggested_job_reason,
        j.title         AS job_title,
        j.active        AS job_active
@@ -1058,6 +1063,7 @@ LEFT JOIN applications a ON a.id = (
     ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT 1
 )
 LEFT JOIN jobs j ON j.id = a.job_id
+LEFT JOIN jobs sj2 ON sj2.id = a.suggested_job_id
 """
 
 
@@ -1203,12 +1209,18 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
 
     if keyword:
         kw = keyword.strip().lower()
+        # 注意：**对应岗位也要能被搜到**（v1.17）。HR 嘴里的"数字化工程师的人"、
+        # "我想招材料的人"指的是岗位名或方向，不是技能词——原来只匹配
+        # 姓名/学历/学校/专业/技能，导致明明库里有人却搜不出来，
+        # 模型还会据此回答"没有符合的候选人"（误导）。
         items = [
             i for i in items
             if kw in (i.get("name") or "").lower()
             or kw in (i.get("edu_level") or "").lower()
             or kw in (i.get("school") or "").lower()
             or kw in (i.get("major") or "").lower()
+            or kw in (i.get("job_title") or "").lower()          # 对应岗位
+            or kw in (i.get("suggested_job_title") or "").lower()  # 建议岗位
             or any(kw in s.lower() for s in i.get("skills", []))
         ]
     return items
@@ -1232,6 +1244,22 @@ def gender_matches(value: str | None, want: str | None) -> bool:
     if want == "未标注":
         return not cur
     return cur == want
+
+
+
+def _group_honors(raw) -> dict:
+    """把 honors_json 按 奖学金/荣誉/论文/专利 分组（缺类补空）。"""
+    out = {"奖学金": [], "荣誉": [], "论文": [], "专利": []}
+    try:
+        items = json.loads(raw) if raw else []
+    except (ValueError, TypeError):
+        items = []
+    for it in items or []:
+        k = (it or {}).get("kind")
+        if k in out:
+            out[k].append({"name": (it or {}).get("name") or "",
+                           "evidence": (it or {}).get("evidence") or ""})
+    return out
 
 
 def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
@@ -1289,6 +1317,8 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         "file_path": ((docs[0].get("archived_path") or docs[0].get("file_path"))
                       if docs else None),
         "tier_effective": latest.get("tier_final") or latest.get("tier_suggested"),
+        # v1.17：荣誉/论文/专利（按类分组，界面直接渲染）
+        "honors": _group_honors(c.get("honors_json")),
     }
 
 

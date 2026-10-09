@@ -1265,6 +1265,67 @@ def main(verbose: bool = True) -> int:
                 # ---- v1.16.1：超出 15 人时要给**真能点的出口** ----
                 # 原来只有一行灰字"去人才库按阶段筛"，但人才库**没有阶段筛选器**，
                 # 那是句空话。现在两条路都通：就地展开 / 跳人才库按阶段筛。
+                # ---- v1.17：岗位名能搜到人 + 荣誉/论文/专利抽取 ----
+                # ① HR 反馈「明明有为什么会搜索不到」：原来 keyword 只匹配
+                #    姓名/学历/学校/专业/技能，**不匹配对应岗位**——
+                #    说"数字化工程师"（岗位名）一个人都搜不到，模型还会据此
+                #    回答"没有符合的候选人"，那是误导。
+                #    自建数据：造一个岗位并把陈志远归过去，再按岗位名搜。
+                _c17 = db.connect(db_path)
+                _jid17 = db.create_job(_c17, "材料成型工程师（自检岗）", dept_id=None,
+                                       jd={"role": "材料成型工程师",
+                                           "must": {"skills_required": ["钛合金"],
+                                                     "education_min": "本科", "years_min": 0},
+                                           "preferred": {"skills": []}, "note": ""})
+                _conn_ap17 = db.connect(db_path)
+                _aid17 = db.get_application(_conn_ap17, chen["application_id"])
+                db.update_candidate(_conn_ap17, chen["id"], name=chen["name"])
+                _conn_ap17.execute(
+                    "UPDATE applications SET job_id = ? WHERE id = ?",
+                    (_jid17, chen["application_id"]))
+                _conn_ap17.commit()
+                _conn_ap17.close()
+                _hit17 = db.list_candidates(_c17, keyword="材料成型工程师")
+                _c17.close()
+                c.ok(len(_hit17) > 0,
+                     "㉔ 关键词能搜到**对应岗位**（HR 嘴里的岗位名/方向也是检索词）",
+                     f"按岗位名搜到 {len(_hit17)} 人")
+                # ② 荣誉/论文/专利：规则抽取 + 必须带原文片段
+                from app.pipeline.extract import (extract_honors as _eh,
+                    verify_honors_against_text as _ehv, merge_honors as _ehm)
+                _txt17 = ("2022.10 获国家奖学金（一等）\n"
+                          "在校期间发表期刊论文 3 篇，其中 SCI 一篇\n"
+                          "2024.03 获发明专利 ZL202410123456.7\n"
+                          "2023.12 优秀毕业生")
+                _h17 = _eh(_txt17)
+                _kinds17 = {h["kind"] for h in _h17}
+                c.ok({"奖学金", "论文", "专利", "荣誉"} <= _kinds17
+                     and all(h.get("evidence") for h in _h17),
+                     "㉕ 荣誉/论文/专利抽取：四类都认，且每条带原文片段（可核对）",
+                     f"抽出：{[(h['kind'], h['name']) for h in _h17]}")
+                # ③ v1.18：荣誉改由**模型**在已有那次分析里抽，但必须逐条验原文——
+                #    模型编的荣誉一律丢掉（项目反幻觉底线）。
+                _txt18 = ("2022.10 获国家奖学金（一等）\n"
+                          "在校期间发表 SCI 论文 2 篇\n"
+                          "2024.03 获发明专利 ZL202410123456.7")
+                _fake18 = [
+                    {"category": "奖学金", "name": "国家奖学金",
+                     "evidence": "2022.10 获国家奖学金（一等）"},
+                    {"category": "荣誉", "name": "全国优秀毕业生",
+                     "evidence": "2023.12 获全国优秀毕业生"},   # 原文没有 → 必须丢
+                ]
+                _v18 = _ehv(_fake18, _txt18)
+                c.ok(len(_v18) == 1 and _v18[0]["kind"] == "奖学金",
+                     "㉘ 模型抽的荣誉**逐条验原文**：编的直接丢（反幻觉底线）",
+                     f"4 条里过了 {len(_v18)} 条")
+                _mg18 = _ehm(_v18, _eh(_txt18))
+                c.ok(len(_mg18) >= 1 and all(x.get("evidence") for x in _mg18),
+                     "㉙ 模型 + 规则合并：都有原文片段，不丢已有结果",
+                     f"合并后 {len(_mg18)} 条")
+                c.ok(_eh("今天天气不错") == [],
+                     "㉖ 没有就不抽（缺 = 未识别，不等于『没有』）")
+                c.ok("荣誉 / 论文 / 专利" in _pgjs,
+                     "㉗ 完整档案里有荣誉/论文/专利区块")
                 c.ok("pipeExpand" in _pgjs and "goStageFilter" in _pgjs
                      and "在本列展开" in _pgjs and "去人才库筛选" in _pgjs,
                      "㉒ 管道超出 15 人时给出可点出口（展开 / 去人才库筛选），不是一句提示")

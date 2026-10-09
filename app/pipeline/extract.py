@@ -316,6 +316,10 @@ _LLM_SYSTEM = (
     "name, education(大专/本科/硕士/博士), years(整数), school, major, current_org,\n"
     "skills(数组，每项 {name:技能名, evidence:该技能在原文中出现的**原样片段**}),\n"
     "certificates(字符串数组),\n"
+    "honors(数组，每项 {category:奖学金/荣誉/论文/专利, name:简短名称, "
+    "   3.2) 每条的 evidence 必须是**包含日期与完整表述的整句/整行原文**（例：2022.10 获国家奖学金一等），不要只给关键词；\n"
+    "honors(数组，每项 {category:奖学金/荣誉/论文/专利, name:简短名称, "
+    "   3.2) 每条的 evidence 必须是**包含日期与完整表述的整句/整行原文**（例：2022.10 获国家奖学金一等），不要只给关键词；\n"
     "contact{phone,email},\n"
     "confidence(0-1，抽取可信度)。\n"
     "field_evidence(对象)：基本信息每个字段对应的**原文原样片段**，"
@@ -326,6 +330,7 @@ _LLM_SYSTEM = (
     "1) 只抽与岗位相关的技术/工艺/表征/软件/管理技能，通用软技能不要；\n"
     "2) evidence 必须是原文中逐字存在的片段，不得改写、不得拼接；\n"
     "3) 原文未提及的信息一律留空或不输出，不要猜测；\n"
+    "   3.1) honors 要抽全：奖学金/奖项（含国家、校级、专项）、荣誉称号、论文（含发表/收录/篇数/期刊）、专利（含专利号、实用新型、软著），以及连续多年获奖、团体奖这类表述；\n"
     "4) 禁止抽取民族、婚姻、生育、宗教、健康、身份证号、住址、政治面貌、身高体重、照片等敏感信息。"
 )
 
@@ -383,6 +388,110 @@ def verify_profile_against_text(fields: dict, field_evidence: dict,
     return ok, bad
 
 
+
+def verify_honors_against_text(items, text: str) -> list[dict]:
+    """**逐条验原文**：证据片段必须逐字出现在简历里，否则丢掉。
+
+    和 `verify_profile_against_text` 同一个道理：模型说"他获过国家奖学金"很容易，
+    但简历里根本没写就是**编的**，档案里出现 HR 无从核对的东西比没有更糟。
+    顺带做规范化比对（去掉空白/标点差异），避免因为排版空格被判假。
+    """
+    t_norm = _norm_for_search(text or "")
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        cat = (it.get("category") or "").strip()
+        name = (it.get("name") or "").strip()
+        ev = (it.get("evidence") or "").strip()
+        if cat not in ("奖学金", "荣誉", "论文", "专利") or not name or not ev:
+            continue
+        if _norm_for_search(ev) not in t_norm:
+            continue                     # 证据不在原文里 → 丢弃（不猜、不放行）
+        key = (cat, _norm_for_search(ev)[:40])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"kind": cat, "name": name, "evidence": ev,
+                    "from": "模型（已核对原文）"})
+    return out
+
+
+def merge_honors(llm_items, rule_items) -> list[dict]:
+    """合并模型抽取与规则抽取：模型优先（同一条不重复），规则兜底。
+
+    为什么两路都要：模型抽得全但可能漏掉格式很规整的（规则擅长）；
+    规则稳但认不出自由表述。两路合并后覆盖面最大，且都有原文兜底。
+    """
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for src in (llm_items or [], rule_items or []):
+        for it in src or []:
+            ev = (it.get("evidence") or "").strip()
+            key = (it.get("kind") or "", _norm_for_search(ev)[:40])
+            if not ev or key in seen:
+                continue
+            seen.add(key)
+            out.append(it)
+    # 排序：奖学金 → 荣誉 → 论文 → 专利，同类保持原顺序（原文出现顺序）
+    order = {"奖学金": 0, "荣誉": 1, "论文": 2, "专利": 3}
+    out.sort(key=lambda x: order.get(x.get("kind"), 9))
+    return out
+
+
+
+def verify_honors_against_text(items, text: str) -> list[dict]:
+    """**逐条验原文**：证据片段必须逐字出现在简历里，否则丢掉。
+
+    和 `verify_profile_against_text` 同一个道理：模型说"他获过国家奖学金"很容易，
+    但简历里根本没写就是**编的**，档案里出现 HR 无从核对的东西比没有更糟。
+    顺带做规范化比对（去掉空白/标点差异），避免因为排版空格被判假。
+    """
+    t_norm = _norm_for_search(text or "")
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        cat = (it.get("category") or "").strip()
+        name = (it.get("name") or "").strip()
+        ev = (it.get("evidence") or "").strip()
+        if cat not in ("奖学金", "荣誉", "论文", "专利") or not name or not ev:
+            continue
+        if _norm_for_search(ev) not in t_norm:
+            continue                     # 证据不在原文里 → 丢弃（不猜、不放行）
+        key = (cat, _norm_for_search(ev)[:40])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"kind": cat, "name": name, "evidence": ev,
+                    "from": "模型（已核对原文）"})
+    return out
+
+
+def merge_honors(llm_items, rule_items) -> list[dict]:
+    """合并模型抽取与规则抽取：模型优先（同一条不重复），规则兜底。
+
+    为什么两路都要：模型抽得全但可能漏掉格式很规整的（规则擅长）；
+    规则稳但认不出自由表述。两路合并后覆盖面最大，且都有原文兜底。
+    """
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for src in (llm_items or [], rule_items or []):
+        for it in src or []:
+            ev = (it.get("evidence") or "").strip()
+            key = (it.get("kind") or "", _norm_for_search(ev)[:40])
+            if not ev or key in seen:
+                continue
+            seen.add(key)
+            out.append(it)
+    # 排序：奖学金 → 荣誉 → 论文 → 专利，同类保持原顺序（原文出现顺序）
+    order = {"奖学金": 0, "荣誉": 1, "论文": 2, "专利": 3}
+    out.sort(key=lambda x: order.get(x.get("kind"), 9))
+    return out
+
+
 def extract_llm(text: str, jd: dict, model: str, base_url: str, api_key: str) -> dict:
     payload = {
         "model": model,
@@ -420,6 +529,96 @@ def _assemble(text: str, fields: dict, detail: list[dict], mode: str) -> dict:
         "extract_mode": mode,
         "confidence": round(found / 4, 2),
     }
+
+
+
+# ============================================================================
+# 荣誉 / 论文 / 专利（v1.17）
+# ============================================================================
+# 只认**原文里逐字出现**的说法：正则的好处之一就是天然满足"每个结论都能指回原文"。
+
+_HONOR_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("奖学金", (
+        "国家奖学金", "政府奖学金", "校一等奖学金", "校二等奖学金", "校三等奖学金",
+        "一等奖学金", "二等奖学金", "三等奖学金", "特等奖学金", "学业奖学金",
+        "优秀学生奖学金", "助学奖学金", "格林奖学金", "国家励志奖学金", "单项奖学金",
+    )),
+    ("荣誉", (
+        "优秀毕业生", "优秀学生干部", "三好学生", "优秀学生", "优秀团员", "优秀共产党员",
+        "先进个人", "优秀员工", "优秀论文奖", "优秀导师", "优秀课程", "标兵",
+        "优秀青年", "杰出青年", "先进个人称号",
+    )),
+    ("论文", (
+        "期刊论文", "学术论文", "会议论文", "SCI", "EI", "CSSCI", "核心期刊",
+        "发表论文", "论文发表", "CNKI", "万方", " ResearchGate",
+    )),
+    ("专利", (
+        "发明专利", "实用新型", "外观设计", "专利号", "专利申请", "软件著作权", "软著",
+    )),
+)
+
+# 「获/授予/荣获」前缀：用来确认上下文是"拿到了"而不是"申请了"
+_AWARD_VERB = ("获", "授予", "荣获", "获得", "被评为", "当选")
+
+# 专利号：ZL + 年份 + 序号（CN/US 等可带）
+_PATENT_NO = re.compile(r"(?:ZL|CN|US)\s?\d{6,}[A-Z0-9.\-]{0,12}", re.I)
+# 篇数：发表论文 3 篇 / 论文 2 篇
+_PAPER_COUNT = re.compile(r"(?:发表)?(?:论文|文章)\s*\d{1,2}\s*篇")
+
+
+def _looks_like_paper_context(line: str) -> bool:
+    return any(k in line for k in ("论文", "期刊", "会议", "发表", "SCI", "EI", "CNKI"))
+
+
+def extract_honors(text: str) -> list[dict]:
+    """抽取奖学金 / 荣誉 / 论文 / 专利。每条带原文片段（evidence）。
+
+    规则：
+    - 命中关键词**且**所在行有"获/授予/授予"等动词，或该行就是一行荣誉/论文罗列；
+    - 专利另外接受"专利号 ZL2024…"这种强特征（不要求动词）；
+    - 同一条同一行只出一次，跨行去重；
+    - **不推断**：原文没写就一条都没有（缺=未识别，不是"没有"）。
+    """
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in (text or "").split("\n"):
+        line = raw.strip().strip("·•|\t ")
+        if not line or len(line) > 200:
+            continue
+        has_verb = any(v in line for v in _AWARD_VERB)
+        # ① 专利（强特征优先：专利号不需要动词）
+        for _m in _PATENT_NO.finditer(line):
+            _no = _m.group(0)
+            key = ("专利", _no)
+            if key not in seen:
+                seen.add(key)
+                out.append({"kind": "专利", "name": _no, "evidence": line})
+        if "专利" in line:
+            key = ("专利", line[:40])
+            if key not in seen and (has_verb or "申请" in line or "授权" in line):
+                seen.add(key)
+                out.append({"kind": "专利", "name": line[:60], "evidence": line})
+        # ② 奖学金 / 荣誉
+        for kind, kws in _HONOR_RULES[:2]:
+            for kw in kws:
+                if kw in line and (has_verb or len(line) <= 24):
+                    key = (kind, kw)
+                    if key not in seen:
+                        seen.add(key)
+                        out.append({"kind": kind, "name": kw, "evidence": line})
+                    break
+        # ③ 论文
+        m = _PAPER_COUNT.search(line)
+        if m or any(k in line for k in ("SCI", "EI", "期刊论文", "会议论文", "学术论文",
+                                        "核心期刊", "CNKI", "发表论文")):
+            if has_verb or _looks_like_paper_context(line):
+                name = (m.group(0) if m else "") or "、".join(
+                    k for k in ("SCI", "EI", "核心期刊", "期刊论文", "会议论文") if k in line) or "论文"
+                key = ("论文", name)
+                if key not in seen:
+                    seen.add(key)
+                    out.append({"kind": "论文", "name": name, "evidence": line})
+    return out
 
 
 def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = None,
@@ -497,6 +696,10 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
             out["confidence"] = round(max(out["confidence"], min(1.0, model_conf)), 2)
             out["sensitive_found"] = sensitive_found
             out["sensitive_fields_removed"] = removed
+            # v1.18：荣誉/论文/专利——**模型抽的逐条验过原文**才带出来，
+            # 验不过的直接丢（不让模型编的荣誉进档案）。规则抽的那份作为兜底补上。
+            out["honors"] = merge_honors(verify_honors_against_text(clean.get("honors"), safe_text),
+                                        extract_honors(safe_text))
             _fix_name_from_filename(out, filename)
             return out
         except (urllib.error.URLError, KeyError, ValueError, TypeError,

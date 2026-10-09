@@ -922,6 +922,21 @@ async function showDetail(cid){
           <b>技能与年限不在此处改</b>（必须来自简历原文与证据核对）</span></div>
       <div class="k">学历 / 身份</div><div>${eduBadge(d)} · ${expBadge(d)}</div>
       <div class="k">院校 / 专业</div><div>${esc(d.school||'—')} · ${esc(d.major||'—')}</div>
+      ${(()=>{
+        // v1.17.1：紧跟院校/专业——荣誉、奖学金、论文、专利是**基础画像**的一部分，
+        // 放在档案最底部等于藏起来。展示的是**简历原文那一行**（逐字来自原文，可核对）。
+        const H = d.honors || {};
+        const kinds = [['奖学金','奖学金'],['荣誉','荣誉'],['论文','论文'],['专利','专利']];
+        const groups = kinds.map(([k,label])=>[label, (H[k]||[])]).filter(([,a])=>a.length);
+        if (!groups.length) return '';
+        return `<div class="k">荣誉 / 论文 / 专利</div><div>
+          ${groups.map(([label,arr])=>`<div style="margin-top:4px">
+            <span class="small" style="color:var(--ink-3)">${label}</span>
+            ${arr.map(h=>`<div class="ev" style="margin:2px 0">${esc(h.evidence||h.name||label)}</div>`).join('')}
+          </div>`).join('')}
+          <div class="small" style="margin-top:4px">按简历原文规则识别，未逐条核实，请以原件为准</div>
+        </div>`;
+      })()}
       <div class="k">性别</div><div>${(d.gender||'').trim()
         ? esc(d.gender) + ' <span class="small">（简历明写；不参与档位判定）</span>'
         : '<span class="small">简历未写性别（系统不做推断）</span>'}</div>
