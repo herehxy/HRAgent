@@ -18,7 +18,7 @@ import os
 import re
 
 DEFAULT_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    __import__("app.paths", fromlist=["BASE"]).BASE,
     "config", "ontology.json",
 )
 

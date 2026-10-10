@@ -74,11 +74,14 @@ def _spec(name: str, desc: str, props: dict | None = None, required: list[str] |
 TOOL_SPECS = [
     # ------------------------------ 读 ------------------------------
     _spec("search_candidates",
-          "按条件筛选候选人（档位/学历/年限/关键词/阶段）。返回真实库内数据，找不到就返回空，不要编造。",
+          "按条件筛选候选人（档位/学历/年限/关键词/院校层次/阶段）。返回真实库内数据，找不到就返回空，不要编造。",
           {"tier": {"type": "string", "description": "A/B/C/D/REVIEW/UNCONFIRMED/ALL"},
            "keyword": {"type": "string", "description": "姓名、院校、专业关键词"},
            "min_years": {"type": "integer", "description": "最低工作年限"},
            "education": {"type": "string", "description": "最低学历：大专/本科/硕士/博士"},
+           "univ": {"type": "string",
+                    "description": "院校层次：985 或 211。用户说『985/211 的人』时**必须用这个参数**，"
+                                   "不要用 keyword 去猜校名（名单外会漏）。选 211 时 985 也算。"},
            "skill": {"type": "string", "description": "技能关键词"},
            "stage": {"type": "string", "description": "投递阶段，取值：" + "/".join(STAGES)},
            "limit": {"type": "integer", "description": "最多返回条数，默认 20"}}),
@@ -253,6 +256,8 @@ def _brief(c: dict) -> dict:
         "candidate_id": c["id"], "name": c.get("name"),
         "education": c.get("edu_level"), "years": c.get("years_exp"),
         "school": c.get("school"), "major": c.get("major"),
+        # 院校层次要如实带给助手，否则它没法回答"这些人是 985 吗"
+        "univ_tier": c.get("uni_tier"),
         "tier_suggested": c.get("tier_suggested"), "tier_final": c.get("tier_final"),
         "tier": c.get("tier_effective"), "score": c.get("score"),
         "stage": c.get("stage"), "confirmed": (c.get("app_status") or "") == "已确认",
@@ -413,6 +418,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 conn, tier=args.get("tier"), keyword=args.get("keyword"),
                 skill=skill_terms, min_years=args.get("min_years"),
                 education=args.get("education"), stage=args.get("stage"),
+                univ=args.get("univ"),
                 job_id=ctx.job_id,
                 # 归档的人不在人才库里，助手也就不该把他们列出来（与界面同一口径）
                 archived=False)
@@ -472,9 +478,12 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             return _ok(res)
 
         if name == "similar_candidates":
-            _cid_s, _cerr_s = _resolve_cid(conn, args.get(candidate_id))
+            # v1.24.4 修：三处未定义名（candidate_id / error / hint）——
+            # 调用「找相似的人」这个工具必然抛 NameError，工具等于不可用。
+            # 与同文件 get_candidate 的写法保持一致。
+            _cid_s, _cerr_s = _resolve_cid(conn, args.get("candidate_id"))
             if _cerr_s:
-                return _err(_cerr_s[error], _cerr_s.get(hint))
+                return _err(_cerr_s["error"], _cerr_s.get("hint"))
             res = search_mod.similar_to(conn, _cid_s,
                                         top_k=int(args.get("top_k") or 5))
             return _ok(res)

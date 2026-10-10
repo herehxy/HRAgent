@@ -32,7 +32,7 @@ import os
 import shutil
 from datetime import datetime
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from ..paths import BASE as ROOT        # 根目录唯一来源（认 TP_HOME）
 ONTOLOGY_PATH = os.path.join(ROOT, "config", "ontology.json")
 MAJORS_PATH = os.path.join(ROOT, "config", "majors.json")
 DOMAIN_DIR = os.path.join(ROOT, "config", "domains")

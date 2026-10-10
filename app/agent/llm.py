@@ -17,7 +17,7 @@ import urllib.request
 
 from .. import net
 
-_BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from ..paths import BASE as _BASE_DIR   # 根目录唯一来源（认 TP_HOME）
 CONFIG_PATH = os.path.join(_BASE_DIR, "config", "model.json")
 SECRETS_PATH = os.path.join(_BASE_DIR, "config", "secrets.json")
 

@@ -19,8 +19,8 @@ import json
 import os
 from functools import lru_cache
 
-_CFG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "config", "universities.json")
+from .paths import CONFIG_DIR as _C          # 根目录唯一来源（认 TP_HOME）
+_CFG = os.path.join(_C, "universities.json")
 
 
 def _norm(name: str) -> str:

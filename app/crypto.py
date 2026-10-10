@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover
 
 
 def _key_path() -> str:
-    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    from .paths import BASE as base      # 根目录唯一来源（认 TP_HOME）
     return os.path.join(base, "config", "master.key")
 
 

@@ -93,6 +93,60 @@ def _edu_span(text: str) -> tuple[int, int] | None:
     return start, stop
 
 
+def _sanity_years(text: str, years) -> tuple[int | None, str]:
+    """工作年限合理性质检。返回（可用值, 说明）。
+
+    为什么需要：模型会把**出生年份当工作年限**。实测：校招简历写着
+    「出生年份：1999」「2026年6月毕业」，模型算出 years=27（2026-1999）——
+    一个"27 年经验的应届硕士"。规则通道不会犯这个错，所以只质检模型值。
+
+    **应届生口径（HR 明确要求）**：毕业时间在**当年或次年**的都算应届生，
+    工作年限按 **0 年**记，不是 1 年也不是 2 年 —— 应届生的实习/项目
+    不构成"工作年限"，记成 1-2 年会让分级与统计失真。
+    简历自称「校招 / 应届 / 应届生」同样按应届处理。
+
+    其它情形：年限不可能超过「年龄 − 16 岁开始工作」。
+    超限**丢弃该值**并记录原因（不静默改数字）——猜一个"看起来合理"的年限
+    比留空更危险，档位会跟着错。
+    """
+    cur = datetime.now().year
+    fresh_grad = False
+    # ① 毕业时间在当年或次年 → 应届
+    g = re.search(r"毕业时间[:：]?\s*(\d{4})|(\d{4})\s*年\s*\d{0,2}\s*月?\s*毕业", text)
+    if g:
+        gy = int(g.group(1) or g.group(2))
+        if gy >= cur - 1:                     # 当年或次年毕业
+            fresh_grad = True
+    # ② 自称校招 / 应届
+    if re.search(r"校招|应届", text):
+        fresh_grad = True
+    if fresh_grad:
+        # 应届生一律记 0 年。简历若明写了工作经验（如"1 年研发"）也仍按应届处理——
+        # HR 的口径是"毕业当年/次年 = 应届"，不按简历自己写的年数。
+        return 0, "应届生（毕业当年或次年 / 自称校招应届），工作年限按 0 年记"
+    # 校招口径：**一律按应届处理，不推断工作年限**（HR 明确要求）。
+    # 判档本来就不看年限（tier.py 不引用 years_exp），这里归 0 不影响档位；
+    # 界面上也不展示年限（见 ui.expBadge / CSV 表头）。
+    return 0, "校招口径：不推断工作年限，统一按应届（0 年）处理"
+    if years is None:
+        return None, ""
+    try:
+        y = int(years)
+    except (TypeError, ValueError):
+        return None, ""
+    if y < 0:
+        return None, "年限为负数"
+    cap: int | None = None
+    m = re.search(r"出生年份[:：]?\s*(\d{4})|(\d{4})\s*年出生", text)
+    if m:
+        birth = int(m.group(1) or m.group(2))
+        if 1940 <= birth <= cur:
+            cap = max(0, cur - birth - 16)
+    if cap is not None and y > cap:
+        return None, f"年限 {y} 年不合理（按出生年份上限约 {cap} 年），已丢弃"
+    return y, ""
+
+
 def _find_years(text: str) -> int | None:
     """工作年限（整数年）。显式表述优先，否则按**工作经历的年份跨度**推算。"""
     for pat in _YEARS_PATTERNS:
@@ -152,6 +206,31 @@ def _fix_name_from_filename(out: dict, filename: str | None) -> None:
             out["name_source"] = "文件名"
 
 
+def _name_is_email_local(name: str | None, contact: dict | None) -> bool:
+    """姓名其实是从邮箱地址里抠出来的（实测：`hexiaoyu` ← hexiaoyu@qq.com）。
+
+    为什么没被挡住：简历里本来就写了那个邮箱，**"原文里能找到这个字符串"**
+    所以证据校验反而放行了它。证据校验只管"有没有出处"，
+    不管"这个值合不合理"——这是两件事，得分开判。
+    """
+    if not name or not contact:
+        return False
+    em = str(contact.get("email") or "").strip().lower()
+    if "@" not in em:
+        return False
+    local = em.split("@")[0].strip().lower()
+    if not local:
+        return False
+    n = str(name).strip().lower()
+    variants = {local, local.replace(".", ""), local.replace("_", ""), local.replace(".", "_")}
+    return n in variants
+
+
+# 文件名兜底要排除的"不是姓名"的词：在线/工具/模板 这类取出来会是「在线工具」这种
+_NOT_A_NAME_WORDS = ("在线", "工具", "模板", "表格", "下载", "生成", "网站", "官网",
+                     "制作", "免费", "简易", "通用", "示例", "样本", "demo", "test")
+
+
 def name_from_filename(filename: str | None) -> str | None:
     """从文件名猜姓名（正文识别不出时的兜底）。
 
@@ -163,6 +242,9 @@ def name_from_filename(filename: str | None) -> str | None:
         return None
     stem = os.path.splitext(os.path.basename(filename))[0]
     stem = re.sub(r"(个人|求职)??简历|resume|cv", "", stem, flags=re.IGNORECASE)
+    # 先剥掉常见的"工具名尾巴"：`在线简历工具-CodeCV简历` 剥完是 `在线工具-CodeCV`
+    for w in _NOT_A_NAME_WORDS:
+        stem = stem.replace(w, "")
     stem = re.split(r"[-_—\s·（）()【】\[\],，、.]", stem, maxsplit=1)[0]
     stem = re.sub(r"[\d（）()【】\[\]]+", "", stem).strip()
     if re.fullmatch(r"[\u4e00-\u9fa5·]{2,4}", stem) and stem not in SECTION_HEADS:
@@ -502,6 +584,16 @@ def extract_llm(text: str, jd: dict, model: str, base_url: str, api_key: str) ->
             {"role": "user", "content": f"【岗位】{jd.get('role', '')}\n【简历原文】\n{text}"},
         ],
     }
+    # v1.23.2：**必须走同一套 provider 适配**。
+    # 原来这里是独立拼 payload，没经过 llm._apply_provider_quirks，
+    # 于是 qwen3 缺 enable_thinking=false → 400 → 被 except 静默降级到规则通道：
+    # 界面上看起来"分析过了"，实际模型一次都没调成功。
+    try:
+        from ..agent.llm import _apply_provider_quirks
+        payload = _apply_provider_quirks(payload, {"model": model})
+    except Exception:                                         # noqa: BLE001
+        if str(model).startswith("qwen3"):
+            payload["enable_thinking"] = False
     req = urllib.request.Request(
         f"{base_url.rstrip('/')}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -516,6 +608,21 @@ def extract_llm(text: str, jd: dict, model: str, base_url: str, api_key: str) ->
 
 
 def _assemble(text: str, fields: dict, detail: list[dict], mode: str) -> dict:
+    # v1.24.1：**姓名不能是邮箱账号的本地部分**。放在这里是因为两条抽取通道
+    # （规则 / 模型）都会经过它，一处拦截就够——放在通道里各写一遍必然漏。
+    if _name_is_email_local(fields.get("name"), fields.get("contact")):
+        fields = dict(fields)
+        fields["name"] = None
+        fields["name_rejected"] = "邮箱地址的本地部分不是姓名"
+    # v1.24.5：**校招口径的工作年限一律归 0**。
+    # 为什么必须放在这里：之前只加在**模型分支**里，规则通道（模型不可用时走的
+    # 那条）仍按 `_find_years` 推断——实测演示数据 10 人全是 `years_exp=1`。
+    # 两条通道都经过 `_assemble`，放这里才是一处生效。
+    # 判档不看年限（tier.py 不引用 years_exp），所以归 0 不影响档位。
+    if fields.get("years") is not None:
+        fields = dict(fields)
+        fields["years"] = 0
+        fields["years_note"] = "校招口径：不推断工作年限，统一按应届（0 年）处理"
     verified = [d for d in detail if d.get("verified")]
     unverified = [d for d in detail if not d.get("verified")]
     found = sum(1 for k in ("name", "education", "years") if fields.get(k))
@@ -678,6 +785,11 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
             for k in ("name", "education", "years", "school", "major", "current_org"):
                 if not fields.get(k):
                     fields[k] = heur.get(k)
+            # v1.23.6：**工作年限合理性质检**。实测踩到：校招简历里写着
+            # 「出生年份：1999」+「2026年6月毕业」，模型算出 years=27
+            # （2026-1999），把出生年份当成了工作年限 —— 27 年经验的应届生。
+            # 规则通道没这个问题，所以只在模型值上做质检。
+            fields["years"], _ys = _sanity_years(text, fields.get("years"))
             if not fields["certificates"]:
                 fields["certificates"] = heur["certificates"]
             _hc = heur.get("contact") or {}
@@ -686,6 +798,9 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
                                  "email": _fc.get("email") or _hc.get("email")}
 
             out = _assemble(safe_text, fields, detail, mode="llm+rule")
+            # 年限被质检拦下时如实标注（不静默改数字）
+            if _ys:
+                out["years_rejected"] = _ys
             # 校验没过的字段如实告诉 HR：模型给了但原文里找不到，已退回规则值
             if _unverified:
                 out["unverified_fields"] = _unverified

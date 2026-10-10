@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -491,6 +492,11 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         # 没有这一列时拆分只能"如实说明搬不回"，等于白拆。
         "documents": {
             "merged_from_candidate": "INTEGER",
+            # 敏感字段清洗结果（v1.23.4）：{"民族": 1, "婚育": 2} —— 送进模型**之前**
+            # 被剔除的内容与条数。原来只在内存里算出来就丢了，HR 看不到
+            # "到底哪些信息没给模型看"，而这恰恰是隐私红线要能被核查的地方。
+            # 注意：这个字典**只能有一份 documents 键**，重复会互相覆盖（踩过）。
+            "sensitive_found": "TEXT",
         },
         # v1.8 主动提案：区分「HR 问出来的」与「系统自己发现的」。
         # 两者的确认流、留痕、执行路径完全一致，只有来源不同——
@@ -505,6 +511,21 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "business_direction": "TEXT",
         },
     }
+    # v1.24.4：`_ADD` 里同一个表出现**两次**会被 Python 静默合并成一个——
+    # 后写的键覆盖先写的，于是"我明明加了列、迁移却没生效"。
+    # 实测踩过（`documents.sensitive_found` 就是这么丢的，症状是运行时才报
+    # `no such column`，而代码看着完全正常）。这里直接在迁移前检查源码文本，
+    # 把重复变成**启动期**的明确报错，而不是等某条 SQL 炸掉才发现。
+    # 注意必须读**源码**：dict 里已经没有重复键了（重复只存在于源码中）。
+    _ADD_SRC = ""
+    try:
+        import pathlib
+        _txt = pathlib.Path(__file__).read_text(encoding="utf-8")
+        _i = _txt.index("_ADD = {")
+        _ADD_SRC = _txt[_i:_txt.index("\n    }", _i)]
+    except Exception:                                        # noqa: BLE001
+        _ADD_SRC = ""            # 取不到就跳过检查，不因此拦住启动
+
     for table, cols in _ADD.items():
         have = _cols(conn, table)
         if not have:
@@ -512,6 +533,19 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         for col, ddl in cols.items():
             if col not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+
+    # v1.24.4：`_ADD` 里同一个表出现**两次**会被 Python 静默合并成一个——
+    # 后写的键覆盖先写的，于是"我明明加了列、迁移却没生效"。
+    # 实测踩过（documents.sensitive_found 就是这么丢的，症状是运行时报
+    # `no such column`，而代码看着完全正常）。这里直接把重复变成启动期断言，
+    # 而不是等到某条 SQL 炸掉才发现。
+    _seen_tables: set[str] = set()
+    for table in re.findall(r'^\s{8}"(\w+)":\s*\{', _ADD_SRC, re.M):
+        if table in _seen_tables:
+            raise RuntimeError(
+                f"db._ADD 里表 {table!r} 出现了两次：同名键会互相覆盖，"
+                f"导致新增的列不迁移。请把同一个表的列合并到同一个键下。")
+        _seen_tables.add(table)
 
 
 # sqlite3.Connection 不允许挂自定义属性，故用模块级字典暂存迁移报告
@@ -1100,29 +1134,43 @@ def app_status_display(item: dict) -> tuple[str, str]:
 
 
 
-def _attach_skills(conn: sqlite3.Connection, items: list[dict]) -> list[dict]:
+def _attach_skills(conn: sqlite3.Connection, items: list[dict],
+                   with_skills: bool = True) -> list[dict]:
+    """给列表项补技能明细与派生字段。
+
+    `with_skills=False`（v1.23.5）：**只补不查库的派生字段**，跳过技能查询。
+    用途是"先过滤、再只为当前页装配"：1000 人时把全库都装配出来要 59ms，
+    而界面一屏只有 20 条——先轻量过一遍筛出这 20 条 id，再装配它们即可。
+    派生的三个字段（tier_effective / status_display / status_hint）两种模式都要，
+    因为筛选与 facets 依赖它们。
+    """
     if not items:
         return items
-    ids = [i["id"] for i in items]
-    marks = ",".join("?" * len(ids))
-    rows = conn.execute(
-        f"""SELECT cs.candidate_id, s.canonical_name, cs.level, cs.verified, cs.evidence
-            FROM candidate_skills cs JOIN skills s ON s.id = cs.skill_id
-            WHERE cs.candidate_id IN ({marks})
-            ORDER BY cs.verified DESC, s.canonical_name""",
-        ids,
-    ).fetchall()
-    bucket: dict[int, list[str]] = {}
-    detail: dict[int, list[dict]] = {}
-    for r in rows:
-        bucket.setdefault(r["candidate_id"], []).append(r["canonical_name"])
-        detail.setdefault(r["candidate_id"], []).append(
-            {"name": r["canonical_name"], "level": r["level"],
-             "verified": bool(r["verified"]), "evidence": r["evidence"]}
-        )
+    if with_skills:
+        ids = [i["id"] for i in items]
+        marks = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"""SELECT cs.candidate_id, s.canonical_name, cs.level, cs.verified, cs.evidence
+                FROM candidate_skills cs JOIN skills s ON s.id = cs.skill_id
+                WHERE cs.candidate_id IN ({marks})
+                ORDER BY cs.verified DESC, s.canonical_name""",
+            ids,
+        ).fetchall()
+        bucket: dict[int, list[str]] = {}
+        detail: dict[int, list[dict]] = {}
+        for r in rows:
+            bucket.setdefault(r["candidate_id"], []).append(r["canonical_name"])
+            detail.setdefault(r["candidate_id"], []).append(
+                {"name": r["canonical_name"], "level": r["level"],
+                 "verified": bool(r["verified"]), "evidence": r["evidence"]}
+            )
     for i in items:
-        i["skills"] = bucket.get(i["id"], [])
-        i["skill_detail"] = detail.get(i["id"], [])
+        if with_skills:
+            i["skills"] = bucket.get(i["id"], [])
+            i["skill_detail"] = detail.get(i["id"], [])
+        else:
+            i["skills"] = []
+            i["skill_detail"] = []
         i["tier_effective"] = i.get("tier_final") or i.get("tier_suggested")
         # 状态标签按实际情况给（待归岗 / 待分析 / 待确认 / 已确认），
         # 不再直接把库里的默认值「待确认」原样贴上去
@@ -1133,9 +1181,11 @@ def _attach_skills(conn: sqlite3.Connection, items: list[dict]) -> list[dict]:
 def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: str | None = None,
                     skill: str | list[str] | None = None, min_years: int | None = None,
                     education: str | None = None, job_id: int | None = None,
+                    univ: str | None = None,
                     stage: str | None = None, pool_status: str | None = None,
                     needs_review: bool | None = None, include_merged: bool = False,
-                    archived: bool | None = None, limit: int | None = None) -> list[dict]:
+                    archived: bool | None = None, limit: int | None = None,
+                    light: bool = False) -> list[dict]:
     """`archived` 参数三态（v1.4 软归档）：
     `None`（默认）不过滤——统计、合并等内部口径保持全量，行为与旧版完全一致；
     `False` 只看未归档——人才库列表与检索走这个口径，归档的不再展示；
@@ -1160,6 +1210,26 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
     if needs_review is not None:
         where.append("a.needs_review = ?")
         args.append(1 if needs_review else 0)
+    if keyword:
+        # v1.23.5：关键词改为**在 SQL 里筛**（原来是把全库装配成对象后在 Python 里逐条比）。
+        # 两个原因：
+        #   ① 轻量模式（light=True）不装配技能，Python 版本会因为 skills 为空而
+        #      **静默搜不到技能** —— 迁到 SQL 才能与分页优化共存；
+        #   ② 少装配 95% 的行。
+        # 口径与原来完全一致：姓名/学历/院校/专业/岗位名/建议岗位名/技能，任一**包含**即命中。
+        # **对应岗位必须能被搜到**（v1.17）：HR 嘴里的"数字化工程师的人"指的是岗位名，
+        # 不是技能词——搜不到会让模型回答"没有符合的候选人"（误导）。
+        # 注意：这段必须在 `sql` 执行**之前**，否则条件加进的是一个已经用过的列表。
+        like = "%" + keyword.strip().lower() + "%"
+        where.append(
+            "(LOWER(COALESCE(c.name,'')) LIKE ? OR LOWER(COALESCE(c.edu_level,'')) LIKE ?"
+            " OR LOWER(COALESCE(c.school,'')) LIKE ? OR LOWER(COALESCE(c.major,'')) LIKE ?"
+            " OR LOWER(COALESCE(j.title,'')) LIKE ?"
+            " OR LOWER(COALESCE(sj2.title,'')) LIKE ?"
+            " OR EXISTS (SELECT 1 FROM candidate_skills cs3 JOIN skills s3 ON s3.id = cs3.skill_id"
+            "            WHERE cs3.candidate_id = c.id"
+            "              AND LOWER(COALESCE(s3.canonical_name,'')) LIKE ?))")
+        args.extend([like] * 7)
     if where:
         sql += " WHERE " + " AND ".join(where)
     # 排序（v1.8.8，HR 口径）：**D 档一律沉底**，其余不看分数、按导入时间倒序。
@@ -1173,10 +1243,18 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
         sql += f" LIMIT {int(limit)}"
 
     items = [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
-    # 院校层次标签（v1.7.3）：每条都挂上（不限筛选时卡片也要显示 985/211 标签）；
-    # 985/211 的**筛选**在 server 层做（ facets 口径与性别筛选一致）。
+    # 院校层次标签（v1.7.3）：每条都挂上（不限筛选时卡片也要显示 985/211 标签）。
+    # **筛选也放这里**（v1.23.4）：原来只在 server 层筛，导致智能助手的
+    # `search_candidates` 根本没这个参数——HR 问"985 的人有哪些"，
+    # 助手只能回"没有标注 985/211 的候选人"，而列表页明明挂着这些标签。
+    # 同一份口径只能有一处实现，否则两处必然漂移。
     for _i in items:
         _i["uni_tier"] = univ_mod.uni_tier(_i.get("school") or "")
+    if univ in ("985", "211"):
+        # 985 院校全部同时是 211，所以选 211 时 985 也算（与界面提示一致）
+        items = [i for i in items
+                 if i.get("uni_tier") == "985"
+                 or (univ == "211" and i.get("uni_tier") == "211")]
 
     if tier and tier != "ALL":
         if tier == "REVIEW":
@@ -1197,7 +1275,7 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
     # 任何带技能条件的筛选都会返回 0 条（表现为"库里明明有 Java 候选人，
     # 对话却答『没有会 Java 的候选人』"）。keywords 过滤本来就在挂载之后，
     # 两处口径此前不一致，这也是它没被发现的原因。
-    items = _attach_skills(conn, items)
+    items = _attach_skills(conn, items, with_skills=not light)
 
     if skill:
         raw = [skill] if isinstance(skill, str) else list(skill)
@@ -1208,21 +1286,9 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
                             for w in wants for s in (i.get("skills") or []))]
 
     if keyword:
-        kw = keyword.strip().lower()
-        # 注意：**对应岗位也要能被搜到**（v1.17）。HR 嘴里的"数字化工程师的人"、
-        # "我想招材料的人"指的是岗位名或方向，不是技能词——原来只匹配
-        # 姓名/学历/学校/专业/技能，导致明明库里有人却搜不出来，
-        # 模型还会据此回答"没有符合的候选人"（误导）。
-        items = [
-            i for i in items
-            if kw in (i.get("name") or "").lower()
-            or kw in (i.get("edu_level") or "").lower()
-            or kw in (i.get("school") or "").lower()
-            or kw in (i.get("major") or "").lower()
-            or kw in (i.get("job_title") or "").lower()          # 对应岗位
-            or kw in (i.get("suggested_job_title") or "").lower()  # 建议岗位
-            or any(kw in s.lower() for s in i.get("skills", []))
-        ]
+        # 关键词已在 SQL 阶段筛过（见上），这里无需重复——重复会导致
+        # "轻量模式下二次过滤把技能命中的人筛掉"的老问题回归。
+        pass
     return items
 
 
@@ -1768,20 +1834,37 @@ def exists_hash(conn: sqlite3.Connection, file_hash: str) -> bool:
 
 
 def insert_document(conn: sqlite3.Connection, rec: dict) -> int:
-    cur = conn.execute(
-        """INSERT OR IGNORE INTO documents
-           (file_hash, candidate_id, application_id, file_name, file_path, archived_path,
-            mime, size, received_at, source_message_id, raw_text, text_len,
-            parse_engine, parse_ok, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (rec.get("file_hash"), rec.get("candidate_id"), rec.get("application_id"),
-         rec.get("file_name"), rec.get("file_path"), rec.get("archived_path"),
-         rec.get("mime"), rec.get("size"), rec.get("received_at", now()),
-         rec.get("source_message_id"), rec.get("raw_text", ""), len(rec.get("raw_text") or ""),
-         rec.get("parse_engine"), 1 if rec.get("parse_ok", True) else 0, now()),
-    )
-    conn.commit()
-    return cur.lastrowid
+    """写入附件台账。返回文档 id。
+
+    v1.23.5：**不再用裸 `INSERT OR IGNORE`**。它的本意只是"同一哈希不重复写"，
+    但 `OR IGNORE` 会连**列不存在、类型不符、非空约束**这类真错误一起吞掉——
+    实测踩到：新加的 `sensitive_found` 列在旧库上还没迁移时，
+    插入被静默忽略，结果是**简历进了库、附件台账却没有这一条**（丢记录还查不出来）。
+    现在只吞唯一键冲突：命中则返回既有 id；其它异常照抛。
+    """
+    try:
+        cur = conn.execute(
+            """INSERT INTO documents
+               (file_hash, candidate_id, application_id, file_name, file_path, archived_path,
+                mime, size, received_at, source_message_id, raw_text, text_len,
+                parse_engine, parse_ok, sensitive_found, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (rec.get("file_hash"), rec.get("candidate_id"), rec.get("application_id"),
+             rec.get("file_name"), rec.get("file_path"), rec.get("archived_path"),
+             rec.get("mime"), rec.get("size"), rec.get("received_at", now()),
+             rec.get("source_message_id"), rec.get("raw_text", ""), len(rec.get("raw_text") or ""),
+             rec.get("parse_engine"), 1 if rec.get("parse_ok", True) else 0,
+             rec.get("sensitive_found"), now()),
+        )
+        conn.commit()
+        return cur.lastrowid
+    except sqlite3.IntegrityError:
+        # 唯一键冲突：同一份文件（file_hash）已经入过账，返回既有 id
+        row = conn.execute("SELECT id FROM documents WHERE file_hash = ?",
+                           (rec.get("file_hash"),)).fetchone()
+        if row:
+            return int(row["id"] if not isinstance(row, tuple) else row[0])
+        raise
 
 
 def update_document(conn: sqlite3.Connection, did: int, **fields) -> None:
@@ -2797,14 +2880,32 @@ def pool_stats(conn: sqlite3.Connection) -> dict:
     看起来像归档没生效——和"管道里还挂着归档的人"是同一类问题。
     需要"一共收过多少"的台账数字用 `*_total`（附件、邮件本来就是台账，不随归档增减）。
     """
-    items = list_candidates(conn, archived=False)
     _ARCH = "COALESCE(c.archived_at, '') = ''"
+    # 人数也直接数（不再把全库装配成对象）
+    people = conn.execute(
+        f"""SELECT COUNT(*) AS n FROM candidates c
+            WHERE {_ARCH} AND c.merged_into IS NULL""").fetchone()["n"]
+    # 档位/阶段分布改用 SQL 聚合（v1.23.5）：原来是把**全库候选人装配成对象**
+    # 再在 Python 里数一遍——1000 人时要 60ms，且随人数线性增长。
+    # 口径与 list_candidates 完全一致：取每人**最新一条投递**、排除已归档、
+    # 档位取 tier_final 优先于 tier_suggested（`tier_effective`）。
+    _LATEST = ("a.id = (SELECT id FROM applications WHERE candidate_id = c.id "
+               "ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT 1)")
     tiers = {t: 0 for t in ("A", "B", "C", "D")}
+    for r in conn.execute(
+            f"""SELECT COALESCE(a.tier_final, a.tier_suggested) AS t, COUNT(*) AS n
+                FROM candidates c JOIN applications a ON {_LATEST}
+                WHERE {_ARCH} AND c.merged_into IS NULL
+                GROUP BY t""").fetchall():
+        if r["t"]:
+            tiers[r["t"]] = tiers.get(r["t"], 0) + r["n"]
     stages = {s: 0 for s in STAGES}
-    for i in items:
-        t = i.get("tier_effective")
-        tiers[t] = tiers.get(t, 0) + 1
-        stages[i.get("stage") or "新投递"] = stages.get(i.get("stage") or "新投递", 0) + 1
+    for r in conn.execute(
+            f"""SELECT COALESCE(a.stage, '新投递') AS s, COUNT(*) AS n
+                FROM candidates c JOIN applications a ON {_LATEST}
+                WHERE {_ARCH} AND c.merged_into IS NULL
+                GROUP BY s""").fetchall():
+        stages[r["s"]] = stages.get(r["s"], 0) + r["n"]
     apps = conn.execute(
         f"""SELECT COUNT(*) AS n FROM applications a
             JOIN candidates c ON c.id = a.candidate_id WHERE {_ARCH}""").fetchone()["n"]
@@ -2817,10 +2918,10 @@ def pool_stats(conn: sqlite3.Connection) -> dict:
     pending_mails = conn.execute(
         "SELECT COUNT(*) AS n FROM email_messages WHERE processed = 0").fetchone()["n"]
     return {
-        "people": len(items),
+        "people": people,
         # 含归档的总数：回答"这些年一共收了多少人"时才用得上
         "people_total": people_total,
-        "archived": max(0, people_total - len(items)),
+        "archived": max(0, people_total - people),
         "applications": apps,
         "applications_total": apps_total,
         "documents": docs,
@@ -2833,10 +2934,21 @@ def pool_stats(conn: sqlite3.Connection) -> dict:
             "SELECT COUNT(*) AS n FROM candidates WHERE merged_into IS NOT NULL").fetchone()["n"],
         "tiers": tiers,
         "stages": stages,
-        "pending": sum(1 for i in items if (i.get("app_status") or "待确认") != "已确认"),
-        "confirmed": sum(1 for i in items if (i.get("app_status") or "") == "已确认"),
-        "needs_review": sum(1 for i in items if i.get("needs_review")),
-        "in_pool": sum(1 for i in items if (i.get("pool_status") or "在池") == "在池"),
+        "pending": conn.execute(
+            f"""SELECT COUNT(*) AS n FROM candidates c JOIN applications a ON {_LATEST}
+                WHERE {_ARCH} AND c.merged_into IS NULL
+                  AND COALESCE(a.status, '待确认') != '已确认'""").fetchone()["n"],
+        "confirmed": conn.execute(
+            f"""SELECT COUNT(*) AS n FROM candidates c JOIN applications a ON {_LATEST}
+                WHERE {_ARCH} AND c.merged_into IS NULL
+                  AND COALESCE(a.status, '') = '已确认'""").fetchone()["n"],
+        "needs_review": conn.execute(
+            f"""SELECT COUNT(*) AS n FROM candidates c JOIN applications a ON {_LATEST}
+                WHERE {_ARCH} AND c.merged_into IS NULL AND a.needs_review = 1""").fetchone()["n"],
+        "in_pool": conn.execute(
+            f"""SELECT COUNT(*) AS n FROM candidates c
+                WHERE {_ARCH} AND c.merged_into IS NULL
+                  AND COALESCE(c.pool_status, '在池') = '在池'""").fetchone()["n"],
         "emails": mails,
         "emails_pending": pending_mails,
         "skills": conn.execute("SELECT COUNT(*) AS n FROM skills").fetchone()["n"],

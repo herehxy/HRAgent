@@ -25,7 +25,7 @@ import urllib.request
 
 from . import db, net
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from .paths import BASE      # 根目录唯一来源（认 TP_HOME）
 CONFIG_PATH = os.path.join(BASE, "config", "embedding.json")
 
 HASH_DIM = 384

@@ -33,7 +33,7 @@ import ssl
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # app/ -> 项目根
+from .paths import BASE      # 根目录唯一来源（认 TP_HOME）
 CONFIG_PATH = os.path.join(BASE, "config", "mailbox.json")
 
 DEFAULT_CONFIG = {

@@ -29,6 +29,7 @@ import json
 import os
 import re
 import sys
+import queue
 import threading
 from datetime import datetime
 
@@ -311,7 +312,8 @@ def _open_jobs_with_jd(conn) -> list[dict]:
 
 
 def _route_by_open_jobs(conn, text: str, jd_default: dict,
-                        filename: str | None = None, use_llm: bool = False) -> dict | None:
+                        filename: str | None = None, use_llm: bool = False,
+                        llm_conf: dict | None = None) -> dict | None:
     """给未归岗的简历找「建议岗位」：**关键词已在上游试过**（没命中才走到这里），这一步问模型。
 
     v1.12 改口径（原来轮询每个在招岗位打分、取最高分）：
@@ -331,16 +333,21 @@ def _route_by_open_jobs(conn, text: str, jd_default: dict,
         # 模型未启用时不猜岗位：宁可待指定，也不要随机塞一个
         return {**empty, "why": "模型未启用，未做归岗判断"}
     from .pipeline import analyze as analyze_mod
-    # 先用默认尺子抽一份画像（不调模型的抽取，便宜）——只为让模型读懂这份简历
+    # 先用默认尺子抽一份画像（**故意不调模型**，便宜）——只为让模型读懂这份简历。
+    # 注意：它的结果**不落库**，只喂给 suggest_job()。
     cand0 = extract(text, jd_default, use_llm=False, filename=filename)
     pick = analyze_mod.suggest_job(cand0, jobs)
     if not pick:
-        return {**empty, "cand": cand0, "why": "模型没能判断出对应岗位"}
+        # 判不出岗位 → 返回 cand=None，让调用方**保留自己那次带模型的抽取结果**。
+        # （v1.23.3 修：原来这里返回 cand0，把上游用模型抽好的字段覆盖成了规则版本，
+        #   结果"模型明明跑了，落库的抽取方式却是 heuristic"。）
+        return {**empty, "cand": None, "why": "模型没能判断出对应岗位"}
     job = next((j for j in jobs if str(j.get("title") or "").strip() == pick["title"]), None)
     if not job:
-        return {**empty, "cand": cand0, "why": "模型给出的岗位不在在招清单里（已丢弃）"}
-    # 用该岗位的 JD 尺子重抽一次：技能词表来自岗位 JD，命中口径才与岗位一致
-    cand = extract(text, job["jd"], use_llm=use_llm, filename=filename)
+        return {**empty, "cand": None, "why": "模型给出的岗位不在在招清单里（已丢弃）"}
+    # 用该岗位的 JD 尺子重抽一次：技能词表来自岗位 JD，命中口径才与岗位一致。
+    # **必须把 llm_conf 传下去**，否则 use_llm=True 也走规则通道（静默降级）。
+    cand = extract(text, job["jd"], use_llm=use_llm, llm_conf=llm_conf, filename=filename)
     return {**job, "cand": cand, "usable": True, "considered": len(jobs),
             "why": pick.get("reason") or ""}
 
@@ -421,6 +428,8 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     if not ok:
         result["notes"].append(f"解析未成功（{engine}），已标『待人工判读』，原件保留")
 
+    # 一次带模型的抽取作为**默认结果**（v1.23.3：原来这里抽一次、else 分支又抽一次，
+    # 白花一次模型调用；且路由失败时会被规则结果覆盖）。
     cand = extract(text, jd, use_llm=use_llm, llm_conf=llm_conf, filename=filename)
 
     # —— 归岗口径（v1.12）：**没有岗位名就问模型，问不出来就待指定** ——
@@ -431,7 +440,8 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     #   ② 没有 → 请模型判断最像哪个在招岗位（一次调用）；
     #   ③ 模型也说不出 → 保持待指定、不出建议，由 HR 手动归岗。
     # 岗位本身仍然不落 `job_id`——系统只建议，HR 点「采纳」才真正归岗。
-    route = (_route_by_open_jobs(conn, text, jd, filename=filename, use_llm=use_llm)
+    route = (_route_by_open_jobs(conn, text, jd, filename=filename, use_llm=use_llm,
+                                 llm_conf=llm_conf)
              if job_id is None else None)
     if route and route.get("cand") is not None:
         # 画像用"胜出岗位"那一轮抽取的结果：技能清单里会包含该岗位 JD 写的词
@@ -439,7 +449,7 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         cand = route["cand"]
         g = grade(cand, route["jd"] or jd)
     else:
-        cand = extract(text, jd, use_llm=use_llm, llm_conf=llm_conf, filename=filename)
+        # 判不出岗位 / 无在招岗位 → **保留上面那次带模型的抽取结果**，不重抽、不覆盖。
         # 只有**明确归岗**（job_id 来自文件名/邮件标题命中）时才允许判 D；
         # 用默认尺子试算的待指定投递不判 D（见 tier.grade 的 job_confirmed）。
         g = grade(cand, jd, job_confirmed=(job_id is not None))
@@ -565,6 +575,9 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
             "mime": parse_mod.mime_of(filename), "size": size, "received_at": applied_at,
             "source_message_id": source_message_id, "raw_text": text,
             "parse_engine": engine, "parse_ok": ok,
+            # 送进模型前剔除了什么（隐私红线要可核查），落库供档案页展示
+            "sensitive_found": json.dumps(cand.get("sensitive_found") or {},
+                                          ensure_ascii=False),
         })
         refreshed = _regrade_if_unconfirmed(conn, existing, g)
         result["document_id"] = doc_id
@@ -605,6 +618,9 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
             "mime": parse_mod.mime_of(filename), "size": size, "received_at": applied_at,
             "source_message_id": source_message_id, "raw_text": text,
             "parse_engine": engine, "parse_ok": ok,
+            # 送进模型前剔除了什么（隐私红线要可核查），落库供档案页展示
+            "sensitive_found": json.dumps(cand.get("sensitive_found") or {},
+                                          ensure_ascii=False),
         })
     conn.execute("UPDATE applications SET resume_doc_id = ? WHERE id = ?", (doc_id, app_id))
     if route and route["usable"]:
@@ -647,6 +663,170 @@ def _hash_path(path: str | None) -> str:
 # ============================================================
 # 对外入口
 # ============================================================
+
+
+def _hr_edited_fields(conn, cid: int) -> set[str]:
+    """HR 手动改过哪些字段（`audit_log.action='edit_fields'`）。
+
+    重分析要保住这些值：HR 之所以手动改，就是因为抽取抽错了
+    （姓名在图片里、学校写简称……）。让重分析把改对的冲掉，
+    等于每重跑一次就毁一次人工成果。
+    """
+    try:
+        rows = conn.execute(
+            "SELECT before, after FROM audit_log WHERE entity='candidate' AND entity_id=? "
+            "AND action='edit_fields'", (str(cid),)).fetchall()
+    except Exception:                                         # noqa: BLE001
+        return set()
+    keys: set[str] = set()
+    for r in rows:
+        for part in f"{r[0] or ''}；{r[1] or ''}".split("；"):
+            if "=" in part:
+                keys.add(part.split("=", 1)[0].strip())
+    # 审计里用的是中文标签，映射回字段名
+    label2field = {"姓名": "name", "学历": "edu_level", "学校": "school",
+                   "专业": "major", "电话": "phone_enc", "邮箱": "email_enc"}
+    return {label2field.get(k, k) for k in keys if k}
+
+
+def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id: int, *,
+                   use_llm: bool = True, llm_conf: dict | None = None) -> dict:
+    """把一份已有档案按当前配置**完整重跑**一遍（不产生新投递）。
+
+    返回 {ok, steps[], changes{}, kept_hr[], error?}，供界面如实展示每一步做了什么。
+    """
+    from .pipeline import parse as parse_mod
+    from .pipeline.tier import grade
+
+    steps: list[str] = []
+    d = db.candidate_detail(conn, candidate_id)
+    if not d:
+        return {"ok": False, "error": "未找到该候选人"}
+
+    docs = d.get("documents") or []
+    apps = d.get("applications") or []
+    app_row = apps[0] if apps else {}
+    app_id = app_row.get("id") or 0
+
+    # ---- ① 找到磁盘上的原件并重新解析 ----
+    doc = None
+    src_path = ""
+    for x in docs:
+        for key in ("archived_path", "file_path"):
+            p = x.get(key) or ""
+            if p and os.path.exists(p):
+                doc, src_path = x, p
+                break
+        if doc:
+            break
+    if not doc:
+        return {"ok": False,
+                "error": "原件不在磁盘上，无法完整重新分析；请重新导入这份简历"}
+
+    text, engine, ok = parse_mod.parse_file_ex(src_path)
+    if not ok or not (text or "").strip():
+        return {"ok": False,
+                "error": f"原件重新解析失败（{engine}），未改动任何数据"}
+    steps.append(f"重新解析原件（{engine}，{len(text)} 字）")
+
+    # ---- ② 归岗口径：已归岗沿用该岗位（不擅自换岗），未归岗才问模型 ----
+    jd_used, job_meta = db.resolve_candidate_job(conn, d)
+    route = None
+    if not jd_used:
+        route = _route_by_open_jobs(conn, text, jd_default, filename=doc.get("file_name"),
+                                    use_llm=use_llm, llm_conf=llm_conf)
+        if route and route.get("cand") is not None:
+            jd_used = route.get("jd") or jd_default
+            steps.append(f"模型建议岗位：{route.get('title') or '—'}"
+                         + ("（已采纳为建议）" if route.get("usable") else ""))
+        else:
+            jd_used = jd_default
+            if route:
+                steps.append("未归岗：模型也没判断出对应岗位，保持待指定")
+    else:
+        steps.append(f"沿用已归岗岗位：{job_meta.get('job_title') or job_meta.get('source')}")
+
+    # ---- ③ 重新抽取字段（模型）----
+    cand = extract(text, jd_used, use_llm=use_llm, llm_conf=llm_conf,
+                   filename=doc.get("file_name"))
+    steps.append(f"重新抽取字段（{cand.get('extract_mode')}）")
+
+    # ---- ④ 写回字段：保住 HR 人工更正过的 ----
+    kept_hr: list[str] = []
+    hr_touched = _hr_edited_fields(conn, candidate_id)
+    want = {"name": cand.get("name"), "edu_level": cand.get("education"),
+            "school": cand.get("school"), "major": cand.get("major"),
+            "years_exp": cand.get("years"), "gender": cand.get("gender"),
+            "grad_date": cand.get("grad_date"), "current_org": cand.get("current_org")}
+    changes: dict[str, list] = {}
+    upd: dict = {}
+    for k, v in want.items():
+        cur = d.get(k)
+        if v in (None, "", []) or v == cur:
+            continue
+        if k in hr_touched:
+            kept_hr.append(k)
+            continue
+        upd[k] = v
+        changes[k] = [cur, v]
+    if upd:
+        db.update_candidate(conn, candidate_id, **upd)
+        steps.append("更新字段：" + "、".join(f"{k}" for k in upd))
+    if kept_hr:
+        steps.append("保留人工更正：" + "、".join(kept_hr))
+
+    # ---- ⑤ 重挂技能（新抽取到技能才重建，避免模型挂了把旧技能清空）----
+    sk = cand.get("skill_detail") or []
+    if sk:
+        conn.execute("DELETE FROM candidate_skills WHERE candidate_id=?", (candidate_id,))
+        persist_skills(conn, candidate_id, cand, doc.get("id"))
+        conn.commit()
+        steps.append(f"重建技能：{len(sk)} 项（含未核验）")
+
+    # ---- ⑥ 重判档（只写建议档，绝不动 HR 定档与阶段）----
+    g = grade(cand, jd_used, job_confirmed=bool(app_row.get("job_id")))
+    if app_id:
+        conn.execute(
+            """UPDATE applications SET score=?, tier_suggested=?, extract_mode=?,
+                   reasons=?, risks=?, hits=?, miss=?, preferred_hit=?, breakdown=?,
+                   suggested_job_id=COALESCE(?, suggested_job_id),
+                   suggested_job_reason=COALESCE(?, suggested_job_reason),
+                   updated_at=? WHERE id=?""",
+            (g.get("score"), g.get("tier_suggested"), cand.get("extract_mode"),
+             json.dumps(g.get("reasons") or [], ensure_ascii=False),
+             json.dumps(g.get("risks") or [], ensure_ascii=False),
+             json.dumps(g.get("hit") or [], ensure_ascii=False),
+             json.dumps(g.get("miss") or [], ensure_ascii=False),
+             json.dumps(g.get("preferred_hit") or [], ensure_ascii=False),
+             json.dumps(g.get("breakdown") or [], ensure_ascii=False),
+             (route.get("id") if (route and route.get("usable")) else None),
+             (route.get("why") if route else None),
+             db.now(), app_id))
+        conn.commit()
+        steps.append(f"重算建议档：{g.get('tier_suggested') or '—'}")
+
+    # ---- ⑦ 附件台账补清洗记录与解析引擎 ----
+    if doc:
+        conn.execute("UPDATE documents SET sensitive_found=?, parse_engine=?, "
+                     "parse_ok=1, raw_text=?, text_len=? WHERE id=?",
+                     (json.dumps(cand.get("sensitive_found") or {}, ensure_ascii=False),
+                      engine, text, len(text), doc.get("id")))
+        conn.commit()
+
+    # ---- ⑧ 重算分析结论（画像 + 建议档同步）----
+    analyze_one(conn, candidate_id, app_id, source="manual_reanalyze")
+    steps.append("重算系统自动分析")
+
+    db.add_audit(conn, "candidate", str(candidate_id), "reanalyze_full",
+                 "；".join(f"{k}={'（空）' if v[0] in (None, '') else v[0]}"
+                           for k, v in changes.items()) or "（字段无变化）",
+                 "；".join(f"{k}={v[1]}" for k, v in changes.items()) or "（字段无变化）",
+                 "hr", "hr")
+    return {"ok": True, "steps": steps, "changes": changes, "kept_hr": kept_hr,
+            "extract_mode": cand.get("extract_mode"),
+            "tier_suggested": g.get("tier_suggested"), "job": job_meta}
+
+
 
 def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: str,
                  job_id: int | None = None, use_llm: bool = False,
@@ -907,10 +1087,18 @@ def analyze_one(conn, candidate_id: int, application_id: int,
     return ins
 
 
-def spawn_auto_analysis(db_path: str, report: dict, limit: int = 20) -> int:
+def spawn_auto_analysis(db_path: str, report: dict, limit: int = 0) -> int:
     """把入库结果排入后台分析队列，返回排队条数。
 
-    四条设计约束：
+    `limit=0`（默认）= **本次导入的全部**都分析（v1.23.4）。
+    原来默认 20：一次导入 200 份只分析前 20 份，剩下的要 HR 手动点
+    「分析待分析的人」——HR 的原话是「我导入的全部分析就好了，反正我是有开关的」。
+    关掉自动分析有专门的开关（`auto_insight_on_ingest`），不需要再用条数隐式截断。
+
+    现在是**并发**跑（`TP_ANALYZE_CONCURRENCY`，默认 6 路）：模型调用是网络等待型，
+    串行时每人 11 秒、1000 人要 3 小时；并发后同样的活能压到 40 分钟量级。
+
+    设计约束：
     1) **异步且不阻断**：分析再慢、模型再挂，入库结果都已返回，
        HR 看到的"新增 4"就是真的新增了 4；
     2) **不碰档位**：只写候选人的分析文本（`candidate_insights`），
@@ -936,22 +1124,59 @@ def spawn_auto_analysis(db_path: str, report: dict, limit: int = 20) -> int:
     if not _on:
         report["insight_skipped"] = len(targets_all)
         return 0
-    targets = targets_all[:max(0, int(limit))]
+    # limit<=0 = 不截断（全部分析）
+    targets = targets_all if int(limit) <= 0 else targets_all[:int(limit)]
     if not targets:
         return 0
 
+    # 并发路数：模型调用是网络等待型，串行纯属浪费。
+    # 6 路是保守起点（百炼端点对并发有限额；调大前先确认配额）。
+    try:
+        workers = max(1, min(16, int(os.environ.get("TP_ANALYZE_CONCURRENCY", "6"))))
+    except ValueError:
+        workers = 6
+
     def _work() -> None:
-        conn = db.connect(db_path)                     # sqlite 连接不能跨线程复用
-        try:
-            for t in targets:
-                try:
-                    analyze_one(conn, t["candidate_id"], t["application_id"],
-                                source="auto_ingest")
-                except Exception as exc:               # noqa: BLE001 — 单条失败不扩散
-                    print(f"[auto_insight] 候选人#{t['candidate_id']} 分析失败："
-                          f"{type(exc).__name__}: {exc}", file=sys.stderr)
-        finally:
-            conn.close()
+        # 每个线程必须用自己的 sqlite 连接（连接不能跨线程复用）
+        q: "queue.Queue" = queue.Queue()
+        for t in targets:
+            q.put(t)
+        lock = threading.Lock()
+        done = {"ok": 0, "fail": 0}
+
+        def worker() -> None:
+            conn = db.connect(db_path)
+            try:
+                while True:
+                    try:
+                        t = q.get_nowait()
+                    except queue.Empty:
+                        return
+                    try:
+                        analyze_one(conn, t["candidate_id"], t["application_id"],
+                                    source="auto_ingest")
+                        with lock:
+                            done["ok"] += 1
+                    except Exception as exc:           # noqa: BLE001 — 单条失败不扩散
+                        with lock:
+                            done["fail"] += 1
+                        print(f"[auto_insight] 候选人#{t['candidate_id']} 分析失败："
+                              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                    finally:
+                        q.task_done()
+            finally:
+                conn.close()
+
+        threads = [threading.Thread(target=worker, name=f"auto-insight-{i}", daemon=True)
+                   for i in range(min(workers, len(targets)))]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        print(f"[auto_insight] 完成 {done['ok']} 条，失败 {done['fail']} 条"
+              f"（{workers} 路并发）", file=sys.stderr)
 
     threading.Thread(target=_work, name="auto-insight", daemon=True).start()
+    report["insight_queued"] = len(targets)
+    report["insight_concurrency"] = min(workers, len(targets))
     return len(targets)

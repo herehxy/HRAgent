@@ -21,7 +21,7 @@ import os
 from functools import lru_cache
 
 #: 应用根目录（打包后是 exe 同级的 _internal：PyInstaller 会把 app/ 放进去）
-_BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from .paths import BASE as _BASE       # 根目录唯一来源（认 TP_HOME）
 
 _PAGE = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -151,12 +151,32 @@ _PAGE = """<!DOCTYPE html>
   .arch-card.on{border-color:var(--accent);background:var(--accent-soft)}
   .arch-card.on b{color:var(--accent-ink)}
   /* 字典标签 + × 删除（v1.21）：让"删除"有明确入口 */
+  /* 多值输入（v1.23）：标签 + 输入框；点 × 移除 */
+  .multi{border:1px solid var(--line);border-radius:var(--r-ctl);padding:4px 6px;
+    display:flex;flex-wrap:wrap;gap:5px;align-items:center;background:#fff}
+  .multi input:not([type=hidden]){border:0;outline:0;flex:1;min-width:160px;padding:3px 2px}
+  .multi-chip{display:inline-flex;align-items:center;gap:4px;font-size:12px;
+    padding:2px 5px 2px 8px;border:1px solid var(--line);border-radius:var(--r-chip);
+    background:var(--accent-soft);color:var(--accent-ink)}
+  .multi-chip b{cursor:pointer;font-weight:600;padding:0 2px;opacity:.65}
+  .multi-chip b:hover{opacity:1;color:var(--bad)}
   .dict-tags{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:2px}
   .dict-tag{display:inline-flex;align-items:center;gap:4px;font-size:12px;
     padding:2px 6px 2px 8px;border:1px solid var(--line);border-radius:var(--r-chip);
     background:var(--surface-2);color:var(--ink-2)}
   .dict-tag b{cursor:pointer;color:var(--ink-3);font-weight:600;padding:0 2px}
   .dict-tag b:hover{color:var(--bad)}
+  /* 批量归档分组条（v1.22.1）：把散落的控件收成一组，
+     用细线分隔"勾选的人"与"按年"两种方式，不再是四个孤立控件 */
+  .arch-bar{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;
+    background:var(--surface-2);border:1px solid var(--line);
+    border-radius:var(--r-ctl);padding:6px 10px}
+  .arch-bar .arch-label{font-size:12px;color:var(--ink-3);font-weight:600;
+    letter-spacing:.02em}
+  .arch-bar select{min-width:96px}
+  .arch-bar .arch-suffix{font-size:13px;color:var(--ink-2);margin-left:-4px}
+  .arch-bar .arch-div{width:1px;height:20px;background:var(--line);
+    margin:0 2px}
   /* 字典逐项列表（v1.21.2）：每项一行 + × 删除 + 输入框添加 */
   .dict-list{border:1px solid var(--line);border-radius:var(--r-ctl);
     max-height:190px;overflow:auto;background:var(--surface)}
@@ -286,6 +306,10 @@ let SEARCH_MODE = 'kw';
 let _semDegraded = false;   // 语义检索是否正在降级（提示只在真正用到时才出现）
 let TOKEN = localStorage.getItem('tp_token') || '';
 let VIEW = 'pool', TAB = 'ALL', KW = '', CHAT = [], ITEMS = [], CUR = null, LAST_INGEST = null;
+// 校招场景（HR 口径）：**一律按应届处理，不推断也不展示工作年限**。
+// 刻意不做成开关——「能不能投」看的是身份，不是一个年限数字；
+// 留一个可切换的开关反而会让人以为「打开年限分析更准」。
+const CAMPUS_MODE = true;
 // 性别筛选：**默认不筛**（空串）。开关在设置里默认关闭，关着时后端也会忽略这个参数。
 let GENDER = '';
 // 初筛下拉（v1.7.3）：最低学历（≥门槛）与院校层次（985/211）。
@@ -313,7 +337,16 @@ async function api(path, opts){
   opts.headers = hdr(opts.headers);
   const r = await fetch(path, opts);
   let body = null;
-  try { body = await r.json(); } catch(e) { body = {error:'响应不是 JSON'}; }
+  const raw = await r.text();               // 先取文本：失败时要能看见证据
+  try { body = JSON.parse(raw); } catch(e) {
+    // v1.23.7：**别只报「响应不是 JSON」**。服务端 500 时返回的是 HTML 报错页，
+    // 把真实异常盖成一句无信息量的提示——实测害我多排查一轮
+    // （真实原因是一个 NameError，只在服务端日志里，界面上完全看不到）。
+    // 现在把状态码与正文片断带出来，错误当场可见。
+    body = {error: `服务端返回了非 JSON 响应（HTTP ${r.status}）`,
+            detail: (raw || '').slice(-400) || '（空响应）',
+            __non_json: true};
+  }
   if (!r.ok) return Object.assign({__http_error:r.status}, body||{});
   return body;
 }
@@ -324,7 +357,8 @@ function toast(msg, kind){
   d.textContent = msg;
   const host = document.getElementById('alerts');
   host.prepend(d);
-  setTimeout(()=>d.remove(), 7000);
+  // 成功类多留一会儿：发信这种"不可撤销"的动作，只闪 7 秒等于没提示
+  setTimeout(()=>d.remove(), (kind === 'ok') ? 12000 : 7000);
 }
 
 function copyText(t){
@@ -551,11 +585,18 @@ async function rebuildBrief(){
   refresh();
 }
 
-/* 招聘对象身份：有工作经历显示年限；没有则显示毕业时间 + 应届/往届未就业。
-   校招场景下"能不能投"看的是身份，不是一个年限数字。 */
+/* 招聘对象身份：校招模式下**只显应届/往届未就业，不显年限数字**。
+   HR 口径（2026-10-10）：「直接默认都是应届生，不要做工作年限的分析以及展示」——
+   校招里"能不能投"看的是身份，不是一个年限数字。 */
 function expBadge(x){
   const e = x.exp_display;
-  if (!e) return (x.years_exp==null ? '—' : x.years_exp + ' 年');
+  // 校招口径：**不展示工作年限**。只有"往届未就业"这种值得提醒的情况才显示身份，
+  // 其余统一显示"应届"——显示"1 年"只会制造噪音（HR 原话：不要展示工作年限）。
+  if (e && e.kind === 'past_idle') return expBadgeReal(e);
+  return '<span style="color:var(--ok)">应届</span>';
+}
+function expBadgeReal(e){
+  if (!e) return '应届';
   const color = e.kind === 'fresh' ? 'var(--ok)'
               : e.kind === 'past_idle' ? 'var(--warn)'
               : e.kind === 'unknown' ? 'var(--ink-3)' : 'var(--ink)';
@@ -587,7 +628,7 @@ function insightBlock(x){
   const ins = x.insight;
   if (!ins){
     return `<div class="small" style="color:var(--ink-3);margin-top:8px">` +
-      `自动分析生成中…（稍后刷新，或点「重算自动分析」）</div>`;
+      `自动分析生成中…（稍后刷新，或在人才库卡片上点「重新分析」做完整重跑）</div>`;
   }
   const src = ins.source === 'rule_fallback' ? '规则降级（模型不可用）'
             : ins.source === 'auto_profile'  ? '未归岗 · 简历画像'
@@ -634,16 +675,65 @@ function tierSourceLine(x){
     </div></details>`;
 }
 
-async function reanalyze(cid){
+async function reanalyze(cid, full){
+  full = (full === undefined) ? true : !!full;
   const out = document.getElementById('out-'+cid);
-  if (out) out.innerHTML = '<div class="note">重算中…</div>';
-  const r = await api('/api/candidates/'+cid+'/reanalyze', {method:'POST'});
+  const btns = document.querySelectorAll(`[data-reanalyze="${cid}"]`);
+  btns.forEach(b => { b.disabled = true; b.dataset.old = b.textContent; b.textContent = '重新分析中…'; });
+  if (out){
+    out.innerHTML = '<div class="note">完整重新分析中：重新解析原件 → 模型重抽字段 → '
+      + '重建技能 → 重新归岗 → 重判建议档 → 重算分析。<b>约 10 秒</b>，请勿关闭页面。</div>';
+  }
+  let r;
+  try {
+    r = await api('/api/candidates/'+cid+'/reanalyze?full=' + (full?'true':'false'),
+                  {method:'POST'});
+  } finally {
+    btns.forEach(b => { b.disabled = false; b.textContent = b.dataset.old || '重新分析'; });
+  }
   if (r.__http_error || r.error){
-    if (out) out.innerHTML = `<div class="danger">重算失败：${esc(r.detail||r.error||'')}</div>`;
+    if (out) out.innerHTML = `<div class="danger">重新分析失败：${esc(r.detail||r.error||'')}
+      ${r.hint?('<br><span class="small">'+esc(r.hint)+'</span>'):''}</div>`;
+    toast(r.detail || r.error || '重新分析失败', 'danger');
     return;
   }
-  toast(r.note || '分析已更新', 'ok');
-  refresh();
+  // 把"到底做了什么"逐条列出来——HR 点的是"重新分析"，
+  // 就有权知道它到底重跑了哪几步、哪些字段变了（否则只能凭感觉）
+  const cs = r.changes || {};
+  const keys = Object.keys(cs);
+  const summaryHtml = `<div class="note" style="background:var(--ok-soft)">
+      <b>完成</b>（抽取方式：${esc(r.extract_mode||'—')}${r.tier_suggested?' · 建议档 '+esc(r.tier_suggested):''}）
+      <div style="margin-top:4px">${(r.steps||[]).map(s=>'· '+esc(s)).join('<br>')}</div>
+      ${keys.length ? `<div class="small" style="margin-top:4px">字段变化：` +
+          keys.map(k=>`${esc(k)}：${esc(String(cs[k][0]??'（空）'))} → <b>${esc(String(cs[k][1]??''))}</b>`).join('；')
+          + `</div>` : ''}
+      ${(r.kept_hr||[]).length ? `<div class="small" style="margin-top:4px">已保留人工更正：
+          ${esc((r.kept_hr||[]).join('、'))}（不做覆盖）</div>` : ''}
+    </div>`;
+  const fromModal = document.getElementById('modal').classList.contains('on');
+  if (fromModal){
+    // 弹层里的按钮：重开档案让新值生效，再把结果面板放回去
+    // （否则页面上还是旧字段，HR 会以为没跑成功）
+    await showDetail(cid);
+  } else {
+    // 列表里的按钮：先刷新让新值上屏，**再把结果面板塞回去**。
+    // 原来只填面板就 refresh()，卡片重渲染把面板一起冲没了 ——
+    // 表现就是"点了没反应"（请求其实发出去了，14 秒后静默结束）。
+    refresh();
+  }
+  // 候选人可能已被筛选条件排除、不在这一页 → 面板没处放，就贴到页面顶部并保留
+  const box = document.getElementById('out-'+cid);
+  if (box){ box.innerHTML = summaryHtml; }
+  else {
+    const host = document.getElementById('alerts');
+    const d = document.createElement('div');
+    d.className = 'note';
+    d.style.cssText = 'background:var(--ok-soft);border-left:3px solid var(--ok)';
+    d.innerHTML = summaryHtml;
+    host.prepend(d);
+    setTimeout(()=>d.remove(), 60000);
+  }
+  toast(r.note || '已完成完整重新分析', 'ok');
 }
 
 async function viewPool(){
@@ -738,30 +828,34 @@ async function viewPool(){
                 onclick="analyzePendingBatch()" ${isw.pending?'':'disabled'}>
           ${isw.pending ? ('分析待分析的人（'+isw.pending+'）') : '无需补充分析'}
         </button>
+        <button id="btnReanalyzeBatch" onclick="reanalyzeBatch()"
+                title="把「抽取方式=规则通道」的档案按当前配置完整重跑一遍：重读原件 → 模型重抽字段 → 重建技能 → 重新归岗 → 重判建议档。HR 已定的档位/阶段/岗位不动，人工更正过的字段保留。">
+          批量按模型重跑
+        </button>
       </div>
     </div>
     <div class="bar" style="margin-top:8px">
-      <span class="small" title="按年使用：新一年开始时把旧简历整批收起（归档不等于删除，满 30 天才彻底清理，期间可随时取消）">批量归档</span>
-      <button onclick="archiveBatch(null,true)">归档勾选的人</button>
       ${(()=>{
-        // v1.20：原来是一个年份输入框（打字/上下箭头）——容易打错成 1、2、3，
-        // 也不可能出现负数，但**不友好**。改成卡片式，一眼点选、默认当年。
-        // v1.21：改成**下拉框**（上一版做成了卡片行，HR 要的是下拉）。
-        // 默认当年，选项是"某年以前"（**不含该年**：后端是 year < before_year）；不会出现负数或乱值。
+        // v1.22.1：固定列 2018–2050，默认当年（避免"近4年"窗口明年错位）。
+        // 下拉**只显示年份**——"年以前"的含义由右边按钮说全，不用重复两遍；
+        // 说明文字也不常驻（悬停「批量归档」可见）。
         const y = new Date().getFullYear();
         const ys = [];
-        for (let i=0;i<4;i++) ys.push(y-i);
-        ys.push(2019);
-        return `<div class="bar" style="margin-top:6px">
-          <select id="poolArchYear" style="width:200px" onchange="pickArchYear(this.value)">
-            ${ys.map(v=>`<option value="${v}"${v===y?' selected':''}>${v} 年以前</option>`).join('')}
-            ${ys.indexOf(y)<0?`<option value="${y}" selected>${y} 年以前</option>`:''}
+        for (let v=2018; v<=2050; v++) ys.push(v);
+        return `<div class="arch-bar"
+            title="按年使用：新一年开始时把旧简历整批收起。归档不等于删除——档案/投递/附件/审计都保留，满 30 天才彻底清理，期间可随时取消。">
+          <span class="arch-label">批量归档</span>
+          <button onclick="archiveBatch(null,true)">归档勾选的人</button>
+          <span class="arch-div"></span>
+          <select id="poolArchYear" onchange="pickArchYear(this.value)">
+            ${ys.map(v=>`<option value="${v}"${v===y?' selected':''}>${v}</option>`).join('')}
           </select>
+          <span class="arch-suffix">年以前</span>
           <button id="btnArchByYear" class="btn-primary" onclick="archiveByYear()">
             归档 ${y} 年以前的投递</button>
-          <span class="small">默认 ${y} 年（当年）。要归档更早的年在下拉里选</span>
         </div>`;
       })()}
+
 
     </div>
     ${gtip}
@@ -886,7 +980,8 @@ function cardHtml(x){
       <select onchange="setTier(${x.application_id},this.value)">${tiers}</select>
       <select onchange="setStage(${x.application_id},this.value)">${stages}</select>
       <button onclick="showDetail(${x.id})">完整档案</button>
-      <button onclick="reanalyze(${x.id})">重新分析</button>
+      <button data-reanalyze="${x.id}" onclick="reanalyze(${x.id},true)"
+        title="完整重新分析：重新解析原件 → 模型重抽字段 → 重建技能 → 重新归岗 → 重判建议档 → 重算分析。约 10 秒。不动 HR 已定的档位/阶段/岗位。">重新分析</button>
       <button onclick="interview(${x.id})">面试提纲</button>
       ${sug ? `<span class="vdiv"></span>
       <button class="btn-primary" onclick="assignJob(${x.id},${sug.job_id},'${esc(sug.title)}')">采纳建议岗位</button>
@@ -1040,8 +1135,65 @@ async function showDetail(cid){
         <td class="small">${esc(a.before)}</td><td class="small">${esc(a.after)}</td>
         <td>${esc(a.operator)}</td></tr>`).join('')||'<tr><td colspan="5">—</td></tr>'}</tbody></table>
     <div class="spacer"></div><div style="font-weight:600;font-size:15px">简历原文</div>
-    <pre>${esc(d.raw_text||'（无文本，需人工查看附件原件；原件已留档）')}</pre>`;
+    ${extractModeLine(d)}
+    ${sensitiveLine(d.sensitive_removed)}
+    <pre>${esc(d.raw_text||'（无文本，需人工查看附件原件；原件已留档）')}</pre>
+    <div class="bar" style="margin-top:10px">
+      <button data-reanalyze="${d.id}" onclick="reanalyze(${d.id},true)"
+        title="重新解析原件 → 模型重抽字段 → 重建技能 → 重新归岗 → 重判建议档 → 重算分析。约 10 秒。">完整重新分析</button>
+      <span class="small">抽取方式是「规则通道」时用它重跑一遍，就能换成模型抽取
+        （不用重新导入，也不会多出一条投递）。HR 已定的档位/阶段/岗位不受影响，
+        手动更正过的字段会保留。</span>
+    </div>
+    <div id="out-${d.id}"></div>`;
   document.getElementById('modal').classList.add('on');
+}
+
+/* 字段抽取方式（v1.23.4）：模型抽取 vs 规则降级。
+   为什么单列一行：两者的字段质量差一档（技能靠词表扫 vs 模型读懂上下文），
+   但界面上完全看不出来 —— 本项目就出过"模型静默降级、HR 以为分析过了"的事故。
+   抽取方式取自 applications.extract_mode：
+     llm+rule = 模型抽取成功（规则做兜底合并）
+     heuristic = 规则通道（模型不可用/未启用）
+     parse_failed = 没解析出文本 */
+function extractModeLine(d){
+  const apps = d.applications || [];
+  const app = apps[0] || {};
+  const m = app.extract_mode;
+  if (!m){
+    return `<div class="note" style="margin-bottom:6px">字段抽取方式：<b>未记录</b>
+      （历史数据，早于本字段上线）。</div>`;
+  }
+  if (m === 'llm+rule'){
+    return `<div class="note" style="margin-bottom:6px;background:var(--accent-soft)">
+      字段抽取方式：<b>模型 + 规则</b>　技能与荣誉都要求能在原文定位到证据，定位不到的不计入。</div>`;
+  }
+  if (m === 'heuristic'){
+    return `<div class="note" style="margin-bottom:6px;background:var(--warn-soft)">
+      字段抽取方式：<b>规则通道（模型当时不可用）</b>　
+      这份档案的字段是词表匹配 + 正则抽出来的，<b>质量低于模型抽取</b>。
+      想重来：在「模型设置」确认模型可用后，重新导入这份简历即可。</div>`;
+  }
+  return `<div class="note" style="margin-bottom:6px">字段抽取方式：<b>${esc(m)}</b></div>`;
+}
+
+/* 送进模型前剔除了哪些敏感信息（v1.23.4）。
+   为什么必须显示：这是隐私红线唯一能被**核查**的地方。
+   原来界面上完全看不到，HR 只能选择相信；而且分母（有没有剔除）和
+   分子（剔了什么）都不透明——"一条都没剔除"和"未记录"是两回事，
+   得分清楚，不能糊成一句"已脱敏"。 */
+function sensitiveLine(removed){
+  const r = removed || {};
+  const keys = Object.keys(r);
+  if (!keys.length){
+    return `<div class="note" style="margin-bottom:6px">模型看到的内容：本份简历未记录剔除明细
+      （可能是历史数据）。<b>不是"没有敏感信息"</b>，只是没留痕。</div>`;
+  }
+  const parts = keys.map(k => `${esc(k)} <b>${r[k]}</b> 处`).join('、');
+  return `<div class="note" style="margin-bottom:6px;background:var(--ok-soft)">
+    <b>模型看到的内容已剔除：</b>${parts}
+    <div class="small" style="margin-top:3px">下面是<b>原件解析出的完整原文</b>（含上述敏感信息，供人工核对）；
+      送进模型的是剔除后的版本。剔除发生在调模型之前，且不改动原件。</div></div>`;
 }
 function closeModal(){ document.getElementById('modal').classList.remove('on'); }
 
@@ -1201,13 +1353,14 @@ async function exportCsv(){
     + '&kw=' + encodeURIComponent(KW) + '&gender=' + encodeURIComponent(GENDER)
     + '&education=' + encodeURIComponent(EDU_MIN) + '&univ=' + encodeURIComponent(UNIV));
   const list = (full && full.items) || ITEMS;
-  const head = ['姓名','性别','学历','工作年限','院校','专业','专业方向/技能概要','手机','邮箱',
-                '对应岗位','投递渠道','投递时间'];
+  const head = ['姓名','性别','学历','院校','专业','专业方向/技能概要','手机','邮箱',
+                '对应岗位','投递渠道','投递时间'];   // 校招口径：不导工作年限
   const rows = list.map(x=>{
     const sug = x.job_suggestion || null;
     const job = x.job_title || (sug ? `建议：${sug.title}` : '待指定');
     const skills = (x.skills||[]).slice(0,8).join('、');
-    return [x.name||'', x.gender||'', x.edu_level||'', x.years_exp==null?'':x.years_exp,
+    // 年限列在校招模式下不存在，行数据必须同步少一项——否则后面所有列整体错位
+    return [x.name||'', x.gender||'', x.edu_level||'',
             x.school||'', x.major||'', skills,
             contactValue(x.phone), contactValue(x.email),
             job, x.channel||'', (x.applied_at||'').slice(0,10)];
@@ -1316,8 +1469,22 @@ async function viewArchive(){
     <div class="bar" style="margin-top:10px">
       <button onclick="archiveBatch(null,false)">批量取消归档（勾选的人）</button>
       <span class="vdiv"></span>
-      <input id="archYear" type="number" placeholder="年份，如 2026" style="width:150px">
-      <button onclick="archiveByYear()">归档该年以前的投递</button>
+      ${(()=>{
+        // 与人才库保持同一套控件（这里原来是数字输入框——打字容易错、还能输负数）
+        const y = new Date().getFullYear();
+        const ys = [];
+        for (let v=2018; v<=2050; v++) ys.push(v);
+        return `<div class="arch-bar" style="margin:6px 0">
+          <span class="arch-label">按年归档</span>
+          <select id="archYear" onchange="pickArchYear(this.value, 'archYear')">
+            ${ys.map(v=>`<option value="${v}"${v===y?' selected':''}>${v}</option>`).join('')}
+          </select>
+          <span class="arch-suffix">年以前</span>
+          <button class="btn-primary" onclick="archiveByYear('archYear')">
+            归档 ${y} 年以前的投递</button>
+        </div>`;
+      })()}
+      <span class="vdiv"></span>
       <span class="small">按最后一条投递的年份整批归档，适合"新一年开始、旧简历收起来"</span>
     </div></div>
   ${items.length ? items.map(x=>{
@@ -1368,16 +1535,27 @@ async function archiveBatch(ids, archived){
   toast(`已${verb} ${r.changed} 人${r.skipped?`（跳过 ${r.skipped} 人）`:''}`,'ok');
   refresh();
 }
-let ARCH_YEAR = new Date().getFullYear();   // v1.21：默认当年，下拉选择
-function pickArchYear(v){
+// v1.22.1：页面上有多处归档年份（人才库、归档页），各自一个下拉、各自一份状态，
+// 所以把"选中的年份"记在 select 自己身上（dataset），不再用一个全局变量——
+// 两处互相串台是很典型的"改了这边那边也变"的怪 bug。
+function pickArchYear(v, selId){
   const y = parseInt(v, 10);
-  if (!y || y < 1990 || y > 2100) return;      // 挡掉明显不合理的输入
-  ARCH_YEAR = y;
-  const b = document.getElementById('btnArchByYear');
-  if (b) b.textContent = '归档 ' + y + ' 年以前的投递';
+  if (!y || y < 1900 || y > 2200) return;
+  const sid = selId || 'poolArchYear';
+  const sel = document.getElementById(sid);
+  if (sel) sel.dataset.year = String(y);
+  // 按钮文案跟着变（同一个 .arch-bar 里的按钮）
+  const bar = sel && sel.closest ? sel.closest('.arch-bar') : null;
+  const btn = bar ? bar.querySelector('button.btn-primary') : document.getElementById('btnArchByYear');
+  if (btn) btn.textContent = '归档 ' + y + ' 年以前的投递';
 }
-async function archiveByYear(){
-  const y = ARCH_YEAR;
+function archYearOf(selId){
+  const sel = document.getElementById(selId || 'poolArchYear');
+  const y = sel && parseInt(sel.dataset.year || sel.value, 10);
+  return (y && y > 1900) ? y : new Date().getFullYear();
+}
+async function archiveByYear(selId){
+  const y = archYearOf(selId);
   if (!await askConfirm(`把「最后一条投递早于 ${y} 年」的档案整批归档（当前还在人才库里的）。\\n\\n`
       + `归档后在「归档」页可见，满 30 天会被彻底删除。继续？`)) return;
   const r = await api('/api/candidates/archive-batch', {method:'POST',
@@ -1542,6 +1720,49 @@ async function setAutoInsight(on){
   toast(r.note || '已保存','ok');
   refresh();
 }
+/* 批量完整重新分析（v1.23.9）：把「抽取方式=规则通道」的档案按当前配置重跑一遍。
+   为什么需要：老档案是在模型不可用时入库的，抽取方式永远是规则通道；
+   一个个点「重新分析」太慢。
+   为什么分批循环：每人 6-15 秒（两次模型调用），一次全跑会超时且看不到进度。
+   这与「分析待分析的人」是同一套交互口径：按钮变进度条 → 循环 → 结束刷新。 */
+async function reanalyzeBatch(){
+  const btn = document.getElementById('btnReanalyzeBatch');
+  if (!btn || btn.disabled) return;
+  const ok = await askConfirm({
+    title: '批量按模型重跑？',
+    body: `<div>将对<b>抽取方式还是「规则通道」</b>的档案，逐人完整重跑：<br><br>
+      ① 重新解析原件 → ② 模型重抽字段 → ③ 重建技能 → ④ 重新归岗 → ⑤ 重判建议档<br><br>
+      <b>不会动的：</b>HR 已定的档位、阶段、已归岗的岗位；<b>你手动更正过的字段会保留</b>。<br>
+      <b>会变的：</b>模型抽出的字段与技能（技能可能变少——模型只认能在原文定位到证据的）。<br><br>
+      每人约 6-15 秒，6 路并发。可以随时关页面，已完成的不会白做。</div>`,
+    okText: '开始重跑', danger: false});
+  if (!ok) return;
+  btn.disabled = true;
+  let guard = 0, done = 0, fail = 0;
+  try {
+    for(;;){
+      const r = await api('/api/candidates/reanalyze-batch',
+        {method:'POST', body:JSON.stringify({limit: 5, only_heuristic: true})});
+      if (r.__http_error || r.error){
+        toast(r.detail || r.error || '批量重跑失败','danger'); break;
+      }
+      done += (r.analyzed || 0); fail += (r.failed || 0);
+      const left = r.remaining || 0;
+      btn.textContent = left
+        ? ('重跑中…已完成 ' + done + '，还剩 ' + left)
+        : '正在刷新…';
+      if (r.note) toast(r.note, left ? 'info' : 'ok');
+      if (!left || guard++ > 60) break;      // guard：防止后端一直返回 left>0 时死循环
+      await new Promise(rs => setTimeout(rs, 300));
+    }
+  } finally {
+    btn.disabled = false;
+    refresh();
+  }
+  if (fail) toast('完成：成功 ' + done + ' 人，失败 ' + fail + ' 人（失败的点开档案看原因）', 'warn');
+  else if (done) toast('全部完成：' + done + ' 人已改为模型抽取', 'ok');
+}
+
 async function analyzePendingBatch(){
   const btn = document.getElementById('btnAnalyzePending');
   if (!btn || btn.disabled) return;
@@ -1605,19 +1826,12 @@ async function viewChat(){
     <div id="chatRetention" class="note" style="display:none;margin-bottom:8px"></div>
     <div class="chatlog" id="chatLog"></div>
     <div class="bar" style="margin-top:10px">
-      <input id="chatInput" placeholder="例如：帮我找做过真空熔铸、会 XRD 的人" style="flex:1;min-width:240px"
+      <input id="chatInput" placeholder="输入问题或指令" style="flex:1;min-width:240px"
              onkeydown="if(event.key==='Enter'){askAgent()}">
       <button class="btn-primary" onclick="askAgent()">发送</button>
       <button id="chatRestoreBtn" onclick="restoreChat()" style="display:none"
               title="把刚清空的对话找回来。清空后 30 天内有效，到期系统自动清理底层记录">恢复对话</button>
       <button onclick="clearChat()" title="清空对话展示；30 天内可恢复，到期系统自动清理底层运行记录">清空</button>
-    </div>
-    <div class="bar" style="margin-top:8px">
-      ${['人才库有多少人？各档位分布如何？',
-         '帮我找做过真空熔铸、会 XRD 的候选人',
-         '现在招聘管道各阶段有多少、有没有积压',
-         '有哪些待确认的提案'].map(q=>
-        `<button class="small" onclick="document.getElementById('chatInput').value='${esc(q)}';askAgent()">${esc(q)}</button>`).join('')}
     </div>
   </div>`;
   // v1.6：进页面就把已落库的对话拉回来（刷新/重启后不再"历史消失"）
@@ -2041,18 +2255,22 @@ async function viewOrg(){
       <label>岗位名称 *</label>
       <input id="jobTitle" placeholder="如：工艺工程师">
       <label>必需技能</label>
-      <input id="jobMust" placeholder="逗号分隔，如：真空熔铸, 钛合金">
+      <div class="multi" id="multi_jmust"></div>
       <label>加分技能</label>
-      <input id="jobPref" placeholder="逗号分隔，如：XRD, 有限元仿真">
+      <div class="multi" id="multi_jpref"></div>
       <label>最低学历</label>
       <select id="jobEdu">
         <option value="">（不限 / 沿用默认）</option>
         <option>大专</option><option>本科</option><option>硕士</option><option>博士</option>
       </select>
       <label>最低年限</label>
-      <input id="jobYears" type="number" min="0" placeholder="如：3" style="width:120px">
+      <input id="jobYears" list="yearList2" placeholder="不限" style="width:130px">
+      <datalist id="yearList2">
+        <option value="不限"></option><option value="1"></option><option value="2"></option>
+        <option value="3"></option><option value="5"></option><option value="8"></option>
+      </datalist>
       <label>专业需求（学科名）</label>
-      <input id="jobMajor" list="majorList" placeholder="逗号分隔，如：材料科学与工程, 凝聚态物理">
+      <div class="multi" id="multi_jmajor"></div>
       <datalist id="majorList"></datalist>
       <label>职责说明</label>
       <textarea id="jobNote" rows="3" placeholder="岗位职责、必须说明的事项（自由文本）"></textarea>
@@ -2085,6 +2303,13 @@ async function viewOrg(){
   // 学科目录补进 <datalist>：HR 填专业需求时能直接选学科名，不用凭记忆写。
   // 这一步只影响输入体验——填错名字不会报错，只会在报告里标「未识别」。
   loadMajorList();
+  loadSkillList();          // 技能候选（本体规范名），同样只是输入提示
+  // 岗位上那三个多值输入要在 DOM 到位后初始化。
+  // 顺序反了就是"控件是空的"——本项目踩过（字典面板那次）。
+  JD_MULTI = {jmust: [], jpref: [], jmajor: []};
+  multiRender('jmust', 'skillList', '如：真空熔铸，回车添加');
+  multiRender('jpref', 'skillList', '如：XRD，回车添加');
+  multiRender('jmajor', 'majorList', '如：材料科学与工程，回车添加');
 }
 // 拉学科目录填进 datalist（失败静默：它只是输入提示，不该挡住岗位管理页面）
 async function loadMajorList(){
@@ -2094,6 +2319,17 @@ async function loadMajorList(){
   const d = await api('/api/majors?limit=400');
   if(d.__http_error || !d.items) return;
   el.innerHTML = d.items.map(m=>`<option value="${esc(m.name)}">${esc(m.category)}</option>`).join('');
+  el.dataset.loaded = '1';
+}
+// 技能候选（v1.23.4）：岗位表单的技能输入一直写着 list="skillList"，
+// 但这个 datalist **从来不存在** —— 输入框有下拉箭头却点不出东西。
+// 用本体里的规范名补上（别名也会出现在候选里，选中后按规范名存）。
+async function loadSkillList(){
+  const el = document.getElementById('skillList');
+  if(!el || el.dataset.loaded==='1') return;
+  const d = await api('/api/ontology');
+  if(d.__http_error || !d.skills) return;
+  el.innerHTML = d.skills.map(s=>`<option value="${esc(s.canonical)}"></option>`).join('');
   el.dataset.loaded = '1';
 }
 // JD 摘要：列表里一眼看出这个岗位的判断尺子是什么
@@ -2114,6 +2350,50 @@ function splitSkills(raw){
   return String(raw||'').replace(/[，、；;]/g, ',').split(',')
     .map(s=>s.trim()).filter(Boolean);
 }
+/* ---- 多值输入组件（v1.23）----
+   专业需求/必需技能/加分技能都是"若干个值"，之前是逗号分隔的文本框：
+   选一个（datalist）就顶掉前一个，等于多值场景用了单值控件。
+   现在：已选显示成标签（点 × 删），输入框里选中或回车就追加一个。
+   隐藏域沿用原来的 id（ejMust/ejPref/ejMajor），保存逻辑一行不用改。 */
+let JD_MULTI = {};
+/* 多值组件的宿主表。key → 隐藏域 id。
+   岗位管理页的表单用 jmust/jpref/jmajor 三个 key，与 JD 编辑器的
+   must/pref/major 分开——两处同屏出现时不会互相覆盖。 */
+const MULTI_IDS = {must:'ejMust', pref:'ejPref', major:'ejMajor',
+                   jmust:'jobMust', jpref:'jobPref', jmajor:'jobMajor'};
+/* 每个 key 的渲染参数（下拉 id / 占位文字）。
+   记下来是为了**重渲染时不丢参数**：原来 multiDel 只能从 DOM 里反查，
+   结果 placeholder 会变成空字符串、datalist 也掉了。 */
+const MULTI_OPTS = {};
+function multiRender(key, listId, ph){
+  const box = document.getElementById('multi_'+key);
+  if (!box) return;
+  if (listId !== undefined && listId !== null) MULTI_OPTS[key] = {listId, ph};
+  const o = MULTI_OPTS[key] || {listId: '', ph: ''};
+  const vals = JD_MULTI[key] || [];
+  box.innerHTML = `${vals.map((v,i)=>`<span class="multi-chip">${esc(v)}
+      <b onclick="multiDel('${key}',${i})" title="移除">×</b></span>`).join('')}
+    <input id="madd_${key}" list="${o.listId}" placeholder="${esc(o.ph||'输入后回车，或从下拉里选')}"
+      onkeydown="if(event.key==='Enter'){event.preventDefault();multiAdd('${key}');}"
+      onchange="multiAdd('${key}')">
+    <input type="hidden" id="${MULTI_IDS[key]}" value="${esc(vals.join(', '))}">`;
+}
+function multiAdd(key){
+  const inp = document.getElementById('madd_'+key);
+  const v = (inp && inp.value || '').trim().replace(/[，、；;]/g, '');
+  if (!v){ if (inp) inp.focus(); return; }
+  JD_MULTI[key] = JD_MULTI[key] || [];
+  if (JD_MULTI[key].indexOf(v) >= 0){ toast('「'+v+'」已经加过了','warn'); inp.value=''; return; }
+  JD_MULTI[key].push(v);
+  multiRender(key);                       // 参数已记住，重渲染不会丢
+  const again = document.getElementById('madd_'+key);
+  if (again) again.focus();
+}
+function multiDel(key, idx){
+  (JD_MULTI[key] || []).splice(idx, 1);
+  multiRender(key);
+}
+
 function jdEditorHtml(jid, jd){
   const must = jd.must || {}, pref = jd.preferred || {};
   const eduOpts = ['','大专','本科','硕士','博士'].map(v =>
@@ -2121,20 +2401,25 @@ function jdEditorHtml(jid, jd){
   return `<div class="note">JD 是判断尺子：<b>学历门槛</b>决定是否判 D，档位 A/B/C 由模型按它判断。<b>保存后只影响之后新入库的投递，已入库的档位保持不变。</b></div>
   <div class="jdform" style="margin-top:12px">
     <label>必需技能</label>
-    <input id="ejMust" value="${esc((must.skills_required||[]).join(', '))}" placeholder="逗号分隔">
+    <div class="multi" id="multi_must"></div>
     <label>加分技能</label>
-    <input id="ejPref" value="${esc((pref.skills||[]).join(', '))}" placeholder="逗号分隔">
+    <div class="multi" id="multi_pref"></div>
     <label>最低学历</label><select id="ejEdu">${eduOpts}</select>
     <label>最低年限</label>
-    <input id="ejYears" type="number" min="0" style="width:120px"
-           value="${must.years_min==null?'':must.years_min}">
+    <input id="ejYears" list="yearList" style="width:130px"
+           value="${must.years_min==null?'不限':must.years_min}"
+           placeholder="不限">
+    <datalist id="yearList">
+      <option value="不限"></option><option value="1"></option><option value="2"></option>
+      <option value="3"></option><option value="5"></option><option value="8"></option>
+      <option value="10"></option>
+    </datalist>
     <label>专业需求（学科名）</label>
-    <input id="ejMajor" value="${esc((must.major_required||[]).join(', '))}"
-           placeholder="逗号分隔，如：材料学, 仪器科学与技术">
+    <div class="multi" id="multi_major"></div>
     <label>职责说明</label>
     <textarea id="ejNote" rows="3">${esc(jd.note||'')}</textarea>
   </div>
-  <div class="note" style="margin-top:6px">
+  <div class="note" style="margin-top:6px" id="jdHint">
     专业需求填<b>学科名</b>（认别名，如「材料学」≡「材料科学与工程」），
     <b>不要填进技能栏</b>。专业只作提示、不参与淘汰；判不出会标「未识别」——未识别不等于不满足。
   </div>
@@ -2154,15 +2439,29 @@ async function editJd(jid){
   document.getElementById('mTitle').textContent = (d.job.title||'岗位') + ' · 岗位 JD';
   document.getElementById('mBody').innerHTML = jdEditorHtml(jid, d.jd||{});
   document.getElementById('modal').classList.add('on');
+  // 多值组件要在 DOM 到位后初始化（顺序反了就是"控件是空的"——踩过）
+  JD_MULTI = {
+    must: ((d.jd||{}).must||{}).skills_required || [],
+    pref: ((d.jd||{}).preferred||{}).skills || [],
+    major: ((d.jd||{}).must||{}).major_required || [],
+  };
+  multiRender('must', 'skillList', '如：真空熔铸，回车添加');
+  multiRender('pref', 'skillList', '如：XRD，回车添加');
+  multiRender('major', 'majorList', '如：材料科学与工程，回车添加');
 }
 async function saveJd(jid){
-  const yv = document.getElementById('ejYears').value;
+  const yv = (document.getElementById('ejYears').value || '').trim();
+  // 「不限」= 0（后端口径：0 表示不设年限门槛），校招岗位就该是这一项。
   // 清空 = 用空值覆盖，而不是"没填就不改"：HR 主动删掉门槛要真的生效
+  const yvNum = (yv === '' || yv === '不限') ? 0 : parseInt(yv, 10);
+  if (yv !== '' && yv !== '不限' && (isNaN(yvNum) || yvNum < 0)){
+    toast('最低年限请填非负数字，或选「不限」','warn'); return;
+  }
   const body = {
     must_skills: splitSkills(document.getElementById('ejMust').value),
     preferred_skills: splitSkills(document.getElementById('ejPref').value),
     education_min: document.getElementById('ejEdu').value,
-    years_min: yv==='' ? 0 : parseInt(yv),
+    years_min: yvNum,
     major_required: splitSkills(document.getElementById('ejMajor').value),
     note: document.getElementById('ejNote').value
   };
@@ -2269,7 +2568,12 @@ async function addJob(){
   if(must.length) body.must_skills = must;
   if(pref.length) body.preferred_skills = pref;
   if(edu) body.education_min = edu;
-  if(yv!=='') body.years_min = parseInt(yv);
+  // v1.23：「不限」= 0（后端 0 即不设年限门槛）；校招岗位常用这一项。
+  const yvNum = (yv==='' || yv==='不限') ? 0 : parseInt(yv, 10);
+  if (yv!=='' && yv!=='不限' && (isNaN(yvNum) || yvNum < 0)){
+    toast('最低年限请填非负数字，或选「不限」','warn'); return;
+  }
+  if(yv!=='') body.years_min = yvNum;
   if(mreq.length) body.major_required = mreq;
   if(note) body.note = note;
   const r = await api('/api/jobs',{method:'POST',body:JSON.stringify(body)});
@@ -2590,10 +2894,13 @@ async function viewMail(){
     </div>
     <div id="mMiss" class="small" style="margin-top:6px"></div>
     <div class="bar" style="margin-top:10px">
-      <button class="btn-ok" onclick="sendMailConfirm()">确认发送</button>
+      <button class="btn-ok" id="mailSendBtn" onclick="sendMailConfirm()">确认发送</button>
       <button onclick="saveCurrentAsTemplate()">把当前正文存为模板</button>
       <span class="small">点击后会再确认一次收件人与主题；发送动作写入审计</span>
     </div>
+    <!-- 发信结果留在这里：成功的凭据（收件人/主题/时间/发件人显示名）要能事后核对，
+         失败也要留住原因，别只靠顶部那条 7 秒就消失的提示。 -->
+    <div id="mailSentBox"></div>
   </div>
 `;
 }
@@ -3150,12 +3457,63 @@ async function sendMailConfirm(){
   const cid = document.getElementById('mCand').value;
   const tsel = document.getElementById('mTpl');
   const tname = tsel.value ? (tsel.selectedOptions[0].textContent || '') : '';
-  const r = await api('/api/mail/send', {method:'POST', body:JSON.stringify({
-    to: to, subject: subject, body: plain, html: html,
-    candidate_id: cid ? parseInt(cid,10) : null,
-    template_name: tname})});
-  if (r.__http_error || r.error){ toast(r.detail || r.error || '发送失败','danger'); return; }
-  toast(r.note || '邮件已发送','ok');
+  const btn = document.getElementById('mailSendBtn');
+  if (btn){ btn.disabled = true; btn.textContent = '发送中…'; }
+  let r;
+  try {
+    r = await api('/api/mail/send', {method:'POST', body:JSON.stringify({
+      to: to, subject: subject, body: plain, html: html,
+      candidate_id: cid ? parseInt(cid,10) : null,
+      template_name: tname})});
+  } finally {
+    if (btn){ btn.disabled = false; btn.textContent = '确认发送'; }
+  }
+  if (r.__http_error || r.error){
+    mailSentBanner(false, r.detail || r.error || '发送失败');
+    toast(r.detail || r.error || '发送失败','danger');
+    return;
+  }
+  // v1.23.8：发信成功后**在编辑区就地留痕**，不只靠顶部 toast。
+  // 原来只有 `toast('邮件已发送')`，而 #alerts 在页面顶部、发信操作在最下方，
+  // toast 7 秒后还消失——用户盯着编辑器根本看不到，回过神又不知道发没发出去，
+  // 于是会重复点。**发信是不可撤销的动作，必须留下"已发出去"的证据。**
+  mailSentBanner(true, r.note || '邮件已发送',
+    {to, subject, when: new Date(), from_header: r.from_header || ''});
+  toast(r.note || '邮件已发送', 'ok');
+}
+
+/* 发信结果横幅：成功=绿、失败=红，都留在编辑区里（不自动消失），
+   成功时把收件人/主题/时间/发件人显示名写清楚——这些是事后要核对的凭据。 */
+function mailSentBanner(ok, msg, info){
+  const host = document.getElementById('mailSentBox');
+  if (!host) return;
+  const from = (META.mailbox && META.mailbox.from_name) || '';
+  if (ok){
+    const when = (info && info.when) || new Date();
+    const fh = (info && info.from_header) || '';
+    host.innerHTML = `<div class="card" style="border-left:3px solid var(--ok);background:var(--ok-soft)">
+      <b>✓ 已发送</b>
+      <div class="small" style="margin-top:6px">
+        收件人：${esc((info&&info.to)||'')}<br>
+        主题：${esc((info&&info.subject)||'（无主题）')}<br>
+        时间：${esc(String(when).slice(0,19))}
+      </div>
+      ${fh ? `<div class="small" style="margin-top:5px">本次发出的 From 头原文：
+          <code style="word-break:break-all">${esc(fh)}</code></div>
+        <div class="small" style="margin-top:2px">对方看到的名字与这里不一致时，
+          是<b>邮箱服务商在服务器端覆盖了显示名</b>（QQ 邮箱会强制使用账号的「发件人名」）
+          ——系统这边改不动，只能到对应邮箱的设置里改。</div>`
+        : (from ? `<div class="small" style="margin-top:5px">发件人显示名：<b>${esc(from)}</b></div>` : '')}
+      <div class="small" style="margin-top:6px">邮件已交给邮箱服务器发出，<b>无法撤回</b>。
+        要改内容请重新编辑后再发一次（会再发一封）。</div>
+    </div>`;
+  } else {
+    host.innerHTML = `<div class="card" style="border-left:3px solid var(--bad);background:var(--danger-soft)">
+      <b>✗ 发送失败</b><div class="small" style="margin-top:4px">${esc(msg)}</div>
+      <div class="small" style="margin-top:4px">内容还在编辑器里，改完可直接再点发送。</div>
+    </div>`;
+  }
+  if (host.scrollIntoView) host.scrollIntoView({block:'nearest'});
 }
 
 /* ---- 模板编辑 ---- */
@@ -3347,7 +3705,18 @@ async function renderSmtpCfgInto(boxId){
         placeholder="${c.password_set?'已保存（留空则不修改）':'未设置'}">
         <span class="small">${c.password_set?'当前已保存（不回显）':'尚未保存'}　留空 = 不修改</span></div>
       <div class="k">发件人显示名</div><div><input id="spFrom" value="${esc(c.from_name||'')}" style="width:260px"
-        placeholder="西北有色金属研究院 人力资源部"></div>
+        placeholder="西北有色金属研究院 人力资源部">
+        <div class="small" style="margin-top:4px">
+          <b>这里决定"我们发出去的邮件里带什么名字"。</b><br>
+          收件人看到的发件人由两部分组成：<code>显示名 &lt;账号@qq.com&gt;</code>。
+          这个框管<b>显示名</b>，下面的账号管<b>登录与收信</b>，两个都要是你的。<br>
+          <b style="color:var(--warn)">重要：QQ 邮箱会在服务器端覆盖这个显示名</b>，
+          强制改用它账号设置里的「发件人名」。所以只改这里，
+          对方<b>详情页</b>可能仍然只看到邮箱地址。要让名称真正生效，
+          还得去 QQ 邮箱「设置 → 账户」把<b>发件人名</b>也改成同样的名字。<br>
+          彻底稳妥的做法是改用<b>单位的企业邮箱</b>发信——显示名与账号域名一致，
+          各家客户端都不会改写，也不依赖邮箱服务商的这个设置。
+        </div></div>
     </div>
     <div class="bar" style="margin-top:16px">
       <button class="btn-primary" onclick="saveSmtp()">保存发信配置</button>
@@ -3440,21 +3809,27 @@ async function testMailCfg(){
 }
 
 /* ------------------------------ 系统说明 ------------------------------ */
-function _dictRows(name, items){
-  // 逐项一行 + × 删除（点一下直接从字典里去掉并落盘）
+// v1.21.3：**显示名与数据 key 必须分开**。
+// 原来把中文显示名（"面试单位"）当成 key 传进 dictDel/dictAdd，
+// 而数据表是 units/rooms/… → next['面试单位'] 是 undefined → 静默 return，
+// 界面表现就是"× 和添加都是假的"（联系人走另一条路，所以只有它是好的）。
+const DICT_KEYS = [['面试单位','units'], ['会议室','rooms'],
+                   ['面试时段','slots'], ['面试方式','modes']];
+
+function _dictRows(key, label, items){
   const cur = items || [];
   if (!cur.length) return '<div class="small" style="color:var(--ink-3)">（还没有内容，用下面的框添加）</div>';
   return `<div class="dict-list">${cur.map((x,i)=>`
     <div class="dict-row"><span>${esc(x)}</span>
-      <b onclick="dictDel('${esc(name)}',${i})" title="点 × 从字典里去掉">×</b></div>`).join('')}</div>`;
+      <b onclick="dictDel('${esc(key)}',${i})" title="点 × 从字典里去掉">×</b></div>`).join('')}</div>`;
 }
-function _dictList(name, items, ph){
-  return `<div class="k" style="vertical-align:top">${esc(name)}</div><div>
-      ${_dictRows(name, items)}
+function _dictList(key, label, items, ph){
+  return `<div class="k" style="vertical-align:top">${esc(label)}</div><div>
+      ${_dictRows(key, label, items)}
       <div class="dict-add">
-        <input id="new_${esc(name)}" placeholder="${esc(ph||'输入新的一项，回车添加')}"
-               onkeydown="if(event.key==='Enter'){dictAdd('${esc(name)}');}">
-        <button class="mini" onclick="dictAdd('${esc(name)}')">添加</button>
+        <input id="new_${esc(key)}" placeholder="${esc(ph||'输入新的一项，回车添加')}"
+               onkeydown="if(event.key==='Enter'){dictAdd('${esc(key)}');}">
+        <button class="mini" onclick="dictAdd('${esc(key)}')">添加</button>
       </div>
     </div>`;
 }
@@ -3476,20 +3851,28 @@ async function dictSave(next, msg){
   renderDictBox();
   toast(msg || '已保存','ok');
 }
-async function dictDel(name, idx){
+async function dictDel(key, idx){
   const next = _dictPayload();
-  if (!next[name] || idx >= next[name].length) return;
-  const gone = next[name][idx];
-  next[name].splice(idx, 1);
+  if (!Array.isArray(next[key]) || idx >= next[key].length){
+    // 不再静默 return——"点了没反应"最难查，出问题就说话
+    toast('字典项定位失败（' + key + '#' + idx + '），请刷新页面重试','danger');
+    return;
+  }
+  const gone = next[key][idx];
+  next[key].splice(idx, 1);
   await dictSave(next, '已删除「' + gone + '」');
 }
-async function dictAdd(name){
-  const inp = document.getElementById('new_'+name);
+async function dictAdd(key){
+  const inp = document.getElementById('new_'+key);
   const v = (inp && inp.value || '').trim();
-  if (!v) { if (inp) inp.focus(); return; }
+  if (!v) { if (inp) inp.focus(); toast('先输入要添加的内容','warn'); return; }
   const next = _dictPayload();
-  if ((next[name]||[]).indexOf(v) >= 0){ toast('已经有这一项了','warn'); return; }
-  next[name] = (next[name]||[]).concat([v]);
+  if (!Array.isArray(next[key])){
+    toast('字典项定位失败（' + key + '），请刷新页面重试','danger');
+    return;
+  }
+  if (next[key].indexOf(v) >= 0){ toast('已经有这一项了','warn'); return; }
+  next[key] = next[key].concat([v]);
   await dictSave(next, '已添加「' + v + '」');
 }
 async function dictContactDel(idx){
@@ -3515,10 +3898,10 @@ function renderDictBox(){
                         dept:c.dept||'', name:c.name||'', phone:c.phone||''}))};
   const cs = window._dictData.contacts;
   box.innerHTML = `<div class="kv">
-    ${_dictList('面试单位', window._dictData.units, '如：材料研究中心')}
-    ${_dictList('会议室', window._dictData.rooms, '如：创新大楼1519会议室')}
-    ${_dictList('面试时段', window._dictData.slots, '如：08:00-09:00')}
-    ${_dictList('面试方式', window._dictData.modes, '如：现场面试')}
+    ${_dictList('units', '面试单位', window._dictData.units, '如：材料研究中心')}
+    ${_dictList('rooms', '会议室', window._dictData.rooms, '如：创新大楼1519会议室')}
+    ${_dictList('slots', '面试时段', window._dictData.slots, '如：08:00-09:00')}
+    ${_dictList('modes', '面试方式', window._dictData.modes, '如：现场面试')}
   </div>
   <div class="kv" style="margin-top:12px">
     <div class="k" style="vertical-align:top">联系人</div><div>
@@ -3617,22 +4000,34 @@ async function viewSys(){
   </div>
   <div class="card"><h2>运行环境</h2>
     <div class="kv">
-      <div class="k">对话模型</div><div>${esc(META.model.model||'—')} ·
-        ${META.model.reachable?'服务可达':'服务不可达'} · ${META.model.model_installed?'模型已安装':'模型未安装'}
-        ${META.model.base_url?('<br><span class="small">'+esc(META.model.base_url)+'</span>'):''}
-        ${META.model.error?('<br><span class="small">'+esc(META.model.error)+'</span>'):''}</div>
-      <div class="k">向量模型</div><div>${esc(META.search.model||'—')} · ${META.search.dim||0} 维 ·
-        ${META.search.reachable
-          ? '服务可达'
-          : '<span style="color:var(--ink-3)">未启用</span>（用本地哈希向量，零成本、不联网）'} ·
-        已索引 ${META.search.indexed||0} 人
-        ${(META.search.index_model && META.search.index_model !== META.search.model)
-          ? ('<br><span class="small">索引实际使用 <b>'+esc(META.search.index_model)+'</b>。'
-             + '这不是故障：哈希向量只匹配字面相近（"钛合金焊接"能命中、"金属连接"命中不了），'
-             + '十几到几百人的库用技能检索 + 关键词基本够用；'
-             + '真要语义检索再配一个本地向量模型（bge-m3 / gte-small），简历不出内网。</span>')
-          : ''}
-        ${META.search.error?('<br><span class="small">'+esc(META.search.error)+'</span>'):''}</div>
+      <div class="k">对话模型</div><div>${(()=>{
+        // v1.23：META.model 缺失时整页会崩成空白（实测：/api/meta 少了这个键就白屏）。
+        // 这里兜一层 —— 一个信息块拿不到数据，不该拖垮整个系统配置页。
+        const m = META.model || {};
+        if (!m || m.model === undefined && !m.base_url){
+          return '<span class="small">未获取到模型信息</span>';
+        }
+        return esc(m.model||'—') + ' · ' + (m.reachable?'服务可达':'服务不可达')
+          + ' · ' + (m.model_installed?'模型已安装':'模型未安装')
+          + (m.base_url?('<br><span class="small">'+esc(m.base_url)+'</span>'):'')
+          + (m.error?('<br><span class="small">'+esc(m.error)+'</span>'):'');
+      })()}</div>
+      <div class="k">向量模型</div><div>${(()=>{
+        // 与「对话模型」同一处防御：META.search 缺失时不该让整页崩成空白
+        const se = META.search || {};
+        let out = esc(se.model||'—') + ' · ' + (se.dim||0) + ' 维 · '
+          + (se.reachable ? '服务可达'
+             : '<span style="color:var(--ink-3)">未启用</span>（用本地哈希向量，零成本、不联网）')
+          + ' · 已索引 ' + (se.indexed||0) + ' 人';
+        if (se.index_model && se.index_model !== se.model){
+          out += '<br><span class="small">索引实际使用 <b>' + esc(se.index_model) + '</b>。'
+              + '这不是故障：哈希向量只匹配字面相近（"钛合金焊接"能命中、"金属连接"命中不了），'
+              + '十几到几百人的库用技能检索 + 关键词基本够用；'
+              + '真要语义检索再配一个本地向量模型（bge-m3 / gte-small），简历不出内网。</span>';
+        }
+        if (se.error) out += '<br><span class="small">' + esc(se.error) + '</span>';
+        return out;
+      })()}</div>
       <div class="k">解析能力</div><div>PyMuPDF ${META.parse.pymupdf?'':'✗'} ·
         MarkItDown ${META.parse.markitdown?'':'✗'} · OCR ${META.parse.ocr?'':'✗（图片简历将标『待人工判读』）'}</div>
       <div class="k">邮箱接入</div><div>模式 ${esc(META.mailbox.mode||'—')} ·

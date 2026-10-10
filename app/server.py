@@ -56,6 +56,7 @@ import time
 import urllib.parse
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request, Query
@@ -80,7 +81,10 @@ from .pipeline import sanitize
 from .pipeline.analyze import analyze_fit, draft_interview
 from .ui import render_page, ui_build
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+#: 程序根目录。默认按文件位置推导；**TP_HOME 可覆盖**——
+#: 开发/测试时用它把源码版指向已安装目录（_internal/），
+#: 这样源码跑起来用的是同一套 data/ 与 config/，测的就是真实数据。
+from .paths import BASE      # 根目录唯一来源（认 TP_HOME）
 # 允许用 TP_DB_PATH 指向另一个库：演练、验收、接口实测时不必动真实人才库
 DB_PATH = os.environ.get("TP_DB_PATH") or os.path.join(BASE, "data", "workbench.db")
 JD_PATH = os.path.join(BASE, "config", "jd.json")
@@ -246,6 +250,11 @@ def api_meta(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                         "imap_user": (cfg.get("imap") or {}).get("user") or "",
                         "imap_folder": (cfg.get("imap") or {}).get("folder", "INBOX"),
                         "password_set": bool(mb.read_secret()),
+                        # 发件人显示名与发信账号：放进 meta 是为了让界面在
+                        # 「已发送」凭据里能写清"是以什么名义发的"。
+                        # 这两项都是公开信息（不像密码要脱敏）。
+                        "from_name": (cfg.get("smtp") or {}).get("from_name") or "",
+                        "smtp_user": (cfg.get("smtp") or {}).get("user") or "",
                         "readonly": (cfg.get("imap") or {}).get("readonly", True),
                         "attachment_ext": cfg.get("attachment_ext"),
                         "max_attachment_mb": cfg.get("max_attachment_mb", 20),
@@ -337,10 +346,22 @@ async def api_upload(request: Request, name: str = Query(...),
     with open(dest, "wb") as fh:
         fh.write(body)
     jd, tiers = _jd_tiers()
-    rep = _ing.ingest_dir(inbox, jd, tiers, DB_PATH, job_id=None, use_llm=False)
+    # v1.23.2：**必须和「导入本地文件夹」同一口径**。
+    # 这里原来写死 use_llm=False，等于上传的照片永远不做模型分析——
+    # 同一份简历走文件夹就是有分析的、走上传就是没分析的，用户看不出来，
+    # 只会觉得上传的不准。是否调模型交给同一个开关决定。
+    _use_llm = _llm_enabled()
+    _conf = None
+    if _use_llm:
+        _c = llm.load_cfg()
+        _conf = {"api_key": _c.get("api_key"), "base_url": _c.get("base_url"),
+                 "model": _c.get("model")}
+    rep = _ing.ingest_dir(inbox, jd, tiers, DB_PATH, job_id=None,
+                          use_llm=_use_llm, llm_conf=_conf)
     return {"ok": True, "stored": _os.path.basename(dest),
             "bytes": len(body), "index": rep.get("index"),
             "notes": rep.get("notes") or [],
+            "analyzed": bool(_use_llm),
             "hint": "到人才库里点开这个人的完整档案，看「简历原文」那一段——"
                     "那就是 OCR 识别出来的文字，可逐字核对。"}
 
@@ -368,9 +389,51 @@ def _load_interview_dict() -> dict:
         for k, v in _INTERVIEW_FALLBACK.items():
             if not d.get(k):
                 d[k] = v
+        # 历史文件里可能是乱序的（早于 v1.22 存的），读出来先规整一次
+        for k in ("slots", "rooms"):
+            if isinstance(d.get(k), list):
+                d[k] = _sort_dict_items(k, d[k])
         return d
     except (OSError, ValueError):
         return dict(_INTERVIEW_FALLBACK)
+
+
+# ---- 字典项排序（v1.22）----
+# 时段与会议室有**客观顺序**，新加的项要插到该在的位置，不能一律追加到末尾。
+# 单位/方式/联系人没有客观顺序，保持人工顺序（HR 可能按常用度排）。
+_CN_DIGIT = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+             "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _slot_key(v: str):
+    """'08:30-09:30' → (8*60+30, v)；解析不出来的排到最后（但保持相对顺序）。"""
+    m = re.match(r"\s*(\d{1,2})\s*[:：]\s*(\d{1,2})", str(v or ""))
+    if not m:
+        return (99 * 60, str(v))
+    return (int(m.group(1)) * 60 + int(m.group(2)), str(v))
+
+
+def _room_key(v: str):
+    """自然排序：'创新大楼1203会议室' < '创新大楼1519会议室'。
+    数字按数值比（否则 1203 vs 1519 的字符串比较虽然也对，但 999 > 1519 会错），
+    中文数字（二层/三楼）折成阿拉伯数字再比。"""
+    t = str(v or "")
+    parts = []
+    for seg in re.split(r"(\d+)", t):
+        if seg.isdigit():
+            parts.append((1, int(seg), ""))
+        elif seg:
+            cn = "".join(str(_CN_DIGIT[c]) for c in seg if c in _CN_DIGIT)
+            parts.append((0, 0, seg)) if not cn else parts.append((1, int(cn), seg))
+    return parts + [str(t)]
+
+
+def _sort_dict_items(key: str, values: list) -> list:
+    if key == "slots":
+        return sorted(values, key=_slot_key)
+    if key == "rooms":
+        return sorted(values, key=_room_key)
+    return list(values)
 
 
 @app.get("/api/interview-dict")
@@ -397,7 +460,7 @@ def api_interview_dict_save(req: dict = Body(...),
                 if v not in seen:
                     seen.add(v)
                     out.append(v)
-            cur[key] = out
+            cur[key] = _sort_dict_items(key, out)
     if isinstance(req.get("contacts"), list):
         rows = []
         for c in req["contacts"]:
@@ -464,6 +527,10 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
         want_univ = (univ or "").strip()
         items = db.list_candidates(conn, tier=tier, keyword=kw, stage=stage,
                                    min_years=min_years,
+                                   # 分页请求时先**轻量**取（不装配技能明细）：
+                                   # 1000 人时全装配是 59ms，而一屏只要 20 条。
+                                   # 筛选与 facets 都不依赖技能字段，切片后再装配即可。
+                                   light=bool(page_size and page_size > 0),
                                    archived=True if want_archived else False)
         # 最低学历：在 server 层做而不是塞进 list_candidates——
         # "无法判定被隐藏的人数"要数的是**除学历外其他条件都命中**的人，
@@ -530,6 +597,9 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
             pages = max(1, (total_after_filter + page_size - 1) // page_size)
             cur = min(max(1, page or 1), pages)
             items = items[(cur - 1) * page_size: cur * page_size]
+            # 只为这一页装配技能明细（上面是轻量取的）——
+            # 一次 IN 查询 20 人，而不是把全库 1000 人都装配出来再丢掉 980 个
+            db._attach_skills(conn, items)
             paging = {"page": cur, "page_size": page_size, "total": total_after_filter,
                       "total_pages": pages}
         # 自动分析结果（v1.8「入库即分析」）：在分页之后按当前页批量取，
@@ -655,6 +725,22 @@ def _tier_detail_of(item: dict, jd_map: dict, cats: list) -> dict | None:
     }
 
 
+def _sensitive_of(doc: dict) -> dict:
+    """把 documents.sensitive_found（JSON 文本）解成 {类别: 条数}。
+
+    老库没有这一列 / 老记录是空的 → 返回 {}，界面按"无可核查记录"处理，
+    不要假装"一条都没剔除"（那会让人误以为红线没生效）。
+    """
+    raw = (doc or {}).get("sensitive_found")
+    if not raw:
+        return {}
+    try:
+        v = json.loads(raw) if isinstance(raw, str) else raw
+        return v if isinstance(v, dict) else {}
+    except Exception:                                     # noqa: BLE001
+        return {}
+
+
 @app.get("/api/candidates/{cid}")
 def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                   x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
@@ -687,6 +773,9 @@ def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias=
                           for x in d.get("documents", [])],
             "raw_text": raw,
             "parse_engine": latest_doc.get("parse_engine"),
+            # 送进模型前剔除了哪些敏感信息（类别→条数）。原来算完就丢，
+            # HR 无从核查"到底哪些内容没给模型看"——隐私红线应当是可核查的。
+            "sensitive_removed": _sensitive_of(latest_doc),
             "audit_snippet": db.candidate_audit(conn, cid, limit=20),
             "duplicates": db.suspicious_duplicates(conn, cid),
             "agent_runs": [],
@@ -700,13 +789,22 @@ def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias=
 
 
 @app.post("/api/candidates/{cid}/reanalyze")
-def api_candidate_reanalyze(cid: int,
+def api_candidate_reanalyze(cid: int, full: bool = True, req: dict | None = None,
                             x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                             x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    """重跑自动分析并立刻返回结果（同步，供界面「重算」按钮用）。
+    """重新分析一位候选人。
 
-    与入库时那条异步钩子的区别：这里是 HR 在等结果，所以同步执行、直接回结果。
-    **仍然只写分析文本**，不碰档位——重算分析不等于重算档位。
+    **默认 `full=True`：完整重跑**（v1.23.6）。原来这个按钮只重跑 `auto_insight`，
+    产出一段分析文本 —— HR 的原话是「重新分析应该包括完整的重新分析，
+    不应该只是这部分的重新分析」，说得对：老档案的 `extract_mode=heuristic`
+    （模型不可用时的规则通道）永远是规则通道，想用上模型抽取只能重新导入一份，
+    还会多出一条投递。现在完整重跑：
+      重新解析原件 → 模型重抽字段 → 重建技能 → 重新归岗 → 重判建议档 → 重算分析
+
+    **不动的三样**：HR 定的档（`tier_final`）、阶段、已归岗的岗位；
+    另外**保人工更正**：HR 手动改过的字段（审计里有 `edit_fields`）保持不动。
+
+    `full=False` 保留旧行为（只重跑分析结论），供"只想刷新那段文字"的场景用。
     """
     from .pipeline.analyze import auto_insight
 
@@ -717,6 +815,28 @@ def api_candidate_reanalyze(cid: int,
         d = db.candidate_detail(conn, cid)
         if not d:
             raise HTTPException(status_code=404, detail="未找到该候选人")
+
+        if full:
+            if not _llm_enabled():
+                return {"ok": False, "error": "模型未启用，无法完整重新分析；"
+                                              "请先在「模型设置」里配置模型",
+                        "hint": "只刷新分析文本可改用「只看分析」（full=false）"}
+            _c = llm.load_cfg()
+            _conf = {"api_key": _c.get("api_key"), "base_url": _c.get("base_url"),
+                     "model": _c.get("model")}
+            _jd, _tiers = _jd_tiers()
+            # 注意：模块级别名是 `ingest_mod`（`_ing` 只是别的函数里的局部导入，
+            # 在这里用会 NameError —— 上次只测了函数、没测接口，漏了这个）
+            r = ingest_mod.reanalyze_full(conn, mb.load_config(), _jd, _tiers, cid,
+                                          use_llm=True, llm_conf=_conf)
+            if not r.get("ok"):
+                return r
+            r["insight"] = db.get_insight(conn, cid)
+            r["note"] = ("完整重新分析完成：原件已重解析、字段已用模型重抽、"
+                         "技能已重建、建议档已重算、分析结论已刷新。"
+                         "HR 已定的档位/阶段/岗位不受影响。")
+            return r
+
         apps = d.get("applications") or []
         app_row = apps[0] if apps else {}
         app_id = app_row.get("id") or 0
@@ -1010,6 +1130,105 @@ class InsightBatchReq(BaseModel):
     # 一次最多分析多少人（前端循环调用）。上限 20：再多单请求会超时，
     # 而且模型连着调 20 次也让 HR 等太久没有反馈。
     limit: int = 5
+
+
+class ReanalyzeBatchReq(BaseModel):
+    limit: int = 5                  # 每次调用处理几个（前端循环调用直到 remaining=0）
+    only_heuristic: bool = True     # 只处理"还在规则通道"的；False = 全部重来一遍
+
+
+def _needs_full_reanalysis(conn, limit: int, only_heuristic: bool) -> list[dict]:
+    """挑出需要完整重跑的人（排除归档）。
+
+    默认只挑 `extract_mode != 'llm+rule'` 的——已经用模型抽过的人不必再花一次模型调用。
+    顺序按投递时间从早到晚，和"待分析"按钮一致。
+    """
+    sql = """SELECT a.candidate_id AS cid, a.id AS app_id, c.name, a.extract_mode
+             FROM applications a JOIN candidates c ON c.id = a.candidate_id
+            WHERE COALESCE(c.archived_at, '') = ''
+              AND c.merged_into IS NULL
+              AND a.id = (SELECT id FROM applications WHERE candidate_id = c.id
+                          ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT 1)"""
+    if only_heuristic:
+        sql += " AND COALESCE(a.extract_mode, '') != 'llm+rule'"
+    sql += " ORDER BY COALESCE(a.applied_at, '') ASC, a.id ASC LIMIT ?"
+    return [dict(r) for r in conn.execute(sql, (int(limit),)).fetchall()]
+
+
+@app.post("/api/candidates/reanalyze-batch")
+def api_reanalyze_batch(req: ReanalyzeBatchReq,
+                        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """**批量完整重新分析**（v1.23.9）。前端循环调用直到 remaining=0。
+
+    为什么分批而不是一次全跑：每人 6-15 秒（两次模型调用），
+    100 人就是十几分钟——一次 HTTP 调用扛不住，前端也看不到进度。
+    分批 + 循环 + 并发，跟「分析待分析的人」是同一套交互口径。
+
+    并发：批内用线程池（沿用入库分析那套路数），6 路时 5 个人约 15 秒而非 75 秒。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    if not _llm_enabled():
+        return {"ok": False, "analyzed": 0, "remaining": 0, "failed": 0,
+                "error": "模型未启用，无法完整重新分析；请先在「模型设置」里配置模型"}
+    limit = max(1, min(int(req.limit or 5), 12))
+    jd, tiers = _jd_tiers()
+    conf_c = llm.load_cfg()
+    conf = {"api_key": conf_c.get("api_key"), "base_url": conf_c.get("base_url"),
+            "model": conf_c.get("model")}
+    cfg = mb.load_config()
+
+    conn = db.connect(DB_PATH)
+    try:
+        targets = _needs_full_reanalysis(conn, 20, req.only_heuristic)
+        batch = targets[:limit]
+        if not batch:
+            return {"ok": True, "analyzed": 0, "failed": 0, "remaining": 0,
+                    "note": "没有需要重跑的人了" if not targets
+                            else "这一批已完成"}
+
+        def one(t: dict) -> dict:
+            # 每人一个连接：sqlite 连接不能跨线程复用
+            c2 = db.connect(DB_PATH)
+            try:
+                r = ingest_mod.reanalyze_full(c2, cfg, jd, tiers, t["cid"],
+                                              use_llm=True, llm_conf=conf)
+                return {"name": t.get("name"), "ok": bool(r.get("ok")),
+                        "error": r.get("error"), "mode": r.get("extract_mode")}
+            except Exception as exc:                          # noqa: BLE001
+                # **必须兜住**：没有这层的话，一个人出错会让 pool.map 抛出、
+                # 整个批量请求 500，而**已经跑完的那些人的结果与进度全部丢失**
+                # （数据其实已写库，但 HR 只看到一个"失败"）。
+                # 批量任务的价值就在于"能跑完"，所以这里记失败、继续下一个。
+                return {"name": t.get("name"), "ok": False,
+                        "error": f"{type(exc).__name__}: {exc}", "mode": None}
+            finally:
+                c2.close()
+
+        workers = max(1, min(8, int(os.environ.get("TP_ANALYZE_CONCURRENCY", "6"))))
+        results: list[dict] = []
+        with ThreadPoolExecutor(max_workers=min(workers, len(batch))) as pool:
+            for r in pool.map(one, batch):
+                results.append(r)
+        ok_n = sum(1 for r in results if r["ok"])
+        fail_n = len(results) - ok_n
+        left = max(0, len(targets) - len(batch))
+        for r in results:
+            if r["ok"]:
+                db.add_audit(conn, "candidate", "", "reanalyze_batch", "",
+                             "批量完整重跑：" + (r.get("name") or "?"), s["username"], s["role"])
+        conn.commit()
+        return {"ok": True, "analyzed": ok_n, "failed": fail_n, "remaining": left,
+                "total_hint": len(targets),
+                "details": [{"name": r.get("name"), "ok": r["ok"],
+                             "mode": r.get("mode"), "error": r.get("error")}
+                            for r in results],
+                "note": f"本批 {len(results)} 人：成功 {ok_n}"
+                        + (f"，失败 {fail_n}" if fail_n else "")
+                        + (f"；还剩 {left} 人" if left else "；全部完成")}
+    finally:
+        conn.close()
 
 
 @app.post("/api/insights/analyze-pending")

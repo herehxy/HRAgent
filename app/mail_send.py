@@ -111,7 +111,14 @@ def send_mail(to: str, subject: str, body: str,
         return {"ok": False, "error": f"发信失败：{type(exc).__name__}: {exc}",
                 "hint": f"确认 {conf['host']}:{conf['port']} 可达，且端口与 SSL 设置匹配"
                         f"（465 用 SSL、587 用 STARTTLS）。"}
-    return {"ok": True, "to": to, "subject": subject, "host": conf["host"]}
+    # v1.24.0：把**实际发出的 From 头原文**回传。
+    # 为什么：QQ 邮箱会在服务端**覆盖发件人显示名**（用 QQ 账号的"发件人名"），
+    # 于是对方面板与详情页可能显示不同、没有名称。回传原文才能判断
+    # "我们发出去的就带名称" 还是 "我们没带" —— 前者只能去 QQ 设置里改。
+    return {"ok": True, "to": to, "subject": subject, "host": conf["host"],
+            "from_header": msg["From"],
+            "from_account": conf["user"],
+            "from_name_used": from_name}
 
 
 def check_smtp(cfg: dict | None = None, password: str | None = None) -> dict:

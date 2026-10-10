@@ -206,7 +206,7 @@ def draft_mail(cand: dict, job_title: str, purpose: str = "", tone: str = "",
                      f"学历：{cand.get('edu_level')}" if cand.get("edu_level") else "",
                      f"学校：{cand.get('school')}" if cand.get("school") else "",
                      f"专业：{cand.get('major')}" if cand.get("major") else "",
-                     f"工作年限：{cand.get('years_exp')} 年" if cand.get("years_exp") is not None else "",
+                     "应届",   # 校招口径：不展示工作年限
                      f"邮箱：{cand.get('email')}" if cand.get("email") else "",
                  ])) or "（无）")
     if hint:
