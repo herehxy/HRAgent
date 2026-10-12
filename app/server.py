@@ -1961,10 +1961,28 @@ def api_ingest(req: IngestReq | None = Body(default=None),
     if req.source == "folder":
         # 文件夹上传：只分析、不归岗（job_id=None = 待 HR 指定）
         folder = req.folder or cfg.get("folder_dir") or RESUME_DIR
+        folder = mb.resolve_dir(folder)
+        # v1.24.20：目录不存在时**建出来并说清楚**，不要静默扫0。
+        # 原样跑下去会返回 scanned:0，界面上只是一句"新增 0"——
+        # HR 根本不知道是自己放错位置了，还是程序没找到。
+        if not os.path.isdir(folder):
+            try:
+                os.makedirs(folder, exist_ok=True)
+            except OSError as exc:
+                raise HTTPException(status_code=400,
+                                    detail=f"导入文件夹不存在且无法创建：{folder}（{exc}）")
         report = ingest_mod.ingest_dir(folder, jd, tiers, DB_PATH, cfg=cfg, job_id=None,
                                        use_llm=_use_llm, llm_conf=llm_conf)
         report["source"] = "folder"
         report["source_label"] = f"本地文件夹 {os.path.abspath(folder)}"
+        # 扫到 0 个文件要**说清是哪一种 0**（v1.24.20）。
+        # HR 看到"新增 0"无法区分：放错位置了？文件夹是空的？还是都重复被跳了。
+        # 这里把目录与支持格式直接带回去，界面上原样显示。
+        if not report.get("scanned"):
+            report["empty_hint"] = (
+                f"这个文件夹里没有可导入的简历。目录：{os.path.abspath(folder)}"
+                "（新建的空目录）。把 PDF / Word / 图片放进去再点一次即可；"
+                "如果简历在别处，可在系统配置里改「导入文件夹」路径。")
     else:
         # 邮箱：按邮件标题归岗（在 ingest_mails 内部完成），job_id 参数不参与
         report = ingest_mod.sync_mailbox(jd, tiers, DB_PATH, job_id=None,

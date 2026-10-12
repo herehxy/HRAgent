@@ -106,7 +106,14 @@ _PAGE = """<!DOCTYPE html>
   /* 侧栏：比内容区**略深**一档的灰（--surface-2）而不是纯白。
      飞书就是这样分层的——导航区沉一点，内容区浮起来。
      之前侧栏是纯白、body 也是纯白，两边一样亮，界面就没了纵深。 */
-  .layout{display:flex;min-height:100vh;align-items:stretch}
+  /* v1.24.20：.layout 改成**固定一屏**（原min-height:100vh）。
+   原来用 min-height 是对的（内容长了就长高、页面整体滚动），
+   但那样聊天页无法把对话区撑到视区底部 —— 一屏之内放不下就该页内滚，
+   不该让整页滚动。改成 height:100vh + overflow:hidden，
+   滚动交给下层各页自己决定（.main-inner 或 .chatlog）。
+   覆盖写在这一行而不是另起一条：CSS 同优先级按出现顺序生效，
+   写在别处的覆盖会被原始定义盖掉（v1.24.20 踩过）。 */
+  .layout{display:flex;height:100vh;overflow:hidden;align-items:stretch}
   .side{width:220px;flex:0 0 220px;background:var(--surface-nav);border-right:1px solid var(--line);
     padding:20px 12px 14px;position:sticky;top:0;height:100vh;
     display:flex;flex-direction:column;box-sizing:border-box}
@@ -124,8 +131,29 @@ _PAGE = """<!DOCTYPE html>
   .navitem:hover{background:var(--surface);color:var(--ink)}
   .navitem.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:500}
   .sidefoot{font-size:12px;color:var(--ink-3);padding:10px 12px 0;border-top:1px solid var(--line)}
-  .main{flex:1;min-width:0;padding:24px 30px 60px}
-  .main-inner{max-width:1240px;margin:0 auto}
+  /* v1.24.20：.main 变flex 列，滚动交给 .main-inner。
+   内容区不再自己滚动，而是撑满一屏、超出的部分由子容器滚。
+
+   ⚠️ height:100% 不是冗余：.layout 是 align-items:stretch，
+   .side 有 height:100vh，而 .main 作为 flex item 拿到的是**内容撑出来的高度**，
+   不写 height:100% 时它的子级flex:1 参照的是"父级自动高度"——于是链条断在
+   .main → .main-inner 之间，.chatlog 撑不出高度，输入框被顶到视口外
+   （实测过：截图里对话区在滚，输入条看不见）。
+   显式 height:100% 把这条链一次接到底。 */
+  .main{flex:1;min-width:0;height:100%;padding:24px 30px 60px;
+    display:flex;flex-direction:column;overflow:hidden}
+  /* 聊天页不需要底部 60px 留白（内容要贴到可视区底部才叫"填满"），只留24px 呼吸位。 */
+  body.main-on-chat .main{padding-bottom:24px}
+  /* max-width 居中 + flex 列 + 自己滚：常规页面（人才库等）内容长就滚这里。
+     ⚠️ 隐藏的兄弟节点（#stats 隐藏、#alerts 空）不占高度，flex 分配才对；
+     #view 拿 flex:1 的全部剩余空间。 */
+  .main-inner{max-width:1240px;margin:0 auto;width:100%;height:100%;
+    flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto}
+  /* 聊天页把滚动从 .main-inner 移到 .chatlog 内部，否则底部会多出一截空白。
+     body.main-on-chat 由 refresh() 一处切换（它才是渲染每一页的必经之路）。 */
+  body.main-on-chat .main-inner{overflow:hidden}
+  #view{flex:1;min-height:0;display:flex;flex-direction:column}
+  #view > .panel:last-child{margin-bottom:0}
   h1{font-size:22px;font-weight:600;margin:0}
   h2{font-size:17px;font-weight:600;margin:0 0 12px}
   .sub{color:var(--ink-3);font-size:13px;margin-top:4px}
@@ -315,6 +343,12 @@ _PAGE = """<!DOCTYPE html>
     overflow:auto;padding:22px 24px}
   .progtrack{height:10px;background:var(--surface-2);border-radius:6px;overflow:hidden;margin:12px 0 8px}
   .progfill{height:100%;background:var(--accent);border-radius:6px;transition:width .3s ease}
+  /* v1.24.20：不确定时长的等待态。总耗时未知时**不要假装有百分比**
+     ——写死35% 会被当成"卡在35%"（HR 的原话）。循环摆动只表达"还在动"。 */
+  .progfill--indet{width:35%;animation:progindet 1.4s ease-in-out infinite}
+  @keyframes progindet{0%{transform:translateX(-100%);margin-left:0}
+                       50%{margin-left:30%}
+                       100%{transform:translateX(280%);margin-left:0}}
   .progmeta{font-size:13px;color:var(--ink-2);line-height:1.6}
   /* 居中提示层（v1.24.9）：固定在视口中央偏上，pointer-events:none 让它不挡操作，
      每条提示自己 pointer-events:auto 所以能点、能关。多条时纵向堆叠不重叠。 */
@@ -365,7 +399,34 @@ _PAGE = """<!DOCTYPE html>
   .info{background:var(--accent-soft);border:1px solid var(--accent-line);color:var(--accent-ink);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
   .danger{background:var(--bad-soft);border:1px solid var(--bad-line);color:var(--bad);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
   .ok{background:var(--ok-soft);border:1px solid var(--ok-line);color:var(--ok);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
-  .chatlog{margin-top:12px;max-height:440px;overflow:auto;display:flex;flex-direction:column;gap:9px}
+  /* v1.24.20：对话区撑满可视高度、且**页面不出现多余下滑**。
+   原来是 max-height:440px 固定矮框 —— 页面下面留一大片空白，
+   对话气泡挤在小窗口里上下滚动（用户原话："把智能助手这个对话框扩大到页面大小"）。
+
+   ⚠️ 踩过的坑：第一版写的是 min-height:calc(100vh - 190px)，
+   **页面底部多出约 40px 的下滑条**（用户反馈"页面下面好像有一个可以下滑的区域"）。
+   成因：.main 有 padding-bottom:60px、.layout 是 min-height:100vh，
+   用 100vh 算出来的容器比可视区高出整整一个底padding —— 它是**内容**溢出，
+   不是容器溢出，所以改overflow 也治不了。
+
+   正确做法：**不自己算 100vh**，改成让布局自己分配高度。
+   .layout 换成 height:100vh + overflow:hidden，
+   .main 内部用 flex 列，.chat-page 靠 flex:1 自然填满剩余空间。
+   这样窗口尺寸怎么变都对，不存在需要我算的常量。
+
+   ⚠️ 第二个坑：这组覆盖规则最初写在**这里**（.chatlog 附近，第 390 行），
+   而原始的 .layout/.main/.main-inner 定义在文件更前的第 109~128 行。
+   CSS 同优先级**按出现顺序**生效，后写的赢—— 于是原始的 min-height:100vh
+   把height:100vh 盖掉了，overflow:hidden 也被后面的默认 overflow 盖掉，
+   结果完全没生效（截图：输入框被顶到视口外，右侧多一条滚动条）。
+   **覆盖同一选择器必须写在原始定义之后**，或者直接改原始那一行。
+   —— 这个坑和「后加的 CSS 不起作用」是同一类，值得单独记。 */
+  .chat-page{display:flex;flex-direction:column;flex:1;min-height:0}
+  /* flex:1 + min-height:0 是关键：不给 min-height:0，
+     内容会把flex 容器顶高，溢出又被推回页面滚动条上。 */
+  .chatlog{margin-top:12px;overflow:auto;display:flex;flex-direction:column;gap:9px;
+    flex:1;min-height:0}
+  .chat-foot{margin-top:10px;flex:0 0 auto}
   .msg{font-size:15px;line-height:1.75;padding:10px 13px;border-radius:var(--r-card);white-space:pre-wrap}
   .msg.user{background:var(--accent-soft);align-self:flex-end;max-width:78%}
   .msg.assistant{background:var(--surface-2);max-width:94%}
@@ -381,6 +442,17 @@ _PAGE = """<!DOCTYPE html>
   .msg.md pre code{background:none;border:none;padding:0}
   .msg.md strong{font-weight:700}
   .msg.md a{color:var(--accent);text-decoration:underline}
+  /* v1.24.20：Markdown 表格。模型做"全员对比"时一定出表格，
+     列数常6~9 个，窄屏必须能横向滚——直接铺开会撑破气泡布局。
+     描边只用 --line 且只画横线（分隔线优先于卡片堆叠，同全局原则），
+     表头一档底色区分，不引入第二个强调色。 */
+  .mdtable-wrap{overflow-x:auto;margin:8px 0 10px;-webkit-overflow-scrolling:touch}
+  .mdtable{border-collapse:collapse;font-size:13px;line-height:1.6;min-width:100%}
+  .mdtable th,.mdtable td{border-bottom:1px solid var(--line);padding:6px 10px;
+    text-align:left;vertical-align:top;white-space:normal}
+  .mdtable th{background:var(--surface);font-weight:700;white-space:nowrap}
+  .mdtable tbody tr:last-child td{border-bottom:none}
+  .mdtable tbody tr:hover td{background:var(--surface)}
   .trace{font-size:13px;color:var(--ink-3);margin-top:8px;border-top:1px dashed var(--line);padding-top:8px}
   .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
   .pcol{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:12px 14px}
@@ -539,8 +611,48 @@ function md(src){
   const flushPara = () => {
     if (paraBuf.length){ out.push('<p>' + paraBuf.join('<br>') + '</p>'); paraBuf = []; }
   };
-  for (const line of lines){
-    const t = line.trim();
+  // ---- v1.24.20：Markdown 表格 ----
+  // 模型做"全员对比"时几乎一定输出管道表格，而 md() 原先只认
+  // 代码块/加粗/标题/列表/链接，表格整块以原始文本裸奔
+  // （用户原话："回复页面还是没有实现表格的正常渲染"）
+  // —— `| :--- |` 这些符号直接怼在页面上。
+  //
+  // 判据：**表头行 + 分隔行**同时存在才算表格。
+  //   光看"有竖线"会误伤正文里的 "A | B" 这种写法；
+  //   而分隔行（`:---`、`---:`、`---`）才是表格的确证。
+  //
+  // 放在行组装这一步做：表格是**连续多行**的结构，
+  // 在此之前已单独处理掉代码块/行内代码/加粗/链接，行内不会被污染。
+  const isSepRow = t => /^\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?$/.test(t);
+  const splitRow = t => t.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+  // 单元格里的 <br> 是模型故意换行（"命中: 材料成型,<br>缺失: 无"），
+  // esc() 已经把原文里的尖括号转义过，这里要还原成真换行。
+  const cell = c => c.replace(/&lt;br\s*\/?&gt;/gi, '<br>');
+  for (let i = 0; i < lines.length; i++){
+    const t = lines[i].trim();
+    // 表头：含竖线，且下一行是分隔行
+    if (t.includes('|') && i + 1 < lines.length && isSepRow(lines[i + 1].trim())){
+      flushLi(); flushPara();
+      const head = splitRow(t);
+      i += 1;                       // 跳过分隔行
+      const body = [];
+      while (i + 1 < lines.length){
+        const nxt = lines[i + 1].trim();
+        if (!nxt || !nxt.includes('|')) break;
+        body.push(splitRow(nxt));
+        i += 1;
+      }
+      const cols = head.length;
+      // 列数对齐：缺列补空、多列截断。模型偶尔会写歪，截断会串位。
+      const fit = r => Array.from({length: cols}, (_, k) => cell(r[k] == null ? '' : r[k]));
+      let html = '<div class="mdtable-wrap"><table class="mdtable"><thead><tr>'
+        + head.map(h => '<th>' + cell(h) + '</th>').join('')
+        + '</tr></thead><tbody>';
+      body.forEach(r => { html += '<tr>' + fit(r).map(c => '<td>' + c + '</td>').join('') + '</tr>'; });
+      html += '</tbody></table></div>';
+      out.push(html);
+      continue;
+    }
     if (!t){ flushLi(); flushPara(); continue; }
     if (/^[-*+][ \t]+/.test(t)){
       flushPara();
@@ -848,7 +960,7 @@ function go(v, keepHash){
   closeModal();
   VIEW = VIEWS.some(x=>x[0]===v) ? v : 'pool';
   if (!keepHash && location.hash !== '#'+VIEW) location.hash = VIEW;
-  renderTabs(); refresh();
+  renderTabs(); refresh();   // body 的 main-on-chat 标记在 refresh() 里打
 }
 function readHash(){
   return (location.hash||'').replace(/^#/,'');
@@ -859,8 +971,17 @@ function readHash(){
    `let` 有暂时性死区——如果声明写在 doIngest 附近，
    refresh 首次执行时读它会直接抛 ReferenceError，页面当场白屏。 */
 let __ingesting = null;
+/* 导入弹窗秒表的 interval 句柄。同样必须提前声明：
+   ingestStartModal() 定义在 ingestStopTick() 调用点之前，
+   但赋值/读取散布在三个函数里，放一起最不容易踩死区。 */
+let __ingestTick = null;
 
 async function refresh(){
+  // v1.24.20：聊天页要把页面滚动收进 .chatlog，否则底部多出一截空白。
+  // 标记打在这里而不是 go()：**refresh() 是渲染每一页的必经之路**，
+  // 首屏初始化走的是 readHash() 而不是 go()（实测 go() 里打首屏就漏了这一下，
+  // body 上没有 main-on-chat，整套 CSS 静默不生效）。
+  document.body.classList.toggle('main-on-chat', VIEW === 'chat');
   // 顶部统计卡片只在「今日待办」与「人才库」展示。
   // 其他页面放一排数字只是噪音：看岗位管理或写邮件时，那排总数帮不上任何忙。
   const showStats = (VIEW === 'brief' || VIEW === 'pool');
@@ -1728,12 +1849,30 @@ async function doUpload(files){
   const arr = Array.from(files||[]).filter(f =>
     /[.](jpe?g|png|bmp|webp|pdf|docx?|txt)$/i.test(f.name));
   if (!arr.length){ resultModal({title:'上传', kind:'warn', body:'没有可上传的文件（支持图片 / PDF / Word / txt）'}); return; }
-  // 开始前先给一条即时提示：多份文件的裸字节上传要好几秒，
-  // 期间界面毫无反应会让人以为按钮没生效（v1.24.11 补）。
-  toast(`正在上传 ${arr.length} 份文件…`, 'info');
+  // v1.24.20：原本只弹一个 toast 就开始传。
+  // toast 3.5 秒自动消失，而多份文件的裸字节上传常常要十几秒——
+  // 之后界面就完全没反馈了，和"导入弹窗不动"是同一类毛病。
+  // 现在给出**可数的**进度（第几份/共几份），上传完自动换成结果弹窗。
+  document.getElementById('mTitle').textContent = '上传简历文件';
+  document.getElementById('mBody').innerHTML =
+    `<div>
+       <div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">
+         正在上传 ${arr.length} 份文件</div>
+       <div class="progtrack"><div class="progfill" id="upFill" style="width:0%"></div></div>
+       <div class="progmeta" id="upMeta">准备中…</div>
+     </div>
+     <div class="bar" style="margin-top:18px;justify-content:flex-end">
+       <button class="btn-primary" onclick="closeModal()">关掉（后台继续传）</button>
+     </div>`;
+  document.getElementById('modal').classList.add('on');
   let ok = 0, fail = 0;
   const failedNames = [];
-  for (const f of arr){
+  const fill = document.getElementById('upFill');
+  const meta = document.getElementById('upMeta');
+  for (let i = 0; i < arr.length; i++){
+    const f = arr[i];
+    if (meta) meta.textContent = `第 ${i + 1} / ${arr.length} 份：${f.name}`;
+    if (fill) fill.style.width = Math.round(i / arr.length * 100) + '%';
     try{
       // 裸字节上传：文件名走 query。不引 multipart 依赖（打包产物里没有它）
       const r = await fetch('/api/upload?name=' + encodeURIComponent(f.name),
@@ -1762,28 +1901,52 @@ async function doUpload(files){
    重复收取不只是"多跑一遍"——会并发抢同一个邮件游标、重复触发入库即分析，
    白白烧模型额度。所以：**一按下去就锁住，跑完（哪怕失败）才解锁**。 */
 
-/* 进行中的"开始"提示：不可手动关（关掉就等于"我不知道它还在跑"），
-   只能等它自己变成完成/失败弹窗。加 × 是为了挡住误点遮罩，
-   并在标题里写明"请勿重复点击"。 */
+/* 进行中的"开始"提示。
+   ⚠️ v1.24.20 改：进度条原本是**硬编码的 width:35%**，永远不动 ——
+   HR 的原话是"这个弹窗不会变化，也不会根据导入结果自动退出"。
+   接口实测只要 2 秒就返回，但一条死进度条 + 没有数字，
+   在几十秒级的真实导入里就会被当成"卡住了"。
+
+   现在改成**真在动的等待态**：
+   · 宽度用 CSS 动画做不确定进度循环（不确定总耗时，不能假装有百分比）；
+   · 旁边挂一个秒表，让"还在跑"变成可验证的事实而不是猜；
+   · 超过 20 秒提示可能是在等模型，让 HR 知道没死。 */
 function ingestStartModal(label){
   document.getElementById('mTitle').textContent = label + '进行中';
   document.getElementById('mBody').innerHTML =
     `<div>
        <div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">
          正在${label === '邮箱' ? '收取邮箱里的简历' : '读取本地文件夹里的简历'}，请稍候…</div>
-       <div class="progtrack"><div class="progfill" style="width:35%"></div></div>
-       <div class="progmeta">已开始，扫描与入库完成后会显示结果。期间请勿重复点击。</div>
+       <div class="progtrack"><div class="progfill progfill--indet"></div></div>
+       <div class="progmeta" id="ingestElapsed">已等待 <span id="ingestSecs">0</span> 秒，请勿重复点击</div>
+       <div class="progmeta" id="ingestSlow" style="display:none;color:var(--warn,#b06a00)">
+         耗时偏长，通常是在等模型分析。若超过 2 分钟仍无结果，可能是模型接口不通。</div>
      </div>
      <div class="bar" style="margin-top:18px;justify-content:flex-end">
-       <button class="btn-primary" onclick="closeModal()">后台运行</button>
+       <button class="btn-primary" onclick="closeModal()">关掉（后台继续跑）</button>
      </div>`;
   document.getElementById('modal').classList.add('on');
+  // 秒表：证明"还活着"。无论从哪条路出去，收尾都要停掉它。
+  if (__ingestTick){ clearInterval(__ingestTick); __ingestTick = null; }
+  let sec = 0;
+  const secsEl = document.getElementById('ingestSecs');
+  const slowEl = document.getElementById('ingestSlow');
+  __ingestTick = setInterval(() => {
+    sec += 1;
+    if (secsEl) secsEl.textContent = sec;
+    if (slowEl && sec === 20) slowEl.style.display = '';
+  }, 1000);
+}
+function ingestStopTick(){
+  if (__ingestTick){ clearInterval(__ingestTick); __ingestTick = null; }
 }
 
 /* 锁/解锁两个导入按钮。改 textContent 而不是 disabled，
    因为要看清"它到底在跑哪个"——disabled 的灰按钮在深色下容易读不出状态。 */
 function setIngestBusy(busy, source){
   __ingesting = busy ? (source || '?') : null;
+  // 解锁即收尾：秒表必须停，否则它会一直跑到下一个导入才被清掉。
+  if (!busy) ingestStopTick();
   const cfg = [
     ['btnIngestMailbox', 'mailbox', '收取邮箱简历'],
     ['btnIngestFolder', 'folder',   '导入本地文件夹'],
@@ -1836,9 +1999,14 @@ async function doIngest(source){
     `跳过重复 ${num('skipped_dup')}，无附件 ${num('no_attachment')}，` +
     `解析失败(仍入库) ${num('parse_failed')}，超限跳过 ${num('skipped_oversize')}，` +
     `异常 ${num('failed')}`;
-  const hasProblem = (r.failed || r.skipped_oversize || num('insight_skipped'));
+  const hasProblem = (r.failed || r.skipped_oversize || num('insight_skipped') || r.empty_hint);
   const warnNote = num('insight_skipped') > 0
     ? `<br><br>有 ${num('insight_skipped')} 人未分析（"入库即分析"当前是关的）——可在上方点「分析待分析的人」批量补上。`
+    : '';
+  // v1.24.20：扫到 0 个文件时，必须说清是"文件夹是空的"还是"放错位置了"。
+  // 只报"新增 0"的话，HR 无从判断——这正是刚才那个弹窗让人摸不着头脑的另一半。
+  const emptyNote = r.empty_hint
+    ? `<br><br><span style="color:var(--warn,#b06a00)">${r.empty_hint}</span>`
     : '';
   // 收尾了才解锁：入库即分析还在后台跑，但收取动作本身已经结束，
   // 允许 HR 排队下一次（避免"等模型分析"期间什么都做不了）。
@@ -1863,9 +2031,9 @@ async function doIngest(source){
   resultModal({
     title: label + '导入完成',
     kind: hasProblem ? 'warn' : 'ok',
-    headline: hasProblem ? '有需要留意的地方' : '导入成功',
+    headline: hasProblem ? '有需要留意的地方' : (r.empty_hint ? '没有可导入的简历' : '导入成功'),
     body: `${summary}<br><span style="color:var(--ink-2)">源：${r.source_label||label}</span>` +
-          warnNote + insightNote,
+          emptyNote + warnNote + insightNote,
     afterClose: startInsight
   });
 }
@@ -2019,8 +2187,14 @@ async function viewArchive(){
     const am = x.archive || {};
     const left = am.days_left;
     const expiring = left!=null && left<=7;
+    // ⚠️ v1.24.20 修：expired 原来**根本没声明**，只有下面第 2080 行在用它。
+    // 于是只要归档记录带上了 days_left（= 有归档到期时间），
+    // viewArchive() 就抛 ReferenceError，归档页整页空白——
+    // 而且只在有到期时间时才崩，所以早先 4 条 days_left 全为 null 时看不出来。
+    // 这正是 MEMORY.md 里"let/const 暂时性死区"的又一次：判据要覆盖**所有数据形状**。
+    const expired = left!=null && left<=0;
     const leftTxt = left==null ? ''
-      : (expired ? `<span class="chip" style="color:var(--bad);background:var(--bad-soft)">已归档</span>`
+      : (expired ? `<span class="chip" style="color:var(--bad);background:var(--bad-soft)">归档已到期</span>`
                  : `<span class="chip" style="color:${expiring?'var(--bad)':'var(--ink-2)'};background:${expiring?'var(--bad-soft)':'var(--surface-2)'}"
                       title="归档 ${esc(am.purge_at||'')} 到期后自动彻底删除">归档中（${esc((am.purge_at||'').slice(0,10))} 到期）</span>`);
     return `<div class="card" style="border-left-color:${fg}">
@@ -2366,7 +2540,7 @@ async function markReview(aid, undo, fromDetail){
 async function viewChat(){
   const runs = await api('/api/agent/runs?limit=1');
   const t = META.tools || {};
-  document.getElementById('view').innerHTML = `  <div class="panel">
+  document.getElementById('view').innerHTML = `  <div class="panel chat-page">
     <div class="flexbetween">
       <div><h2 style="margin:0">HR 助手（智能体）</h2>
         <div class="note">写操作只生成待确认提案，点确认才生效。</div></div>
@@ -2379,7 +2553,7 @@ async function viewChat(){
     </div>
     <div id="chatRetention" class="note" style="display:none;margin-bottom:8px"></div>
     <div class="chatlog" id="chatLog"></div>
-    <div class="bar" style="margin-top:10px">
+    <div class="bar chat-foot">
       <input id="chatInput" placeholder="输入问题或指令" style="flex:1;min-width:240px"
              onkeydown="if(event.key==='Enter'){askAgent()}">
       <button class="btn-primary" onclick="askAgent()">发送</button>
