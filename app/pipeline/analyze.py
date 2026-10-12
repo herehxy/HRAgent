@@ -12,7 +12,7 @@ import sys
 
 from ..agent import llm
 from . import normalize as nz
-from .tier import guess_major_family
+from .tier import edu_gate, guess_major_family, lock_tier
 
 _FIT_SYSTEM = (
     "你是稀有金属材料行业的资深招聘官。依据岗位要求(JD)与候选人简历，做匹配分析。"
@@ -356,7 +356,7 @@ def auto_insight(cand: dict, jd: dict | None, grade_result: dict | None = None) 
             risks.append(f"有 {len(all_skills) - len(verified)} 项技能未在简历原文找到出处，"
                          "未计入命中")
         if app.get("needs_review"):
-            risks.append("原文未能完整解析，档案标『待人工判读』")
+            risks.append("原文未能完整解析，档案标『简历读不出』")
         # 业务方向（模型提炼，仅展示）：未归岗也给，HR 看卡片时就知道这个人是干什么的
         bd = None
         try:
@@ -367,6 +367,8 @@ def auto_insight(cand: dict, jd: dict | None, grade_result: dict | None = None) 
         return {"summary": summary, "reasons": reasons, "risks": risks,
                 "evidence": evidence, "source": "auto_profile", "model": "",
                 "suggested_tier": app.get("tier_suggested"), "confidence": None,
+                "tier_source": "沿用库内（未归岗，不做匹配判断）",
+                "edu_gate": edu_gate(cand, {}),
                 "business_direction": bd}
 
     try:
@@ -376,24 +378,34 @@ def auto_insight(cand: dict, jd: dict | None, grade_result: dict | None = None) 
         fit = None
 
     if isinstance(fit, dict) and (fit.get("summary") or fit.get("highlights")):
-        # **档位决策**：D（学历不达标）优先于模型建议——
+        # **档位决策**：学历门槛优先于模型建议（v1.24.15 走 `tier.lock_tier`）。
         # 学历是硬门槛，模型不能越过；其余情况模型判断优先（规则已不再打分）。
         # 模型漏给档位时会**单独追问一次**（实测 deepseek-flash 有概率漏字段），
         # 不能因为格式问题就把它的判断当没发生。
-        rule_tier = (grade_result or {}).get("tier_suggested")
-        final_tier = rule_tier                                # 默认用规则（=学历门槛结论）
-        if rule_tier != "D":
-            model_tier = resolve_tier(cand, jd, fit)
-            if model_tier:
-                final_tier = model_tier
+        #
+        # v1.24.15 修掉的缺陷：这里的 `grade_result` 参数**从来不是判档结果**——
+        # 两个调用方（server.analyze / ingest.analyze_one）传进来的都是
+        # applications 行，里面 `tier_suggested` 是**上一次存进去的值**。
+        # 于是旧代码 `if rule_tier != "D"` 形同虚设：库里存的是 C 时，
+        # 学历不够的人也能被模型改成 A 档。现在一律现算 `edu_gate`。
+        gate = edu_gate(cand, jd or {})
+        model_tier = None if gate.get("failed") else resolve_tier(cand, jd, fit)
+        final_tier, tier_src = lock_tier(None, model_tier, gate)
+        _risks = [x for x in (fit.get("risks") or []) if x][:4]
+        if gate.get("failed"):
+            # 说清是谁定的档：HR 看到 D 时要知道这是硬门槛结论、不可被模型改写
+            _risks = [f"学历{gate['edu']}低于岗位要求（{gate['edu_min']}），"
+                      f"已由系统直接判 D（不采用模型建议）"] + _risks
         return {
             "summary": (fit.get("summary") or "").strip(),
             "reasons": [x for x in (fit.get("highlights") or []) if x][:4],
-            "risks": [x for x in (fit.get("risks") or []) if x][:4],
+            "risks": _risks,
             "evidence": evidence,
             "source": "auto_ingest",
             "model": llm.load_cfg().get("model") or "",
             "suggested_tier": final_tier,
+            "tier_source": tier_src,
+            "edu_gate": gate,
             "confidence": fit.get("confidence"),
             "business_direction": str(fit.get("business_direction") or "").strip() or None,
         }
@@ -414,6 +426,8 @@ def auto_insight(cand: dict, jd: dict | None, grade_result: dict | None = None) 
         "source": "rule_fallback",
         "model": "",
         "suggested_tier": g.get("tier_suggested"),
+        "tier_source": "学历门槛" if g.get("tier_suggested") == "D" else "规则",
+        "edu_gate": edu_gate(cand, jd or {}),
         "confidence": g.get("confidence"),
         "business_direction": None,
     }

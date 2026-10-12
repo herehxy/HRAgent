@@ -29,8 +29,8 @@ import json
 import os
 import re
 import sys
-import queue
 import threading
+import traceback
 from datetime import datetime
 
 from . import db
@@ -43,6 +43,48 @@ from .pipeline.extract import extract, extract_honors
 from .pipeline import subject_meta as subject_meta_mod
 from .pipeline import major_llm as major_llm_mod
 from .pipeline import majors as majors_mod
+from .pipeline import tier as tier_mod
+
+
+# ---- 后台分析进度表（v1.24.9）：进程级共享，server 的 /api/tasks/{id} 从这里读 ----
+# {task_id: {"title","total","done","failed","status","message","started_at"}}
+# 导入后的自动分析在后台线程跑，入库 HTTP 已返回，靠这个表让前端轮询到实时进度。
+_PROGRESS: dict[str, dict] = {}
+_PROGRESS_LOCK = threading.Lock()
+
+
+def register_progress(title: str, total: int) -> str:
+    """登记一个后台任务，返回 task_id（自动分析的进度靠它查询）。"""
+    import uuid
+    tid = uuid.uuid4().hex[:12]
+    with _PROGRESS_LOCK:
+        _PROGRESS[tid] = {"title": title, "total": total, "done": 0,
+                          "failed": 0, "status": "running", "message": "",
+                          "started_at": __import__("time").time()}
+    return tid
+
+
+def update_progress(tid: str, *, done: int | None = None,
+                    failed: int | None = None, status: str | None = None,
+                    message: str | None = None) -> None:
+    with _PROGRESS_LOCK:
+        p = _PROGRESS.get(tid)
+        if not p:
+            return
+        if done is not None:
+            p["done"] = done
+        if failed is not None:
+            p["failed"] = failed
+        if status is not None:
+            p["status"] = status
+        if message is not None:
+            p["message"] = message
+
+
+def get_progress(tid: str) -> dict | None:
+    with _PROGRESS_LOCK:
+        p = _PROGRESS.get(tid)
+        return dict(p) if p else None
 
 
 def _enrich_major(cand: dict, text: str) -> tuple[dict, str]:
@@ -426,7 +468,7 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         # —— 解析（失败不阻断）——
         text, engine, ok = parse_mod.parse_file_ex(archived)
     if not ok:
-        result["notes"].append(f"解析未成功（{engine}），已标『待人工判读』，原件保留")
+        result["notes"].append(f"解析未成功（{engine}），已标『简历读不出』，原件保留")
 
     # 一次带模型的抽取作为**默认结果**（v1.23.3：原来这里抽一次、else 分支又抽一次，
     # 白花一次模型调用；且路由失败时会被规则结果覆盖）。
@@ -481,11 +523,18 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
             result["score"] = g["score"]
 
     if not ok:
-        g["needs_review"] = True
+        # **解析失败**与**信息缺失**是两条线（v1.24.9 拆分）：
+        # 这里是"原文根本读不出来"，走 parse_failed；needs_review 留给
+        # "读出来了但姓名/年限/技能没抽到"。过去两者共用一个字段，
+        # 界面上只能统称"待人工判读"，HR 不知道该补字段还是修文件。
+        g["parse_failed"] = True
         g["risks"] = list(g.get("risks") or []) + ["原文未能解析，需人工查看附件原件"]
     result["name"] = cand.get("name")
     result["tier"] = g["tier_suggested"]
     result["score"] = g["score"]
+    # v1.24.9：详情行也带上parse_failed，上层统计用**字段**判断，
+    # 不再靠匹配 notes 里的文案（文案一改统计就静默归零，这个坑踩过）。
+    result["parse_failed"] = bool(g.get("parse_failed"))
     if route:
         result["suggested_job"] = {"job_id": route["id"] if route["usable"] else None,
                                    "title": route["title"],
@@ -690,23 +739,38 @@ def _hr_edited_fields(conn, cid: int) -> set[str]:
 
 
 def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id: int, *,
-                   use_llm: bool = True, llm_conf: dict | None = None) -> dict:
+                   use_llm: bool = True, llm_conf: dict | None = None,
+                   wlock: threading.RLock | None = None) -> dict:
     """把一份已有档案按当前配置**完整重跑**一遍（不产生新投递）。
 
     返回 {ok, steps[], changes{}, kept_hr[], error?}，供界面如实展示每一步做了什么。
+
+    `wlock`（v1.24.8）：批量重跑并发时传入共享连接的写锁。这里各处写入分散，
+    逐段加锁改动大且易漏；改为用一把 RLock 把每个**写段**包住，读与模型调用
+    仍不持锁。不传就是单线程用法，行为不变。
     """
+    lk = wlock or threading.RLock()
     from .pipeline import parse as parse_mod
     from .pipeline.tier import grade
 
     steps: list[str] = []
-    d = db.candidate_detail(conn, candidate_id)
-    if not d:
-        return {"ok": False, "error": "未找到该候选人"}
-
-    docs = d.get("documents") or []
-    apps = d.get("applications") or []
-    app_row = apps[0] if apps else {}
-    app_id = app_row.get("id") or 0
+    # ----读也必须持锁（v1.24.8 补）----
+    # 踩过的坑：最初只给"写段"加锁，读段留在锁外，结果并发照样炸
+    # `sqlite3.InterfaceError: bad parameter or other API misuse`，
+    # 堆栈落在 db.candidate_detail 里的 conn.execute(...).fetchall()。
+    #
+    # 为什么读也要锁：**共享的是同一条连接**，而 Connection 上的游标是
+    # 连接级共享状态——多个线程各自 execute 后交替 fetch，sqlite3 判定为
+    # API 误用。**这跟事务隔离无关，是连接对象的线程安全问题。**
+    # 注意：这不损失并发——读段是毫秒级查询，耗时的模型调用在锁外。
+    with lk:
+        d = db.candidate_detail(conn, candidate_id)
+        if not d:
+            return {"ok": False, "error": "未找到该候选人"}
+        docs = d.get("documents") or []
+        apps = d.get("applications") or []
+        app_row = apps[0] if apps else {}
+        app_id = app_row.get("id") or 0
 
     # ---- ① 找到磁盘上的原件并重新解析 ----
     doc = None
@@ -730,7 +794,8 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
     steps.append(f"重新解析原件（{engine}，{len(text)} 字）")
 
     # ---- ② 归岗口径：已归岗沿用该岗位（不擅自换岗），未归岗才问模型 ----
-    jd_used, job_meta = db.resolve_candidate_job(conn, d)
+    with lk:                                    # 读段持锁（同上：共享连接必须）
+        jd_used, job_meta = db.resolve_candidate_job(conn, d)
     route = None
     if not jd_used:
         route = _route_by_open_jobs(conn, text, jd_default, filename=doc.get("file_name"),
@@ -770,7 +835,8 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
         upd[k] = v
         changes[k] = [cur, v]
     if upd:
-        db.update_candidate(conn, candidate_id, **upd)
+        with lk:                                # 写段持锁（v1.24.8）
+            db.update_candidate(conn, candidate_id, **upd)
         steps.append("更新字段：" + "、".join(f"{k}" for k in upd))
     if kept_hr:
         steps.append("保留人工更正：" + "、".join(kept_hr))
@@ -778,50 +844,54 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
     # ---- ⑤ 重挂技能（新抽取到技能才重建，避免模型挂了把旧技能清空）----
     sk = cand.get("skill_detail") or []
     if sk:
-        conn.execute("DELETE FROM candidate_skills WHERE candidate_id=?", (candidate_id,))
-        persist_skills(conn, candidate_id, cand, doc.get("id"))
-        conn.commit()
+        with lk:                                # 写段持锁（v1.24.8）
+            conn.execute("DELETE FROM candidate_skills WHERE candidate_id=?", (candidate_id,))
+            persist_skills(conn, candidate_id, cand, doc.get("id"))
+            conn.commit()
         steps.append(f"重建技能：{len(sk)} 项（含未核验）")
 
     # ---- ⑥ 重判档（只写建议档，绝不动 HR 定档与阶段）----
     g = grade(cand, jd_used, job_confirmed=bool(app_row.get("job_id")))
     if app_id:
-        conn.execute(
-            """UPDATE applications SET score=?, tier_suggested=?, extract_mode=?,
-                   reasons=?, risks=?, hits=?, miss=?, preferred_hit=?, breakdown=?,
-                   suggested_job_id=COALESCE(?, suggested_job_id),
-                   suggested_job_reason=COALESCE(?, suggested_job_reason),
-                   updated_at=? WHERE id=?""",
-            (g.get("score"), g.get("tier_suggested"), cand.get("extract_mode"),
-             json.dumps(g.get("reasons") or [], ensure_ascii=False),
-             json.dumps(g.get("risks") or [], ensure_ascii=False),
-             json.dumps(g.get("hit") or [], ensure_ascii=False),
-             json.dumps(g.get("miss") or [], ensure_ascii=False),
-             json.dumps(g.get("preferred_hit") or [], ensure_ascii=False),
-             json.dumps(g.get("breakdown") or [], ensure_ascii=False),
-             (route.get("id") if (route and route.get("usable")) else None),
-             (route.get("why") if route else None),
-             db.now(), app_id))
-        conn.commit()
+        with lk:                                # 写段持锁（v1.24.8）
+            conn.execute(
+                """UPDATE applications SET score=?, tier_suggested=?, extract_mode=?,
+                       reasons=?, risks=?, hits=?, miss=?, preferred_hit=?, breakdown=?,
+                       suggested_job_id=COALESCE(?, suggested_job_id),
+                       suggested_job_reason=COALESCE(?, suggested_job_reason),
+                       updated_at=? WHERE id=?""",
+                (g.get("score"), g.get("tier_suggested"), cand.get("extract_mode"),
+                 json.dumps(g.get("reasons") or [], ensure_ascii=False),
+                 json.dumps(g.get("risks") or [], ensure_ascii=False),
+                 json.dumps(g.get("hit") or [], ensure_ascii=False),
+                 json.dumps(g.get("miss") or [], ensure_ascii=False),
+                 json.dumps(g.get("preferred_hit") or [], ensure_ascii=False),
+                 json.dumps(g.get("breakdown") or [], ensure_ascii=False),
+                 (route.get("id") if (route and route.get("usable")) else None),
+                 (route.get("why") if route else None),
+                 db.now(), app_id))
+            conn.commit()
         steps.append(f"重算建议档：{g.get('tier_suggested') or '—'}")
 
     # ---- ⑦ 附件台账补清洗记录与解析引擎 ----
     if doc:
-        conn.execute("UPDATE documents SET sensitive_found=?, parse_engine=?, "
-                     "parse_ok=1, raw_text=?, text_len=? WHERE id=?",
-                     (json.dumps(cand.get("sensitive_found") or {}, ensure_ascii=False),
-                      engine, text, len(text), doc.get("id")))
-        conn.commit()
+        with lk:                                # 写段持锁（v1.24.8）
+            conn.execute("UPDATE documents SET sensitive_found=?, parse_engine=?, "
+                         "parse_ok=1, raw_text=?, text_len=? WHERE id=?",
+                         (json.dumps(cand.get("sensitive_found") or {}, ensure_ascii=False),
+                          engine, text, len(text), doc.get("id")))
+            conn.commit()
 
     # ---- ⑧ 重算分析结论（画像 + 建议档同步）----
-    analyze_one(conn, candidate_id, app_id, source="manual_reanalyze")
+    analyze_one(conn, candidate_id, app_id, source="manual_reanalyze", wlock=lk)
     steps.append("重算系统自动分析")
 
-    db.add_audit(conn, "candidate", str(candidate_id), "reanalyze_full",
-                 "；".join(f"{k}={'（空）' if v[0] in (None, '') else v[0]}"
-                           for k, v in changes.items()) or "（字段无变化）",
-                 "；".join(f"{k}={v[1]}" for k, v in changes.items()) or "（字段无变化）",
-                 "hr", "hr")
+    with lk:                                    # 审计也是写，v1.24.8
+        db.add_audit(conn, "candidate", str(candidate_id), "reanalyze_full",
+                     "；".join(f"{k}={'（空）' if v[0] in (None, '') else v[0]}"
+                               for k, v in changes.items()) or "（字段无变化）",
+                     "；".join(f"{k}={v[1]}" for k, v in changes.items()) or "（字段无变化）",
+                     "hr", "hr")
     return {"ok": True, "steps": steps, "changes": changes, "kept_hr": kept_hr,
             "extract_mode": cand.get("extract_mode"),
             "tier_suggested": g.get("tier_suggested"), "job": job_meta}
@@ -902,7 +972,9 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
                         mm += 1
                     else:
                         skipped += 1
-                    if any("待人工判读" in n for n in r["notes"]):
+                    # 判"解析失败"用 parse_failed 字段，不靠匹配 notes 文案——
+                    # v1.24.9 文案改成「简历读不出」后，按字符串匹配会静默失效。
+                    if r.get("parse_failed"):
                         pf += 1
                     report["details"].append(r)
                 except Exception as exc:  # 单份附件失败不影响整批
@@ -987,7 +1059,8 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
                                subject_meta=fmeta)
                 report[{"added": "added", "merged_version": "merged_versions",
                         "skipped_dup": "skipped_dup"}.get(r["status"], "failed")] += 1
-                if any("待人工判读" in n for n in r["notes"]):
+                # 同上：用字段判断，不匹配文案
+                if r.get("parse_failed"):
                     report["parse_failed"] += 1
                 report["details"].append(r)
             except Exception as exc:
@@ -1019,9 +1092,24 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
     report = ingest_mails(mails, cfg, jd, tiers, db_path, job_id, use_llm, llm_conf)
     report["mode"] = cfg.get("mode")
     if cfg.get("mode") == "imap" and new_cursor:
-        conn = db.connect(db_path)
-        db.set_email_cursor(conn, (cfg.get("imap") or {}).get("folder", "INBOX"), new_cursor)
-        conn.close()
+        # 游标只是"上次收到哪"的备忘，**写不进去不该让整条收取报错**：
+        # 邮件此刻已经收到并入库了，让 HR 看到 500 反而以为白跑了。
+        # v1.24.11：实测在"目录刚复制完、进程刚启动"的瞬间，
+        # SQLite 还在建 WAL 文件，这里会抛 attempt to write a readonly database，
+        # 导致整个收取在界面上变成失败。
+        # 写失败的最坏后果只是下次重新扫一遍这批邮件（入库侧按内容去重），
+        # 所以降级为警告即可。真要让 HR 知道，报告里带上 cursor_saved=False。
+        try:
+            conn = db.connect(db_path)
+            try:
+                db.set_email_cursor(conn, (cfg.get("imap") or {}).get("folder", "INBOX"),
+                                    new_cursor)
+            finally:
+                conn.close()
+        except Exception as exc:
+            report["cursor_saved"] = False
+            report["cursor_error"] = str(exc)
+            print(f"[ingest] 邮件游标写入失败（不影响本次收取结果）：{exc}")
     return report
 
 
@@ -1044,7 +1132,8 @@ def _insight_targets(report: dict) -> list[dict]:
 
 
 def analyze_one(conn, candidate_id: int, application_id: int,
-                source: str = "auto_ingest") -> dict | None:
+                source: str = "auto_ingest",
+                wlock: threading.RLock | None = None) -> dict | None:
     """给一位候选人跑一次分析并落库，返回落库的 insight（失败返回 None）。
 
     **自动与手动共用这一份逻辑**（v1.13.4）："入库即分析"开关关掉后，HR 手动批量
@@ -1052,38 +1141,71 @@ def analyze_one(conn, candidate_id: int, application_id: int,
     "自动分析的"口径不一致，那比没有开关更糟。
     分析只写 `candidate_insights` 与「系统建议档位」，**不动 HR 已确认的档位、
     不动阶段、不动岗位**。
+
+    `wlock`（v1.24.8）：并发分析时传入共享连接的写锁。**只在落库那一小段加锁**，
+    读与模型调用都不持锁——并发收益 99.98% 来自"并行等模型"，不要自己掐掉。
+    不传 wlock 就是单线程用法（手动触发、单元测试），行为不变。
     """
     from .pipeline.analyze import auto_insight     # 延迟导入，避免模块环
-    cand = db.candidate_detail(conn, candidate_id)
-    if not cand:
-        return None
-    apps = cand.get("applications") or []
-    app_row = next((a for a in apps if a.get("id") == application_id),
-                   apps[0] if apps else {})
-    # 未归岗时 jd 为 None —— 不硬套默认尺子，但仍产出简历画像
-    jd, _meta = db.resolve_candidate_job(conn, cand)
+    lk = wlock or threading.RLock()
+    with lk:
+        cand = db.candidate_detail(conn, candidate_id)
+        if not cand:
+            return None
+        apps = cand.get("applications") or []
+        app_row = next((a for a in apps if a.get("id") == application_id),
+                       apps[0] if apps else {})
+        # 未归岗时 jd 为 None —— 不硬套默认尺子，但仍产出简历画像
+        jd, _meta = db.resolve_candidate_job(conn, cand)
+        # 读完收一次事务，别把只读事务带进后面的网络等待
+        try:
+            conn.commit()
+        except Exception:                 # noqa: BLE001 — 兜底即可
+            pass
+
+    # ↓ 这一段**不持锁**：耗时 6~15 秒的网络调用，并发全靠它
     ins = auto_insight(cand, jd, app_row)
     if not ins:
         return None
-    db.upsert_insight(conn, candidate_id, application_id,
-                      summary=ins.get("summary") or "",
-                      reasons=ins.get("reasons"),
-                      risks=ins.get("risks"),
-                      evidence=ins.get("evidence"),
-                      source=ins.get("source") or source,
-                      model=ins.get("model") or "",
-                      business_direction=ins.get("business_direction"))
-    # 模型建议档位 → 更新 tier_suggested（HR 未确认时才更新）
-    mt = ins.get("suggested_tier")
-    if mt and mt in ("A", "B", "C", "D") and application_id:
-        ar = conn.execute("SELECT tier_suggested, tier_final FROM applications WHERE id=?",
-                          (application_id,)).fetchone()
-        if ar and not ar["tier_final"] and ar["tier_suggested"] != mt:
-            conn.execute("UPDATE applications SET tier_suggested=?, updated_at=? WHERE id=?",
-                         (mt, db.now(), application_id))
-            conn.commit()
-            print(f"[analyze] 候选人#{candidate_id} 档位 {ar['tier_suggested']} → {mt}（模型）",
-                  file=sys.stderr)
+
+    # 落库：只包住写操作，串行化的成本约 1.7ms，可忽略
+    with lk:
+        db.upsert_insight(conn, candidate_id, application_id,
+                          summary=ins.get("summary") or "",
+                          reasons=ins.get("reasons"),
+                          risks=ins.get("risks"),
+                          evidence=ins.get("evidence"),
+                          source=ins.get("source") or source,
+                          model=ins.get("model") or "",
+                          business_direction=ins.get("business_direction"))
+        # 模型建议档位 → 更新 tier_suggested（HR 未确认时才更新）
+        mt = ins.get("suggested_tier")
+        if mt and mt in ("A", "B", "C", "D") and application_id:
+            ar = conn.execute(
+                "SELECT tier_suggested, tier_final FROM applications WHERE id=?",
+                (application_id,)).fetchone()
+            # v1.24.15：这里曾经只有"HR 未确认"一个条件，而注释写着「D 不覆盖」——
+            # 代码根本没实现。学历不够的人若因未归岗被存成 C，模型就能改成 A。
+            # 现在由 auto_insight 产出的 `edu_gate` 现算裁决，
+            # 并且**只有学历门槛判出的 D 才冻结**——模型自己判的 D
+            # （学历达标但业务方向不对口）在后续分析里仍可改写，
+            # 否则会把正常的重判一并锁死。
+            gate = ins.get("edu_gate") or tier_mod.edu_gate(cand, jd or {})
+            _edu_locked = bool(gate.get("failed"))
+            _t, _src = tier_mod.lock_tier(mt if _edu_locked else None,
+                                          None if _edu_locked else mt, gate)
+            if _t != mt:
+                print(f"[analyze] 候选人#{candidate_id} 模型建议 {mt} 档被学历门槛否决"
+                      f"（{gate.get('edu')}<{gate.get('edu_min')}），保留 {_t}", file=sys.stderr)
+                mt = _t
+            if ar and not ar["tier_final"] and ar["tier_suggested"] != mt \
+                    and not (_edu_locked and ar["tier_suggested"] == "D" and mt != "D"):
+                conn.execute(
+                    "UPDATE applications SET tier_suggested=?, updated_at=? WHERE id=?",
+                    (mt, db.now(), application_id))
+                conn.commit()
+                print(f"[analyze] 候选人#{candidate_id} 档位 "
+                      f"{ar['tier_suggested']} → {mt}（{_src}）", file=sys.stderr)
     return ins
 
 
@@ -1129,54 +1251,62 @@ def spawn_auto_analysis(db_path: str, report: dict, limit: int = 0) -> int:
     if not targets:
         return 0
 
-    # 并发路数：模型调用是网络等待型，串行纯属浪费。
-    # 6 路是保守起点（百炼端点对并发有限额；调大前先确认配额）。
-    try:
-        workers = max(1, min(16, int(os.environ.get("TP_ANALYZE_CONCURRENCY", "6"))))
-    except ValueError:
-        workers = 6
-
-    def _work() -> None:
-        # 每个线程必须用自己的 sqlite 连接（连接不能跨线程复用）
-        q: "queue.Queue" = queue.Queue()
-        for t in targets:
-            q.put(t)
-        lock = threading.Lock()
+    def _work(tid: str) -> None:
+        # **串行，每人一条自己的连接**（v1.24.8 定案，与批量重跑一致）。
+        # 进度（v1.24.9）：每完成一人就 update_progress，前端轮询画进度条。
+        #
+        # 为什么放弃并发——两种方案都试过，都不稳：
+        #   ① 每个线程各自 db.connect() → 间歇 `attempt to write a readonly database`
+        #      （Windows 上多连接并发写同一 WAL 库，文件锁判定不稳）
+        #   ② 共享一条连接 + RLock → 写段稳了，但读段/游标仍触发
+        #      `InterfaceError: bad parameter or other API misuse`
+        #      （Connection 的游标是连接级共享状态，多线程交替 fetch 即误用）
+        #
+        # 串行的代价：N 份简历的模型调用排队，N×6~15 秒。
+        # 入库分析本来就是后台跑（HTTP 立即返回"已入队"），HR 不等它，
+        # 所以这个代价**落在后台、不挡界面**，比偶发失败划算得多。
+        #
+        # 以后要提速，正确方向是**多进程**（进程间不共享连接状态），
+        # 而不是多线程共享一条连接。
         done = {"ok": 0, "fail": 0}
-
-        def worker() -> None:
-            conn = db.connect(db_path)
-            try:
-                while True:
-                    try:
-                        t = q.get_nowait()
-                    except queue.Empty:
-                        return
-                    try:
-                        analyze_one(conn, t["candidate_id"], t["application_id"],
-                                    source="auto_ingest")
-                        with lock:
-                            done["ok"] += 1
-                    except Exception as exc:           # noqa: BLE001 — 单条失败不扩散
-                        with lock:
-                            done["fail"] += 1
-                        print(f"[auto_insight] 候选人#{t['candidate_id']} 分析失败："
-                              f"{type(exc).__name__}: {exc}", file=sys.stderr)
-                    finally:
-                        q.task_done()
-            finally:
-                conn.close()
-
-        threads = [threading.Thread(target=worker, name=f"auto-insight-{i}", daemon=True)
-                   for i in range(min(workers, len(targets)))]
-        for th in threads:
-            th.start()
-        for th in threads:
-            th.join()
+        try:
+            for t in targets:
+                conn = None
+                try:
+                    conn = db.connect(db_path)
+                    analyze_one(conn, t["candidate_id"], t["application_id"],
+                                source="auto_ingest")
+                    done["ok"] += 1
+                except Exception as exc:               # noqa: BLE001 — 单条失败不扩散
+                    done["fail"] += 1
+                    print(f"[auto_insight] 候选人#{t['candidate_id']} 分析失败："
+                          f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                    traceback.print_exc()             # 堆栈落盘，便于定位
+                finally:
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except Exception:             # noqa: BLE001
+                            pass
+                update_progress(tid, done=done["ok"] + done["fail"],
+                                failed=done["fail"])
+        finally:
+            update_progress(tid, status="done",
+                            message=(f"成功 {done['ok']} 人"
+                                     + (f"，失败 {done['fail']} 人"
+                                        if done["fail"] else "")))
         print(f"[auto_insight] 完成 {done['ok']} 条，失败 {done['fail']} 条"
-              f"（{workers} 路并发）", file=sys.stderr)
+              f"（串行）", file=sys.stderr)
 
-    threading.Thread(target=_work, name="auto-insight", daemon=True).start()
+    # 登记进度任务，task_id 写进 report，前端轮询 /api/tasks/{task_id}（v1.24.9）
+    tid = register_progress("入库后自动分析", len(targets))
+    report["insight_task_id"] = tid
+
+    # 后台异步跑，不阻断入库结果返回（HR 看到的"新增 N"是真的新增）
+    threading.Thread(target=_work, name="auto-insight", daemon=True,
+                     args=(tid,)).start()
+
     report["insight_queued"] = len(targets)
-    report["insight_concurrency"] = min(workers, len(targets))
+    # 串行（v1.24.8）：保留该字段只为兼容前端进度显示，值固定为 1。
+    report["insight_concurrency"] = 1
     return len(targets)

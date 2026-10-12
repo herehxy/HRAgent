@@ -53,10 +53,12 @@ import shutil
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 import uuid
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+# 注：v1.24.8 起批量分析全部改串行，已不再使用 ThreadPoolExecutor，
+# 故此处不再 import —— 留着会让人以为"还能开并发"。
 from datetime import datetime
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request, Query
@@ -78,6 +80,7 @@ from .pipeline import normalize as nz
 from .pipeline import parse as parse_mod
 from .pipeline import freshness
 from .pipeline import sanitize
+from .pipeline import tier as tier_mod
 from .pipeline.analyze import analyze_fit, draft_interview
 from .ui import render_page, ui_build
 
@@ -85,17 +88,107 @@ from .ui import render_page, ui_build
 #: 开发/测试时用它把源码版指向已安装目录（_internal/），
 #: 这样源码跑起来用的是同一套 data/ 与 config/，测的就是真实数据。
 from .paths import BASE      # 根目录唯一来源（认 TP_HOME）
+from .paths import DATA_DIR  # 数据目录（认 TP_DATA_DIR，可能不在 BASE 下）
 # 允许用 TP_DB_PATH 指向另一个库：演练、验收、接口实测时不必动真实人才库
-DB_PATH = os.environ.get("TP_DB_PATH") or os.path.join(BASE, "data", "workbench.db")
+DB_PATH = os.environ.get("TP_DB_PATH") or os.path.join(DATA_DIR, "workbench.db")
 JD_PATH = os.path.join(BASE, "config", "jd.json")
 TIERS_PATH = os.path.join(BASE, "config", "tiers.json")
-RESUME_DIR = os.path.join(BASE, "data", "resumes")
+RESUME_DIR = os.path.join(DATA_DIR, "resumes")
 # 回收目录：界面上"删除来源文件"只是**移入这里**，随时可恢复。
 # 刻意与 data/archive（原件区，只增不改）分开——两个目录的不变式完全不同，
 # 混在一起会让"原件区只增不改"这条红线变得无法核验。
-REMOVED_DIR = os.path.join(BASE, "data", "removed")
+REMOVED_DIR = os.path.join(DATA_DIR, "removed")
+
+
+def _rel_or_abs(path: str) -> str:
+    """相对 BASE 表示路径；跨盘或带一堆 .. 时改给绝对路径。"""
+    try:
+        rel = os.path.relpath(path, BASE)
+    except ValueError:            # 跨盘符（relpath 直接抛 ValueError）
+        return path
+    return path if rel.startswith("..") else rel
+
+
+def _abs_stored(rel: str) -> str:
+    """把库里存的路径还原成绝对路径。
+
+    库里的路径有两种形态并存（老数据是 `data/archive/xxx` 这样的相对路径，
+    新写入的可能是绝对路径）。相对路径里 `data/` 开头的要走 DATA_DIR ——
+    数据目录被挪走（TP_DATA_DIR）后，按 BASE 拼就会指回只读的包内目录，
+    于是"文件明明在那儿却读不到"。其余相对路径仍按 BASE 拼，行为不变。
+    """
+    if not rel or os.path.isabs(rel):
+        return rel
+    if rel.replace("\\", "/").startswith("data/"):
+        return os.path.join(DATA_DIR, rel[5:].replace("/", os.sep))
+    return os.path.join(BASE, rel)
 
 app = FastAPI(title="企业人才库智能体", version="1.7.0")
+
+
+# ---- 后台任务进度（v1.24.9）：导入/分析这类耗时操作，前端轮询这里拿实时进度 ----
+# 进程内内存表：{task_id: {"title","total","done","failed","status","message"}}
+# status: running | done | error。分析线程每完成一人就更新 done/failed，
+# 前端 `/api/tasks/{task_id}` 轮询，弹窗里画进度条。
+_PROGRESS: dict[str, dict] = {}
+_PROGRESS_LOCK = threading.Lock()
+
+
+def _progress_new(title: str, total: int) -> str:
+    """开一个新任务，返回 task_id。"""
+    tid = uuid.uuid4().hex[:12]
+    with _PROGRESS_LOCK:
+        _PROGRESS[tid] = {"title": title, "total": total, "done": 0,
+                          "failed": 0, "status": "running", "message": "",
+                          "started_at": _time.time()}
+    return tid
+
+
+def _progress_set(tid: str, *, done: int | None = None,
+                  failed: int | None = None, status: str | None = None,
+                  message: str | None = None) -> None:
+    """更新任务进度（缺省字段不动）。"""
+    with _PROGRESS_LOCK:
+        p = _PROGRESS.get(tid)
+        if not p:
+            return
+        if done is not None:
+            p["done"] = done
+        if failed is not None:
+            p["failed"] = failed
+        if status is not None:
+            p["status"] = status
+        if message is not None:
+            p["message"] = message
+
+
+@app.get("/api/tasks/{task_id}")
+def api_task_progress(task_id: str,
+                      x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                      x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """查后台任务进度。前端轮询（每 1~2 秒一次）画进度条。
+
+    返回 {ok, task_id, title, total, done, failed, status, message, percent}。
+    status：running=进行中；done=全部完成；error=中断出错。
+
+    有两张进度表：server 模块级（批量重跑/手动分析）与 ingest 模块级
+    （入库后自动分析，后台线程跑的）。这里两张都查。
+    """
+    _session(x_tp_token, x_tp_role)
+    with _PROGRESS_LOCK:
+        p = _PROGRESS.get(task_id)
+    if not p:
+        # 自动分析的任务登记在 ingest 模块的进度表里
+        p = ingest_mod.get_progress(task_id) if hasattr(ingest_mod, "get_progress") else None
+    if not p:
+        return {"ok": False, "task_id": task_id, "error": "任务不存在或已过期"}
+    total = p.get("total") or 0
+    done = p.get("done") or 0
+    percent = int(done / total * 100) if total else 100
+    return {"ok": True, "task_id": task_id, "title": p.get("title"),
+            "total": total, "done": done, "failed": p.get("failed") or 0,
+            "status": p.get("status"), "message": p.get("message"),
+            "percent": max(0, min(100, percent))}
 
 
 def _load(path: str) -> dict:
@@ -260,16 +353,17 @@ def api_meta(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                         "max_attachment_mb": cfg.get("max_attachment_mb", 20),
                         "same_job_reapply_days": (cfg.get("dedup") or {}).get("same_job_reapply_days")},
             "settings": _settings(conn),
-            # 数据存放（「系统说明」页展示）：相对应用目录，换机器部署口径不变
+            # 数据存放（「系统说明」页展示）：尽量给相对路径，换机器部署口径不变；
+            # 但数据目录被挪走时（TP_DATA_DIR，见 app/paths.py）相对 BASE 会得到
+            # 一串 ../..，那对用户毫无意义，所以这种情况直接展示绝对路径。
             "storage": {
                 "base": os.path.basename(BASE),
-                "db": os.path.relpath(DB_PATH, BASE),
-                "archive_dir": os.path.relpath(
-                    os.path.join(BASE, "data", "archive"), BASE),
-                "resume_dir": os.path.relpath(RESUME_DIR, BASE),
-                "removed_dir": os.path.relpath(REMOVED_DIR, BASE),
-                "mail_dir": os.path.relpath(os.path.join(BASE, "data", "mail_in"), BASE),
-                "backup_dir": os.path.relpath(os.path.join(BASE, "data", "backup"), BASE),
+                "db": _rel_or_abs(DB_PATH),
+                "archive_dir": _rel_or_abs(os.path.join(DATA_DIR, "archive")),
+                "resume_dir": _rel_or_abs(RESUME_DIR),
+                "removed_dir": _rel_or_abs(REMOVED_DIR),
+                "mail_dir": _rel_or_abs(os.path.join(DATA_DIR, "mail_in")),
+                "backup_dir": _rel_or_abs(os.path.join(DATA_DIR, "backup")),
                 "config_dir": "config",
             },
             "model": llm.status(),
@@ -331,7 +425,7 @@ async def api_upload(request: Request, name: str = Query(...),
     body = await request.body()
     if not body:
         raise HTTPException(status_code=400, detail="文件是空的")
-    inbox = _os.path.join(BASE, "data", "inbox")
+    inbox = _os.path.join(DATA_DIR, "inbox")
     _os.makedirs(inbox, exist_ok=True)
     # 文件名只留 basename，去掉路径分隔符（防目录穿越）
     safe = _os.path.basename(name or "resume").strip() or "resume"
@@ -852,17 +946,33 @@ def api_candidate_reanalyze(cid: int, full: bool = True, req: dict | None = None
         # 模型建议档位 → 更新 tier_suggested（HR 未确认时才更新；D 不覆盖）
         _mt = ins.get("suggested_tier")
         if _mt and _mt in ("A", "B", "C", "D") and app_id:
+            # v1.24.15：注释早就写着「D 不覆盖」，但代码从没实现过这个条件——
+            # 学历不够的人被存成 C 时，模型可以合法改成 A/B。这里补上，
+            # 裁决统一走 `tier.lock_tier`（与入库自动分析、岗位重判同一把尺子）。
+            _gate = ins.get("edu_gate") or tier_mod.edu_gate(d, jd or {})
+            _mt, _src = tier_mod.lock_tier(None, _mt, _gate)
             _ar = conn.execute("SELECT tier_suggested, tier_final FROM applications WHERE id=?",
                                (app_id,)).fetchone()
-            if _ar and not _ar["tier_final"] and _ar["tier_suggested"] != _mt:
+            # 只有**学历门槛判出的 D** 才冻结。模型自己判的 D（如业务方向不对口）
+            # 在学历达标时仍可被后续分析改写——把两类 D 一律冻死会锁死正常的重判。
+            _edu_locked = bool(_gate.get("failed"))
+            if _ar and not _ar["tier_final"] and _ar["tier_suggested"] != _mt \
+                    and not (_edu_locked and _ar["tier_suggested"] == "D" and _mt != "D"):
                 conn.execute("UPDATE applications SET tier_suggested=?, updated_at=? WHERE id=?",
                              (_mt, db.now(), app_id))
                 conn.commit()
+                _tier_note = f"（{_src}）"
+            else:
+                _tier_note = ""
+        else:
+            _tier_note = ""
         db.add_audit(conn, "candidate", str(cid), "reanalyze", "",
                      f"{s['username']} 重跑自动分析（{ins.get('source')}）",
                      s["username"], s["role"])
         return {"ok": True, "job": job_meta, "insight": db.get_insight(conn, cid, app_id),
-                "note": "分析已更新。模型建议档位已同步到建议档（HR 未确认的）；阶段与岗位不受影响。"}
+                "note": "分析已更新。模型建议档位已同步到建议档（HR 未确认的）"
+                        f"{_tier_note}；学历不达标的直接判 D、不采用模型建议；"
+                        "阶段与岗位不受影响。"}
     finally:
         conn.close()
 
@@ -1163,9 +1273,10 @@ def api_reanalyze_batch(req: ReanalyzeBatchReq,
 
     为什么分批而不是一次全跑：每人 6-15 秒（两次模型调用），
     100 人就是十几分钟——一次 HTTP 调用扛不住，前端也看不到进度。
-    分批 + 循环 + 并发，跟「分析待分析的人」是同一套交互口径。
+    分批 + 循环，跟「分析待分析的人」是同一套交互口径。
 
-    并发：批内用线程池（沿用入库分析那套路数），6 路时 5 个人约 15 秒而非 75 秒。
+    串行（v1.24.8）：每人一条自己的连接，不建线程池。
+    进度（v1.24.9）：每批返回 task_id，前端轮询 /api/tasks/{task_id} 画进度条。
     """
     s = _session(x_tp_token, x_tp_role)
     require(s, "chat")
@@ -1189,28 +1300,59 @@ def api_reanalyze_batch(req: ReanalyzeBatchReq,
                             else "这一批已完成"}
 
         def one(t: dict) -> dict:
-            # 每人一个连接：sqlite 连接不能跨线程复用
-            c2 = db.connect(DB_PATH)
+            # **串行，每人一条自己的连接**（v1.24.8 定案）。
+            #
+            # 为什么最终选串行——并发试过两种方案都不稳：
+            #   ① 每人一个连接 → 间歇 `attempt to write a readonly database`
+            #      （Windows 上多连接并发写同一WAL 库的文件锁判定不稳）
+            #   ② 共享一条连接 + RLock → 修好了写，却冒出
+            #      `InterfaceError: bad parameter or other API misuse`。
+            #      根因：**Connection 上的游标是连接级共享状态**，多线程各自
+            #      execute 后交替 fetch，sqlite3 判定 API 误用。补了读段加锁后
+            #      又出现 `TypeError: 'NoneType' object is not subscriptable`，
+            #      说明这条路上还有别的共享状态没找干净。
+            #
+            # 代价是明确的：10 人从约 14 秒变成约 70 秒。
+            # 对HR 来说，多等 1 分钟换"确定跑完、不偶发失败"是划算的——
+            # 批量任务的价值本来就在"能跑完"。
+            # 真要提速，更稳的路子是**多进程**（各自进程一条连接，
+            # 进程间不共享任何连接状态），而不是多线程共享连接。
+            own = db.connect(DB_PATH)
             try:
-                r = ingest_mod.reanalyze_full(c2, cfg, jd, tiers, t["cid"],
+                r = ingest_mod.reanalyze_full(own, cfg, jd, tiers, t["cid"],
                                               use_llm=True, llm_conf=conf)
                 return {"name": t.get("name"), "ok": bool(r.get("ok")),
                         "error": r.get("error"), "mode": r.get("extract_mode")}
-            except Exception as exc:                          # noqa: BLE001
-                # **必须兜住**：没有这层的话，一个人出错会让 pool.map 抛出、
-                # 整个批量请求 500，而**已经跑完的那些人的结果与进度全部丢失**
-                # （数据其实已写库，但 HR 只看到一个"失败"）。
-                # 批量任务的价值就在于"能跑完"，所以这里记失败、继续下一个。
+            except Exception as exc:                      # noqa: BLE001
+                # **必须兜住**：没有这层的话，一个人出错会让整批中断、
+                # 而**已经跑完的那些人的结果与进度全部丢失**（数据其实已写库，
+                # 但 HR 只看到一个"失败"）。批量任务的价值就在于"能跑完"。
+                #
+                # 堆栈必须打：只给 "TypeError: ..." 的话，**定位不到是哪一行**。
+                # 踩过：光看类型名完全猜不出位置，打了 traceback 才定位到
+                # db.candidate_detail 里的 conn.execute(...).fetchall()。
+                traceback.print_exc()
+                print(f"[reanalyze_batch] {t.get('name')} 失败："
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
                 return {"name": t.get("name"), "ok": False,
                         "error": f"{type(exc).__name__}: {exc}", "mode": None}
             finally:
-                c2.close()
+                try:
+                    own.close()
+                except Exception:                       # noqa: BLE001
+                    pass
 
-        workers = max(1, min(8, int(os.environ.get("TP_ANALYZE_CONCURRENCY", "6"))))
+        # **串行执行**：不建线程池（TP_ANALYZE_CONCURRENCY 在此路径已不再生效）
+        tid = _progress_new("批量重新分析", len(batch))
         results: list[dict] = []
-        with ThreadPoolExecutor(max_workers=min(workers, len(batch))) as pool:
-            for r in pool.map(one, batch):
-                results.append(r)
+        for t in batch:
+            results.append(one(t))
+            _progress_set(tid, done=len(results),
+                          failed=sum(1 for r in results if not r["ok"]))
+        _progress_set(tid, status="done",
+                      message=(f"成功 {sum(1 for r in results if r['ok'])} 人"
+                               + (f"，失败 {len(results) - sum(1 for r in results if r['ok'])} 人"
+                                  if any(not r["ok"] for r in results) else "")))
         ok_n = sum(1 for r in results if r["ok"])
         fail_n = len(results) - ok_n
         left = max(0, len(targets) - len(batch))
@@ -1220,7 +1362,7 @@ def api_reanalyze_batch(req: ReanalyzeBatchReq,
                              "批量完整重跑：" + (r.get("name") or "?"), s["username"], s["role"])
         conn.commit()
         return {"ok": True, "analyzed": ok_n, "failed": fail_n, "remaining": left,
-                "total_hint": len(targets),
+                "total_hint": len(targets), "task_id": tid,
                 "details": [{"name": r.get("name"), "ok": r["ok"],
                              "mode": r.get("mode"), "error": r.get("error")}
                             for r in results],
@@ -1256,6 +1398,9 @@ def api_analyze_pending(req: InsightBatchReq,
         targets = db.candidates_needing_insight(conn, limit=limit)
         done: list[dict] = []
         failed: list[dict] = []
+        # 登记进度任务：这批只是"待分析的人"里的一小批（最多 limit 个），
+        # 但 total 用"这一批实际要跑的人数"，前端拿到 task_id 后轮询画进度。
+        tid = _progress_new("批量分析", len(targets)) if targets else None
         for t in targets:
             try:
                 ins = ingest_mod.analyze_one(conn, t["candidate_id"], t["application_id"],
@@ -1271,6 +1416,13 @@ def api_analyze_pending(req: InsightBatchReq,
                       f"{type(exc).__name__}: {exc}", file=sys.stderr)
                 failed.append({"candidate_id": t["candidate_id"], "name": t.get("name"),
                                "why": type(exc).__name__})
+            if tid:
+                _progress_set(tid, done=len(done) + len(failed),
+                              failed=len(failed))
+        if tid:
+            _progress_set(tid, status="done",
+                          message=(f"成功 {len(done)} 人"
+                                   + (f"，失败 {len(failed)} 人" if failed else "")))
         conn.commit()
         remaining = db.count_needing_insight(conn)
         db.add_audit(conn, "insight", "batch", "analyze_pending",
@@ -1280,6 +1432,7 @@ def api_analyze_pending(req: InsightBatchReq,
         conn.commit()
         return {"ok": True, "analyzed": len(done), "failed": len(failed),
                 "remaining": remaining, "done": done, "errors": failed[:10],
+                "task_id": tid,
                 "note": (f"已分析 {len(done)} 人"
                          + (f"，失败 {len(failed)} 人" if failed else "")
                          + (f"，还剩 {remaining} 人待分析" if remaining else "，全部完成"))}
@@ -1375,7 +1528,7 @@ def _purge_expired(conn=None, actor: str = "system", role: str = "system",
                                       only_ids=only_ids)
         moved, missing = [], []
         for rel in out["files"]:
-            src = rel if os.path.isabs(rel) else os.path.join(BASE, rel)
+            src = _abs_stored(rel)
             if not os.path.exists(src):
                 missing.append(rel)
                 continue
@@ -1432,10 +1585,10 @@ def api_archive_purge_due(x_tp_token: str | None = Header(default=None, alias="X
 def api_candidate_purge(cid: int,
                         x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    """彻底删除**单个**已归档且已满 30 天的人。
+    """彻底删除**单个**已归档的人（v1.24.8：取消 30 天冷静期，当场生效）。
 
-    未满 30 天一律拒绝（409）并说明还剩几天——"删除"必须有一个不可逆的冷静期，
-    否则一次误点就没了；这也是界面上"彻底删除"按钮只在这一天才出现的原因。
+    仍然要求"已归档"——人才库和检索里的人不给这条按钮，得先归档，
+    避免误点直接抹掉在用的人。审计留痕 + 原件移入 data/removed/。
     """
     s = _session(x_tp_token, x_tp_role)
     require(s, "set_stage")
@@ -1445,17 +1598,13 @@ def api_candidate_purge(cid: int,
         info = meta.get(cid)
         if info is None:
             raise HTTPException(status_code=404, detail="未找到该候选人（或该档案未归档）")
-        left = info.get("days_left")
-        if left is None or left > 0:
-            raise HTTPException(status_code=409,
-                                detail=f"归档未满 {info['purge_after_days']} 天（还剩 {left} 天），"
-                                       f"期间可随时取消归档；到期后系统会自动彻底删除")
+        # 不再校验 days_left（v1.24.8 取消冷静期）
         # **只删这个人**（v1.13.6 修：原来这里删的是"所有到期归档的人"）
         out = _purge_expired(conn=conn, actor=s["username"], role=s["role"], only_ids=[cid])
         got = [p for p in out["people"] if p["id"] == cid]
         if not got:
             raise HTTPException(status_code=409,
-                                detail="未删除：归档时间可能被并发改过，或已不在到期名单里。"
+                                detail="未删除：该档案可能已被取消归档或并发改过。"
                                        "请刷新后重试")
         return {"ok": True, "id": cid, "purged": got[0],
                 "files_moved": out["files_moved"],
@@ -1970,8 +2119,7 @@ def api_document_file(did: int, inline: int = 0, token: str | None = None,
     path = d.get("archived_path") or d.get("file_path")
     # 库里 archived_path 两种写法并存（老数据是 data/archive/xxx 这样的相对路径），
     # 相对路径必须按仓库根解析——否则服务换个工作目录启动就取不到原件。
-    if path and not os.path.isabs(path):
-        path = os.path.join(BASE, path)
+    path = _abs_stored(path)
     if not path:
         raise HTTPException(status_code=404, detail="原件未记录路径")
     # 只允许发送本仓库目录下的文件，避免被构造路径读到系统文件。
@@ -2142,8 +2290,7 @@ def api_sources_bundle(req: BundleReq,
                     continue
                 d = dict(row)
                 path = d.get("archived_path") or d.get("file_path") or ""
-                if path and not os.path.isabs(path):
-                    path = os.path.join(BASE, path)
+                path = _abs_stored(path)
                 if not path:
                     skipped.append(f"{d.get('file_name') or did}（未记录路径）")
                     continue
@@ -2225,7 +2372,7 @@ def _docs_referencing(conn, real: str) -> list[dict]:
             raw = (dict(r).get(key) or "").strip()
             if not raw:
                 continue
-            full = raw if os.path.isabs(raw) else os.path.join(BASE, raw)
+            full = _abs_stored(raw)
             if os.path.realpath(full) == real:
                 out.append(dict(r))
                 break

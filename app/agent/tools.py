@@ -91,7 +91,7 @@ TOOL_SPECS = [
                             "description": "候选人 id 或**姓名**（两种都行，系统自动解析）"}},
            ["candidate_id"]),
     _spec("pool_stats",
-          "人才库总览：人数、投递数、各档位分布、各阶段分布、待确认/待人工判读数量。"),
+          "人才库总览：人数、投递数、各档位分布、各阶段分布、待确认/信息缺失数量。"),
     _spec("search_by_skills",
           "按技能精确召回候选人。技能会先归一到本体（如 XRD = X射线衍射）。"
           "这是回答『做过 X 的人有哪些』的首选工具，结果可解释、每条都带原文证据。",
@@ -226,7 +226,9 @@ TOOL_SPECS = [
           {"application_id": {"type": "integer"}, "stage": {"type": "string"},
            "reason": {"type": "string", "description": "变更理由"}}, ["application_id", "stage"]),
     _spec("set_tier",
-          "【需 HR 确认】调整某条投递的档位。本工具只生成待确认提案，不会直接改库。",
+          "【需 HR 确认】调整某条投递的档位。本工具只生成待确认提案，不会直接改库。"
+          "注意：学历低于岗位门槛的投递，系统已直接判 D，"
+          "不要为它提出上调档位的提案——学历是硬门槛，模型判断不能越过。",
           {"application_id": {"type": "integer"}, "tier": {"type": "string", "description": "A/B/C/D"},
            "note": {"type": "string"}}, ["application_id", "tier"]),
     _spec("add_tag",

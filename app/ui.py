@@ -33,32 +33,66 @@ _PAGE = """<!DOCTYPE html>
      刻意违反 Gate 1（display font 不用 system default）：本机只有雅黑/等线、无中文衬线体；
      高密度内部工具里字的可读性优先于"不像 AI"。身份感由色彩与结构承担。*/
   :root{
-    /* 纸与墨。HR 要求「页面不要底色」→ body 纯白，面与面靠**边框**区分，不靠底色 */
-    --paper:#ffffff;        /* 页面底：纯白 */
-    --surface:#ffffff;      /* 卡片/面板：也是白，靠 1px 边框立起来 */
-    --surface-2:#f5f5f4;    /* 次级面（表头、代码块、hover） */
-    --ink:#1c1b19;          /* 主文字 */
-    --ink-2:#4a4844;        /* 次要文字（对白 ≥7:1） */
-    --ink-3:#6b675f;        /* 弱化文字（对白 ≥4.6:1，原来 #86909c 只有 3.5:1 不达标） */
-    --line:#e4e2dd;         /* 分隔线 */
-    --line-2:#d3d0c9;
-    /* 唯一强调色：**天蓝**（HR 定的）。面积控制在 5% 以内（Hallmark Gate 23）——
+    /* === 配色：飞书观感，但色值不照抄飞书官方 ===
+       HR 反馈"太素"，要求参考飞书。飞书的观感来自三件事，**不是**来自某个色号：
+       ① 页面底是浅灰、卡片是纯白，靠**明度差**把卡片"托"起来；
+       ② 主色是饱和的蓝，用在选中/强调/可点；
+       ③ 中性色偏冷（#F5F6F7 / #DEE0E3 这一族），不用暖灰。
+       之前那版是**暖灰纸墨**（#f5f5f4 / #e4e2dd），对比度没问题，但整体偏黄偏闷，
+       加上全靠边框区分面，视觉上"平"。现在换成冷灰，卡片自然就立起来了。
+
+       为什么色值不直接抄飞书：实测飞书官方色**大部分不能用作正文文字**——
+       主蓝 #3370FF 对白只有 4.28、文字弱色 #8F959E 只有 3.02、
+       绿 #34C724 只有 2.25。飞书自己主要把它们用在图形和大字上。
+       我们的界面是高密度内部工具，13~14px 小字遍地，必须守住 4.5。
+       所以：**观感照飞书，色值按我们的可读性底线重新配**，
+       每个值都算过对比度（数字见注释）。 */
+    --paper:#f5f6f7;        /* 页面底：飞书冷灰。卡片靠"比它亮"浮起来 */
+    --surface:#ffffff;      /* 卡片/面板：纯白，与页面底差 1.08，形成明度层次 */
+    --surface-2:#f2f3f5;    /* 次级面（表头、代码块、hover）：比页面底略深一档 */
+    /* 侧栏单独一档，比页面底**明显更深**（1.10）。
+       为什么不能复用 --surface-2：它是 #f2f3f5，与页面底 #f5f6f7 只差 1.03，
+       肉眼看不出区别，侧栏就和内容区糊在一起了。
+       一身兼两职的变量最容易被误用到拿不到层级的地方。 */
+    --surface-nav:#e9ebee;
+    --ink:#1f2329;          /* 主文字（对白 15.78，对页面底 14.58） */
+    --ink-2:#51565d;        /* 次要文字（对白 7.40） */
+    --ink-3:#646a73;        /* 弱化文字（对白 5.45；飞书的 #8F959E 只有 3.02，不可用） */
+    --line:#dee0e3;         /* 分隔线（对白 1.32） */
+    --line-2:#c9cdd4;       /* 强分隔线：需要"看得见边界"时用 */
+    /* 唯一强调色：**飞书蓝**。面积仍然控制在 5% 以内——
        只给「可点 / 当前 / 进行中」，卡片与 chip 一律中性。 */
-    --accent:#3d8fd1;       /* 天蓝：用于边框、选中线、focus */
-    --accent-ink:#16628f;   /* 深天蓝：用于文字（链接/按钮字），对白 ≥5:1 */
-    --accent-soft:#e8f2fb; /* 浅天蓝：按钮底、选中底 */
-    --focus:#16628f;        /* 焦点环 */
-    /* 状态色只用于状态，不做装饰 */
-    --ok:#2c6a45; --warn:#8a5a1b; --bad:#9c3226;
-    --ok-soft:#e7f0e8; --warn-soft:#f7efe0; --bad-soft:#f8e9e5;
-    /* 圆角：统一收敛 */
-    --r-card:6px; --r-ctl:4px; --r-chip:3px;
+    --accent:#3370ff;       /* 主蓝：边框、选中线、图标（对白 4.28，用于图形与大字） */
+    --accent-ink:#1d5fd6;   /* 深蓝：所有**文字**形态（链接、按钮字），对白 5.74 */
+    --accent-soft:#f0f5ff;  /* 浅蓝底：按钮底、选中底 */
+    --accent-line:#ccdcff;  /* 蓝描边：对浅蓝底 1.26 */
+    --accent-hi:#e1ecff;    /* 蓝 hover 底：比 soft 再深一档，hover 要"有反应" */
+    --focus:#1d5fd6;        /* 焦点环 */
+    /* 状态色：同样照飞书观感重新配，每个都满足文字 4.5。
+       -soft 是**底色**，-line 是**描边**，-xxx 是**文字**。
+       描边对底色的对比度定在 **1.15~1.30**：低于 1.1 边界发糊等于没画，
+       高于 1.4 描边会跳到文字前面抢视线。 */
+    --ok:#1f7a3d; --warn:#a85b00; --bad:#c93a2e;
+    --ok-soft:#e8f5eb; --warn-soft:#fff3e0; --bad-soft:#ffefee;
+    --ok-line:#b8dfc4; --warn-line:#f5d5a8; --bad-line:#f5cfcb;
+    /* 档位色：与状态色分开一套，因为表达的**不是**状态。
+       B 档原来直接借用 --accent（主蓝），现在主蓝对白只有 4.28，
+       达不到 4.5（旧的 #3d8fd1 更只有 3.47，是长期遗留的问题）。
+       这里给 B 档一个专属的深青 #146b9e：对白 5.79，
+       且与主蓝（1.35）、A档绿（1.08）都能明显区分，不会混作一档。
+       A 档则**继续复用 --ok 绿**，不给它单独配色：试过 #0e7c4a 一类的深翠绿，
+       和状态绿对比度只有 1.02~1.09，肉眼分不出，两套几乎一样的绿反而更乱。
+       而且 A 档语义就是"最优/推荐"，与状态绿"没问题"本来就同向，共用合理。 */
+    --tier-b:#146b9e; --tier-b-soft:#e8f1f8;
+    /* 圆角：飞书比之前稍圆（卡片 8px / 控件 6px）。
+       微圆角在中文界面里容易显得"像素对齐"，飞书用略圆的角来软化密集信息。 */
+    --r-card:8px; --r-ctl:6px; --r-chip:4px;
   }
 
   /* Gate 34：窄屏不允许横向滚动。clip 而非 hidden——后者会破坏 sticky/fixed */
   html,body{overflow-x:clip}
   *{box-sizing:border-box}
-  body{margin:0;background:var(--surface-2);color:var(--ink);
+  body{margin:0;background:var(--paper);color:var(--ink);
        font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;
        font-size:15px;line-height:1.7}
   /* 大屏适配（v1.7.1）：笔记本（<1600 宽）保持原样；24 寸及以上显示器整体放大，
@@ -69,9 +103,11 @@ _PAGE = """<!DOCTYPE html>
      Chromium 与 Firefox 126+ 都支持。 */
   @media (min-width:1600px){ body{zoom:1.15} }
   @media (min-width:2000px){ body{zoom:1.3} }
-  /* 飞书式布局：左侧固定导航 + 右侧内容区 */
+  /* 侧栏：比内容区**略深**一档的灰（--surface-2）而不是纯白。
+     飞书就是这样分层的——导航区沉一点，内容区浮起来。
+     之前侧栏是纯白、body 也是纯白，两边一样亮，界面就没了纵深。 */
   .layout{display:flex;min-height:100vh;align-items:stretch}
-  .side{width:220px;flex:0 0 220px;background:#fff;border-right:1px solid var(--line);
+  .side{width:220px;flex:0 0 220px;background:var(--surface-nav);border-right:1px solid var(--line);
     padding:20px 12px 14px;position:sticky;top:0;height:100vh;
     display:flex;flex-direction:column;box-sizing:border-box}
   .brand{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;
@@ -83,9 +119,11 @@ _PAGE = """<!DOCTYPE html>
   .navitem{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--r-ctl);
     cursor:pointer;color:var(--ink-2);font-size:14px;margin-bottom:2px;white-space:nowrap}
   .navitem svg{width:17px;height:17px;flex:0 0 auto}
-  .navitem:hover{background:var(--surface-2);color:var(--ink)}
+  /* 侧栏 hover 用**白底**：侧栏自身已经是 --surface-2 灰，再拿同一个灰当 hover
+     等于点了没反应。飞书就是hover 时浮出一块白。 */
+  .navitem:hover{background:var(--surface);color:var(--ink)}
   .navitem.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:500}
-  .sidefoot{font-size:12px;color:var(--ink-3);padding:10px 12px 0;border-top:1px solid var(--surface-2)}
+  .sidefoot{font-size:12px;color:var(--ink-3);padding:10px 12px 0;border-top:1px solid var(--line)}
   .main{flex:1;min-width:0;padding:24px 30px 60px}
   .main-inner{max-width:1240px;margin:0 auto}
   h1{font-size:22px;font-weight:600;margin:0}
@@ -105,30 +143,86 @@ _PAGE = """<!DOCTYPE html>
   [tabindex]:focus-visible,.tab:focus-visible,.navitem:focus-visible{
     outline:2px solid var(--focus);outline-offset:1px}
   button:active{transform:translateY(.5px)}
-  button:hover{color:var(--accent);border-color:#c0d0ff;background:#f5f8ff}
+  button:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-hi)}
   button:disabled{opacity:.5;cursor:not-allowed}
-  /* 主按钮：浅天蓝底 + 深天蓝字。HR 反馈过"深底浅字看不清"（国产字体渲染下更糊），
-     浅底深字在低亮度屏上对比度更稳（WCAG 1A1）。 */
+  /* 主按钮：浅蓝底 + 深蓝字。
+     保留这个做法是因为 HR 反馈过"深底浅字看不清"（国产字体渲染下更糊），
+     实测后定的浅底深字。
+     2026-10-12 配飞书时复算过：实心蓝底白字要把底色压到 #2b5fe0 才够4.5，
+     而那已经是**另一个蓝**了，和作为强调色的 #3370ff 不是同一个值——
+     "主按钮的蓝"和"强调的蓝"一旦不同色，界面会显得不干净。
+     现在深蓝字 #1d5fd6 对浅蓝底 5.25，比实心方案更清楚，且不用引入第二个蓝。 */
   .btn-primary{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink)}
-  .btn-primary:hover{background:#dcecf9;border-color:var(--accent-ink);color:var(--accent-ink)}
+  .btn-primary:hover{background:var(--accent-hi);border-color:var(--accent-ink);color:var(--accent-ink)}
   .btn-ok{background:var(--ok);border-color:var(--ok);color:var(--surface)}
   .btn-ok:hover{background:var(--ok);border-color:var(--ok);color:var(--surface)}
   .btn-danger{background:var(--surface);border-color:var(--line-2);color:var(--bad)}
   .btn-danger:hover{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
   td button{padding:3px 10px;font-size:13px}
-  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:16px 18px;margin-bottom:12px}
-  .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:18px 20px;margin-bottom:14px}
-  .grid-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(124px,1fr));gap:0;margin:18px 0}
-  .stat{padding:10px 14px;border-left:1px solid var(--line)}
-  .stat:first-child{border-left:0;padding-left:2px}
+  /* 候选人卡片：整张卡按档位在**左边**留一条 3px 色条。
+     为什么放左边而不是只靠右上角的徽章：色条是"位置编码"，扫一列卡片时
+     眼睛沿同一条线下来就知道哪几张是 A 档，不需要逐张去读徽章上的字。
+     色条只表达档位这一个维度，宽度恒定 3px——一旦它开始承载第二个信息
+     （比如"是否已确认"），就会退化成又一层需要解码的图形。 */
+  /* 卡片/面板：白底 + **极淡的投影**。
+     这是从"素"到"不素"最关键的一步：光靠 1px 边框，卡片和灰底之间只有
+     明度差，边界是"画"出来的；加一层4%~6% 透明度的投影后，卡片变成
+     "浮"在底上，纵深立刻出来。
+     投影刻意压得很淡（飞书约 0 1px 2px + 0 0 1px rgba(31,35,41,.05)），
+     不要再重——一重就变成拟物，卡片彼此打架，反而更乱。 */
+  .card{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--line-2);
+    border-radius:var(--r-card);padding:16px 18px;margin-bottom:12px;
+    box-shadow:0 1px 2px rgba(31,35,41,.04)}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);
+    padding:18px 20px;margin-bottom:14px;box-shadow:0 1px 2px rgba(31,35,41,.04)}
+
+  /* 统计区（v1.24.14 优化）：原来 10 个数字**视觉权重完全相同**，都是 26px。
+     问题不在难看，而在**没有重点**——HR 进门最该先看的是「待 HR 确认」和「A 档人数」，
+     可它们和「简历附件数」一样大，眼睛不知道从哪看起。
+     现在分两层：**待办层（需要你动手的）用大号数字**，
+     **库存层（背景信息）缩小并弱化**，A/B/C/D 四档收成一条比例条。
+     这不是装饰，是把"该看哪里"写进视觉层级里。 */
+  .grid-stats{margin:18px 0 4px}
+  /* 待办层：三块并排，每块一条竖线分隔，不做成卡片——卡片会让它显得像"另一件事" */
+  .stat-act{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    border-bottom:1px solid var(--line-2);padding-bottom:14px;margin-bottom:14px}
+  .stat-act .stat{padding:4px 16px 4px 0}
+  .stat-act .stat + .stat{border-left:0;padding-left:16px;border-left:1px solid var(--line)}
+  .stat-act .stat .k{font-size:12px;letter-spacing:.02em}
+  .stat-act .stat .v{font-size:34px;font-weight:600;line-height:1.15;
+    font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  /* 为 0 时不该吸引注意——"没有待确认"是好消息，不是警报 */
+  .stat-act .stat.is-zero .v{color:var(--ink-3)!important;font-weight:500}
+  /* 库存层：小而安静，单行密排 */
+  .stat-rest{display:flex;flex-wrap:wrap;gap:0 26px}
+  .stat-rest .stat{padding:2px 0;border-left:0;min-width:64px}
+  .stat-rest .stat .k{font-size:12px;color:var(--ink-3);display:inline}
+  .stat-rest .stat .v{font-size:14px;font-weight:600;margin-left:6px;
+    font-variant-numeric:tabular-nums}
+  .stat{line-height:1.4}
   .stat .k{color:var(--ink-3);font-size:13px}
-  .stat .v{font-size:26px;font-weight:600;margin-top:2px}
+  .stat .v{font-size:26px;font-weight:600;margin-top:2px;
+    font-variant-numeric:tabular-nums}
+  /* 库存层里 A/B/C/D 是档位分布，用四段细条比四个数字更快读出比例 */
+  .tierbar{display:flex;height:4px;width:100%;gap:1px;margin-top:10px;border-radius:2px;overflow:hidden}
+  .tierbar i{display:block;height:100%}
+  .tierbar.is-empty{background:var(--line-2)}
+  .tier-note{font-size:11px;color:var(--ink-3);margin-top:5px}
   .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:16px 0 12px}
   .tab{padding:7px 15px;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--surface);cursor:pointer;font-size:14px;color:var(--ink-2)}
-  .tab:hover{color:var(--accent);border-color:#c0d0ff}
+  .tab:hover{color:var(--accent);border-color:var(--accent-line)}
   .tab.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink);font-weight:500}
   .chip{font-size:13px;padding:2px 9px;border-radius:var(--r-card);display:inline-block;margin:0 4px 4px 0}
-  .badge{font-size:13px;padding:3px 10px;border-radius:var(--r-ctl);font-weight:500}
+  /* 档位徽章：只把字母加粗放大一点，说明文字缩小一号。
+     注意这里刻意**克制**——卡片左侧已经有一条按档位着色的色条在表达"他是什么档"，
+     徽章如果再做成大字号竖排就是第三次重复表达同一件事了。色条负责"扫一眼就知道"，
+     徽章负责"停下来读清是哪一档"，两者分工，不重叠。 */
+  .badge{font-size:13px;padding:3px 10px;border-radius:var(--r-ctl);font-weight:500;
+    display:inline-flex;align-items:baseline;gap:5px;flex:0 0 auto;line-height:1.4}
+  .badge b{font-size:16px;font-weight:600;letter-spacing:-.01em}
+  .badge span{font-size:12px;font-weight:400;opacity:.85;white-space:nowrap}
+  /* 不是档位徽章的地方（如系统页的模型名）用 .plain 退回单行文字样式 */
+  .badge.plain{display:inline-block;font-size:13px;font-weight:500;padding:3px 10px;line-height:1.5}
   /* chip 两态：已核验技能 / 未核验技能。上一轮漏插了这段，导致这两个类名没有样式 */
   /* 投递管道的一行式条目（v1.15）：密度优先，字号与行高都比正文小一号 */
   .pipe-it{display:flex;align-items:center;gap:6px;line-height:1.55;font-size:12px;
@@ -153,7 +247,7 @@ _PAGE = """<!DOCTYPE html>
   /* 字典标签 + × 删除（v1.21）：让"删除"有明确入口 */
   /* 多值输入（v1.23）：标签 + 输入框；点 × 移除 */
   .multi{border:1px solid var(--line);border-radius:var(--r-ctl);padding:4px 6px;
-    display:flex;flex-wrap:wrap;gap:5px;align-items:center;background:#fff}
+    display:flex;flex-wrap:wrap;gap:5px;align-items:center;background:var(--surface)}
   .multi input:not([type=hidden]){border:0;outline:0;flex:1;min-width:160px;padding:3px 2px}
   .multi-chip{display:inline-flex;align-items:center;gap:4px;font-size:12px;
     padding:2px 5px 2px 8px;border:1px solid var(--line);border-radius:var(--r-chip);
@@ -201,8 +295,13 @@ _PAGE = """<!DOCTYPE html>
   .pipe-sel{flex:none;padding:1px 2px;font-size:11px;border-radius:3px;max-width:5.5em}
   .pipe-more{font-size:11px;color:var(--ink-3);padding-top:4px}
   .row1{display:flex;align-items:center;gap:14px;line-height:1.5}
+  /* 头像：中性灰，不参与档位编码。
+     原来头像底色= 档位色，和左侧色条、右上徽章**同时**表达同一件事，
+     一张卡上三个地方说"他是 A 档"。现在只留色条+ 徽章说档位，
+     头像回归它的本职——让人名首字好找。 */
   .avatar{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;
-    justify-content:center;font-size:17px;font-weight:600;flex:0 0 auto}
+    justify-content:center;font-size:17px;font-weight:600;flex:0 0 auto;
+    color:var(--ink-2);background:var(--surface-2)}
   .nm{font-size:18px;font-weight:600;letter-spacing:-.01em}
   .meta{font-size:13px;color:var(--ink-3);margin-top:3px}
   .acts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px;line-height:1.5}
@@ -214,20 +313,74 @@ _PAGE = """<!DOCTYPE html>
   .modal.on{display:flex}
   .sheet{background:var(--surface);border-radius:var(--r-card);max-width:920px;width:100%;max-height:88vh;
     overflow:auto;padding:22px 24px}
+  .progtrack{height:10px;background:var(--surface-2);border-radius:6px;overflow:hidden;margin:12px 0 8px}
+  .progfill{height:100%;background:var(--accent);border-radius:6px;transition:width .3s ease}
+  .progmeta{font-size:13px;color:var(--ink-2);line-height:1.6}
+  /* 居中提示层（v1.24.9）：固定在视口中央偏上，pointer-events:none 让它不挡操作，
+     每条提示自己 pointer-events:auto 所以能点、能关。多条时纵向堆叠不重叠。 */
+  .poplayer{position:fixed;left:50%;top:38%;transform:translate(-50%,-50%);z-index:60;
+    display:flex;flex-direction:column;gap:10px;align-items:center;pointer-events:none;
+    max-width:min(560px,92vw)}
+  /* v1.24.11：不再整块可点（会让人以为要点它才能关），改成"文案 + 右上角 ×"。
+     cursor 恢复默认，视觉上明确只有 × 是可点关闭的。 */
+  .poplayer .pop{pointer-events:auto;min-width:260px;max-width:100%;
+    display:flex;align-items:flex-start;gap:10px;padding:10px 10px 10px 14px;
+    border-radius:var(--r-ctl);font-size:14px;
+    box-shadow:0 8px 28px rgba(29,33,41,.18);
+    animation:popIn .18s ease-out}
+  .poplayer .pop-body{flex:1;min-width:0;line-height:1.6;word-break:break-word}
+  .poplayer .pop-x{flex:none;width:22px;height:22px;line-height:1;padding:0;
+    border:1px solid rgba(0,0,0,.10);border-radius:6px;background:rgba(255,255,255,.75);
+    color:inherit;font-size:15px;cursor:pointer;opacity:.7}
+  .poplayer .pop-x:hover{opacity:1;background:var(--surface)}
+  /* 页面其它位置被点时提示全消失（JS 侧实现），提示本身淡一下给反馈 */
+  @keyframes popIn{from{opacity:0;transform:translateY(-8px) scale(.98)}
+                    to{opacity:1;transform:none}}
+  .poplayer .pop.info{background:var(--accent-soft);border:1px solid var(--accent-line);color:var(--accent-ink)}
+  .poplayer .pop.ok{background:var(--ok-soft);border:1px solid var(--ok-line);color:var(--ok)}
+  .poplayer .pop.warn{background:var(--warn-soft);border:1px solid var(--warn-line);color:var(--warn)}
+  .poplayer .pop.danger{background:var(--bad-soft);border:1px solid var(--bad-line);color:var(--bad)}
+  /* 收件人邮箱展示块（v1.24.9）：字号加大 + 描边 + 等宽字体。
+     为什么这么强调：发信不可撤销，收件人地址错一位就是发错人。
+     HR 需要在"生成草稿 → 确认发送"之间一眼核对，不该是灰色小字。 */
+  .mailto{display:flex;align-items:center;gap:10px;padding:10px 13px;max-width:100%;
+    background:var(--ok-soft);border:1px solid var(--ok-line);border-left:3px solid var(--ok);
+    border-radius:var(--r-ctl)}
+  .mailto .ml{font-size:12px;color:var(--ink-2);flex:none}
+  .mailto .mv{font-size:15px;font-weight:600;color:var(--ok);
+    font-family:ui-monospace,Consolas,monospace;word-break:break-all}
+  .mailto .mw{font-size:15px;font-weight:600;color:var(--warn)}
+  .cand-drop{position:absolute;z-index:30;background:var(--surface);border:1px solid var(--line);
+    border-radius:var(--r-ctl);max-height:240px;overflow:auto;box-shadow:0 6px 20px rgba(29,33,41,.12)}
+  .cand-drop .cand-item{padding:8px 12px;cursor:pointer;font-size:14px;border-bottom:1px solid var(--surface-2)}
+  .cand-drop .cand-item:hover,.cand-drop .cand-item.hi{background:var(--accent-soft)}
+  .cand-drop .cand-item .em{color:var(--ink-2);font-size:12px}
   pre{white-space:pre-wrap;word-break:break-word;font-size:14px;color:var(--ink-2);line-height:1.8;
     background:var(--surface-2);padding:14px;border-radius:var(--r-ctl);margin:0}
   table{width:100%;border-collapse:collapse;font-size:14px}
   th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--surface-2);vertical-align:top}
-  th{color:var(--ink-3);font-weight:500;background:#fafbfc}
+  th{color:var(--ink-3);font-weight:500;background:var(--surface-2)}
   .note{color:var(--ink-3);font-size:13px;line-height:1.75}
-  .warn{background:var(--warn-soft);border:1px solid #ffe4ba;color:var(--warn);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
-  .info{background:var(--accent-soft);border:1px solid #d3e0ff;color:var(--accent-ink);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
-  .danger{background:var(--bad-soft);border:1px solid #ffd2c8;color:var(--bad);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
-  .ok{background:var(--ok-soft);border:1px solid #c9f2cd;color:var(--ok);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
+  .warn{background:var(--warn-soft);border:1px solid var(--warn-line);color:var(--warn);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
+  .info{background:var(--accent-soft);border:1px solid var(--accent-line);color:var(--accent-ink);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
+  .danger{background:var(--bad-soft);border:1px solid var(--bad-line);color:var(--bad);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
+  .ok{background:var(--ok-soft);border:1px solid var(--ok-line);color:var(--ok);border-radius:var(--r-ctl);padding:10px 13px;font-size:14px}
   .chatlog{margin-top:12px;max-height:440px;overflow:auto;display:flex;flex-direction:column;gap:9px}
   .msg{font-size:15px;line-height:1.75;padding:10px 13px;border-radius:var(--r-card);white-space:pre-wrap}
   .msg.user{background:var(--accent-soft);align-self:flex-end;max-width:78%}
   .msg.assistant{background:var(--surface-2);max-width:94%}
+  .msg.md{white-space:normal;word-break:break-word}
+  .msg.md p{margin:0 0 8px}.msg.md p:last-child{margin-bottom:0}
+  .msg.md h1,.msg.md h2,.msg.md h3,.msg.md h4{font-size:15px;font-weight:700;margin:10px 0 6px}
+  .msg.md ul,.msg.md ol{margin:4px 0 8px;padding-left:20px}
+  .msg.md li{margin:2px 0}
+  .msg.md code{background:var(--surface);border:1px solid var(--line);border-radius:4px;
+    padding:1px 5px;font-size:13px;font-family:ui-monospace,Consolas,monospace}
+  .msg.md pre{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-ctl);
+    padding:10px 12px;overflow:auto;margin:6px 0 10px}
+  .msg.md pre code{background:none;border:none;padding:0}
+  .msg.md strong{font-weight:700}
+  .msg.md a{color:var(--accent);text-decoration:underline}
   .trace{font-size:13px;color:var(--ink-3);margin-top:8px;border-top:1px dashed var(--line);padding-top:8px}
   .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
   .pcol{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:12px 14px}
@@ -241,11 +394,11 @@ _PAGE = """<!DOCTYPE html>
   .job-tag{color:var(--accent-ink);background:var(--accent-soft)}
   .job-tag.pending{color:var(--warn);background:var(--warn-soft)}
   .contact{font-size:14px}
-  .contact a{color:var(--accent-ink);text-decoration:none;border-bottom:1px dashed #b8ccff}
-  .contact a:hover{color:#0e42d2;border-bottom-style:solid}
+  .contact a{color:var(--accent-ink);text-decoration:none;border-bottom:1px dashed var(--accent-line)}
+  .contact a:hover{color:var(--accent-ink);border-bottom-style:solid}
   button.mini{font-size:12px;padding:1px 7px;margin-left:6px;border-radius:var(--r-ctl)}
   .srcbox{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-ctl);padding:10px 12px;font-size:14px}
-  .srcbox code{background:#eef1f6;padding:1px 6px;border-radius:5px;font-size:13px}
+  .srcbox code{background:var(--surface-2);padding:1px 6px;border-radius:5px;font-size:13px}
   .jdform{display:grid;grid-template-columns:150px 1fr;gap:8px 12px;align-items:center;margin-top:6px}
   .jdform label{color:var(--ink-2);font-size:14px}
   .jdform input,.jdform textarea,.jdform select{width:100%}
@@ -263,7 +416,7 @@ _PAGE = """<!DOCTYPE html>
   .richeditor:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
   .richeditor table{border-collapse:collapse;margin:8px 0}
   .richeditor th,.richeditor td{border:1px solid var(--line-2);padding:6px 10px;min-width:64px}
-  .richeditor th{background:#f2f4f7;font-weight:600}
+  .richeditor th{background:var(--surface-2);font-weight:600}
   .ok-txt{color:var(--ok)}.warn-txt{color:var(--warn)}.bad-txt{color:var(--bad)}
 </style></head>
 <body>
@@ -288,17 +441,24 @@ _PAGE = """<!DOCTYPE html>
     <div id="mBody"></div></div>
 </div>
 
+<!-- 居中提示层（v1.24.9）：所有 toast 提示都落在这里，不再往页面顶部塞。
+     为什么必须居中：#alerts 在 .main-inner 顶部，而实际操作多在页面下方
+     （收件人、发信按钮、批量操作都在下面）——提示在顶部等于没有提示。 -->
+<div class="poplayer" id="popLayer"></div>
+
 <script>
 const AUTH_ENABLED = __AUTH_ENABLED__;
 // 前端版本戳（与 <meta name="tp-build">、/api/meta 的 ui_build 同源）：
 // 验收脚本用它确认"页面里跑的就是服务端当前这版"，防止静默地验了缓存里的旧代码。
 const UI_BUILD = '__UI_BUILD__';
 const TIER_LABELS = {A:'优先面试',B:'建议面试',C:'储备',D:'暂不匹配当前岗位'};
-const TIER_COLOR = {A:['var(--ok)','var(--ok-soft)'],B:['var(--accent)','var(--accent-soft)'],
+const TIER_COLOR = {A:['var(--ok)','var(--ok-soft)'],B:['var(--tier-b)','var(--tier-b-soft)'],
                     C:['var(--warn)','var(--warn-soft)'],D:['var(--ink-3)','var(--surface-2)']};
 const STAGES = ['新投递','已联系','初面','复面','待offer','已入职','已结束'];
 
 let META = null;
+// 归档页当前列表（批量彻底删除时按id 取姓名做确认文案）
+let ARCH_ITEMS = [];
 /** 搜索模式：kw=关键词（字面）｜sem=语义（按意思）。
  *  v1.14：语义检索的函数一直存在但界面上没有入口（孤儿函数），HR 反馈"没有语义检索入口"，
  *  这里把它接回同一个搜索栏。语义走的是向量检索，**只用于找人，不参与档位判定**。 */
@@ -327,6 +487,57 @@ let PIPE_OPEN = false;
 function poolPageReset(){ POOL_PAGE = 1; }
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+/* 轻量 Markdown 渲染（v1.24.9）：智能助手回复是 Markdown，直接当纯文本会
+   裸奔出 ** / # / - / ` 等符号。先把原文转义（防 XSS），再转换常见标记。
+   支持：代码块、行内代码、加粗、#~#### 标题、-/* 无序列表、1. 有序列表、链接、换行。 */
+function md(src){
+  let s = String(src==null?'':src);
+  // 1) 先转义一切 HTML，杜绝注入
+  s = esc(s);
+  // 2) 代码块（``` 或 ~~~），先占位，避免里面的标记被后续替换
+  const blocks = [];
+  s = s.replace(/```([\s\S]*?)```/g, (m, code) => {
+    blocks.push('<pre><code>' + code + '</code></pre>');
+    return '\u0000BLOCK' + (blocks.length - 1) + '\u0000';
+  });
+  // 3) 行内代码
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // 4) 加粗
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // 5) 标题（行首 #）
+  s = s.replace(/^######[ \t]+(.+)$/gm, '<h4>$1</h4>');
+  s = s.replace(/^#####[ \t]+(.+)$/gm, '<h4>$1</h4>');
+  s = s.replace(/^####[ \t]+(.+)$/gm, '<h4>$1</h4>');
+  s = s.replace(/^###[ \t]+(.+)$/gm, '<h3>$1</h3>');
+  s = s.replace(/^##[ \t]+(.+)$/gm, '<h3>$1</h3>');
+  s = s.replace(/^#[ \t]+(.+)$/gm, '<h2>$1</h2>');
+  // 6) 链接 [文字](url)
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  // 7) 逐行组装：列表项聚合成 <ul>，空行分段，其余行转 <p>
+  // 注意：源码里必须写 \\n/\\r（双反斜杠），Python 三引号会把单反斜杠转义成真实换行
+  const lines = s.split(/[\\n\\r]+/);
+  const out = [];
+  let liBuf = [];
+  const flushLi = () => { if (liBuf.length){ out.push('<ul>' + liBuf.join('') + '</ul>'); liBuf = []; } };
+  let paraBuf = [];
+  const flushPara = () => {
+    if (paraBuf.length){ out.push('<p>' + paraBuf.join('<br>') + '</p>'); paraBuf = []; }
+  };
+  for (const line of lines){
+    const t = line.trim();
+    if (!t){ flushLi(); flushPara(); continue; }
+    if (/^[-*+][ \t]+/.test(t)){ flushPara(); liBuf.push('<li>' + t.replace(/^[-*+][ \t]+/, '') + '</li>'); continue; }
+    if (/^\d+\.[ \t]+/.test(t)){ flushPara(); liBuf.push('<li>' + t.replace(/^\d+\.[ \t]+/, '') + '</li>'); continue; }
+    if (/^<(ul|ol|pre|h[1-4])/.test(t)){ flushLi(); flushPara(); out.push(t); continue; }
+    flushLi();
+    paraBuf.push(t);
+  }
+  flushLi(); flushPara();
+  s = out.join('');
+  // 8) 还原代码块占位
+  s = s.replace(/\u0000BLOCK(\d+)\u0000/g, (m, i) => blocks[+i]);
+  return s;
+}
 function hdr(extra){
   const h = Object.assign({'Content-Type':'application/json'}, extra||{});
   if (AUTH_ENABLED && TOKEN) h['X-TP-Token'] = TOKEN;
@@ -350,15 +561,135 @@ async function api(path, opts){
   if (!r.ok) return Object.assign({__http_error:r.status}, body||{});
   return body;
 }
+/* 全局提示（v1.24.9 改：顶部内联 → 居中弹窗；v1.24.11 再改交互）
+   原来往#alerts（.main-inner 顶部）prepend 一个 div，操作在页面下方时根本看不见。
+   现在统一落到视口中央的 #popLayer。
+   v1.24.11 按试用反馈重做交互（原来是"只能点提示本身才关 + 自动停 6/9 秒"）：
+     1) 每条提示右上角都有显式的 ×，不用猜哪儿能点；
+     2) 点页面其他任何位置，当前所有提示立即消失（点提示内部不关，避免误操作）；
+     3) 不再长时间赖着不走——自动消失压到 3.5/5 秒。
+   132 个调用点不用逐个改——只改这个函数，全站提示一次性生效。 */
 function toast(msg, kind){
+  const host = document.getElementById('popLayer');
+  if (!host) return;
   const d = document.createElement('div');
-  d.className = kind || 'info';
-  d.style.margin = '0 0 10px';
-  d.textContent = msg;
-  const host = document.getElementById('alerts');
-  host.prepend(d);
-  // 成功类多留一会儿：发信这种"不可撤销"的动作，只闪 7 秒等于没提示
-  setTimeout(()=>d.remove(), (kind === 'ok') ? 12000 : 7000);
+  d.className = 'pop ' + (kind || 'info');
+  // msg 允许带 **粗体**（有几处调用就是这么传的），转成 <br>/<b> 再显示。
+  // 走 textContent 之外的路径前先escape，杜绝注入。
+  const escd = String(msg == null ? '' : msg)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
+  // 结构：文案区 + 独立关闭按钮。按钮自带 stopPropagation，
+  // 这样"点提示内部不关闭"和"× 能关闭"两条规则不会互相打架。
+  const box = document.createElement('div');
+  box.className = 'pop-body';
+  box.innerHTML = escd;
+  const x = document.createElement('button');
+  x.className = 'pop-x';
+  x.type = 'button';
+  x.title = '关闭';
+  x.setAttribute('aria-label', '关闭');
+  x.innerHTML = '&times;';
+  x.onclick = (ev) => { ev.stopPropagation(); d.remove(); };
+  d.appendChild(box);
+  d.appendChild(x);
+  host.appendChild(d);
+  // 自动消失时间：成功/警告稍长（发信不可撤销，闪一下等于没提示），但都压到几秒内
+  const ms = (kind === 'ok' || kind === 'warn' || kind === 'danger') ? 5000 : 3500;
+  setTimeout(() => d.remove(), ms);
+  // 同类提示最多留 4 条，避免批量操作时刷屏把屏占满
+  const same = [...host.children].filter(y => y.className.includes(kind || 'info'));
+  while (same.length > 4) same.shift().remove();
+}
+
+/* 点页面其他位置 → 所有居中提示立即消失。
+   capture=true 抢在业务 onclick 之前跑，保证"点哪儿都能关"。
+   只认落在提示层之外的点击；点在提示、详情弹窗、收件人下拉里一律不关。 */
+document.addEventListener('click', (ev) => {
+  const host = document.getElementById('popLayer');
+  if (!host || !host.children.length) return;
+  const t = ev.target;
+  if (host.contains(t)) return;
+  if (t.closest && t.closest('#modal')) return;
+  if (t.closest && t.closest('.cand-drop')) return;
+  host.innerHTML = '';
+}, true);
+
+/* 居中结果弹窗（v1.24.9）：导入/分析这类耗时操作的**成败**要让人一眼看到。
+   不再用顶部 toast —— 操作在页面下方、提示在顶部，等于没提示。
+   opts: {title, body(html), kind: 'ok'|'danger'|'warn', okText} */
+/* opts.afterClose：关闭时再执行的动作。
+   为什么需要：入库流程里有两步（先"收取完成"，再"自动分析进度"），
+   而 resultModal 和 progressModal 共用同一个 #modal —— 第二个弹窗会瞬间覆盖第一个。
+   v1.24.11 之前用户实际只看到最后的进度条，"收取完成"的成交通知被吃掉了。
+   现在改成：先让用户看完收取结果并点"知道了"，再接着开分析进度窗。 */
+let __afterClose = null;
+function resultModal(opts){
+  const o = opts || {};
+  __afterClose = o.afterClose || null;
+  const kind = o.kind || 'info';
+  const color = kind==='ok' ? 'var(--ok)' : (kind==='danger' ? 'var(--bad)' : (kind==='warn' ? 'var(--warn)' : 'var(--accent)'));
+  document.getElementById('mTitle').textContent = o.title || '完成';
+  document.getElementById('mBody').innerHTML =
+    `<div style="line-height:1.8;white-space:pre-wrap">
+       <div style="font-size:15px;color:${color};font-weight:600;margin-bottom:8px">${o.headline || ''}</div>
+       <div>${o.body || ''}</div>
+     </div>
+     <div class="bar" style="margin-top:18px;justify-content:flex-end">
+       <button class="btn-primary" onclick="closeModal()">${esc(o.okText || '知道了')}</button>
+     </div>`;
+  document.getElementById('modal').classList.add('on');
+}
+
+/* 居中进度弹窗（v1.24.9）：带真实进度条。
+   taskId 来自后端的任务登记；轮询 /api/tasks/{taskId}，每 1.2 秒刷新进度。
+   完成后自动把弹窗换成 resultModal（成功/失败），并回调 onDone(taskResult)。 */
+let __progressTimer = null;
+function progressModal(taskId, opts){
+  const o = opts || {};
+  if (!taskId){ resultModal({title: o.title||'处理中', body:o.body||'', kind:'info'}); return; }
+  if (__progressTimer){ clearInterval(__progressTimer); __progressTimer = null; }
+  document.getElementById('mTitle').textContent = o.title || '处理中…';
+  document.getElementById('mBody').innerHTML =
+    `<div>
+       <div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">${esc(o.desc || '正在处理，请稍候')}</div>
+       <div class="progtrack"><div class="progfill" id="progFill" style="width:0%"></div></div>
+       <div class="progmeta" id="progMeta">准备中…</div>
+     </div>`;
+  document.getElementById('modal').classList.add('on');
+  const fill = document.getElementById('progFill');
+  const meta = document.getElementById('progMeta');
+  const tick = async () => {
+    try {
+      const r = await api('/api/tasks/' + taskId);
+      if (r.__http_error || !r.ok){ return; }
+      const pct = r.percent || 0;
+      if (fill) fill.style.width = pct + '%';
+      const line = `已完成 ${r.done || 0} / ${r.total || 0}` +
+                   (r.failed ? `，失败 ${r.failed}` : '');
+      if (meta){
+        meta.textContent = r.status === 'done'
+          ? (r.message || line)
+          : (r.message ? (line + ' · ' + r.message) : line);
+      }
+      if (r.status === 'done' || r.status === 'error'){
+        clearInterval(__progressTimer); __progressTimer = null;
+        const okAll = !(r.failed);
+        const title = r.status === 'error' ? '处理中断' : (okAll ? '全部完成' : '有失败');
+        const kind = r.status === 'error' ? 'danger' : (okAll ? 'ok' : 'warn');
+        resultModal({
+          title, kind,
+          headline: (r.status === 'error' ? '任务出错' : (okAll ? '处理成功' : '部分失败')),
+          body: (r.message || '') +
+                `<div style="margin-top:6px;color:var(--ink-2)">共 ${r.total} 人：完成 ${r.done} 人`
+                + (r.failed ? `，失败 ${r.failed} 人` : '') + '</div>'
+        });
+        if (o.onDone) o.onDone(r);
+      }
+    } catch(e){ /* 网络抖动忽略，下一轮继续 */ }
+  };
+  tick();
+  __progressTimer = setInterval(tick, 1200);
 }
 
 function copyText(t){
@@ -447,8 +778,10 @@ function contactLine(x){
 async function boot(){
   META = await api('/api/meta');
   const su = document.getElementById('sideUser');
+  // 左下角不再显示"本机模式 · 单 HR"这类模式标签（v1.24.9）：
+  // 登录态才显示"登录：用户名"，本机模式留空。
   if (su) su.textContent = META.session.mode === 'local'
-    ? '本机模式 · 单 HR' : ('登录：' + META.session.username);
+    ? '' : ('登录：' + META.session.username);
   const h = readHash();
   if (h) VIEW = VIEWS.some(x=>x[0]===h) ? h : 'pool';
   window.addEventListener('hashchange', () => go(readHash(), true));
@@ -490,6 +823,12 @@ function readHash(){
   return (location.hash||'').replace(/^#/,'');
 }
 
+/* 收取/导入进行中的来源（'mailbox'|'folder'|null）。
+   为什么声明在这里：refresh() 在下面，会读它来恢复按钮锁定。
+   `let` 有暂时性死区——如果声明写在 doIngest 附近，
+   refresh 首次执行时读它会直接抛 ReferenceError，页面当场白屏。 */
+let __ingesting = null;
+
 async function refresh(){
   // 顶部统计卡片只在「今日待办」与「人才库」展示。
   // 其他页面放一排数字只是噪音：看岗位管理或写邮件时，那排总数帮不上任何忙。
@@ -504,20 +843,60 @@ async function refresh(){
   else if (VIEW==='org') await viewOrg();
   else if (VIEW==='mail') await viewMail();
   else if (VIEW==='sys') await viewSys();
+  // 人才库重渲染会把按钮区的 HTML 整个换掉，忙碌状态会被冲掉。
+  // 这里按当前标志恢复锁定，否则"进行中"的按钮会变回可点，用户能重复提交。
+  if (__ingesting) setIngestBusy(true, __ingesting);
 }
 
+/* 统计区（v1.24.14 优化）：分「待办层」与「库存层」。
+
+   原来的 10 个数字同权重平铺，HR 进门不知道该先看哪个。
+   现在的分法依据是**这个数字会不会要求 HR 动手**：
+     待办层 = 需要你处理的（A 档待约面 / 待你确认 / 待确认提案）→ 大号数字
+     库存层 = 背景事实（总人数、投递数、附件数、档位分布）→ 小号密排 + 一条档位比例条
+   「待 HR 确认」为 0 时自动弱化——没有待办是好消息，不该继续用红色抢注意力。 */
 function renderStats(s){
   if (!s || s.__http_error) return;
   const t = s.tiers || {};
+  const n = v => (v == null ? 0 : v);
+  const sum = n(t.A) + n(t.B) + n(t.C) + n(t.D);
+
+  // 待办层：数字大、颜色语义明确
+  const acts = [
+    card('A 档 · 优先面试', t.A, 'var(--ok)',    n(t.A) > 0),
+    card('待你确认',          s.pending, 'var(--bad)',  n(s.pending) > 0),
+    card('待确认提案',        s.proposals_pending, 'var(--bad)', n(s.proposals_pending) > 0),
+  ].join('');
+
+  // 库存层：小而安静
+  const rest =
+    card('候选人数', s.people, 'var(--ink)') +
+    card('投递数',   s.applications, 'var(--ink)') +
+    card('简历附件', s.documents, 'var(--ink)') +
+    card('信息缺失', s.needs_review, 'var(--warn)');
+
+  // 档位分布条：四段比例比"A 3 / B 2 / C 4 / D 1"四个数字更快读出结构
+const seg = (v, c) => (sum ? `<i style="flex:${n(v) || 0};background:${c}"></i>` : '');
+        // 一条都还没判档时，四段全空 = 一条看不见的线，HR 会以为这里坏了。
+        // 没数据时给一条中性灰底，并说明原因。
+        const bar = sum
+          ? `<div class="tierbar" title="档位分布：A ${n(t.A)} · B ${n(t.B)} · C ${n(t.C)} · D ${n(t.D)}"
+              role="img" aria-label="档位分布：A ${n(t.A)}、B ${n(t.B)}、C ${n(t.C)}、D ${n(t.D)}">
+              ${seg(t.A, 'var(--ok)')}${seg(t.B, 'var(--tier-b)')}${seg(t.C, 'var(--warn)')}${seg(t.D, 'var(--line-2)')}
+            </div>`
+          : `<div class="tierbar is-empty" title="还没有任何一份简历被判过档位"></div>
+             <div class="tier-note">档位分布：暂无（简历尚未判档）</div>`;
+
   document.getElementById('stats').innerHTML =
-    card('候选人数', s.people, 'var(--ink)') + card('A 优先面试', t.A||0, 'var(--ok)') +
-    card('B 建议面试', t.B||0, 'var(--accent)') + card('C 储备', t.C||0, 'var(--warn)') +
-    card('D 暂不匹配', t.D||0, 'var(--ink-3)') +
-    card('待 HR 确认', s.pending, 'var(--bad)') + card('待人工判读', s.needs_review, 'var(--warn)') +
-    card('投递数', s.applications, 'var(--ink)') + card('简历附件', s.documents, 'var(--ink)') +
-    card('待确认提案', s.proposals_pending, 'var(--bad)');
+    `<div class="stat-act">${acts}</div>
+     <div class="stat-rest">${rest}</div>${bar}`;
 }
-function card(k,v,c){ return `<div class="stat"><div class="k">${k}</div><div class="v" style="color:${c}">${v==null?'—':v}</div></div>`; }
+/* hot=false 时该数字为 0，加 is-zero 让它自动褪成灰色 */
+function card(k, v, c, hot){
+  const zero = (v == null || v === 0);
+  return `<div class="stat${(zero && !hot) ? ' is-zero' : ''}">`
+       + `<div class="k">${k}</div><div class="v" style="color:${c}">${v == null ? '—' : v}</div></div>`;
+}
 
 /* ------------------------------ 今日待办 ------------------------------ */
 /* 与"报表"的区别：顶部那句 headline 是**判断**（今天最该关注什么），不是计数。
@@ -549,7 +928,7 @@ async function viewBrief(){
   </div>
   ${prios.length ? `<div class="card"><h2>优先处理（按建议顺序）</h2>
     ${prios.map((p,i)=>`
-      <div style="padding:10px 0;border-bottom:1px solid #f0f1f3">
+      <div style="padding:10px 0;border-bottom:1px solid var(--line)">
         <b>${i+1}. ${esc(p.title||'')}</b>
         ${p.why?`<div class="small" style="margin-top:4px">为什么现在做：${esc(p.why)}</div>`:''}
         ${p.action?`<div class="small">建议动作：${esc(p.action)}</div>`:''}
@@ -635,7 +1014,9 @@ function insightBlock(x){
             : ins.source === 'manual'        ? '手动重算' : '进门即分析';
   const ev = (ins.evidence||[]).slice(0,2)
     .map(e => `[${e.skill}] ${(e.quote||'').slice(0,28)}`).join(' ｜ ');
-  return `<div style="margin-top:10px;background:#f2f7ff;border-left:3px solid var(--accent);
+  // 底色用 --accent-hi（强调色的最浅一档）。原来这里是 #f2f7ff——上一版遗留的
+  // 冷蓝，和强调色不同色温，洞察块因此比周围明显"偏紫"。
+  return `<div style="margin-top:10px;background:var(--accent-hi);border-left:3px solid var(--accent);
                       padding:8px 10px;border-radius:0 6px 6px 0">
     <b>系统自动分析</b> <span class="small">${esc(src)}${ins.model?' · '+esc(ins.model):''}</span>
     <div style="margin-top:4px">${esc(ins.summary||'')}</div>
@@ -725,12 +1106,14 @@ async function reanalyze(cid, full){
   const box = document.getElementById('out-'+cid);
   if (box){ box.innerHTML = summaryHtml; }
   else {
-    const host = document.getElementById('alerts');
+    // 候选人被筛选排除、不在这一页 → 没有卡片可挂，改成**居中弹窗**（v1.24.9）。
+    // 原来贴到 #alerts（页面顶部），操作在下方时看不见，等于白做。
+    const host = document.getElementById('popLayer') || document.getElementById('alerts');
     const d = document.createElement('div');
-    d.className = 'note';
-    d.style.cssText = 'background:var(--ok-soft);border-left:3px solid var(--ok)';
+    d.className = 'pop ok';
+    d.style.cssText = 'padding:12px 14px;text-align:left;cursor:default';
     d.innerHTML = summaryHtml;
-    host.prepend(d);
+    host.appendChild(d);
     setTimeout(()=>d.remove(), 60000);
   }
   toast(r.note || '已完成完整重新分析', 'ok');
@@ -755,7 +1138,7 @@ async function viewPool(){
   const host = document.getElementById('view');
   const n = {ALL:(pg?pg.total:(c.items||[]).length), REVIEW:0, UNCONFIRMED:0};
   const tabs = [['ALL','全部'],['A','A 优先面试'],['B','B 建议面试'],['C','C 储备'],
-                ['D','D 暂不匹配'],['REVIEW','待人工判读'],['UNCONFIRMED','未复核']];
+                ['D','D 暂不匹配'],['REVIEW','信息缺失（缺字段）'],['UNCONFIRMED','未复核']];
   // 性别筛选只在开关打开时出现：开关关着还摆一个筛选项，等于诱导所有人按性别筛。
   const facets = c.gender_facets || {};
   const gsel = !gfOn ? '' : `<span class="small" style="margin-left:6px">性别</span>
@@ -808,8 +1191,8 @@ async function viewPool(){
         ${gsel}${eduSel}${uniSel}${stageSel}
       </div>
       <div class="bar">
-        <button onclick="doIngest('mailbox')">收取邮箱简历</button>
-        <button onclick="doIngest('folder')">导入本地文件夹</button>
+        <button id="btnIngestMailbox" onclick="doIngest('mailbox')">收取邮箱简历</button>
+        <button id="btnIngestFolder" onclick="doIngest('folder')">导入本地文件夹</button>
         <button onclick="document.getElementById('upFile').click()"
                 title="手机拍的纸质简历照片、扫描件，直接选文件上传入库（不用先改配置目录）">上传简历照片/文件</button>
         <input id="upFile" type="file" multiple hidden
@@ -843,7 +1226,7 @@ async function viewPool(){
         const ys = [];
         for (let v=2018; v<=2050; v++) ys.push(v);
         return `<div class="arch-bar"
-            title="按年使用：新一年开始时把旧简历整批收起。归档不等于删除——档案/投递/附件/审计都保留，满 30 天才彻底清理，期间可随时取消。">
+            title="按年使用：新一年开始时把旧简历整批收起。归档不等于删除——档案/投递/附件/审计都保留，可随时取消归档，也可随时彻底删除。">
           <span class="arch-label">批量归档</span>
           <button onclick="archiveBatch(null,true)">归档勾选的人</button>
           <span class="arch-div"></span>
@@ -949,7 +1332,16 @@ function cardHtml(x){
   const conf = (_st
     ? `<span class="chip" style="${_stStyle}" title="${esc(x.status_hint||'')}">${esc(_st)}</span>` + _rev
     : '');
-  const rev = x.needs_review ? '<span class="chip" style="color:var(--warn);background:var(--warn-soft)">待人工判读</span>' : '';
+  // 两条线分开显示（v1.24.9）：解析失败 ≠ 信息缺失。
+  // 解析失败 → "简历读不出"（要去修文件/看原件）；信息缺失 → "缺：年限、技能"（补字段即可）
+  const _miss = x.missing_fields || [];
+  const rev = x.parse_failed
+    ? '<span class="chip" style="color:var(--bad);background:var(--bad-soft)" title="简历原文未能解析，需要人工查看附件原件">简历读不出</span>'
+    : (x.needs_review
+        ? (_miss.length
+            ? `<span class="chip" style="color:var(--warn);background:var(--warn-soft)" title="简历读出来了，但这些字段没抽到：${esc(_miss.join('、'))}，可手动更正">缺：${esc(_miss.join('、'))}</span>`
+            : '<span class="chip" style="color:var(--warn);background:var(--warn-soft)" title="这条投递有字段没抽到或原文未解析，可打开档案手动补录">待补录</span>')
+        : '');
   const stage = x.stage || '新投递';
   const tiers = ['A','B','C','D'].map(k=>`<option value="${k}" ${k===t?'selected':''}>${k} · ${TIER_LABELS[k]}</option>`).join('');
   const stages = STAGES.map(k=>`<option value="${k}" ${k===stage?'selected':''}>${k}</option>`).join('');
@@ -957,10 +1349,10 @@ function cardHtml(x){
   const contact = contactLine(x);
   const scoreTip = (!job && sug)
     ? ` title="档位按「建议岗位 · ${esc(sug.title)}」的 JD 判断：学历不达标判 D，其余由模型给出"` : '';
-  return `<div class="card">
+  return `<div class="card" style="border-left-color:${fg}">
     <div class="row1">
       <input type="checkbox" class="pickChk" value="${x.id}" style="margin-right:10px">
-      <div class="avatar" style="color:${fg};background:${bg}">${esc((x.name||'?').slice(0,1))}</div>
+      <div class="avatar">${esc((x.name||'?').slice(0,1))}</div>
       <div style="flex:1;min-width:0">
         <div class="nm">${esc(x.name||'未识别')} ${rev} ${genderTag} ${jobTag}</div>
         <div class="meta">${eduBadge(x)} · ${expBadge(x)} ·
@@ -968,7 +1360,7 @@ function cardHtml(x){
           来源 ${esc(x.channel||'—')} · 投递 ${esc((x.applied_at||'').slice(0,10))}</div>
         <div class="meta" style="margin-top:2px"><b>联系方式</b>：${contact}</div>
       </div>
-      <div class="badge"${scoreTip} style="color:${fg};background:${bg}">${t} · ${TIER_LABELS[t]}</div>
+      <div class="badge"${scoreTip} style="color:${fg};background:${bg}"><b>${t}</b><span>${TIER_LABELS[t]}</span></div>
     </div>
     <div style="margin-top:10px">${hits}${miss}${conf}</div>
     <div style="margin-top:8px">${skillChips}</div>
@@ -1037,7 +1429,7 @@ async function showDetail(cid){
       return `<tr><td>${esc(x.file_name)}<div class="small">${esc(x.mime||'')} ·
          ${x.size?Math.round(x.size/1024)+' KB':''}</div></td>
       <td>${esc(x.parse_engine||'—')}<div class="small">${x.text_len?x.text_len+' 字':''}</div></td>
-      <td>${x.parse_ok?'<span class="ok-txt">已解析</span>':'<span class="warn-txt">待人工判读</span>'}</td>
+      <td>${x.parse_ok?'<span class="ok-txt">已解析</span>':'<span class="warn-txt" title="原文未能解析，需人工查看附件原件">简历读不出</span>'}</td>
       <td>${esc((x.received_at||'').slice(0,16))}</td>
       <td class="small">${esc(x.archived_path||'—')}</td>
       <td class="bar">${acts}</td></tr>`;
@@ -1195,7 +1587,12 @@ function sensitiveLine(removed){
     <div class="small" style="margin-top:3px">下面是<b>原件解析出的完整原文</b>（含上述敏感信息，供人工核对）；
       送进模型的是剔除后的版本。剔除发生在调模型之前，且不改动原件。</div></div>`;
 }
-function closeModal(){ document.getElementById('modal').classList.remove('on'); }
+function closeModal(){
+  document.getElementById('modal').classList.remove('on');
+  // v1.24.11：关闭后按需接续下一个动作（如收取完成 → 自动分析进度）
+  const f = __afterClose; __afterClose = null;
+  if (f){ try{ f(); }catch(e){} }
+}
 
 /* 人工更正档案字段：识别错/识别不出的兜底口子。
    姓名错会连带污染去重与检索；学校/专业错会让"专业方向判定"跟着错。
@@ -1304,43 +1701,147 @@ async function interview(cid){
 async function doUpload(files){
   const arr = Array.from(files||[]).filter(f =>
     /[.](jpe?g|png|bmp|webp|pdf|docx?|txt)$/i.test(f.name));
-  if (!arr.length){ toast('没有可上传的文件（支持图片 / PDF / Word / txt）','warn'); return; }
+  if (!arr.length){ resultModal({title:'上传', kind:'warn', body:'没有可上传的文件（支持图片 / PDF / Word / txt）'}); return; }
+  // 开始前先给一条即时提示：多份文件的裸字节上传要好几秒，
+  // 期间界面毫无反应会让人以为按钮没生效（v1.24.11 补）。
+  toast(`正在上传 ${arr.length} 份文件…`, 'info');
   let ok = 0, fail = 0;
+  const failedNames = [];
   for (const f of arr){
     try{
       // 裸字节上传：文件名走 query。不引 multipart 依赖（打包产物里没有它）
       const r = await fetch('/api/upload?name=' + encodeURIComponent(f.name),
         {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:f});
       const j = await r.json();
-      if (r.ok && !j.error){ ok++; } else { fail++; }
-    }catch(e){ fail++; }
+      if (r.ok && !j.error){ ok++; } else { fail++; failedNames.push(f.name + '：' + (j.error||'上传失败')); }
+    }catch(e){ fail++; failedNames.push(f.name + '：网络错误'); }
   }
-  toast(ok + ' 份已入库' + (fail ? ('，'+fail+' 份失败') : ''), fail ? 'warn' : 'ok');
-  refresh();
+  // 完成提示：成功/部分失败/全部失败 三种状态分开说，并列出失败文件
+  resultModal({
+    title: '上传完成',
+    kind: fail ? (ok ? 'warn' : 'danger') : 'ok',
+    headline: fail ? (ok ? '部分文件未上传成功' : '全部文件上传失败') : '上传成功',
+    body: `共 ${arr.length} 份：成功 ${ok} 份` + (fail ? `，失败 ${fail} 份` : '，全部已入库')
+      + (failedNames.length
+          ? `<div style="margin-top:10px;color:var(--bad);font-size:13px">失败明细：<br>`
+            + failedNames.map(n => esc(n)).join('<br>') + '</div>'
+          : '')
+  });
+  await refresh();
+}
+
+/* 收取/导入进行中标记（v1.24.13）。状态变量 __ingesting 已声明在 refresh() 之前。
+   为什么必须有：邮箱收取和文件夹导入都是**几十秒级**的耗时操作，
+   而按钮点下去到界面有反应之间有网络往返，HR 很容易以为没点上而连点多次。
+   重复收取不只是"多跑一遍"——会并发抢同一个邮件游标、重复触发入库即分析，
+   白白烧模型额度。所以：**一按下去就锁住，跑完（哪怕失败）才解锁**。 */
+
+/* 进行中的"开始"提示：不可手动关（关掉就等于"我不知道它还在跑"），
+   只能等它自己变成完成/失败弹窗。加 × 是为了挡住误点遮罩，
+   并在标题里写明"请勿重复点击"。 */
+function ingestStartModal(label){
+  document.getElementById('mTitle').textContent = label + '进行中';
+  document.getElementById('mBody').innerHTML =
+    `<div>
+       <div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">
+         正在${label === '邮箱' ? '收取邮箱里的简历' : '读取本地文件夹里的简历'}，请稍候…</div>
+       <div class="progtrack"><div class="progfill" style="width:35%"></div></div>
+       <div class="progmeta">已开始，扫描与入库完成后会显示结果。期间请勿重复点击。</div>
+     </div>
+     <div class="bar" style="margin-top:18px;justify-content:flex-end">
+       <button class="btn-primary" onclick="closeModal()">后台运行</button>
+     </div>`;
+  document.getElementById('modal').classList.add('on');
+}
+
+/* 锁/解锁两个导入按钮。改 textContent 而不是 disabled，
+   因为要看清"它到底在跑哪个"——disabled 的灰按钮在深色下容易读不出状态。 */
+function setIngestBusy(busy, source){
+  __ingesting = busy ? (source || '?') : null;
+  const cfg = [
+    ['btnIngestMailbox', 'mailbox', '收取邮箱简历'],
+    ['btnIngestFolder', 'folder',   '导入本地文件夹'],
+  ];
+  cfg.forEach(([id, src, text]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (busy){
+      el.disabled = true;
+      el.textContent = (__ingesting === src) ? (text + '…进行中') : (text + '（等待中）');
+      el.style.opacity = '.6';
+      el.style.cursor = 'not-allowed';
+    } else {
+      el.disabled = false;
+      el.textContent = text;
+      el.style.opacity = '';
+      el.style.cursor = '';
+    }
+  });
 }
 
 async function doIngest(source){
   const label = source==='mailbox' ? '邮箱' : '本地文件夹';
-  toast('正在收取简历…（'+label+'）','info');
-  const r = await api('/api/ingest', {method:'POST', body:JSON.stringify({source:source})});
-  if (r.__http_error || r.error){ toast(r.detail||r.error||'收取失败','danger'); return; }
+  // 已在跑就直接拒绝：重复收取会并发抢同一个邮件游标、
+  // 重复触发入库即分析（每人都要调一次模型），代价是真金白银。
+  if (__ingesting){
+    toast(`已有一个导入任务在进行中（${__ingesting==='mailbox'?'邮箱收取':'文件夹导入'}），请等它完成`, 'warn');
+    return;
+  }
+  setIngestBusy(true, source);
+  ingestStartModal(label);
+  let r;
+  try{
+    r = await api('/api/ingest', {method:'POST', body:JSON.stringify({source:source})});
+  }catch(e){
+    // 网络层异常也必须解锁，否则按钮永久卡死
+    setIngestBusy(false);
+    resultModal({title: label + '导入失败', kind:'danger', body: '请求失败：' + (e && e.message || e)});
+    return;
+  }
+  if (r.__http_error || r.error){
+    setIngestBusy(false);
+    resultModal({title: label + '导入失败', kind:'danger', body: r.detail||r.error||'导入失败'}); return;
+  }
   const num = k => (r[k]==null?0:r[k]);
   const ix = r.index || {};
-  // v1.13.4：入库即分析关着时，如实告诉 HR"这几个人没分析"——不能让人以为分析过了。
-  // 静默入库最坏：HR 打开一看没有分析结果，以为功能坏了。
-  if (num('insight_skipped') > 0){
-    toast(`已入库，但有 ${num('insight_skipped')} 人未分析`
-      + `（"入库即分析"当前是关的）——可在上方点「分析待分析的人」批量补上`,'warn');
-  }
-  toast(`完成：新增 ${num('added')}，新版本 ${num('merged_versions')}，`
-    + `跳过重复 ${num('skipped_dup')}，无附件 ${num('no_attachment')}，`
-    + `解析失败(仍入库) ${num('parse_failed')}，超限跳过 ${num('skipped_oversize')}，`
-    + `异常 ${num('failed')}`
-    + `｜源：${r.source_label||label}`
-    + `｜索引：新增 ${ix.indexed==null?0:ix.indexed} 条（跳过 ${ix.skipped==null?0:ix.skipped} 条）`
-    (r.failed || r.skipped_oversize) ? 'warn':'ok');
+  // 入库结果用居中弹窗报告（成功/失败一眼可见），不再顶部 toast
+  const summary =
+    `新增 ${num('added')}，新版本 ${num('merged_versions')}，` +
+    `跳过重复 ${num('skipped_dup')}，无附件 ${num('no_attachment')}，` +
+    `解析失败(仍入库) ${num('parse_failed')}，超限跳过 ${num('skipped_oversize')}，` +
+    `异常 ${num('failed')}`;
+  const hasProblem = (r.failed || r.skipped_oversize || num('insight_skipped'));
+  const warnNote = num('insight_skipped') > 0
+    ? `<br><br>有 ${num('insight_skipped')} 人未分析（"入库即分析"当前是关的）——可在上方点「分析待分析的人」批量补上。`
+    : '';
+  // 收尾了才解锁：入库即分析还在后台跑，但收取动作本身已经结束，
+  // 允许 HR 排队下一次（避免"等模型分析"期间什么都做不了）。
+  setIngestBusy(false);
   LAST_INGEST = r;                       // 明细留在「导入与来源」页看
   await refresh();
+  // 入库后自动分析在后台跑（v1.24.9 接进度窗，v1.24.11 改为**收取结果确认后再开**）
+  // 原因：progressModal 与 resultModal 共用 #modal，同时调用会把「收取完成」覆盖掉，
+  // 用户反馈"没有完成提示"就是因为只看到了后面的进度条。
+  const startInsight = () => {
+    if (!r.insight_task_id) return;
+    progressModal(r.insight_task_id, {
+      title: '入库后自动分析',
+      desc: `正在对新增的 ${num('insight_queued')} 人做模型分析`,
+      onDone: () => refresh()
+    });
+  };
+  const insightNote = r.insight_task_id
+    ? `<br><br>接下来自动对新增的 ${num('insight_queued')} 人做模型分析，
+       点「知道了」后开始跟踪进度。`
+    : '';
+  resultModal({
+    title: label + '导入完成',
+    kind: hasProblem ? 'warn' : 'ok',
+    headline: hasProblem ? '有需要留意的地方' : '导入成功',
+    body: `${summary}<br><span style="color:var(--ink-2)">源：${r.source_label||label}</span>` +
+          warnNote + insightNote,
+    afterClose: startInsight
+  });
 }
 async function exportCsv(){
   // 导出内容按试用反馈定：**个人简介 + 对应岗位**，不掺内部判定口径。
@@ -1459,15 +1960,14 @@ function pipeBoardHtml(p){
 async function viewArchive(){
   const c = await api('/api/candidates?archived=1');
   const items = c.items || [];
-  const due = items.filter(x=>(x.archive||{}).days_left===0).length;
+  ARCH_ITEMS = items;// 批量彻底删除时用来显示姓名
   document.getElementById('view').innerHTML = `
   <div class="panel"><h2>归档</h2>
-    <div class="note">共 <b>${items.length}</b> 份已归档档案。归档不是删除：
-      档案、投递、附件、审计全部保留，点「取消归档」即恢复到人才库与检索。
-      <b>归档满 30 天后系统会自动彻底删除</b>（原件移入回收目录，审计保留）——
-      所以想留的人请在到期前取消归档${due?`，当前有 <b>${due}</b> 份已到期`:''}。</div>
+    <div class="note">共 <b>${items.length}</b> 份已归档档案。</div>
     <div class="bar" style="margin-top:10px">
       <button onclick="archiveBatch(null,false)">批量取消归档（勾选的人）</button>
+      <span class="vdiv"></span>
+      <button class="btn-danger" onclick="purgeSelected()">批量彻底删除（勾选的人）</button>
       <span class="vdiv"></span>
       ${(()=>{
         // 与人才库保持同一套控件（这里原来是数字输入框——打字容易错、还能输负数）
@@ -1493,15 +1993,14 @@ async function viewArchive(){
     const am = x.archive || {};
     const left = am.days_left;
     const expiring = left!=null && left<=7;
-    const expired = left===0;
     const leftTxt = left==null ? ''
-      : (expired ? `<span class="chip" style="color:var(--bad);background:var(--bad-soft)">已满 30 天，可彻底删除</span>`
+      : (expired ? `<span class="chip" style="color:var(--bad);background:var(--bad-soft)">已归档</span>`
                  : `<span class="chip" style="color:${expiring?'var(--bad)':'var(--ink-2)'};background:${expiring?'var(--bad-soft)':'var(--surface-2)'}"
-                      title="到期后自动彻底删除，原件移入回收目录">还有 ${left} 天彻底删除（${esc(am.purge_at||'')}）</span>`);
-    return `<div class="card">
+                      title="归档 ${esc(am.purge_at||'')} 到期后自动彻底删除">归档中（${esc((am.purge_at||'').slice(0,10))} 到期）</span>`);
+    return `<div class="card" style="border-left-color:${fg}">
       <div class="row1">
         <input type="checkbox" class="archChk" value="${x.id}" style="margin-right:10px">
-        <div class="avatar" style="color:${fg};background:${bg}">${esc((x.name||'?').slice(0,1))}</div>
+        <div class="avatar">${esc((x.name||'?').slice(0,1))}</div>
         <div style="flex:1;min-width:0">
           <div class="nm">${esc(x.name||'未识别')} ${leftTxt}</div>
           <div class="meta">${eduBadge(x)} · ${expBadge(x)} ·
@@ -1509,13 +2008,13 @@ async function viewArchive(){
             归档于 ${esc((x.archived_at||'').slice(0,16)||'—')}</div>
           <div class="meta" style="margin-top:2px"><b>联系方式</b>：${contactLine(x)}</div>
         </div>
-        <div class="badge" style="color:${fg};background:${bg}">${t} · ${TIER_LABELS[t]}</div>
+        <div class="badge" style="color:${fg};background:${bg}"><b>${t}</b><span>${TIER_LABELS[t]}</span></div>
       </div>
       <div class="acts">
         <button onclick="showDetail(${x.id})">完整档案</button>
         <button class="btn-primary" onclick="archiveCandidate(${x.id},false)">取消归档</button>
-        ${expired ? `<span class="vdiv"></span>
-        <button class="btn-danger" onclick="purgeOne(${x.id})">彻底删除</button>` : ''}
+        <span class="vdiv"></span>
+        <button class="btn-danger" onclick="purgeOne(${x.id})">彻底删除</button>
       </div>
     </div>`;}).join('') : '<div class="card">暂无归档档案。在人才库卡片上点「归档」即可移入这里。</div>'}`;
 }
@@ -1527,7 +2026,7 @@ async function archiveBatch(ids, archived){
   if (!list.length){ toast('先勾选要处理的人','warn'); return; }
   const verb = archived ? '归档' : '取消归档';
   if (!await askConfirm(`将${verb} ${list.length} 人。\\n\\n` + (archived
-      ? '归档后在「归档」页可见，满 30 天会被彻底删除（期间可随时取消归档）。继续？'
+      ? '归档后在「归档」页可见，可随时取消归档或彻底删除。继续？'
       : '取消归档后立即恢复在人才库与检索中展示。继续？'))) return;
   const r = await api('/api/candidates/archive-batch', {method:'POST',
     body:JSON.stringify({ids:list, archived:archived})});
@@ -1557,7 +2056,7 @@ function archYearOf(selId){
 async function archiveByYear(selId){
   const y = archYearOf(selId);
   if (!await askConfirm(`把「最后一条投递早于 ${y} 年」的档案整批归档（当前还在人才库里的）。\\n\\n`
-      + `归档后在「归档」页可见，满 30 天会被彻底删除。继续？`)) return;
+      + `归档后在「归档」页可见，可随时取消归档或彻底删除。继续？`)) return;
   const r = await api('/api/candidates/archive-batch', {method:'POST',
     body:JSON.stringify({before_year:y, archived:true})});
   if (r.__http_error || r.error){ toast(r.detail||r.error||'批量归档失败','danger'); return; }
@@ -1571,6 +2070,24 @@ async function purgeOne(cid){
   const r = await api('/api/candidates/'+cid+'/purge', {method:'POST'});
   if (r.__http_error || r.error){ toast(r.detail||r.error||'彻底删除失败','danger'); return; }
   toast('已彻底删除（原件移入回收目录，审计已留痕）','ok');
+  refresh();
+}
+async function purgeSelected(){
+  const ids = archSelected();
+  if (!ids.length){ toast('先勾选要删除的人','warn'); return; }
+  const names = ARCH_ITEMS.filter(x=>ids.includes(x.id)).map(x=>x.name||'?');
+  const shown = names.slice(0,12).join('、') + (names.length>12?' 等':'');
+  if (!await askConfirm('即将彻底删除 <b>'+ids.length+'</b> 份已归档档案：'
+    + '<br>'+esc(shown)
+    + '<br><br>档案、投递、附件记录都会删除，原件移入回收目录，<b>不可恢复</b>。'
+    + '<br><br>确定删除？')) return;
+  let ok = 0, fail = [];
+  for (const cid of ids){
+    const r = await api('/api/candidates/'+cid+'/purge', {method:'POST'});
+    if (r.__http_error || r.error) fail.push(r.detail||r.error||String(cid)); else ok++;
+  }
+  toast(`已彻底删除 ${ok} 人${fail.length?`，失败 ${fail.length} 人：${esc(fail[0])}`:''}`,
+        fail.length?'warn':'ok');
   refresh();
 }
 async function archiveCandidate(cid, on){
@@ -1734,33 +2251,35 @@ async function reanalyzeBatch(){
       ① 重新解析原件 → ② 模型重抽字段 → ③ 重建技能 → ④ 重新归岗 → ⑤ 重判建议档<br><br>
       <b>不会动的：</b>HR 已定的档位、阶段、已归岗的岗位；<b>你手动更正过的字段会保留</b>。<br>
       <b>会变的：</b>模型抽出的字段与技能（技能可能变少——模型只认能在原文定位到证据的）。<br><br>
-      每人约 6-15 秒，6 路并发。可以随时关页面，已完成的不会白做。</div>`,
+      每人约 6-15 秒，串行处理。可以随时关页面，已完成的不会白做。</div>`,
     okText: '开始重跑', danger: false});
   if (!ok) return;
   btn.disabled = true;
-  let guard = 0, done = 0, fail = 0;
+  let done = 0, fail = 0, taskId = null;
   try {
     for(;;){
       const r = await api('/api/candidates/reanalyze-batch',
         {method:'POST', body:JSON.stringify({limit: 5, only_heuristic: true})});
       if (r.__http_error || r.error){
-        toast(r.detail || r.error || '批量重跑失败','danger'); break;
+        resultModal({title:'批量重跑失败', kind:'danger', body: r.detail || r.error || '批量重跑失败'}); break;
       }
       done += (r.analyzed || 0); fail += (r.failed || 0);
+      taskId = r.task_id || taskId;
       const left = r.remaining || 0;
-      btn.textContent = left
-        ? ('重跑中…已完成 ' + done + '，还剩 ' + left)
-        : '正在刷新…';
-      if (r.note) toast(r.note, left ? 'info' : 'ok');
-      if (!left || guard++ > 60) break;      // guard：防止后端一直返回 left>0 时死循环
+      if (!left) break;
+      // 每批之间稍等，让后台串行分析往前走
       await new Promise(rs => setTimeout(rs, 300));
     }
   } finally {
     btn.disabled = false;
     refresh();
   }
-  if (fail) toast('完成：成功 ' + done + ' 人，失败 ' + fail + ' 人（失败的点开档案看原因）', 'warn');
-  else if (done) toast('全部完成：' + done + ' 人已改为模型抽取', 'ok');
+  // 用居中弹窗报告最终结果（不再用顶部 toast）
+  if (fail) resultModal({title:'批量重跑完成', kind:'warn',
+    headline:'部分失败', body:`成功 ${done} 人，失败 ${fail} 人。<br>失败的点开档案看具体原因。`});
+  else if (done) resultModal({title:'批量重跑完成', kind:'ok',
+    headline:'全部完成', body:`${done} 人已改为模型抽取。`});
+  else resultModal({title:'批量重跑', kind:'info', body:'没有需要重跑的人了。'});
 }
 
 async function analyzePendingBatch(){
@@ -1768,23 +2287,36 @@ async function analyzePendingBatch(){
   if (!btn || btn.disabled) return;
   const total0 = parseInt((btn.dataset.pending || '0'), 10);
   btn.disabled = true;
-  let guard = 0;
+  let done = 0, fail = 0, taskId = null;
   try {
     for(;;){
       const r = await api('/api/insights/analyze-pending',
         {method:'POST', body:JSON.stringify({limit: 5})});
       if (r.__http_error || r.error){
-        toast(r.detail || r.error || '分析失败','danger'); break;
+        resultModal({title:'分析失败', kind:'danger', body: r.detail || r.error || '分析失败'}); break;
       }
-      const done = r.analyzed || 0, left = r.remaining || 0;
-      btn.textContent = left ? ('分析中…已处理 ' + (total0 - left) + '/' + total0)
-                             : '正在刷新…';
-      if (r.note) toast(r.note, left ? 'info' : 'ok');
-      if (!left || !done || ++guard > 40) break;   // guard：防止后端一直返回 left>0 时死循环
+      done += (r.analyzed || 0); fail += (r.failed || 0);
+      taskId = r.task_id || taskId;
+      const left = r.remaining || 0;
+      if (!left || !(r.analyzed || 0)) break;
+      // 若还有剩余，用进度弹窗跟踪（后端返回了 task_id）
+      if (left && taskId){
+        progressModal(taskId, {title:'分析中', desc:`正在分析待分析的人（共 ${total0} 人）`,
+          onDone: () => { refresh(); }});
+        // 进度弹窗接管了，这里退出循环，交给弹窗轮询
+        break;
+      }
+      await new Promise(rs => setTimeout(rs, 300));
     }
   } finally {
     btn.disabled = false;
-    refresh();
+    if (!taskId) refresh();
+  }
+  // 最终结果：有 taskId 时进度弹窗已展示结果；否则直接弹结果
+  if (!taskId){
+    if (fail) resultModal({title:'分析完成', kind:'warn', headline:'部分失败',
+      body:`成功 ${done} 人，失败 ${fail} 人。`});
+    else if (done) resultModal({title:'分析完成', kind:'ok', headline:'全部完成', body:`${done} 人已分析。`});
   }
 }
 /* 复核（v1.14.1）：认可系统这次给的建议档，**不改档位**。
@@ -1811,11 +2343,7 @@ async function viewChat(){
   document.getElementById('view').innerHTML = `  <div class="panel">
     <div class="flexbetween">
       <div><h2 style="margin:0">HR 助手（智能体）</h2>
-        <div class="note">模型自己决定调用哪些工具；<b>写操作只生成待确认提案</b>，HR 点确认才生效。
-          模型不可用时自动降级为规则应答，数据仍来自真实库。<br>
-          <b>对话历史保存在本机数据库</b>：刷新页面、重启服务后仍在；只有点「清空」才会清空。
-          清空是<b>软清空</b>——30 天内可一键「恢复对话」，到期后系统才自动清理底层运行记录
-          （清空 / 恢复 / 清理三条痕迹永久保留在「提案与审计」中）。</div></div>
+        <div class="note">写操作只生成待确认提案，点确认才生效。</div></div>
       <div class="small" style="text-align:right">
         工具 ${t.total||0} 个：读 ${(t.read||[]).length} / 算 ${(t.compute||[]).length}
         / 写(需确认) ${(t.write_requires_confirmation||[]).length}<br>
@@ -1857,7 +2385,8 @@ async function loadChatHistory(){
       + '</div>';
   }
   msgs.forEach(m=>{
-    const d = pushMsg(m.role, m.content);
+    // 助手消息走 Markdown 渲染（v1.24.9），用户消息仍是纯文本
+    const d = pushMsg(m.role, m.content, m.role === 'assistant');
     if (m.role !== 'assistant') return;
     const bits = [];
     if (m.mode) bits.push('模式：'+m.mode);
@@ -1911,10 +2440,12 @@ function renderChatRetention(h){
     + `在此之前可点「恢复对话」找回，清理执行后即不可恢复。`
     + `清空 / 恢复 / 清理三条痕迹永久保留在「提案与审计」中。`;
 }
-function pushMsg(role, text){
+function pushMsg(role, text, isMd){
   const log = document.getElementById('chatLog');
   const d = document.createElement('div');
-  d.className = 'msg ' + role; d.textContent = text;
+  d.className = 'msg ' + role;
+  if (isMd){ d.classList.add('md'); d.innerHTML = md(text); }
+  else { d.textContent = text; }
   log.appendChild(d); log.scrollTop = log.scrollHeight;
   return d;
 }
@@ -1925,7 +2456,10 @@ async function askAgent(){
   const holder = pushMsg('assistant', '思考中…');
   const r = await api('/api/agent/chat', {method:'POST',
     body:JSON.stringify({message:q, history:CHAT})});
-  holder.textContent = r.answer || (r.detail||'(无回复)');
+  // Markdown 渲染（v1.24.9）：模型回复是 Markdown，textContent 会让 **/#/- 裸奔
+  const answer = r.answer || (r.detail||'(无回复)');
+  holder.classList.add('md');
+  holder.innerHTML = md(answer);
   let extra = '';
   if (r.trace && r.trace.length){
     extra += '<div class="trace">工具调用轨迹：' + r.trace.map(t=>
@@ -1980,7 +2514,10 @@ async function decideProposal(pid, decision, btn){
     return;
   }
   if (card){
-    card.style.background = decision === 'approve' ? '#f0fbf1' : '#f5f5f5';
+    // 采纳/驳回后的瞬时高亮沿用色板，不用随手写的十六进制：
+    // 绿是 ok-soft（比 ok 淡，做背景刚好），驳回用中性 surface-2——
+    // 驳回不是错误，只是一次选择，所以不给红色。
+    card.style.background = decision === 'approve' ? 'var(--ok-soft)' : 'var(--surface-2)';
     card.innerHTML = '<div style="font-weight:600">'
       + (decision === 'approve' ? '已执行' : '已拒绝') + ' · 提案 #' + pid + '</div>'
       + '<div class="small" style="margin-top:4px">' + esc(r.note || '') + '</div>';
@@ -2020,7 +2557,14 @@ async function openDraftInMailer(idx, d){
   try {
     const sel = document.getElementById('mCand');
     if (sel && d.candidate_id) sel.value = String(d.candidate_id);
-    if (typeof fillMailTo === 'function') fillMailTo();
+    // 智能助手起草的草稿里带着收件人地址（v1.24.9）。
+    // 原来这里调fillMailTo()——那是 <select> 时代的函数，从 option 文本里split 出邮箱，
+    // mCand 变成 hidden input 之后它既没意义也早已删除，结果是：
+    // **候选人 id 设了、邮箱不显示**，HR 不知道这封要发给谁。
+    // 现在直接用草稿里的 to 字段填，并走 setMailTo() 醒目显示。
+    if (d.to) setMailTo(d.to, d.name || '');
+    const inp = document.getElementById('mCandInput');
+    if (inp) inp.value = d.name || (d.to ? String(d.to) : '');
     const sub = document.getElementById('mSubject');
     if (sub) sub.value = d.subject || '';
     const ed = document.getElementById('mailEditor');
@@ -2060,8 +2604,6 @@ async function renderImportCfgInto(boxId){
   box.innerHTML = `
   <div class="panel">
     <h2 style="margin:0">导入与来源</h2>
-    <div class="note">收信（IMAP）配置在上方「收信配置」卡片；这里只管本地文件夹与导入结果，
-      执行导入的按钮在「人才库」页。</div>
   </div>
 
   <div class="card"><h2>① 来源一：本地文件夹</h2>
@@ -2245,12 +2787,7 @@ async function viewOrg(){
   document.getElementById('view').innerHTML = `
   <div class="card">
     <h2>岗位管理</h2>
-    <div class="note" style="margin-top:8px">JD 就是这个岗位的判断尺子：<b>学历门槛</b>由它决定（不达标判 D），
-      <b>档位 A/B/C</b>由模型按它给出的要求判断。
-      <b>改了 JD 只影响之后新入库的投递，已入库的档位不会被追溯改动</b>——
-      想让已有投递也按新尺子重排，点该岗位的「重新分析」：
-      先给差异预览，确认后才落库，且 <b>HR 已确认过的档位一概不动</b>。
-      只有岗位名称必填；JD 留空的项沿用默认尺子。</div>
+    <div class="note" style="margin-top:8px">只有岗位名称必填；JD 留空的项沿用默认尺子。</div>
     <div class="jdform" style="margin-top:12px">
       <label>岗位名称 *</label>
       <input id="jobTitle" placeholder="如：工艺工程师">
@@ -2275,18 +2812,11 @@ async function viewOrg(){
       <label>职责说明</label>
       <textarea id="jobNote" rows="3" placeholder="岗位职责、必须说明的事项（自由文本）"></textarea>
     </div>
-    <div class="note" style="margin-top:6px">
-      <b>专业需求填「学科名」，不要填进「必需技能」。</b>
-      技能栏里写「材料科学与工程」这类学科名，候选人的技能栏永远不会出现这几个字，
-      结果是全员命中 0 项。学科名（材料科学与工程、凝聚态物理、会计学…）认别名，
-      判不出会标「未识别」——<b>未识别不等于不满足</b>。
-      专业只作提示，<b>不参与档位淘汰</b>（材料物理去做工艺是常态）。
-    </div>
+    <div class="note" style="margin-top:6px">专业需求填<b>学科名</b>，不要填进「必需技能」。</div>
     <div class="bar" style="margin-top:10px">
       <button class="btn-primary" onclick="addJob()">新增岗位</button>
       <span class="small">技能按逗号 / 顿号 / 分号分隔都认。</span>
     </div>
-    <div class="note" style="margin-top:8px">邮件标题里带上岗位名时，收件会自动归到对应岗位；不带则标「待指定」。</div>
     <div class="spacer"></div>
     <table><thead><tr><th>岗位</th><th>JD（判断尺子）</th><th class="nw">投递数</th><th class="nw">状态</th><th class="nw">操作</th></tr></thead>
       <tbody>${jobs.map(x=>`<tr>
@@ -2398,8 +2928,7 @@ function jdEditorHtml(jid, jd){
   const must = jd.must || {}, pref = jd.preferred || {};
   const eduOpts = ['','大专','本科','硕士','博士'].map(v =>
     `<option value="${v}" ${v===(must.education_min||'')?'selected':''}>${v||'（不限 / 沿用默认）'}</option>`).join('');
-  return `<div class="note">JD 是判断尺子：<b>学历门槛</b>决定是否判 D，档位 A/B/C 由模型按它判断。<b>保存后只影响之后新入库的投递，已入库的档位保持不变。</b></div>
-  <div class="jdform" style="margin-top:12px">
+  return `<div class="jdform" style="margin-top:12px">
     <label>必需技能</label>
     <div class="multi" id="multi_must"></div>
     <label>加分技能</label>
@@ -2419,18 +2948,13 @@ function jdEditorHtml(jid, jd){
     <label>职责说明</label>
     <textarea id="ejNote" rows="3">${esc(jd.note||'')}</textarea>
   </div>
-  <div class="note" style="margin-top:6px" id="jdHint">
-    专业需求填<b>学科名</b>（认别名，如「材料学」≡「材料科学与工程」），
-    <b>不要填进技能栏</b>。专业只作提示、不参与淘汰；判不出会标「未识别」——未识别不等于不满足。
-  </div>
+  <div class="note" style="margin-top:6px" id="jdHint">专业需求填<b>学科名</b>（认别名，如「材料学」≡「材料科学与工程」），不要填进技能栏。</div>
   <div class="bar" style="margin-top:12px">
     <button class="btn-primary" onclick="saveJd(${jid})">保存 JD</button>
     <button onclick="regradeJob(${jid})">改完重新分析</button>
     <button onclick="closeModal()">取消</button>
     <span class="small">清空某一项 = 该项不再作为门槛。</span>
   </div>
-  <div class="note" style="margin-top:8px">保存只影响之后新入库的投递；要让已有投递也按新尺子重排，
-    点「改完重新分析」——它会先给你看差异，确认后才落库。</div>
   <div id="ejOut"></div>`;
 }
 async function editJd(jid){
@@ -2605,8 +3129,7 @@ async function renderPropsInto(boxId){
     : '<span class="small">对话产生</span>';
   box.innerHTML = `
   <div class="panel"><h2>待确认提案</h2>
-    <div class="note">系统提出的写操作。<b>在你确认之前，人才库没有任何改动。</b>
-      「系统巡检」是系统自己发现的（没人问它），走同一条确认流。</div>
+    <div class="note">在你确认之前，人才库没有任何改动。</div>
     ${auto.length?`<div class="bar" style="margin-top:8px">
       <span class="small">其中 <b>${auto.length}</b> 条来自系统巡检</span>
       <button class="btn-ok" onclick="decideMany('approve')">全部确认执行</button>
@@ -2670,13 +3193,10 @@ async function renderSearchInto(boxId){
   <div class="panel">
     <div class="flexbetween">
       <div><h2 style="margin:0">人才检索</h2>
-        <div class="note">技能召回走本体精确匹配（结果可解释、带原文证据）；
-          语义召回用于说不清关键词的探索性需求。
-          当前索引模型 <b>${esc(s.index_model||'未建立')}</b>，已索引 ${s.indexed||0}/${s.people||0} 人。
-          导入新简历后会自动建立增量索引（只处理新增/变更的人），无需手动重建。</div></div>
+        <div class="note">索引模型 <b>${esc(s.index_model||'未建立')}</b>，已索引 ${s.indexed||0}/${s.people||0} 人。</div></div>
       <div class="bar"><button onclick="go('sys')">导入与来源配置在系统配置 →</button>
         <button onclick="refresh()">刷新索引状态</button>
-        <span class="badge" style="background:var(--surface-2);color:var(--ink-3)">${esc(s.model||'')}</span></div>
+        <span class="badge plain" style="background:var(--surface-2);color:var(--ink-3)">${esc(s.model||'')}</span></div>
     </div>
   </div>
   <div class="card">
@@ -2749,7 +3269,7 @@ async function doSemSearch(){
       <td class="small">${esc((x.skills||[]).join('、'))}</td>
       <td><button onclick="showDetail(${x.candidate_id})">档案</button></td></tr>`).join('')
       ||'<tr><td colspan="7">无结果</td></tr>'}</tbody></table>
-    <div class="note" style="margin-top:8px">语义相似度是相对排序指标，不是匹配度评分，请勿直接当筛除依据。</div>`;
+    ;`;
 }
 
 /* ------------------------------ 写邮件 ------------------------------ */
@@ -2804,9 +3324,9 @@ async function viewMail(){
   MAIL_VARS = {builtin: tpl.builtin_vars || [], runtime: tpl.runtime_vars || []};
   const conf = smtp || {};
   const cands_ = cands.items || [];
-  const clist = cands_.map(c =>
-    `<option value="${c.id}">${esc(c.name || ('未识别#'+c.id))} · ${esc(c.email || '无邮箱')}</option>`
-  ).join('');
+  // 存全量候选人（按姓氏筛选收件人用）
+  window.MAIL_CANDS = cands_.map(c => ({
+    id: c.id, name: c.name || ('未识别#'+c.id), email: c.email || '' }));
   const tlist = MAIL_TPL.map(t =>
     `<option value="${t.id}">${esc(t.name)}${t.scene?('（'+esc(t.scene)+'）'):''}</option>`).join('');
   // v1.20：这些字段不该是"带灰色提示的文本框"——那是让 HR 凭记忆敲键盘。
@@ -2854,8 +3374,8 @@ async function viewMail(){
   document.getElementById('view').innerHTML = `
   <div class="panel">
     <h2>写邮件</h2>
-    <div class="note"><b>发送必须由你点确认</b>，系统不做自动发送。
-      变量取不到值会标成 <code>【待填：xxx】</code>，不会静默留空。<br>发信账号：${conf.user
+    <div class="note">发送必须由你点确认。变量取不到值会标成 <code>【待填：xxx】</code>。</div>
+    <div class="note">发信账号：${conf.user
         ? `<b>${esc(conf.user)}</b>（${esc(conf.host)}:${conf.port}，${conf.ssl?'SSL':'STARTTLS'}）`
         : '<span style="color:var(--bad)">未配置</span>'}
       <button onclick="checkSmtp()" style="margin-left:6px">检查发信配置</button>
@@ -2865,10 +3385,19 @@ async function viewMail(){
   </div>
   <div class="card"><h2>第一步 · 选人、选模板</h2>
     <div class="kv">
-      <div class="k">收件人</div><div>
-        <select id="mCand" style="width:55%" onchange="fillMailTo()">
-          <option value="">（选择候选人）</option>${clist}</select>
-        <span class="small" id="mTo"></span></div>
+      <div class="k">收件人</div><div style="position:relative">
+        <input id="mCandInput" style="width:55%" placeholder="输入姓名或邮箱前缀，点选或回车确认"
+               autocomplete="off"
+               oninput="filterCand(true)" onfocus="filterCand()" onkeydown="candKey(event)">
+        <input id="mCand" type="hidden" value="">
+        <!-- 给代码读的收件人邮箱（显示给人看的是下面那块醒目样式，见 setMailTo） -->
+        <input id="mToVal" type="hidden" value="">
+        <div class="cand-drop" id="mCandDrop" style="display:none"></div>
+        <!-- 收件人邮箱（v1.24.9）：选人后**显眼**展示。
+             原来是小灰字跟在输入框后面（"放在后面不够显眼"），而发信时 HR 要靠它
+             核对收件人——邮箱错一位就是发错人，必须一眼看清、字号够大。 -->
+        <div id="mTo" style="display:none;margin-top:8px"></div>
+        <div class="small" style="color:var(--ink-3)">点开就列出候选人；输入姓名/邮箱则按前缀筛选，↑↓ 移动、Enter 确认。</div></div>
       <div class="k">模板</div><div>
         <select id="mTpl" style="width:55%">
           <option value="">（不用模板，直接手写）</option>${tlist}</select>
@@ -2944,10 +3473,7 @@ async function renderTplMgrInto(boxId){
     .map(v => `<code title="${esc(v.desc)}">{${esc(v.key)}}</code>`).join(' ');
   box.innerHTML = `
   <div class="card"><h2>模板管理</h2>
-    <div class="note">模板 = 固定措辞 + <code>{变量}</code>，系统只做替换。
-      正文用下面的<b>可视化编辑器</b>排版（表格、加粗、合并单元格都能直接调），
-      <b>不用看也不用写任何代码</b>；变量点一下插到光标处。
-      发送时按 HTML 邮件发出，并自动附一份纯文本版本兼容不显示 HTML 的客户端。
+    <div class="note">变量点一下插到光标处。
       <br>可用变量：${varChips}</div>
     <div class="spacer"></div>
     <table><thead><tr><th>#</th><th>模板名</th><th>场景</th><th>主题</th><th>操作</th></tr></thead>
@@ -2964,12 +3490,97 @@ async function renderTplMgrInto(boxId){
   </div>`;
 }
 
-function fillMailTo(){
-  const sel = document.getElementById('mCand');
-  const opt = sel.selectedOptions[0];
-  const mail = opt ? (opt.textContent.split(' · ')[1] || '') : '';
-  document.getElementById('mTo').textContent = sel.value ? ('将发往：' + mail) : '';
+/* 原来这里有个 fillMailTo()，是<mCand> 还是<select> 时代的遗留（从 option 文本里
+   split(' · ') 反解邮箱）。v1.24.9 收件人改成可输入组合框后 mCand 变成 hidden input，
+   这个函数已经没有任何调用点、也永远不会工作——删掉，免得日后有人以为能用。 */
+
+/* 收件人可输入筛选（v1.24.9）：输入姓名/姓氏，实时列出匹配候选人，点选填入。
+   底层 mCand（hidden）仍存 candidate_id，genMailDraft 拿它发草稿，数据流不变。 */
+/* 收件人输入 + 前缀匹配补全（v1.24.9）
+   要的行为：输入框**自由打字**（不被下拉锁死），同时下方下拉做**前缀匹配**
+   （输入到哪匹配到哪），点一下选中并回填。
+   为什么不用原生 <datalist>：它按 option 的 value 整体前缀匹配，而这里的 value
+   是"姓名 · 邮箱"，输入"林"匹配不到；且各浏览器行为不一致、无法加键盘导航。
+   ——所以自己实现一个可控的补全框。 */
+let _candHi = -1;   // 当前高亮项下标（键盘上下用）
+function filterCand(clearSel){
+  const inp = document.getElementById('mCandInput');
+  const drop = document.getElementById('mCandDrop');
+  if (!inp || !drop) return;
+  const q = (inp.value || '').trim();
+  // 输入内容一旦变动，就把"已选"清掉——不能让上一份简历的 id 留着发错人。
+  // clearSel 只在 oninput 时传 true；onfocus 不传，否则点选后一聚焦就把 id 清了。
+  if (clearSel){
+    document.getElementById('mCand').value = '';
+    setMailTo('');
+  }
+  // **空输入也弹下拉**（v1.24.9）：点进输入框就该看到候选人列表，
+  // 不该要求"先打字才给看"——HR 常常是先浏览再决定输什么。
+  // 前缀为空 = 全部命中（startsWith('') 恒真），所以下面不用特判空串。
+  const lq = q.toLowerCase();
+  const list = (window.MAIL_CANDS || []).filter(c =>
+    (c.name || '').toLowerCase().startsWith(lq) ||
+    (c.email || '').toLowerCase().startsWith(lq));
+  _candHi = list.length ? 0 : -1;
+  if (!list.length){
+    // 没匹配上时也把框显示出来，写明"没有匹配的人"——
+    // 静默不弹会让人以为功能坏了。
+    drop.innerHTML = '<div class="cand-item" style="color:var(--ink-3);cursor:default">'
+      + '没有匹配「' + esc(q) + '」的候选人</div>';
+    drop.style.display = 'block';
+    return;
+  }
+  drop.innerHTML = list.slice(0, 20).map((c, i) =>
+    `<div class="cand-item${i === _candHi ? ' hi' : ''}" data-cid="${c.id}">`
+    + `<b>${esc(c.name)}</b> <span class="em">${esc(c.email || '无邮箱')}</span></div>`
+  ).join('');
+  drop.style.display = 'block';
+  // 事件委托：点候选项回填。用 mousedown 而非 click——早于输入框失焦，
+  // 否则 blur 先跑、下拉已被收起，点不中。
+  drop.onmousedown = ev => {
+    const el = ev.target.closest('.cand-item');
+    if (el) pickCand(el.dataset.cid);
+  };
 }
+function candHighlight(i){
+  const drop = document.getElementById('mCandDrop');
+  if (!drop) return;
+  const items = drop.querySelectorAll('.cand-item');
+  if (!items.length) return;
+  _candHi = (i + items.length) % items.length;
+  items.forEach((el, k) => el.classList.toggle('hi', k === _candHi));
+  items[_candHi].scrollIntoView({block: 'nearest'});
+}
+// 点选：回填姓名、锁定 candidate_id、显示邮箱
+function pickCand(cid){
+  const c = (window.MAIL_CANDS || []).find(x => x.id === +cid);
+  if (!c) return;
+  document.getElementById('mCandInput').value = c.name;
+  document.getElementById('mCand').value = c.id;
+  document.getElementById('mCandDrop').style.display = 'none';
+  setMailTo(c.email, c.name);
+}
+// 键盘：上下选、Enter 选中、Esc 收起
+function candKey(e){
+  const drop = document.getElementById('mCandDrop');
+  if (!drop || drop.style.display === 'none'){
+    if (e.key === 'ArrowDown') filterCand();
+    return;
+  }
+  if (e.key === 'ArrowDown'){ e.preventDefault(); candHighlight(_candHi + 1); }
+  else if (e.key === 'ArrowUp'){ e.preventDefault(); candHighlight(_candHi - 1); }
+  else if (e.key === 'Enter'){
+    const el = drop.querySelectorAll('.cand-item')[_candHi];
+    if (el){ e.preventDefault(); pickCand(el.dataset.cid); }
+  }
+  else if (e.key === 'Escape'){ drop.style.display = 'none'; }
+}
+// 点别处收起补全框（用 mousedown，比 click 早，能抢在输入框失焦前）
+document.addEventListener('mousedown', e => {
+  const drop = document.getElementById('mCandDrop');
+  if (drop && e.target !== document.getElementById('mCandInput')
+      && !drop.contains(e.target)) drop.style.display = 'none';
+});
 
 function mailRuntime(){
   const out = {};
@@ -3272,12 +3883,12 @@ function beautifyTable(id, quiet){
         const isHead = c.tagName === 'TH';
         if (isTitle){
           c.setAttribute('style', `border:${BORDER};padding:10px;text-align:center;`
-            + 'font-size:18px;font-weight:600;background:#f2f4f7');
+            + 'font-size:18px;font-weight:600;background:var(--surface-2)');
         } else if (isHead || ri === 0){
           // 粘贴来的表格常全是 td（没有 th）：**首行一律当表头**，
           // 否则整张表一片白，看着就是"没排版"（保留原标签，不破坏 colspan 结构）
           c.setAttribute('style', `${CELL};text-align:center;font-weight:600;`
-            + 'background:#f2f4f7');
+            + 'background:var(--surface-2)');
         } else {
           c.setAttribute('style', CELL);
         }
@@ -3423,7 +4034,8 @@ async function genMailDraft(){
   // 草稿直接灌进所见即所得编辑器：模板里的 `| 列 | 列 |` 在这里已经变成真表格
   const ed = editorEl('mailEditor');
   if (ed) ed.innerHTML = r.body_html || '<p><br></p>';
-  if (r.to) document.getElementById('mTo').textContent = '将发往：' + r.to;
+  // 草稿接口回了实际收件人，以它为准（可能与选人时不同，比如取的是投递上的邮箱）
+  if (r.to) setMailTo(r.to);
   msg.innerHTML = (r.missing || []).length
     ? `<span style="color:var(--bad)">有变量没取到值：${esc(r.missing.join('、'))}
        —— 正文里已标成【待填：xxx】，发送前请补上（填了对应变量再点一次生成也行）。</span>`
@@ -3441,8 +4053,37 @@ async function checkSmtp(){
   msg.innerHTML = `<span style="color:var(--ok)">${esc(r.note||'配置可用')}</span>`;
 }
 
+/* 收件人邮箱展示（v1.24.9）：统一走这里，醒目显示 + 同时写隐藏字段。
+   为什么要有隐藏字段：原来 sendMailConfirm 靠
+   `textContent.replace('将发往：','')` 反解邮箱——**改一次文案就发错人**，
+   这个坑今天已经踩过（统计逻辑靠匹配文案字符串，静默失效）。
+   现在"给人看的"和"给代码读的"分开：显示走 innerHTML，取值走 value。 */
+function setMailTo(email, name){
+  const box = document.getElementById('mTo');
+  const hid = document.getElementById('mToVal');
+  if (hid) hid.value = email || '';
+  if (!box) return;
+  if (!email){
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  box.style.display = 'block';
+  box.innerHTML = `<div class="mailto">
+      <span class="ml">收件人</span>
+      <span class="mv">${esc(email)}</span>
+      ${name ? `<span class="ml">（${esc(name)}）</span>` : ''}
+    </div>`;
+}
+
+function mailToValue(){
+  const hid = document.getElementById('mToVal');
+  if (hid && hid.value) return hid.value;
+  return '';   // 拿不到就空着——由 sendMailConfirm 如实报"没选收件人"，不猜
+}
+
 async function sendMailConfirm(){
-  const to = (document.getElementById('mTo').textContent || '').replace('将发往：','').trim();
+  const to = mailToValue();
   const subject = document.getElementById('mSubject').value.trim();
   const html = editorBody('mailEditor');
   const plain = (editorEl('mailEditor') || {}).innerText || '';
@@ -3519,7 +4160,7 @@ function mailSentBanner(ok, msg, info){
 /* ---- 模板编辑 ---- */
 function tplFormHtml(t){
   const t_ = t || {};
-  return `<div class="card" style="margin-top:10px;background:#fafbfc">
+  return `<div class="card" style="margin-top:10px;background:var(--surface-2)">
     <h2>${t_.id ? '编辑模板' : '新建模板'}</h2>
     <input type="hidden" id="tplId" value="${t_.id || ''}">
     <div class="kv">
@@ -3629,7 +4270,6 @@ async function renderMailCfgInto(boxId){
   box.innerHTML = `
   <div class="panel">
     <h2>收信配置</h2>
-    <div class="note">把投递到招聘邮箱的简历自动收进人才库。IMAP 只读增量拉取，不删信、不改已读。</div>
     <div id="cfgWarn"></div>
     <div class="kv" style="margin-top:14px;grid-template-columns:170px 1fr">
       <div class="k">抓取模式</div><div>
@@ -3672,7 +4312,6 @@ async function renderMailCfgInto(boxId){
     </div>
     <div id="cfgOut"></div>
     <div id="mailPreview" style="margin-top:10px"></div>
-    <div class="note" style="margin-top:10px">口令只会写入本地 config/imap.secret（权限 0600），不会显示在界面或日志里，也不提交到版本库。</div>
   </div>`;
   loadCfgPresets();
   showCfgWarnings();
@@ -3688,8 +4327,7 @@ async function renderSmtpCfgInto(boxId){
   box.innerHTML = `
   <div class="panel">
     <h2>发信配置（SMTP）</h2>
-    <div class="note">这里只配发信账号，<b>系统不会自动发任何一封</b>；真正发送要你在「写邮件」页
-      逐封点确认（会二次确认收件人与主题，动作写入审计）。<br>${esc(c.note||'')}</div>
+    <div class="note">${esc(c.note||'')}</div>
     <div class="kv" style="margin-top:14px;grid-template-columns:170px 1fr">
       <div class="k">服务商预设</div><div class="bar">
         <select id="spPreset" onchange="applySmtpPreset()">
@@ -3705,18 +4343,7 @@ async function renderSmtpCfgInto(boxId){
         placeholder="${c.password_set?'已保存（留空则不修改）':'未设置'}">
         <span class="small">${c.password_set?'当前已保存（不回显）':'尚未保存'}　留空 = 不修改</span></div>
       <div class="k">发件人显示名</div><div><input id="spFrom" value="${esc(c.from_name||'')}" style="width:260px"
-        placeholder="西北有色金属研究院 人力资源部">
-        <div class="small" style="margin-top:4px">
-          <b>这里决定"我们发出去的邮件里带什么名字"。</b><br>
-          收件人看到的发件人由两部分组成：<code>显示名 &lt;账号@qq.com&gt;</code>。
-          这个框管<b>显示名</b>，下面的账号管<b>登录与收信</b>，两个都要是你的。<br>
-          <b style="color:var(--warn)">重要：QQ 邮箱会在服务器端覆盖这个显示名</b>，
-          强制改用它账号设置里的「发件人名」。所以只改这里，
-          对方<b>详情页</b>可能仍然只看到邮箱地址。要让名称真正生效，
-          还得去 QQ 邮箱「设置 → 账户」把<b>发件人名</b>也改成同样的名字。<br>
-          彻底稳妥的做法是改用<b>单位的企业邮箱</b>发信——显示名与账号域名一致，
-          各家客户端都不会改写，也不依赖邮箱服务商的这个设置。
-        </div></div>
+        placeholder="西北有色金属研究院 人力资源部"></div>
     </div>
     <div class="bar" style="margin-top:16px">
       <button class="btn-primary" onclick="saveSmtp()">保存发信配置</button>
@@ -3935,17 +4562,12 @@ async function viewSys(){
   const a = pol.access || {}, pii = a.pii_protection || {};
   document.getElementById('view').innerHTML = `
   <div class="panel"><h2>系统配置</h2>
-    <div class="note">收发信邮箱、简历来源目录、邮件模板都在这里集中配置。
-      导入动作在「人才库」页有按钮，这里只管配置。</div>
   </div>
   <!--顺序原则（v1.15）：**需要填写/填错会出问题**的排最前（邮箱、SMTP、导入来源），
        可选与只读的往后（模板是写作素材，红线/数据存放只需读）。
        HR 的原话：「所有需要填写的配置的部分尽量往前面放」。 -->
   <div class="panel"><h2>面试字典（单位 / 会议室 / 时段 / 联系人）</h2>
-    <div class="note">写邮件时的「面试单位、面试地点、面试时段、联系人」都从这份字典出，
-      可以直接在这里增删。内置了西北有色院本部各研究所与人事处/财务处/数字化中心，
-      以及创新大楼 1519 会议室——<b>换成你们自己的单位只要改这里，不用改代码</b>。
-      联系人填好后，写邮件时选人就会自动带出电话。</div>
+    <div class="note">写邮件时的面试单位、地点、时段、联系人都从这份字典出。</div>
     <div id="dictBox"></div>
     <div class="bar" style="margin-top:8px">
       <button class="btn-primary" onclick="saveDict()">保存字典</button>
@@ -3956,11 +4578,8 @@ async function viewSys(){
   <div id="smtpCfgBox"></div>
   <div id="importCfgBox"></div>
   <div id="tplMgrBox"></div>
-  <div class="panel"><h2>红线（写死在设计里）</h2>
-    ${(pol.red_lines||[]).map(x=>`<div class="ok" style="margin-bottom:6px">${esc(x)}</div>`).join('')}
-  </div>
   <div class="card"><h2>数据存放</h2>
-    <div class="note">全部数据都在应用目录（<code>${esc((META.storage||{}).base||'resume-workbench')}/</code>）下，不写系统目录、不上传外部：
+    <div class="note">数据都在 <code>${esc((META.storage||{}).base||'resume-workbench')}/</code> 下：
       <div class="kv" style="margin-top:8px">
         <div class="k">主数据库</div><div><code>${esc((META.storage||{}).db||'data/workbench.db')}</code>（SQLite：候选人、投递、技能、审计、向量索引，联系方式在此库内 AES-GCM 加密）</div>
         <div class="k">简历原件</div><div><code>${esc((META.storage||{}).archive_dir||'data/archive')}</code>（入库后原件区，只增不改）</div>
@@ -3973,15 +4592,8 @@ async function viewSys(){
       <div class="small" style="margin-top:8px">备份方式：停服后整目录拷贝即可（重点 <code>data/</code> 与 <code>config/</code>）。</div>
     </div>
   </div>
-  <div class="card"><h2>口径偏差（系统建议 vs HR 决定）</h2>
-    <div class="note">统计"系统建议档位 vs 你实际定档"的偏差，用来判断分级口径要不要调。
-      <b>只做统计观察，不修改任何权重</b>。</div>
-    <div id="fbBox"><span class="small">加载中…</span></div>
-  </div>
   <div class="card"><h2>模型与密钥</h2>
-    <div class="note">API Key 只以掩码显示（<code>sk-****1234</code>），完整值不离开服务端；
-      保存写 <code>config/secrets.json</code>（0600，不入库不提交），**保存即生效**（每次模型调用重新读取配置）；
-      动作写入审计。留空 Key 表示不修改。</div>
+    <div class="note">API Key 只以掩码显示。留空表示不修改。</div>
     <div class="kv" style="margin-top:8px">
       <div class="k">模型地址</div><div><input id="mcBaseUrl" style="width:90%" value="${esc(mc.base_url||'')}"
         placeholder="https://api.deepseek.com/v1"></div>
@@ -4029,7 +4641,7 @@ async function viewSys(){
         return out;
       })()}</div>
       <div class="k">解析能力</div><div>PyMuPDF ${META.parse.pymupdf?'':'✗'} ·
-        MarkItDown ${META.parse.markitdown?'':'✗'} · OCR ${META.parse.ocr?'':'✗（图片简历将标『待人工判读』）'}</div>
+        MarkItDown ${META.parse.markitdown?'':'✗'} · OCR ${META.parse.ocr?'':'✗（图片简历将标『简历读不出』）'}</div>
       <div class="k">邮箱接入</div><div>模式 ${esc(META.mailbox.mode||'—')} ·
         只读 ${META.mailbox.readonly?'':'✗'} · 附件白名单 ${esc((META.mailbox.attachment_ext||[]).join(' '))}
         · 单个附件上限 ${META.mailbox.max_attachment_mb==null?20:META.mailbox.max_attachment_mb} MB
@@ -4037,7 +4649,6 @@ async function viewSys(){
       <div class="k">岗位</div><div>${(META.jobs||[]).length} 个（含已停用）</div>
     </div>
   </div>`;
-  loadFeedback();
   renderMailCfgInto('mailCfgBox');       // 收信（IMAP）
   renderSmtpCfgInto('smtpCfgBox');       // 发信（SMTP）
   renderTplMgrInto('tplMgrBox');         // 邮件模板管理
@@ -4046,52 +4657,6 @@ async function viewSys(){
 
 }
 
-/* 口径偏差（决策反馈闭环）：把"系统建议 vs HR 决定"的偏差摊开给 HR 看。
-   数据本来就躺在 applications 表里，这里只是把它算清楚、说人话。
-   样本不足时如实说不足，不硬编趋势。 */
-async function loadFeedback(){
-  const box = document.getElementById('fbBox');
-  if (!box) return;
-  const r = await api('/api/feedback/report?days=90');
-  if (r.__http_error || r.error){
-    box.innerHTML = '<div class="small">报告加载失败</div>'; return;
-  }
-  if (r.insufficient){
-    box.innerHTML = `<div class="warn-txt small">${esc(r.message)}</div>
-      <div class="small" style="margin-top:6px">怎么看数据够不够：在人才库把候选人的档位
-      用下拉框确认（变成"已确认"）即可累积样本。</div>`;
-    return;
-  }
-  const T = ['A','B','C','D'];
-  const rows = T.map(s => `<tr><td><b>${s}</b></td>${T.map(f => {
-    const n = ((r.matrix||{})[s]||{})[f] || 0;
-    const diag = s === f;
-    const bg = diag ? '#e8ffe8' : (n ? 'var(--surface)1f0' : '');
-    return `<td style="${bg?('background:'+bg+';'):''}${diag?'font-weight:600':''}">${n||'—'}</td>`;
-  }).join('')}</tr>`).join('');
-  const attr = (r.attribution||[]).map(a =>
-    `<li>${esc(a.feature)}：被低估组 <b>${a.low}%</b> / 被高估组 ${a.high}% / 全体 ${a.all}%</li>`).join('');
-  box.innerHTML = `
-    <div class="kv" style="margin-bottom:10px">
-      <div class="k">样本</div><div>最近 ${r.days} 天已确认 <b>${r.total}</b> 份</div>
-      <div class="k">一致性</div><div>${r.consistency}% —— 一致 ${r.same} ｜
-        <span style="color:${r.high?'var(--warn)':'var(--ink-3)'}">系统偏高 ${r.high}</span> ｜
-        <span style="color:${r.low?'var(--warn)':'var(--ink-3)'}">系统偏低 ${r.low}</span></div>
-    </div>
-    <table style="width:auto">
-      <thead><tr><th>建议 ↓ / 实际 →</th>${T.map(x=>`<th>${x}</th>`).join('')}</tr></thead>
-      <tbody>${rows}</tbody></table>
-    <div class="small" style="margin-top:4px">绿色格=建议与决定一致；红色格=有偏差</div>
-    ${attr?`<div style="margin-top:12px"><b>偏差归因</b>
-      <ul class="small" style="margin:6px 0 0 18px">${attr}</ul></div>`:''}
-    <div style="margin-top:12px"><b>建议</b>
-      <ul class="small" style="margin:6px 0 0 18px">${
-        (r.suggestions||[]).map(x=>`<li>${esc(x)}</li>`).join('')}</ul></div>
-    <div class="bar" style="margin-top:10px">
-      <button onclick="window.open('/api/feedback/export?days=90')">导出明细 CSV</button>
-      <span class="small">${esc(r.note||'')}</span>
-    </div>`;
-}
 // 保存模型配置（v1.7.6）：地址/模型名直接下发，Key 留空 = 不修改；
 // 后端写 config/model.json + secrets.json（0600）并写审计，保存即生效。
 async function saveModelCfg(){

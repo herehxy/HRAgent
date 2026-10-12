@@ -31,6 +31,7 @@ import sys
 
 from . import db
 from .pipeline.extract import extract
+from .pipeline import tier as tier_mod
 from .pipeline.tier import grade
 
 
@@ -115,7 +116,8 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
         # 达标时再问一次模型——HR 改的是 JD/尺子，档位本就该跟着新要求重新判断。
         # 学历不达标就不问了：结论已定（D），省一次调用也避免模型把硬门槛"说上去"。
         tier_src = "学历门槛"
-        if use_llm and g["tier_suggested"] != "D":
+        _gate = tier_mod.edu_gate(cand, jd)
+        if use_llm and not _gate.get("failed"):
             try:
                 from .pipeline import analyze as analyze_mod
 
@@ -123,10 +125,13 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
                 _fit = analyze_mod.analyze_fit({**cand, "jd": jd}, jd)
                 # 模型漏给档位时会单独追问一次（见 analyze.resolve_tier）
                 _mt = analyze_mod.resolve_tier(cand, jd, _fit)
-                if _mt:
-                    g["tier_suggested"] = _mt
-                    tier_src = "模型"
-                    g["reasons"] = ([f"模型判断建议 {_mt} 档"]
+                # v1.24.15：裁决统一走 lock_tier（学历门槛唯一出口），
+                # 不再在这里自己写 `if g["tier_suggested"] != "D"`。
+                _new_tier, _src = tier_mod.lock_tier(g["tier_suggested"], _mt, _gate)
+                if _new_tier and _new_tier != g["tier_suggested"]:
+                    g["tier_suggested"] = _new_tier
+                    tier_src = _src
+                    g["reasons"] = ([f"{_src}判断建议 {_new_tier} 档"]
                                     + [x for x in (g.get("reasons") or [])])[:4]
             except Exception as exc:                           # noqa: BLE001
                 print(f"[regrade_job] 模型重判档位失败，保留学历结论："
@@ -409,11 +414,14 @@ def assign_job(conn: sqlite3.Connection, application_id: int, job_id: int,
     cand = _reprofile(conn, a.get("resume_doc_id"), jd)
     note = ""
     if cand is None:
-        # 原文不可用：归岗照做（HR 的决定），但不重算，标待人工判读，如实说明
+        # 原文不可用（解析失败）：归岗照做（HR 的决定），但不重算，如实标出来。
+        # v1.24.9：数据库仍用 needs_review 这一个字段承载（不改表结构、避免迁移风险），
+        # **界面按parse_ok 区分显示**——parse_ok=0 显示"简历读不出"，
+        # parse_ok=1 但字段缺失才显示"缺：年限、技能"。这里写 1 表示"需要人处理"。
         conn.execute("UPDATE applications SET job_id = ?, suggested_job_id = NULL, "
                      "needs_review = 1, updated_at = ? WHERE id = ?",
                      (job_id, db.now(), application_id))
-        note = "简历原文不可用（解析失败），已归岗但未重算，请人工判读"
+        note = "简历原文不可用（解析失败），已归岗但未重算，请查看原件或重新导入"
         after = f"归到 {jrow['title']}（未重算：原文不可用）"
     else:
         # 归岗后重算：岗位是 HR 明确指定的 -> 允许按学历判 D

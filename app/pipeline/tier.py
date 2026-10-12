@@ -22,6 +22,71 @@ from . import normalize as nz
 EDU_RANK = {"大专": 1, "专科": 1, "本科": 2, "学士": 2, "研究生": 3, "硕士": 3, "博士": 4}
 
 
+def edu_gate(cand: dict, jd: dict) -> dict:
+    """**学历门槛的唯一权威判定**（v1.24.15）。
+
+    为什么要有这个函数，而不是让各处自己算一遍 `EDU_RANK`：
+    「学历不够就是 D」这条硬规则过去散落在判档、模型写档、写库守卫三处，
+    而其中两处算错了——`grade()` 在未归岗时返回 C（不是 D），
+    于是「模型可以合法地把学历不够的人改成 A 档」。
+    现在只有一个出口算这条规则，其余地方一律调它，避免再各算各的。
+
+    返回::
+
+        {"failed": bool,     # 学历明确不达标 → 必须 D
+         "unknown": bool,    # 学历没抽到 → 不能判 D，交给人工
+         "c_rank": int, "m_rank": int,
+         "edu": str, "edu_min": str}
+
+    `failed` 只在**学历已识别且低于门槛**时为 True：
+    学历读不出来（`unknown`）不算"不够"，那是信息缺失、该人工补填，
+    不能当成否定结论把人判死。
+    **`jd` 为空（该候选人没有对应岗位）时一律 `failed=False`**：
+    没有尺子就没门槛，此时拿默认的"本科"去判死一个人是凭空造规则。
+    """
+    must = (jd or {}).get("must") or {}
+    if not (jd or {}).get("must") and not (jd or {}).get("preferred"):
+        # 没有对应岗位：门槛无从谈起，不判 D（也不需要 unknown 标记）
+        return {"failed": False, "unknown": True, "c_rank": 0, "m_rank": 0,
+                "edu": (cand.get("education") or "").strip() or "学历未识别",
+                "edu_min": ""}
+    edu = (cand.get("education") or "").strip()
+    c_rank = EDU_RANK.get(edu, 0)
+    m_rank = EDU_RANK.get(must.get("education_min") or "本科", 2)
+    return {
+        "failed": bool(c_rank > 0 and c_rank < m_rank),
+        "unknown": c_rank == 0,
+        "c_rank": c_rank,
+        "m_rank": m_rank,
+        "edu": edu or "学历未识别",
+        "edu_min": must.get("education_min") or "本科",
+    }
+
+
+def lock_tier(rule_tier: str | None, model_tier: str | None,
+              gate: dict | None) -> tuple[str | None, str]:
+    """**档位最终裁决**：学历门槛优先，模型只能在门槛之内说话。
+
+    返回 `(档位, 来源说明)`。
+
+    这是「学历不够的档位模型不允许改」的**唯一执行点**。
+    过去这条约束散在调用方的 `if rule_tier != "D"` 里，而调用方手里的
+    `rule_tier` 取自 applications 行的历史值（不是本次判档结果），
+    于是库内存 C 时模型就能改成 A。这里改成从 `gate` 现算，不再依赖历史值。
+
+    三条规则：
+      1. 学历明确不达标 → 一律 D，**不给模型任何选择权**（含模型给 D 时的对齐）；
+      2. 学历未识别 → 不判 D（信息缺失 ≠ 条件不达标），采信模型；
+      3. 学历达标 → 模型说了算；模型没给则用规则值。
+    """
+    if gate is not None and gate.get("failed"):
+        return "D", (f"学历门槛（{gate.get('edu')}低于岗位要求 {gate.get('edu_min')}，"
+                     f"由系统直接判 D）")
+    if model_tier in ("A", "B", "C", "D"):
+        return model_tier, "模型"
+    return rule_tier, "学历门槛" if rule_tier == "D" else "规则"
+
+
 def _evidence_map(cand: dict) -> dict[str, str]:
     out: dict[str, str] = {}
     for d in (cand.get("skill_detail") or []):
@@ -39,6 +104,11 @@ def resolve_requirements(jd: dict) -> tuple[list[str], list[str]]:
     return req, bonus
 
 
+def _job_hint(jd: dict) -> str:
+    """给"按建议岗位判的 D"一句可读的来路说明（界面上要让人知道这把尺子是谁的）。"""
+    return str((jd or {}).get("title") or (jd or {}).get("_job_title") or "建议岗位")
+
+
 def grade(cand: dict, jd: dict, job_confirmed: bool = False) -> dict:
     """极简分级：学历不达标 + 已归岗 → D；其余一律 C（等模型给更准确的建议）。
 
@@ -50,8 +120,9 @@ def grade(cand: dict, jd: dict, job_confirmed: bool = False) -> dict:
       2. 技能命中/缺失（给模型和展示用）。
     其余全部交给模型。模型不可用时调用方给 C（中性默认）。
 
-    `job_confirmed`：这把尺子是否来自**已明确归岗**的投递。
-    只有明确归岗的投递才判 D（用猜出来的建议岗位判死不合理）。
+    `job_confirmed`（v1.24.15 起只影响**提示文案**，不再影响是否判 D）：
+    这把尺子是否来自已明确归岗的投递。未归岗而判 D 时，risks 里会写明
+    "按系统建议岗位的学历门槛判定"，让 HR 知道结论的依据不是已确认的岗位。
     """
     must = jd.get("must", {})
     pref = jd.get("preferred", {})
@@ -59,10 +130,9 @@ def grade(cand: dict, jd: dict, job_confirmed: bool = False) -> dict:
     reasons: list[str] = []
     risks: list[str] = []
 
-    # —— 学历：唯一的 D 判据 ——
-    c_rank = EDU_RANK.get(cand.get("education") or "", 0)
-    m_rank = EDU_RANK.get(must.get("education_min", "本科"), 2)
-    edu_ok = c_rank >= m_rank
+    # —— 学历：唯一的 D 判据（v1.24.15 走 edu_gate，与 lock_tier 同一把尺子）——
+    gate = edu_gate(cand, jd)
+    c_rank = gate["c_rank"]
 
     # —— 技能命中/缺失（给模型和展示用，不计分）——
     skills = set(_skill_names(cand.get("skills")))
@@ -84,26 +154,43 @@ def grade(cand: dict, jd: dict, job_confirmed: bool = False) -> dict:
                              or cand.get("education_major"), major_required)
     major_check["via"] = cand.get("major_via") or "规则"
 
-    # —— 分档：D 只看学历，其余一律 C（等模型给更准确的建议）——
+    # —— 分档：D 只看学历，其余一律 C（等模型给建议）——
+    # v1.24.15：判 D **不再要求 job_confirmed**。
+    # 过去"未归岗就不判 D"是为了避免用猜出来的建议岗位判死人，
+    # 但代价是——学历不够的人在未归岗时被判成 C，而 C 是模型可以合法改写的档，
+    # 于是"学历不够直接判 D"这条规则事实上只在已归岗时才成立。
+    # 现在由 `edu_gate` 兜底：没有对应岗位（jd 为空）时不判 D，
+    # 有岗位（无论归岗还是系统建议）且学历明确不达标 → 一律 D。
     tier = None
-    if not edu_ok and c_rank > 0 and job_confirmed:
+    if gate["failed"]:
         tier = "D"
-        reasons.append(f"学历{cand.get('education')}低于要求（{must.get('education_min')}）")
+        reasons.append(f"学历{gate['edu']}低于岗位要求（{gate['edu_min']}）")
         risks.append("学历不达本岗位门槛，本岗位暂不匹配；建议保留入池，供其他岗位召回")
-    elif c_rank == 0:
+        if not job_confirmed:
+            risks.append(f"该投递尚未明确归岗，此处按系统建议岗位「{_job_hint(jd)}」的学历门槛判定")
+    elif gate["unknown"]:
         tier = "C"
         risks.append("学历未识别，请人工核对")
-    elif not edu_ok:
-        tier = "C"
-        risks.append(f"学历{cand.get('education')}低于建议岗位要求"
-                     f"（{must.get('education_min')}），但投递尚未明确归岗")
 
     if hit:
         reasons.append(f"命中技能 {len(hit)}/{len(req)}：{'、'.join(hit[:3])}")
     if miss:
         risks.append(f"缺技能 {'、'.join(miss[:3])}")
 
-    needs_review = (not cand.get("name")) or (years is None) or (not skills)
+    # **信息缺失**（v1.24.9 拆分）：姓名/年限/技能任一抽不到 → HR 看得见缺什么。
+    # 这跟"简历原文解析失败"（ingest.py 的 parse_ok=False）是**两件不同的事**：
+    #   · 信息缺失 = 简历读出来了，但姓名/年限/技能没抽到 → 人工补填即可
+    #   · 解析失败 = 原文根本读不出来（PDF 损坏、图片无 OCR） → 要去看原件
+    # 过去两者共用 needs_review 一个字段，界面上只能统称"待人工判读"，
+    # HR 看到不知道该去补字段还是去修文件——现在分成 needs_review / parse_failed。
+    missing_fields: list[str] = []
+    if not cand.get("name"):
+        missing_fields.append("姓名")
+    if years is None:
+        missing_fields.append("年限")
+    if not skills:
+        missing_fields.append("技能")
+    needs_review = bool(missing_fields)
 
     return {
         "tier_suggested": tier,           # "D" 或 None（等模型给建议）
@@ -117,8 +204,15 @@ def grade(cand: dict, jd: dict, job_confirmed: bool = False) -> dict:
         "preferred_hit": [],
         "hit_detail": hit_detail,
         "major_check": major_check,
-        "breakdown": {},
+        # breakdown 是 JSON 列，v1.12 加权打分删掉后基本空着；
+        # 这里借它存"缺哪些字段"（v1.24.9），界面卡片直接显示"缺：年限、技能"，
+        # 不用改表结构、不用数据迁移。
+        "breakdown": {"missing_fields": missing_fields} if missing_fields else {},
+        # 信息缺失（缺哪些字段一目了然，界面上直接显示"缺：年限、技能"）
         "needs_review": bool(needs_review),
+        "missing_fields": missing_fields,
+        # 解析失败由 ingest.py 按 parse_ok 写入，这里默认 False（两条线不混）
+        "parse_failed": False,
     }
 
 # ============================================================
