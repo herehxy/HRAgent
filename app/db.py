@@ -396,8 +396,12 @@ _INIT_LOCK = threading.Lock()
 _MIGRATION_BY_PATH: dict[str, dict] = {}
 
 
-def connect(db_path: str) -> sqlite3.Connection:
+def connect(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """打开连接：自动建表、自动迁移 v0.1 数据、自动补列。
+
+    `check_same_thread` 默认 True（sqlite3 原生行为：连接只在创建它的线程里用）。
+    **本项目现状（v1.24.8）：分析路径已全部改为串行，每条处理用自己的连接，
+    所以调用方不需要传 False。** 参数留着是为了将来若改多进程/线程池时不必改签名。
 
     **建表/迁移/补列只在进程内第一次打开某个库时做**（v1.13.6）。
     原来每次连接都重跑全套（实测每次 45ms），而列表页对每个候选人开一次连接
@@ -410,7 +414,7 @@ def connect(db_path: str) -> sqlite3.Connection:
     directory = os.path.dirname(os.path.abspath(db_path))
     if directory:
         os.makedirs(directory, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     # 并发写保护：默认 busy_timeout=0 时，后台巡检正在写与 HR 正在点会直接
@@ -1090,7 +1094,9 @@ SELECT c.*,
        sj2.title          AS suggested_job_title,
        a.suggested_job_reason AS suggested_job_reason,
        j.title         AS job_title,
-       j.active        AS job_active
+       j.active        AS job_active,
+       -- v1.24.9：区分「简历读不出」与「信息缺失」，两者过去共用 needs_review
+       d0.parse_ok     AS doc_parse_ok
 FROM candidates c
 LEFT JOIN applications a ON a.id = (
     SELECT id FROM applications WHERE candidate_id = c.id
@@ -1098,6 +1104,10 @@ LEFT JOIN applications a ON a.id = (
 )
 LEFT JOIN jobs j ON j.id = a.job_id
 LEFT JOIN jobs sj2 ON sj2.id = a.suggested_job_id
+LEFT JOIN documents d0 ON d0.id = (
+    SELECT id FROM documents WHERE candidate_id = c.id
+    ORDER BY id DESC LIMIT 1
+)
 """
 
 
@@ -1243,6 +1253,14 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
         sql += f" LIMIT {int(limit)}"
 
     items = [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
+    # v1.24.9：把"缺哪些字段"与"简历有没有读出来"解出来给界面用。
+    # 过去只有 needs_review 一个布尔，两种情况都显示"待人工判读"，
+    # HR 不知道该去补字段还是去修文件——现在分开。
+    for it in items:
+        bd = it.get("breakdown")
+        it["missing_fields"] = (bd.get("missing_fields") or []) if isinstance(bd, dict) else []
+        it["parse_failed"] = (it.get("doc_parse_ok") is not None
+                              and not it.get("doc_parse_ok"))
     # 院校层次标签（v1.7.3）：每条都挂上（不限筛选时卡片也要显示 985/211 标签）。
     # **筛选也放这里**（v1.23.4）：原来只在 server 层筛，导致智能助手的
     # `search_candidates` 根本没这个参数——HR 问"985 的人有哪些"，
@@ -1720,11 +1738,13 @@ PURGE_AFTER_DAYS = 30
 def purge_due_candidates(conn: sqlite3.Connection, days: int | None = None,
                          operator: str = "system", role: str = "system",
                          only_ids: list[int] | None = None) -> dict:
-    """把**归档已满 `days` 天**的档案彻底删除（连带投递、附件记录、标签、技能、向量）。
+    """彻底删除**已归档**的档案（连带投递、附件记录、标签、技能、向量）。
 
     设计取舍：
-    - **删除的前提是"先归档满 30 天"**，不是随手一点就删。归档是缓冲期，
-      这 30 天里 HR 随时能取消归档把人捞回来；期满才真正不可恢复。
+    - **删除的前提是"先归档"**，不需要归档满 30 天。
+      v1.24.8 起HR 要求取消冷静期：归档页点「立即彻底删除」当场生效。
+      防误删改由这几道承担：必须先归档 → 界面二次确认 → 审计永久留痕
+      → 原件移入 `data/removed/` 而不是直接抹掉（可手工捞回）。
     - 只删数据库记录，**原件区文件由调用方回收**（`file_path` / `archived_path`
       随返回值一起给出，服务层把它们移进回收目录 `data/removed/`），
       这样"库删了、文件还在回收目录里"——比直接 `unlink` 安全。
@@ -1735,27 +1755,27 @@ def purge_due_candidates(conn: sqlite3.Connection, days: int | None = None,
     为什么必须有这个参数：原来单人接口调的是不带过滤的本函数，
     于是 HR 点"彻底删除"一个人，**所有**归档满 30 天的人都被一起删掉，
     而接口只回报他要的那一个——不可逆的数据丢失，且没有任何提示。
-    批量与定时任务传 None，行为与原来一致。
+    传 None 时退化为"只清已满 `days` 天的"，供定时任务使用——
+    **这样取消冷静期不会波及自动清理任务**。
     """
     days = PURGE_AFTER_DAYS if days is None else days
     if days <= 0:
         return {"purged": 0, "days": days, "people": [], "files": [], "disabled": True}
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-    if only_ids is None:
-        rows = conn.execute(
-            "SELECT id, name, archived_at FROM candidates "
-            "WHERE COALESCE(archived_at,'') != '' AND archived_at <= ? ORDER BY id",
-            (cutoff,)).fetchall()
+    # 只要求"已归档"（archived_at 非空），**不再要求归档满 30 天**——
+    # HR 要求取消冷静期：归档页点"立即彻底删除"就能删。
+    # 防误删的两道闸移到别处：① 必须先归档（回收站外的人根本没这个按钮）
+    # ② 界面删除前有二次确认；③ 审计永久留痕；④ 原件移入 data/removed/ 不直接抹掉。
+    rows_all = conn.execute(
+        "SELECT id, name, archived_at FROM candidates "
+        "WHERE COALESCE(archived_at,'') != '' ORDER BY id").fetchall()
+    if only_ids is not None:
+        _ids = {int(x) for x in only_ids}
+        rows = [r for r in rows_all if r["id"] in _ids]
+        cutoff = None# 单人接口不按天数筛（v1.24.8 取消冷静期）
     else:
-        _ids = [int(x) for x in only_ids]
-        if not _ids:
-            return {"purged": 0, "days": days, "people": [], "files": []}
-        _marks = ",".join("?" * len(_ids))
-        rows = conn.execute(
-            f"SELECT id, name, archived_at FROM candidates "          # noqa: S608 — 占位符拼法固定
-            f"WHERE id IN ({_marks}) AND COALESCE(archived_at,'') != '' "
-            f"AND archived_at <= ? ORDER BY id",
-            (*_ids, cutoff)).fetchall()
+        # 定时任务仍只清到期者：接口走 only_ids，这里兜底批量时按天数过滤
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        rows = [r for r in rows_all if (r["archived_at"] or "") <= cutoff]
     people: list[dict] = []
     files: list[str] = []
     for r in rows:
@@ -1777,9 +1797,11 @@ def purge_due_candidates(conn: sqlite3.Connection, days: int | None = None,
         conn.execute("DELETE FROM documents WHERE candidate_id = ?", (cid,))
         conn.execute("DELETE FROM applications WHERE candidate_id = ?", (cid,))
         conn.execute("DELETE FROM candidates WHERE id = ?", (cid,))
+        how = (f"归档 {r['archived_at']} 后由 HR 立即彻底删除" if cutoff is None
+              else f"归档满 {days} 天自动清理")
         add_audit(conn, "candidate", str(cid), "purge",
                   f"{r['name']}（{r['archived_at']} 归档）",
-                  f"归档满 {days} 天彻底删除：{n_app} 条投递、{n_doc} 份附件（原件移入回收目录）",
+                  f"{how}：{n_app} 条投递、{n_doc} 份附件（原件移入回收目录）",
                   operator, role)
         people.append({"id": cid, "name": r["name"], "archived_at": r["archived_at"],
                        "applications": n_app, "documents": n_doc})

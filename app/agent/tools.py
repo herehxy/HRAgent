@@ -74,9 +74,11 @@ def _spec(name: str, desc: str, props: dict | None = None, required: list[str] |
 TOOL_SPECS = [
     # ------------------------------ 读 ------------------------------
     _spec("search_candidates",
-          "按条件筛选候选人（档位/学历/年限/关键词/院校层次/阶段）。返回真实库内数据，找不到就返回空，不要编造。",
+          "按条件筛选候选人（档位/学历/年限/关键词/院校层次/阶段）。返回真实库内数据，找不到就返回空，不要编造。"
+          "**keyword 是字面匹配**：院校请用全称（库里存的是『西安电子科技大学』，"
+          "传『西电』会返回空——遇到简称先展开成全称再搜）。",
           {"tier": {"type": "string", "description": "A/B/C/D/REVIEW/UNCONFIRMED/ALL"},
-           "keyword": {"type": "string", "description": "姓名、院校、专业关键词"},
+           "keyword": {"type": "string", "description": "姓名、院校、专业关键词（院校用全称）"},
            "min_years": {"type": "integer", "description": "最低工作年限"},
            "education": {"type": "string", "description": "最低学历：大专/本科/硕士/博士"},
            "univ": {"type": "string",

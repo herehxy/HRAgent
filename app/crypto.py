@@ -30,8 +30,19 @@ except Exception:  # pragma: no cover
 
 
 def _key_path() -> str:
-    from .paths import BASE as base      # 根目录唯一来源（认 TP_HOME）
-    return os.path.join(base, "config", "master.key")
+    """主密钥落盘位置。
+
+    放**数据目录**而不是 `config/`：打包分发后包目录可能只读（Program Files
+    或受限账户），而这个文件是**首次运行时自动生成**的——写不进去的话
+    PII 加密密钥会每次启动都变成一把新的，库里已加密的手机号/邮箱就再也
+    解不开了（表现为历史候选人手机号全空，且没有任何报错提示）。
+    已有文件仍优先沿用旧位置，避免换目录后解不开老数据。
+    """
+    from .paths import BASE, DATA_DIR
+    old = os.path.join(BASE, "config", "master.key")
+    if os.path.exists(old):
+        return old
+    return os.path.join(DATA_DIR, "master.key")
 
 
 _CACHE: dict[str, bytes] = {}

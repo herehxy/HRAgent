@@ -495,10 +495,13 @@ function md(src){
   // 1) 先转义一切 HTML，杜绝注入
   s = esc(s);
   // 2) 代码块（``` 或 ~~~），先占位，避免里面的标记被后续替换
+  //    v1.24.15 修：① 去掉首行语言标记（```python 里的 python 不该显示）
+  //    ② 去掉代码块紧邻行首尾的空行，否则 <pre> 前后多出空行
+  //    ③ 占位符自带块标记，让行组装阶段把它当独立块，而不是塞进 <p>
   const blocks = [];
-  s = s.replace(/```([\s\S]*?)```/g, (m, code) => {
-    blocks.push('<pre><code>' + code + '</code></pre>');
-    return '\u0000BLOCK' + (blocks.length - 1) + '\u0000';
+  s = s.replace(/```[ \t]*([A-Za-z0-9+#._-]*)[ \t]*\\n?([\\s\\S]*?)```/g, (m, lang, code) => {
+    blocks.push('<pre><code>' + code.replace(/^\\n+|\\n+$/g, '') + '</code></pre>');
+    return '\\n<pre>\\u0000BLOCK' + (blocks.length - 1) + '\\u0000</pre>\\n';
   });
   // 3) 行内代码
   s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
@@ -512,13 +515,26 @@ function md(src){
   s = s.replace(/^##[ \t]+(.+)$/gm, '<h3>$1</h3>');
   s = s.replace(/^#[ \t]+(.+)$/gm, '<h2>$1</h2>');
   // 6) 链接 [文字](url)
-  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  //    v1.24.15 修：原来只认 https?://，而模型很爱写站内锚点（[投递管道](#pool)），
+  //    这些会原样露出 markdown 符号。这里放开到任意协议与相对路径。
+  //    安全：href 里的引号已在第 1 步被转义，javascript: 再由下面的白名单挡掉。
+  s = s.replace(/\[([^\]]+)\]\(([^)\\s]+)\)/g, (m, txt, url) => {
+    const u = String(url);
+    if (!/^(https?:\\/\\/|mailto:|\\/|#|\\.)/i.test(u)) return m;  // 未知协议当纯文本
+    return '<a href="' + u + '" target="_blank" rel="noopener">' + txt + '</a>';
+  });
   // 7) 逐行组装：列表项聚合成 <ul>，空行分段，其余行转 <p>
   // 注意：源码里必须写 \\n/\\r（双反斜杠），Python 三引号会把单反斜杠转义成真实换行
   const lines = s.split(/[\\n\\r]+/);
   const out = [];
-  let liBuf = [];
-  const flushLi = () => { if (liBuf.length){ out.push('<ul>' + liBuf.join('') + '</ul>'); liBuf = []; } };
+  let liBuf = [], liTag = 'ul';   // v1.24.15：记住当前列表是 ul 还是 ol
+  const flushLi = () => {
+    if (liBuf.length){
+      // 两种列表不能塞进同一个 <ul>，否则序号会串
+      out.push('<' + liTag + '>' + liBuf.join('') + '</' + liTag + '>');
+      liBuf = [];
+    }
+  };
   let paraBuf = [];
   const flushPara = () => {
     if (paraBuf.length){ out.push('<p>' + paraBuf.join('<br>') + '</p>'); paraBuf = []; }
@@ -526,16 +542,31 @@ function md(src){
   for (const line of lines){
     const t = line.trim();
     if (!t){ flushLi(); flushPara(); continue; }
-    if (/^[-*+][ \t]+/.test(t)){ flushPara(); liBuf.push('<li>' + t.replace(/^[-*+][ \t]+/, '') + '</li>'); continue; }
-    if (/^\d+\.[ \t]+/.test(t)){ flushPara(); liBuf.push('<li>' + t.replace(/^\d+\.[ \t]+/, '') + '</li>'); continue; }
-    if (/^<(ul|ol|pre|h[1-4])/.test(t)){ flushLi(); flushPara(); out.push(t); continue; }
+    if (/^[-*+][ \t]+/.test(t)){
+      flushPara();
+      if (liBuf.length && liTag !== 'ul') flushLi();   // 换类型前先收尾
+      liTag = 'ul';
+      liBuf.push('<li>' + t.replace(/^[-*+][ \t]+/, '') + '</li>');
+      continue;
+    }
+    if (/^\d+\.[ \t]+/.test(t)){
+      flushPara();
+      if (liBuf.length && liTag !== 'ol') flushLi();
+      liTag = 'ol';
+      liBuf.push('<li>' + t.replace(/^\d+\.[ \t]+/, '') + '</li>');
+      continue;
+    }
+    if (/^<\\/?(ul|ol|pre|h[1-4])\\b/.test(t)){ flushLi(); flushPara(); out.push(t); continue; }
     flushLi();
     paraBuf.push(t);
   }
   flushLi(); flushPara();
   s = out.join('');
   // 8) 还原代码块占位
-  s = s.replace(/\u0000BLOCK(\d+)\u0000/g, (m, i) => blocks[+i]);
+  //    v1.24.15 修：<pre> 是块级元素，不能待在 <p> 里（浏览器会拆断，样式错乱）。
+  //    还原时前后补换行，让行组装阶段把它当独立块；并把紧贴着的多余 <br> 收掉。
+  s = s.replace(/<pre>\\s*\\u0000BLOCK(\\d+)\\u0000\\s*<\\/pre>/g, (m, i) => blocks[+i]);
+  s = s.replace(/\\u0000BLOCK(\\d+)\\u0000/g, (m, i) => blocks[+i]);
   return s;
 }
 function hdr(extra){
@@ -1178,14 +1209,9 @@ async function viewPool(){
   <div class="panel">
     <div class="flexbetween">
       <div class="bar">
-        <input id="kwBox" placeholder="${SEARCH_MODE==='sem'?'语义检索：用一句话描述你想找的人（如：会钛合金焊接的硕士）':'搜索姓名 / 院校 / 专业 / 技能'}"
-               style="width:${SEARCH_MODE==='sem'?'360px':'280px'}" value="${esc(KW)}"
+        <input id="kwBox" placeholder="搜索姓名 / 院校 / 专业 / 技能"
+               style="width:280px" value="${esc(KW)}"
                onkeydown="if(event.key==='Enter'){doSearch()}">
-        <select onchange="SEARCH_MODE=this.value;poolPageReset();refresh()"
-                title="关键词=姓名/院校/专业/技能的字面匹配；语义=按意思找（简历措辞不同也能命中）">
-          <option value="kw" ${SEARCH_MODE==='sem'?'':'selected'}>关键词</option>
-          <option value="sem" ${SEARCH_MODE==='sem'?'selected':''}>语义</option>
-        </select>
         <button class="btn-primary" onclick="doSearch()">搜索</button>
         <button onclick="KW='';GENDER='';EDU_MIN='';UNIV='';poolPageReset();refresh()">清空</button>
         ${gsel}${eduSel}${uniSel}${stageSel}
@@ -2487,10 +2513,16 @@ function renderProposalCards(holder, proposals){
   const canConfirm = perms.indexOf('confirm') >= 0;
   let html = '';
   proposals.forEach(p => {
+    /* v1.24.18：加「打开档案」。原来点「确认执行」是**盲签**——
+       HR 只看到一句"把陈志远推进到初面"，无法核对他确认的是不是这个人的档案。
+       提案里的 candidate_id 缺失就不给这个按钮（宁可没有，也不要指错人）。 */
+    const openBtn = p.candidate_id
+      ? '<button onclick="showDetail(' + p.candidate_id + ')">打开档案核对</button>' : '';
     const acts = canConfirm
       ? '<button class="btn-primary" onclick="decideProposal(' + p.proposal_id + ',' + APPROVE + ',this)">确认执行</button>'
         + '<button class="btn-danger" onclick="decideProposal(' + p.proposal_id + ',' + REJECT + ',this)">拒绝</button>'
-      : '<span class="small">你没有「确认」权限，请到「提案与审计」页处理</span>';
+        + openBtn
+      : '<span class="small">你没有「确认」权限，请到「提案与审计」页处理</span>' + openBtn;
     html += '<div class="card" style="background:var(--surface)8e6;margin-top:10px" id="prop-' + p.proposal_id + '">'
       + '<div style="font-weight:600">待确认提案 · ' + esc(p.tool || '')
         + '<span class="small">提案 #' + p.proposal_id + (p.risk ? (' · 风险 ' + esc(p.risk)) : '') + '</span></div>'
@@ -2503,7 +2535,7 @@ function renderProposalCards(holder, proposals){
 async function decideProposal(pid, decision, btn){
   const card = document.getElementById('prop-' + pid);
   const _q = decision === 'approve' ? '确认执行这条提案吗？\\n\\n它会真的改档案（写审计）。'
-                                 : '拒绝这条提案？' + BS + BS + 'n' + BS + BS + 'n拒绝也会写入审计（谁在什么时候拒的）。';
+                                 : '拒绝这条提案？\\n\\n拒绝也会写入审计（谁在什么时候拒的）。';
   if (!await askConfirm(_q)) return;
   if (btn) btn.disabled = true;
   const r = await api('/api/proposals/' + pid + '/decide',
@@ -2529,29 +2561,93 @@ async function decideProposal(pid, decision, btn){
    为什么要有这个卡：智能体说"我无法发送邮件"时，HR 真正缺的是**能用的草稿**。
    这里把草稿原样亮出来，HR 可以直接复制，或点按钮进编辑器改完自己点发送——
    **智能体不发送，这是红线**。 */
+/* v1.24.18：由 `let DRAFTS = []`（整表覆盖）改为**按卡片 id 存**。
+   原实现每渲染一轮就 `DRAFTS = drafts` 整体覆盖，于是第二轮对话之后，
+   第一轮那张草稿卡上的「确认并发送」会读到**第二轮的草稿**——
+   收件人、正文全错，而按钮点下去是真发信。这不是显示问题，是会误发邮件。
+   id 用递增序号，历史卡片永远指向自己那份数据。 */
+let DRAFTS = {};
+let _draftSeq = 0;
+/* key 必须**全局递增**，不能每轮从 d0 重来。
+   renderDraftCards 每轮都被调用一次，i 是本轮内的下标——
+   若直接 `'d' + i`，第二轮的 d0 又会盖掉第一轮的 d0，历史卡片照样串。
+   所以先领一个全局唯一号，再登记。 */
+const draftKey = () => 'd' + (_draftSeq++);
+
+/* 声明必须放在读取者之前：`let`/`const` 有暂时性死区，被后面代码读会抛
+   ReferenceError → 整页白屏（本项目踩过，见 .workbuddy/memory 3.3）。 */
 function renderDraftCards(holder, drafts){
   let html = '';
-  drafts.forEach((d, i) => {
+  drafts.forEach((d) => {
+    const key = draftKey();           // 全局唯一号
+    DRAFTS[key] = d;                  // 登记到全局表，历史卡片不会被覆盖
     const miss = (d.missing_runtime||[]).length
       ? `<div class="warn-txt" style="margin-top:6px">还缺：${esc((d.missing_runtime||[]).join('、'))}（补上后可以在对话里说"补上 XX 再写一版"）</div>` : '';
     const noMail = !d.to
       ? `<div class="bad-txt" style="margin-top:6px">库里没有这个人的邮箱，无法直接发——请先在档案里补邮箱，或改成你手动转发</div>` : '';
-    html += `<div class="card" style="background:var(--surface-2);margin-top:10px">
+    /* v1.24.18：草稿卡补齐「直接发」与「打开档案」两个动作。
+       原先只有「在邮件编辑器中打开」——那是**跳页**：HR 点一下被扔到邮件页，
+       还要自己确认收件人、正文对不对，再点一次发送。从"助手已经起草好了"到
+       "真的发出去"隔了两次跳转，实践里就断在这儿了。
+       现在三个动作并排放在卡片里：发送（就地，带二次确认）/ 编辑 / 看档案。
+       红线不变：按钮写的是「确认并发送」，且必须 HR 点，助手永不自动发。 */
+    const acts =
+      (d.to ? `<button class="btn-primary" onclick="sendDraftNow('${key}', this)">确认并发送</button>` : '')
+      + `<button onclick="openDraftInMailerByKey('${key}')">在编辑器中修改</button>`
+      + (d.candidate_id ? `<button onclick="showDetail(${d.candidate_id})">打开档案</button>` : '')
+      + `<button onclick="copyText(${JSON.stringify('')});toast('已复制主题与正文','ok')">复制正文</button>`;
+    html += `<div class="card" style="background:var(--surface-2);margin-top:10px" id="draft-${key}">
       <div style="font-weight:600">邮件草稿（未发送）· ${esc(d.name||'')}
         <span class="small">收件人：${esc(d.to || '（无邮箱）')}${d.job?(' · 岗位：'+esc(d.job)):''}</span></div>
       <div class="small" style="margin-top:6px">主题：${esc(d.subject||'')}</div>
       <div style="margin-top:6px;white-space:pre-wrap">${esc(d.body||'')}</div>
       ${miss}${noMail}
-      <div class="bar" style="margin-top:8px">
-        <button onclick="copyText(${JSON.stringify('')});toast('已复制主题与正文','ok')">复制正文</button>
-        <button class="btn-primary" onclick="openDraftInMailer(${i}, DRAFTS[${i}])">在邮件编辑器中打开</button>
-        <span class="small">发送仍需你在编辑器里亲自点「确认发送」</span>
+      <div class="bar" style="margin-top:8px">${acts}
+        <span class="small">${d.to ? '点「确认并发送」即寄出到上面这个地址' : '没有邮箱就发不出去'}</span>
       </div></div>`;
   });
-  DRAFTS = drafts;
   holder.insertAdjacentHTML('beforeend', html);
 }
-let DRAFTS = [];
+/* 按 key 取草稿并送进编辑器。单独包一层是为了让按钮只传字符串 key，
+   不把整个草稿对象内联进onclick（正文可能很长，内联会撑爆 HTML 属性）。 */
+function openDraftInMailerByKey(key){
+  const d = (window.DRAFTS || DRAFTS || {})[key];
+  if (!d) { toast('草稿已失效，请让助手重新起草','danger'); return; }
+  return openDraftInMailer(null, d);
+}
+
+/* 从对话里就地发送草稿（v1.24.18）。
+   为什么不用现成的 sendMailConfirm()：那套读的是邮件页表单里的收件人/正文，
+   而草稿卡里的内容在对话里，两者不共享状态。硬套会把编辑器里被改过的内容覆盖掉。
+   这里直接用草稿自己的字段，走同一个后端 /api/mail/send（单一真源，后端留痕一致）。 */
+async function sendDraftNow(key, btn){
+  const d = (window.DRAFTS || DRAFTS || {})[key];
+  if (!d || !d.to) { toast('这封草稿没有收件人，无法发送','danger'); return; }
+  const body = (d.body||'').trim();
+  if (!body) { toast('草稿正文是空的，先补内容','danger'); return; }
+  // 二次确认要把「发给谁、发的是什么」摆在眼前，不能只问一句"确定吗"
+  if (!await askConfirm('把这封信寄给 ' + d.to + '（' + (d.name||'') + '）吗？\\n\\n'
+      + '主题：' + (d.subject||'') + '\\n\\n寄出后不能撤回，发送记录会写进审计。'))
+    return;
+  if (btn) btn.disabled = true;
+  const r = await api('/api/mail/send', {method:'POST', body:JSON.stringify({
+    to: d.to, subject: d.subject||'', body: d.body_html||body,
+    html: d.body_html||'', candidate_id: d.candidate_id, template_name:'智能助手草稿'})});
+  const card = document.getElementById('draft-' + key);
+  if (r.__http_error || r.error){
+    toast(r.detail || r.error || '发送失败','danger');
+    if (btn) btn.disabled = false;
+    return;
+  }
+  delete DRAFTS[key];
+  if (card){
+    card.style.background = 'var(--ok-soft)';
+    card.innerHTML = '<div style="font-weight:600">已发送 · ' + esc(d.name||'') + '</div>'
+      + '<div class="small" style="margin-top:4px">收件人 ' + esc(d.to) + '｜发送记录已写入审计。</div>';
+  }
+  refresh();
+}
+
 async function openDraftInMailer(idx, d){
   await viewMail();
   try {
@@ -3241,7 +3337,6 @@ async function doSkillSearch(){
 }
 async function doSearch(){
   KW = document.getElementById('kwBox').value || '';
-  if (SEARCH_MODE === 'sem') return doSemSearch();
   poolPageReset(); refresh();
 }
 async function doSemSearch(){

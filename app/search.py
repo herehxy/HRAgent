@@ -27,6 +27,9 @@ from . import db, net
 
 from .paths import BASE      # 根目录唯一来源（认 TP_HOME）
 CONFIG_PATH = os.path.join(BASE, "config", "embedding.json")
+# API Key 走独立密钥文件，不进 embedding.json——那是要随包分发的文件。
+# 与 agent/llm.py 读的是同一个 config/secrets.json，同一份凭据两处用。
+SECRETS_PATH = os.path.join(BASE, "config", "secrets.json")
 
 HASH_DIM = 384
 _HASH_MODEL = "local-hash-v1"
@@ -44,10 +47,22 @@ def load_cfg() -> dict:
     preset = cfg.get("preset")
     if preset and preset in (cfg.get("_presets") or {}):
         cfg.update(cfg["_presets"][preset])
+    # 本地密钥文件：只取 api_key。base_url/model 不从这里取——
+    # 那是「该连哪台服务」的决策，属于配置；密钥才是秘密。
+    if os.path.exists(SECRETS_PATH):
+        try:
+            with open(SECRETS_PATH, encoding="utf-8") as fh:
+                sec = json.load(fh)
+            if sec.get("api_key"):
+                cfg["api_key"] = sec["api_key"]
+        except (ValueError, OSError):
+            pass
     if os.environ.get("TP_EMBED_BASE_URL"):
         cfg["base_url"] = os.environ["TP_EMBED_BASE_URL"]
     if os.environ.get("TP_EMBED_MODEL"):
         cfg["model"] = os.environ["TP_EMBED_MODEL"]
+    if os.environ.get("TP_EMBED_API_KEY"):
+        cfg["api_key"] = os.environ["TP_EMBED_API_KEY"]
     return cfg
 
 
@@ -247,10 +262,32 @@ def build_index(db_path: str, cfg: dict | None = None, force: bool = False,
             pending.append(cid)
             texts.append(text)
 
+        # 换模型后必须清掉旧模型的向量，否则库里会同时存在两套语义空间。
+        # embeddings 主键是 (owner_type, owner_id, model)，新模型写进去≠ 覆盖旧的；
+        # 而不同模型的维度可能相同（如 qwen3.7 与 -flash 都是 1024），
+        # 维度检查拦不住 → 检索时会拿 A 模型的查询向量去比 B 模型的库向量，分数全是噪音。
+        # 必须在"无pending 提前 return"**之前**做：换模型后画像文本没变，
+        # 增量路径会skipped 全部并直接返回，清理放在写库那段就永远执行不到。
+        # 只清真模型，保留哈希行（_load_vectors 本来就优先选非兜底模型）。
+        stale = 0
+        live = effective_model(cfg)          # 本次真正会用的模型（不可达时为哈希）
+        cur = conn.execute(
+            "SELECT DISTINCT model FROM embeddings WHERE owner_type='candidate'").fetchall()
+        for r in cur:
+            if r["model"] in (live, _HASH_MODEL):
+                continue
+            stale += conn.execute(
+                "DELETE FROM embeddings WHERE owner_type='candidate' AND model=?",
+                (r["model"],)).rowcount
+        if stale:
+            conn.commit()
+
         if not pending:
             return {"indexed": 0, "skipped": skipped, "total": len(ids),
                     "model": target or cfg.get("model"),
-                    "note": "画像未变化，无需重建（增量索引已跳过全部候选人）"}
+                    "dropped_stale_models": stale,
+                    "note": "画像未变化，无需重建（增量索引已跳过全部候选人）"
+                            + (f"；已清理 {stale} 条旧模型向量" if stale else "")}
 
         vecs, model, err = embed(texts, cfg)
         for cid, text, vec in zip(pending, texts, vecs):
@@ -258,34 +295,48 @@ def build_index(db_path: str, cfg: dict | None = None, force: bool = False,
             db.save_embedding(conn, "candidate", cid, model, vec, digest)
         return {"indexed": len(pending), "skipped": skipped,
                 "model": model, "dim": len(vecs[0]) if vecs else 0,
-                "error": err, "total": len(ids),
-                "note": f"增量索引：新增/更新 {len(pending)} 人，跳过未变化 {skipped} 人"}
+                "error": err, "total": len(ids), "dropped_stale_models": stale,
+                "note": f"增量索引：新增/更新 {len(pending)} 人，跳过未变化 {skipped} 人"
+                        + (f"；已清理 {stale} 条旧模型向量" if stale else "")}
     finally:
         conn.close()
 
 
-def _load_vectors(conn) -> tuple[dict[int, list[float]], str]:
-    """加载索引。若存在多个模型，优先非兜底模型。"""
+def _load_vectors(conn, prefer: str = "") -> tuple[dict[int, list[float]], str]:
+    """加载索引。多个模型并存时的挑选顺序：
+
+    1. `prefer`（通常是当前配置里的模型名）；
+    2. 其他非兜底模型；
+    3. 哈希兜底向量（最差，只在没有任何真模型索引时用）。
+
+    **不能只按字典序取第一个**（实测踩过）：`qwen3.7-text-embedding` 在字典序上
+    排在 `qwen3.7-text-embedding-flash` 之前，于是配置已经切到 flash 了，
+    检索却还在加载旧模型的向量 —— 维度一样，维度检查拦不住，分数全是噪音。
+    """
     rows = conn.execute(
         "SELECT DISTINCT model FROM embeddings WHERE owner_type='candidate'").fetchall()
     models = [r["model"] for r in rows]
     if not models:
         return {}, ""
-    models.sort(key=lambda m: (m == _HASH_MODEL, m))
-    best = models[0]
+    if prefer and prefer in models:
+        best = prefer
+    else:
+        models.sort(key=lambda m: (m == _HASH_MODEL, m))
+        best = models[0]
     return dict(db.load_embeddings(conn, best, "candidate")), best
 
 
 def semantic(conn, query: str, top_k: int = 10, cfg: dict | None = None) -> dict:
     """语义检索候选人。返回 {model, results:[{candidate_id, name, phone, email, score, ...}]}。
     联系方式随结果一并下发，检索列表可直接拨号/发信。"""
-    vectors, model = _load_vectors(conn)
+    cfg = cfg or load_cfg()
+    vectors, model = _load_vectors(conn, prefer=cfg.get("model", ""))
     if not vectors:
         return {"model": None, "results": [],
                 "note": "索引为空：导入简历后系统会自动建立增量索引，无需手动重建"}
 
-    cfg = cfg or load_cfg()
     qvec, qmodel, err = embed_one(query, cfg)
+    # 模型对不上就退回哈希向量——宁可精度低，也不能拿 A 的查询向量比B 的库向量。
     if qmodel != model or len(qvec) != len(next(iter(vectors.values()))):
         qvec = hash_embed(query)
     scored = [(cid, _cosine(qvec, vec)) for cid, vec in vectors.items()]
@@ -313,8 +364,9 @@ def semantic(conn, query: str, top_k: int = 10, cfg: dict | None = None) -> dict
     return {"model": model, "results": results, "error": err}
 
 
-def similar_to(conn, cid: int, top_k: int = 5) -> dict:
-    vectors, model = _load_vectors(conn)
+def similar_to(conn, cid: int, top_k: int = 5, cfg: dict | None = None) -> dict:
+    cfg = cfg or load_cfg()
+    vectors, model = _load_vectors(conn, prefer=cfg.get("model", ""))
     if cid not in vectors:
         return {"model": model, "results": [], "note": f"#{cid} 尚未建立索引"}
     base = vectors[cid]
@@ -378,7 +430,7 @@ def status(db_path: str | None = None) -> dict:
     if db_path:
         conn = db.connect(db_path)
         try:
-            vectors, model = _load_vectors(conn)
+            vectors, model = _load_vectors(conn, prefer=out.get("model", ""))
             out["indexed"] = len(vectors)
             out["index_model"] = model
             if vectors:

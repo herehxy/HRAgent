@@ -88,10 +88,12 @@ def _rule_priorities(workload: dict) -> list[dict]:
     if c.get("needs_review"):
         _nr = items.get("needs_review") or []
         who = _who(_nr)
-        out.append({"title": (f"人工判读「{who}」的简历" if who
-                              else f"人工判读 {c['needs_review']} 份解析失败的简历"),
-                    "why": "原件已保留但内容未读出，不处理会一直占着『待判读』",
-                    "action": "打开档案看原件，手工补录关键字段",
+        # 口径对齐 v1.24.9：needs_review = 信息缺失（简历读出来了但字段没抽到），
+        # 不是"解析失败"。补齐字段即可，不用去看原件。
+        out.append({"title": (f"补齐「{who}」的缺失字段" if who
+                              else f"{c['needs_review']} 份简历有字段没抽到"),
+                    "why": "姓名/年限/技能有缺失，系统不敢据此判档；补上就能正常分析",
+                    "action": "打开档案手动更正缺失字段",
                     "names": [i.get("name") for i in _nr if i.get("name")],
                     "count": c["needs_review"]})
     if c.get("pending_job"):
@@ -130,7 +132,7 @@ def _llm_priorities(workload: dict) -> dict | None:
                         ["name", "score", "tier_suggested", "job_title"]),
         "停滞投递": _brief(workload["items"]["stuck"],
                        ["name", "stage", "since", "job_title"]),
-        "待人工判读": _brief(workload["items"]["needs_review"], ["name", "since"]),
+        "信息缺失": _brief(workload["items"]["needs_review"], ["name", "since"]),
         "待指定岗位": _brief(workload["items"]["pending_job"],
                         ["name", "score", "suggested_job_title"]),
     }

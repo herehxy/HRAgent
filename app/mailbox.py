@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 from .paths import BASE      # 根目录唯一来源（认 TP_HOME）
+from .paths import DATA_DIR  # 数据目录（认 TP_DATA_DIR，可能不在 BASE 下）
 CONFIG_PATH = os.path.join(BASE, "config", "mailbox.json")
 
 DEFAULT_CONFIG = {
@@ -79,7 +80,18 @@ def load_config(path: str | None = None) -> dict:
 
 
 def resolve_dir(value: str) -> str:
-    return value if os.path.isabs(value) else os.path.join(BASE, value)
+    """把配置里的相对目录解析成绝对路径。
+
+    相对路径里以 `data/` 开头的（eml_dir / folder_dir / archive_dir 的默认值
+    都是这个形态），要走 DATA_DIR 而不是 BASE——数据目录可能被挪到用户可写
+    位置（TP_DATA_DIR，见 app/paths.py），若仍按 BASE 拼就会又落回只读的
+    包内 `data/`，出现"能读不能写"。其余相对路径按 BASE 拼，行为不变。
+    """
+    if os.path.isabs(value):
+        return value
+    if value.replace("\\", "/").startswith("data/"):
+        return os.path.join(DATA_DIR, value[5:].replace("/", os.sep))
+    return os.path.join(BASE, value)
 
 
 # ---------------------------------------------------------------- 配置读写（供界面）
