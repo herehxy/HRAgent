@@ -2601,6 +2601,162 @@ def chat_clear_state(conn: sqlite3.Connection) -> dict:
             "restorable": bool(rid)}
 
 
+#: 提案工具名 → HR 看得懂的中文（v1.25）。
+#: 放在 db 层是因为**两个地方都要用**：实时对话（loop）与历史回放（chat_history）。
+#: 分成两份迟早会分叉——本项目已经吃过"两处定义不一致"的亏（权限名 archive、
+#: 写工具清单 5 vs 14）。一份定义，两处引用。
+TOOL_LABEL = {
+    "set_stage": "推进阶段", "set_tier": "调整档位", "add_tag": "添加标签",
+    "add_note": "添加备注", "merge_candidates": "合并档案",
+    "split_candidate": "撤销合并", "assign_job": "归岗 / 改岗位",
+    "suggest_job": "建议岗位", "mark_review": "标记已复核",
+    "set_archive": "归档 / 取消归档", "archive_batch": "批量归档",
+    "archive_by_year": "按年归档", "create_job": "新建岗位",
+    "update_job_jd": "修改岗位 JD", "regrade_job": "重算岗位档位",
+    "update_candidate_fields": "更正候选人字段",
+    "reanalyze_candidate": "完整重新分析", "reanalyze_batch": "批量重新分析",
+    "route_pending": "待归岗批处理",
+    "update_interview_dict": "维护面试字典",
+    "save_mail_config": "修改发信配置", "save_model_config": "修改模型配置",
+    "save_settings": "修改系统设置",
+    "remove_source_files": "移入回收站", "restore_source_files": "从回收站恢复",
+    "rebuild_brief": "重算今日待办", "clear_chat_history": "清空对话历史",
+}
+
+
+def proposal_changes(conn: sqlite3.Connection, proposal: dict) -> list[dict]:
+    """把提案 args 拆成「字段 / 改前 / 改后」，供卡片直接展示。
+
+    ⚠️ **改前值要现查库**，不能用工具当时读到的值缓存进 args ——
+    提案可能隔几分钟、甚至跨天才被 HR 点确认，期间别人（或巡检）可能已经改过。
+    展示一个过期值会让 HR 以为"现在是这样"，比不显示更危险。
+    查不到就留空（前端显示「（空）」），绝不猜。
+    """
+    a = proposal.get("args")
+    if isinstance(a, str):
+        try:
+            a = json.loads(a)
+        except Exception:
+            a = None
+    if not isinstance(a, dict):
+        return []
+    out: list[dict] = []
+
+    def _q(sql, params):
+        try:
+            return conn.execute(sql, params).fetchone()
+        except Exception:
+            return None
+
+    tool = proposal.get("tool")
+    if tool == "update_candidate_fields":
+        fields = a.get("fields") or {}
+        label = {"name": "姓名", "edu_level": "学历", "school": "学校",
+                 "major": "专业", "phone_enc": "电话", "email_enc": "邮箱"}
+        cid = a.get("candidate_id")
+        cur = {}
+        if cid is not None:
+            row = _q("SELECT name, edu_level, school, major, phone_enc, email_enc "
+                     "FROM candidates WHERE id=?", (cid,))
+            if row:
+                try:
+                    from .crypto import decrypt
+                    cur = {"name": row["name"] or "", "edu_level": row["edu_level"] or "",
+                           "school": row["school"] or "", "major": row["major"] or "",
+                           "phone_enc": decrypt(row["phone_enc"]) or "",
+                           "email_enc": decrypt(row["email_enc"]) or ""}
+                except Exception:
+                    cur = {}
+        for k, v in fields.items():
+            if k in label:
+                out.append({"field": k, "label": label[k],
+                            "before": cur.get(k, ""), "after": v or ""})
+
+    elif tool == "set_stage":
+        aid, stage = a.get("application_id"), a.get("stage")
+        row = _q("SELECT stage FROM applications WHERE id=?", (aid,)) if aid else None
+        out.append({"field": "stage", "label": "阶段",
+                    "before": (row["stage"] if row else ""), "after": stage or ""})
+
+    elif tool == "set_tier":
+        aid, tier = a.get("application_id"), a.get("tier")
+        row = _q("SELECT COALESCE(tier_final, tier_suggested, '') AS t "
+                 "FROM applications WHERE id=?", (aid,)) if aid else None
+        out.append({"field": "tier", "label": "档位",
+                    "before": (row["t"] if row else ""), "after": tier or ""})
+
+    elif tool in ("set_archive", "archive_batch", "archive_by_year"):
+        out.append({"field": "archived", "label": "归档",
+                    "before": ("在池" if a.get("archived") else "已归档"),
+                    "after": ("已归档" if a.get("archived") else "在池")})
+    return out
+
+
+def card_for_proposal(conn: sqlite3.Connection, pid: int) -> dict | None:
+    """按提案 id 组装卡片。历史回放用 —— 让"我做过的操作"能重现在对话里。"""
+    p = get_proposal(conn, pid)
+    if not p:
+        return None
+    cid = None
+    a = p.get("args")
+    if isinstance(a, str):
+        try:
+            a = json.loads(a)
+        except Exception:
+            a = None
+    if isinstance(a, dict):
+        def _as_int(v):
+            try:
+                return int(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+        cid = _as_int(a.get("candidate_id"))
+        if cid is None:
+            aid = _as_int(a.get("application_id"))
+            if aid is not None:
+                row = conn.execute(
+                    "SELECT candidate_id FROM applications WHERE id=?", (aid,)).fetchone()
+                if row:
+                    cid = _as_int(row["candidate_id"])
+    return {"proposal_id": p["id"], "tool": p["tool"],
+            "tool_label": TOOL_LABEL.get(p["tool"], p["tool"]),
+            "summary": p["summary"], "risk": p["risk"],
+            "status": p["status"],            # 待确认 / 已执行 / 已拒绝
+            "candidate_id": cid,
+            "changes": proposal_changes(conn, p)}
+
+
+def _draft_with_sent(conn: sqlite3.Connection, draft: dict) -> dict:
+    """给历史里的草稿卡补一个 `sent` 标记。
+
+    ⚠️ 为什么必须补：草稿卡上有个「确认并发送」按钮，一点就**真的寄出**。
+    重建历史时若无条件还原这个按钮，HR 切一次页面再点，
+    就会**给候选人重复发一封一模一样的邮件** —— 这比"卡片消失"严重得多。
+    判据取审计表：发信成功会写 `entity='mail'` + `action='send'`，
+    `after` 里含收件人与主题。用 instr() 做子串匹配（不用 LIKE：
+    主题里可能带 % 或 _，会被当通配符）。
+    """
+    out = dict(draft or {})
+    to_addr = (out.get("to") or "").strip()
+    subj = (out.get("subject") or "").strip()
+    if not to_addr:
+        out["sent"] = False
+        return out
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM audit_log WHERE entity='mail' AND action='send' "
+            "AND instr(COALESCE(after,''), ?) > 0 "
+            "AND instr(COALESCE(after,''), '成功') > 0 LIMIT 1",
+            (to_addr,)).fetchone()
+        out["sent"] = bool(row)
+    except Exception:
+        out["sent"] = False
+    # 主题相同才更可信；但主题可能被改过。这里只在"收件人命中"时保守判为
+    # **可能已发**，前端据此只改文案（不再给发送按钮），不影响其他判断。
+    out["sent_subject_hint"] = subj
+    return out
+
+
 def chat_history(conn: sqlite3.Connection, limit: int = 300) -> dict:
     """把 `agent_runs` 组装成前端可直接渲染的对话流（按时间正序）。
 
@@ -2626,11 +2782,28 @@ def chat_history(conn: sqlite3.Connection, limit: int = 300) -> dict:
         messages.append({"role": "user", "content": q, "at": d.get("ts"),
                          "run_id": d.get("id")})
         if a:
+            # v1.25：把本轮产生的**卡片**一并带出去（提案 + 邮件草稿）。
+            # 为什么：卡片原先只活在浏览器 DOM 里，切一次页面就被重建抹掉，
+            # HR 想回看"我刚才让它做了什么"就没了。这里从库里重建，
+            # 刷新/换页/重启都还在 —— 与「没点清空就不该丢」是同一个口径。
+            tcs = d.get("tool_calls") or []
+            props, drafts = [], []
+            for tc in tcs:
+                if not isinstance(tc, dict):
+                    continue
+                pid = tc.get("proposal_id")
+                if pid:
+                    card = card_for_proposal(conn, int(pid))
+                    if card:
+                        props.append(card)
+                if tc.get("draft"):
+                    drafts.append(_draft_with_sent(conn, tc["draft"]))
             messages.append({"role": "assistant", "content": a, "at": d.get("ts"),
                              "run_id": d.get("id"), "mode": d.get("mode"),
                              "rounds": d.get("rounds") or 0,
-                             "tools": d.get("tool_calls") or [],
+                             "tools": tcs,
                              "latency_ms": d.get("latency_ms"),
+                             "proposals": props, "drafts": drafts,
                              "tokens": (d.get("tokens_in") or 0) + (d.get("tokens_out") or 0)})
 
     shown = conn.execute("SELECT COUNT(*) AS n FROM agent_runs" + where, args[:-1]).fetchone()["n"]

@@ -87,6 +87,15 @@ _PAGE = """<!DOCTYPE html>
     /* 圆角：飞书比之前稍圆（卡片 8px / 控件 6px）。
        微圆角在中文界面里容易显得"像素对齐"，飞书用略圆的角来软化密集信息。 */
     --r-card:8px; --r-ctl:6px; --r-chip:4px;
+    /* ⚠️ --z 必须和下面 body{zoom} 同步改，两处是一个整体。
+       原因：zoom 放大的是**布局像素 → 视觉像素**，
+       而 100vh 拿到的是**视觉像素**的视口高。于是 body 有 zoom 时，
+       height:100vh 的元素会变成 视口高 × zoom，**比窗口高出整整一个 zoom 倍**——
+       表现为右侧一条多余的文档滚动条、页面下方截掉一截（用户 2026-10-13 反馈）。
+       所以凡是要"正好一屏"的高度，一律写 calc(100vh / var(--z))，
+       **不要写死减多少 px**：写死的值换个窗口高度/缩放档就失效
+       （实测 87vh 在 1000px 高窗口下碰巧正确，换1440 高立刻差 187px）。*/
+    --z:1;
   }
 
   /* Gate 34：窄屏不允许横向滚动。clip 而非 hidden——后者会破坏 sticky/fixed */
@@ -100,22 +109,34 @@ _PAGE = """<!DOCTYPE html>
      为什么用 zoom 而不是逐个改字号：这套界面里几十处 px 字号（按钮 14、表格 14、
      说明文字 13、徽标 13……），逐个写媒体查询覆盖改动面大且必然漏；
      zoom 让字号、卡片、侧栏、弹窗**一起**按比例放大且布局随缩放重排，
-     Chromium 与 Firefox 126+ 都支持。 */
-  @media (min-width:1600px){ body{zoom:1.15} }
-  @media (min-width:2000px){ body{zoom:1.3} }
+     Chromium 与 Firefox 126+ 都支持。
+     ⚠️ 每加一档 zoom，**必须同时把 --z 也设成同一个值**，
+     否则 .layout / .side 的"正好一屏"会高出 zoom 倍（见 :root 里 --z 的说明）。*/
+  @media (min-width:1600px){ body{zoom:1.15} :root{--z:1.15} }
+  @media (min-width:2000px){ body{zoom:1.3}  :root{--z:1.3} }
   /* 侧栏：比内容区**略深**一档的灰（--surface-2）而不是纯白。
      飞书就是这样分层的——导航区沉一点，内容区浮起来。
      之前侧栏是纯白、body 也是纯白，两边一样亮，界面就没了纵深。 */
   /* v1.24.20：.layout 改成**固定一屏**（原min-height:100vh）。
    原来用 min-height 是对的（内容长了就长高、页面整体滚动），
    但那样聊天页无法把对话区撑到视区底部 —— 一屏之内放不下就该页内滚，
-   不该让整页滚动。改成 height:100vh + overflow:hidden，
+   不该让整页滚动。改成 height + overflow:hidden，
    滚动交给下层各页自己决定（.main-inner 或 .chatlog）。
    覆盖写在这一行而不是另起一条：CSS 同优先级按出现顺序生效，
-   写在别处的覆盖会被原始定义盖掉（v1.24.20 踩过）。 */
-  .layout{display:flex;height:100vh;overflow:hidden;align-items:stretch}
+   写在别处的覆盖会被原始定义盖掉（v1.24.20 踩过）。
+
+   ⚠️ v1.24.21 修：这里是 calc(100vh / var(--z)) 而不是 height:100vh。
+   body 上有 zoom（≥1600 宽时 1.15/1.3），100vh 是**视觉像素**视口高，
+   而 .layout 的布局盒会被 zoom 乘一遍 —— 于是它比窗口高出 15%/30%，
+   表现为右侧一条多余的文档滚动条、聊天页下方被截掉一截。
+   实测（1600×1000、zoom1.15）：documentElement.scrollHeight=1150、innerHeight=1000，
+   多出正好 150px = 1000×0.15。overflow:hidden 裁的是 .layout **内部**，
+   裁不掉它自己超出视口的那一段。
+   另外验证过 html,body{overflow:hidden} 单独加**完全无效**——
+   溢出的是 .layout 这个元素本身，不是 body，所以别指望锁 body 能解决。 */
+  .layout{display:flex;height:calc(100vh / var(--z));overflow:hidden;align-items:stretch}
   .side{width:220px;flex:0 0 220px;background:var(--surface-nav);border-right:1px solid var(--line);
-    padding:20px 12px 14px;position:sticky;top:0;height:100vh;
+    padding:20px 12px 14px;position:sticky;top:0;height:calc(100vh / var(--z));
     display:flex;flex-direction:column;box-sizing:border-box}
   .brand{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;
     padding:4px 10px 18px;white-space:nowrap}
@@ -339,7 +360,7 @@ _PAGE = """<!DOCTYPE html>
   .modal{position:fixed;inset:0;background:rgba(29,33,41,.45);display:none;align-items:center;
     justify-content:center;padding:22px;z-index:20}
   .modal.on{display:flex}
-  .sheet{background:var(--surface);border-radius:var(--r-card);max-width:920px;width:100%;max-height:88vh;
+  .sheet{background:var(--surface);border-radius:var(--r-card);max-width:920px;width:100%;max-height:calc(88vh / var(--z));
     overflow:auto;padding:22px 24px}
   .progtrack{height:10px;background:var(--surface-2);border-radius:6px;overflow:hidden;margin:12px 0 8px}
   .progfill{height:100%;background:var(--accent);border-radius:6px;transition:width .3s ease}
@@ -454,6 +475,10 @@ _PAGE = """<!DOCTYPE html>
   .mdtable tbody tr:last-child td{border-bottom:none}
   .mdtable tbody tr:hover td{background:var(--surface)}
   .trace{font-size:13px;color:var(--ink-3);margin-top:8px;border-top:1px dashed var(--line);padding-top:8px}
+  /* v1.25：工具轨迹折叠盒。默认收起，只在 HR 想看"你到底做了什么"时展开。 */
+  .tracebox{margin-top:10px;font-size:13px}
+  .tracebox > summary{cursor:pointer;color:var(--ink-3);user-select:none;padding:2px 0}
+  .tracebox > summary:hover{color:var(--ink-2)}
   .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
   .pcol{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:12px 14px}
   .pcol .h{display:flex;justify-content:space-between;font-size:14px;color:var(--ink-2);font-weight:600}
@@ -835,6 +860,19 @@ function progressModal(taskId, opts){
   __progressTimer = setInterval(tick, 1200);
 }
 
+/* v1.25：复制草稿的**主题 + 正文**（v1.25 修）。
+   原来的按钮写成 `copyText(JSON.stringify(''))` —— 复制的是空字符串，
+   点了只弹一句"已复制"，剪贴板里其实什么都没有。 */
+function copyDraft(key){
+  const d = (DRAFTS || {})[key];
+  if (!d){ toast('这封草稿已经不在了','warn'); return; }
+  /* ⚠️ 下面拼接里的换行必须写成双反斜杠形式（见本文件顶部 3.2 那条）：
+     _PAGE 是普通三引号字符串而非 raw string，单反斜杠的换行符会被 Python
+     先转成**真实换行**，直接截断 JS 字符串 → 整页白屏。
+     MEMORY.md 3.2 记过这个坑，本次又踩了一次（注释里写同样的转义也会中招）。 */
+  const txt = (d.subject ? ('主题：' + d.subject + '\\n\\n') : '') + (d.body || '');
+  copyText(txt);
+}
 function copyText(t){
   if (!t || t==='—'){ toast('没有可复制的内容','warn'); return; }
   navigator.clipboard.writeText(t).then(()=>toast('已复制：'+t,'ok'),
@@ -1756,9 +1794,18 @@ async function saveFields(cid){
   };
   const r = await api('/api/candidates/'+cid+'/rename',
                       {method:'POST', body:JSON.stringify(payload)});
-  if (r.__http_error || r.error){ toast(r.detail||r.error||'更正失败','danger'); return; }
+  if (r.__http_error || r.error){
+    toast(r.detail||r.error||'更正失败','danger'); return;
+  }
+  // v1.24.21：保存成功后**留在弹层原地刷新**，不要关掉。
+  // 用户的诉求：「点了保存更正，明明成功了却报错，页面也不自动刷新」。
+  // 原来的做法是 closeModal() —— 弹层一关，HR 看不到改后的值，也没法接着改下一项；
+  // 而且只要后端返回非 2xx（如审计那步抛 500），这里就直接 return，
+  // 弹层既不关也不刷新，看起来像"点了没反应"。
+  // 现在：重新拉一次详情把弹层内容换成最新的，HR 能当场核对。
   toast(r.note || '已更正', 'ok');
-  closeModal(); refresh();
+  await showDetail(cid);
+  refresh();          // 背后的列表/卡片也同步（改完姓名后列表要跟着变）
 }
 
 /* 页面内确认弹窗：替代浏览器原生 await askConfirm()。
@@ -2594,7 +2641,16 @@ async function loadChatHistory(){
     if (m.latency_ms) bits.push(m.latency_ms+' ms');
     if (m.tokens) bits.push('tokens '+m.tokens);
     if ((m.tools||[]).length) bits.push('工具：'+m.tools.map(x=>x.tool).join(' → '));
-    if (bits.length) d.insertAdjacentHTML('beforeend', '<div class="trace">'+esc(bits.join(' · '))+'</div>');
+    if (bits.length) d.insertAdjacentHTML('beforeend',
+      '<details class="tracebox"><summary>本次调用详情</summary>'
+      + '<div class="trace">'+esc(bits.join(' · '))+'</div></details>');
+    /* v1.25：历史回放时也把**卡片重建出来**。
+       原先卡片只活在 DOM 里，切一次页面（refresh → viewChat → 本函数）就被抹掉，
+       HR 想回看"我刚才让它做了什么"就没了。现在服务和历史里都带着卡片数据，
+       这里按同样的渲染函数重建，刷新/换页/重启都还在。
+       已处理过的提案显示状态（已执行/已拒绝）而不是按钮 —— 见 renderProposalCards。 */
+    if ((m.drafts||[]).length) renderDraftCards(d, m.drafts);
+    if ((m.proposals||[]).length) renderProposalCards(d, m.proposals);
   });
   // CHAT 从库里恢复 → 多轮追问的上下文连续（后端只取最近 8 轮）
   CHAT = msgs.map(m=>({role:m.role, content:m.content}));
@@ -2662,9 +2718,22 @@ async function askAgent(){
   holder.innerHTML = md(answer);
   let extra = '';
   if (r.trace && r.trace.length){
-    extra += '<div class="trace">工具调用轨迹：' + r.trace.map(t=>
-      '→ '+esc(t.tool)+'('+esc(JSON.stringify(t.args))+')'+(t.write?' <b>[写·需确认]</b>':'')
-      + (t.disabled?' <b>[已拦截]</b>':'')).join('<br>') + '</div>';
+    /* v1.25：工具轨迹**默认折叠**。
+       原来是把 `→ search_candidates({...})` 一行行摊在回复下面——
+       对 HR 是无意义噪音（他们不关心函数名和 JSON 参数），
+       还会把真正要看的结论挤下去。收进「详情」里，需要排查时才展开。
+       ⚠️ 有 [已拦截] 的时候**默认展开**：那是"这件事没做"的原因，
+       属于必须让 HR 看见的信息，不能藏在折叠里。 */
+    const blocked = r.trace.some(t => t.disabled);
+    const lines = r.trace.map(t =>
+      '→ ' + esc(t.tool_label || t.tool) + '(' + esc(JSON.stringify(t.args)) + ')'
+      + (t.write ? ' <b>[写·需确认]</b>' : '')
+      + (t.disabled ? ' <b>[已拦截]</b>' : '')
+      + (t.recovered ? ' <b>[已补做]</b>' : '')).join('<br>');
+    extra += '<details class="tracebox"' + (blocked ? ' open' : '') + '>'
+      + '<summary>工具调用（' + r.trace.length + ' 次'
+      + (blocked ? ' · 有被拦截的' : '') + '）</summary>'
+      + '<div class="trace">' + lines + '</div></details>';
   }
   if (r.mode) extra += `<div class="trace">模式：${esc(r.mode)} · 轮数 ${r.rounds||0} · ${r.latency_ms||0} ms`
     + (r.tokens && r.tokens.total_tokens ? (' · tokens '+r.tokens.total_tokens) : '') + '</div>';
@@ -2680,8 +2749,25 @@ async function askAgent(){
    所以点头的地方就该在消息下面，而不是另一个页面。
    权限：没有 confirm 权限的人不显示按钮（后端也会拒），只提示去看审计页。
    确认流只有一条：复用 POST /api/proposals/{pid}/decide，不新增写接口。 */
+/* ⚠️ v1.25 修一个**长期存在、且一直没被发现**的 bug：
+   这两个常量是 JS 字符串（"approve" / "reject"），但拼进 HTML 属性时
+   **没有加引号**，生成出来是：
+       onclick="decideProposal(37,approve,this)"      ← approve 是裸标识符
+   浏览器执行时就把它当**变量**去找 → `ReferenceError: approve is not defined`
+   → 点了完全没反应（既不弹确认框，也不报错给用户看）。
+
+   为什么一直没被发现：`decideProposal` 本身没问题，
+   用控制台直接调 `decideProposal(1,'approve')` 是好的；
+   但**从界面上点按钮**走的是 HTML 属性求值那条路，一按就炸。
+   —— 又一个「必须真点一次才算验证」的例子。
+
+   修法：给常量加单引号（属性本身用双引号包着，所以内层只能用单引号）。
+   用 JSON.stringify 会产出双引号，直接把 HTML 属性截断，不能用。 */
 const APPROVE = String.fromCharCode(97,112,112,114,111,118,101);   // approve
-const REJECT  = String.fromCharCode(114,101,106,101,99,116);           // reject
+const REJECT  = String.fromCharCode(114,101,106,101,99,116);       // reject
+//: 拼进 onclick 属性时用的**带引号**形式
+const APPROVE_Q = "'" + APPROVE + "'";
+const REJECT_Q  = "'" + REJECT  + "'";
 function renderProposalCards(holder, proposals){
   const perms = (META && META.session && META.session.permissions) || [];
   const canConfirm = perms.indexOf('confirm') >= 0;
@@ -2692,15 +2778,44 @@ function renderProposalCards(holder, proposals){
        提案里的 candidate_id 缺失就不给这个按钮（宁可没有，也不要指错人）。 */
     const openBtn = p.candidate_id
       ? '<button onclick="showDetail(' + p.candidate_id + ')">打开档案核对</button>' : '';
-    const acts = canConfirm
-      ? '<button class="btn-primary" onclick="decideProposal(' + p.proposal_id + ',' + APPROVE + ',this)">确认执行</button>'
-        + '<button class="btn-danger" onclick="decideProposal(' + p.proposal_id + ',' + REJECT + ',this)">拒绝</button>'
-        + openBtn
-      : '<span class="small">你没有「确认」权限，请到「提案与审计」页处理</span>' + openBtn;
+    /* v1.25：**已处理过的提案**（历史回放时会出现）显示状态，不再给按钮。
+       为什么：从历史里重建的卡片，如果还挂着「确认执行」，点下去后端会回
+       "该提案已是『已执行』状态，无需重复处理" —— 看着像报错，其实是对的。
+       与其让 HR 白点一次，不如直接把它标成已执行/已拒绝。 */
+    const done = p.status && p.status !== '待确认';
+    const acts = done
+      ? '<span class="chip" style="color:'
+          + (p.status === '已执行' ? 'var(--ok)' : 'var(--ink-3)') + ';background:'
+          + (p.status === '已执行' ? 'var(--ok-soft)' : 'var(--surface-2)')
+        + '">' + esc(p.status) + '</span>' + openBtn
+      : (canConfirm
+        ? '<button class="btn-primary" onclick="decideProposal(' + p.proposal_id + ',' + APPROVE_Q + ',this)">确认执行</button>'
+          + '<button class="btn-danger" onclick="decideProposal(' + p.proposal_id + ',' + REJECT_Q + ',this)">拒绝</button>'
+          + openBtn
+        : '<span class="small">你没有「确认」权限，请到「提案与审计」页处理</span>' + openBtn);
+    /* v1.25：把「改前 → 改后」摆出来，而不是只有一句摘要。
+       为什么：HR 点「确认执行」是真改档案。原来只有 summary
+       （"更正 赵敏 的字段：电话：… → …"）——一句中文里塞多个改动，
+       人多改动多时读不出来，还得点「打开档案核对」跳去看。
+       这里把后端已算好、本来只拼进 summary 的前后值**结构化列出**，
+       在卡片上就能核对完。字段名与顺序都由后端给，前端不做任何推断。 */
+    let detailHtml = '';
+    const changes = p.changes || [];
+    if (changes.length){
+      detailHtml = '<div class="small" style="margin-top:8px">'
+        + changes.map(c => '<div style="padding:2px 0">'
+            + '<b>' + esc(c.label || c.field || '') + '</b>：'
+            + '<span style="color:var(--ink-3)">' + esc(c.before || '（空）') + '</span>'
+            + ' <span style="color:var(--ink-3)">→</span> '
+            + '<span style="color:var(--accent-ink)">' + esc(c.after || '（空）') + '</span>'
+          + '</div>').join('')
+        + '</div>';
+    }
     html += '<div class="card" style="background:var(--surface)8e6;margin-top:10px" id="prop-' + p.proposal_id + '">'
-      + '<div style="font-weight:600">待确认提案 · ' + esc(p.tool || '')
+      + '<div style="font-weight:600">待确认提案 · ' + esc(p.tool_label || p.tool || '')
         + '<span class="small">提案 #' + p.proposal_id + (p.risk ? (' · 风险 ' + esc(p.risk)) : '') + '</span></div>'
       + '<div style="margin-top:6px">' + esc(p.summary || '') + '</div>'
+      + detailHtml
       + '<div class="bar" style="margin-top:8px">' + acts
         + '<span class="small">不点就不会生效——系统不会替你做决定</span></div></div>';
   });
@@ -2728,7 +2843,13 @@ async function decideProposal(pid, decision, btn){
       + (decision === 'approve' ? '已执行' : '已拒绝') + ' · 提案 #' + pid + '</div>'
       + '<div class="small" style="margin-top:4px">' + esc(r.note || '') + '</div>';
   }
-  refresh();   // 提案卡片就地变成"已执行/已拒绝"，不再弹 toast
+  /* ⚠️ v1.25 修：原来这里无条件 `refresh()`，而 refresh() 会**重绘整个对话区**
+     （viewChat() 重建 #view，聊天记录从 CHAT 数组重新拼，卡片不在 CHAT 里）。
+     于是刚写好的「已执行」卡片**立刻被抹掉**——HR 点完确认，卡片凭空消失，
+     根本不知道成没成功（实测：后端状态已是"已执行"，但界面显示"卡片已消失"）。
+     现在：只在**非对话页**刷新（那里有列表/统计需要同步）；
+     对话页上就地保留卡片，卡片自己已经变成"已执行"了。 */
+  if (VIEW !== 'chat') refresh();
 }
 
 /* 智能体起草的邮件：渲染成卡片 + 一键送进邮件编辑器（v1.13.7）。
@@ -2766,18 +2887,31 @@ function renderDraftCards(holder, drafts){
        现在三个动作并排放在卡片里：发送（就地，带二次确认）/ 编辑 / 看档案。
        红线不变：按钮写的是「确认并发送」，且必须 HR 点，助手永不自动发。 */
     const acts =
-      (d.to ? `<button class="btn-primary" onclick="sendDraftNow('${key}', this)">确认并发送</button>` : '')
+      (d.to && !d.sent
+        ? `<button class="btn-primary" onclick="sendDraftNow('${key}', this)">确认并发送</button>` : '')
       + `<button onclick="openDraftInMailerByKey('${key}')">在编辑器中修改</button>`
       + (d.candidate_id ? `<button onclick="showDetail(${d.candidate_id})">打开档案</button>` : '')
-      + `<button onclick="copyText(${JSON.stringify('')});toast('已复制主题与正文','ok')">复制正文</button>`;
+      /* ⚠️ v1.25 修：原来是 `copyText(JSON.stringify(''))` —— 复制的是一段**空字符串**，
+         点了只弹"已复制主题与正文"，其实什么都没进剪贴板。
+         改成在卡片上带一份真实的主题+正文，由 copyDraft 复制。 */
+      + `<button onclick="copyDraft('${key}')">复制主题与正文</button>`;
+    /* v1.25：已发过的草稿**不再给发送按钮**。
+       历史重建时若无条件还原按钮，HR 切页后再点就会重复发信；
+       这是"卡片常驻"带来的新风险，必须一起堵掉。 */
+    const sentNote = d.sent
+      ? `<div class="small" style="margin-top:6px;color:var(--ok)">这封已发送过（见下方状态）。`
+        + `要再发一封，请点「在编辑器中修改」确认内容后发送。</div>`
+      : '';
     html += `<div class="card" style="background:var(--surface-2);margin-top:10px" id="draft-${key}">
-      <div style="font-weight:600">邮件草稿（未发送）· ${esc(d.name||'')}
-        <span class="small">收件人：${esc(d.to || '（无邮箱）')}${d.job?(' · 岗位：'+esc(d.job)):''}</span></div>
+      <div style="font-weight:600">邮件草稿${d.sent ? '（已发送）' : '（未发送）'} · ${esc(d.name||'')}
+        <span class="small">收件人：${esc(d.to || '（无邮箱）')}${d.job?(' · 岗位：'+esc(d.job)):''}`
+      + `${d.template?( ' · 模板：'+esc(d.template)):''}</span></div>
       <div class="small" style="margin-top:6px">主题：${esc(d.subject||'')}</div>
       <div style="margin-top:6px;white-space:pre-wrap">${esc(d.body||'')}</div>
-      ${miss}${noMail}
+      ${miss}${noMail}${sentNote}
       <div class="bar" style="margin-top:8px">${acts}
-        <span class="small">${d.to ? '点「确认并发送」即寄出到上面这个地址' : '没有邮箱就发不出去'}</span>
+        <span class="small">${!d.to ? '没有邮箱就发不出去'
+          : (d.sent ? '已发送过，不再重复提供发送按钮' : '点「确认并发送」即寄出到上面这个地址')}</span>
       </div></div>`;
   });
   holder.insertAdjacentHTML('beforeend', html);
@@ -2819,7 +2953,11 @@ async function sendDraftNow(key, btn){
     card.innerHTML = '<div style="font-weight:600">已发送 · ' + esc(d.name||'') + '</div>'
       + '<div class="small" style="margin-top:4px">收件人 ' + esc(d.to) + '｜发送记录已写入审计。</div>';
   }
-  refresh();
+  /* v1.25：与提案卡同一个 bug —— 对话页上 refresh() 会重绘整个对话区，
+     把刚写好的「已发送」状态抹掉（HR 点完看不到结果）。
+     现在只在非对话页刷新；对话页就地保留卡片。
+     （历史重建时靠审计查出的 sent 标记恢复成"已发送"，见 db.chat_history） */
+  if (VIEW !== 'chat') refresh();
 }
 
 async function openDraftInMailer(idx, d){

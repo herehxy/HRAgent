@@ -156,10 +156,22 @@ def _apply_provider_quirks(payload: dict, cfg: dict) -> dict:
     return payload
 
 
-def chat(messages: list[dict], tools: list[dict] | None = None, cfg: dict | None = None) -> dict:
+def chat(messages: list[dict], tools: list[dict] | None = None, cfg: dict | None = None,
+         tool_choice: str | None = None) -> dict:
     """返回 assistant message（dict）。可能含 tool_calls。
 
     额外挂 `_usage`（token 用量）与 `_model`，供 `agent_runs` 记录成本与复盘。
+
+    `tool_choice`（v1.25）：
+      · None/"auto"（默认）—— 模型自己决定调不调工具；
+      · "required"        —— **强制**本轮必须调用工具，不许只回文字。
+
+    为什么需要 "required"：模型有时会说「已为您生成待确认提案」却一个工具都没调，
+    于是界面上没有确认按钮、提案也没落库。过去靠出口加一句警告来兜，
+    但那只是告诉 HR「没做成」——**用户要的是真做成**。
+    强制它重发一次工具调用，提案就真的落库了。
+    ⚠️ 只在"已经确认模型该调工具却没调"时使用；普通问答强加 required
+    会逼模型对着无关问题乱调工具。
     """
     cfg = cfg or load_cfg()
     payload: dict = {
@@ -169,7 +181,7 @@ def chat(messages: list[dict], tools: list[dict] | None = None, cfg: dict | None
     }
     if tools:
         payload["tools"] = tools
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = tool_choice or "auto"
     body = _post("/chat/completions", _apply_provider_quirks(payload, cfg), cfg)
     msg = body["choices"][0]["message"]
     msg["_usage"] = body.get("usage") or {}

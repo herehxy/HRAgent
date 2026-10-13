@@ -22,6 +22,7 @@ import uuid
 from .. import db
 from ..pipeline import normalize as nz
 from . import llm
+from . import tools as tools_write
 from .tools import DISABLED_TOOLS, STAGES, TOOL_SPECS, ToolCtx, execute
 
 SYSTEM_PROMPT = (
@@ -55,9 +56,25 @@ SYSTEM_PROMPT = (
     "不准凭空描述『已为您生成待确认提案』：只要这轮没调过写类工具，"
     "就一定没有提案，界面也不会给确认按钮。宁可多调一次工具，"
     "也不要输出一句没有按钮兜底的『已提交待确认』。\n"
+    # v1.25：用户原话「不需要跳转到对应页面，除非自行选择的」。
+    # 过去模型爱用「请到 XX 页面自己操作」收尾 —— 那是把活儿推回给 HR。
+    "4c) **不要把活儿推回给 HR。** 你能做的事必须自己做完："
+    "查数据就调检索工具、要改档案就提交提案（确认按钮就在这条回复下面）。"
+    "**禁止**用『请到「XX」页面自己操作』『你可以去系统里点一下』这类话收尾。"
+    "确实做不了的（对外发信、彻底删除），要说明是**权限限制**，"
+    "并给出你能做的替代（例如草稿已经写好，点「确认并发送」即可）。\n"
+    "4d) 每个工具的参数里都写了它**什么时候不要用**，动手前先看清；"
+    "工具返回 error 时如实转述原因，不要换个说法掩盖。\n"
     "5) 引用技能或结论时，尽量带上简历原文证据（工具会返回 evidence 字段）。\n"
     "7) 人是用**姓名**指人的：candidate_id 可以直接写姓名（如 '何晓宇'），系统会自动解析；"
     "**绝对不要凭空编数字 id**——编了会直接报'未找到候选人'。\n"
+    # v1.25：实测「把 #1 推进至初面」时模型**不查就反问**，
+    # 而 HR 已经把编号给出来了 —— 再问一遍等于把活儿推回去。
+    # 编号可能是投递 id 也可能是候选人 id，**两个都查一下**再决定要不要问。
+    "7b) HR 给出 `#数字` 时，**先查再问**：把它当投递 id 查一次"
+    "（get_candidate / explain_grade 都能带出投递），"
+    "查到了就直接用；查不到或有多条歧义，才回头问 HR。"
+    "不要一上来就要求 HR 再确认一遍编号——**编号就是他要你用的那个**。\n"
     "6) 回答用简体中文，结论先行、结构化（可用编号或短列表），不要输出 JSON。"
 )
 
@@ -210,6 +227,73 @@ def _looks_like_fake_proposal(answer: str, trace: list[dict]) -> bool:
 
 
 
+def _force_tool_call(messages: list[dict], answer: str, cfg: dict,
+                     usage_total: dict) -> list[dict] | None:
+    """模型口头声称做了写操作却没调工具 —— 强制它重发一次工具调用。
+
+    为什么用 `tool_choice="required"` 而不是继续猜中文动词：
+    模型**刚刚自己说了**"已把 X 推进到 Y"，它完全知道要调哪个工具、
+    要传什么参数。我们唯一需要的是逼它把这一步真的发出来。
+    这样「推进到/推进至/挪到/改到/升级到」全部自然覆盖，
+    **不需要维护任何动词表** —— 动词表必然漏（已在 v1.24.19 验证过）。
+
+    返回 tool_calls 列表；模型仍然只回文字则返回 None。
+
+    ⚠️ 为什么要把原话回灌：必须让它知道自己上一条说了什么，
+    否则它可能答非所问（比如重新去查一遍人）。这里把 answer 作为
+    assistant 轮放进对话，保持上下文连贯。
+    """
+    probe = messages + [
+        {"role": "assistant", "content": answer},
+        {"role": "user", "content":
+         "你上一条声称已经完成了一个写操作，但本轮**没有调用任何工具**，"
+         "所以系统里并不存在这个操作，界面上也不会有确认按钮。\n"
+         "现在只做一件事：**调用正确的工具**把这件事真正提交掉。"
+         "参数取你上一条里已经写明的人与目标值。不要解释，不要重复结论。"},
+    ]
+    try:
+        msg = llm.chat(probe, tools=TOOL_SPECS, cfg=cfg, tool_choice="required")
+    except Exception:
+        return None
+    _accumulate(usage_total, msg.get("_usage"))
+    calls = msg.get("tool_calls")
+    if not calls:
+        return None
+    # 把这一轮也接进对话，保持顺序合法（assistant 的 tool_calls 必须带 id）
+    messages.append({"role": "assistant", "content": answer})
+    messages.append({"role": "assistant", "content": "",
+                     "tool_calls": calls})
+    return calls
+
+
+def _summarize_actions(trace: list[dict]) -> str:
+    """强制补调之后，用**确定性**文案把实际发生了什么说清楚。
+
+    只在模型第二轮仍没给出可读答复时使用 —— 宁可说一句由事实拼成的话，
+    也不要留一段未经执行的描述给 HR。
+    """
+    writes = [t for t in trace if t.get("write")]
+    if not writes:
+        return "这一轮没有产生任何需要确认的操作。请再说一次你要做什么，我来提交。"
+    names = {"set_stage": "推进阶段", "set_tier": "调整档位", "add_tag": "添加标签",
+             "add_note": "添加备注", "merge_candidates": "合并档案"}
+    done = []
+    for t in writes:
+        r = t.get("result")
+        if isinstance(r, str):
+            try:
+                r = json.loads(r)
+            except Exception:
+                r = {}
+        if isinstance(r, dict) and r.get("proposal_id"):
+            done.append(f"「{names.get(t['tool'], t['tool'])}」提案 #{r['proposal_id']}"
+                        f"（{r.get('summary') or ''}）")
+    if not done:
+        return "操作没有提交成功，请把目标再说明一次（例如「把 #65 推进到初面」）。"
+    return ("已提交待 HR 确认：" + "、".join(done)
+            + "。点下面的「确认执行」才会真正生效。")
+
+
 def _recover_missed_action(answer: str, user_message: str, ctx, trace: list[dict]) -> str:
     """模型零工具调用、却在声称做了某个写操作 —— **替它把这一步真的做完**。
 
@@ -351,6 +435,34 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
     max_rounds = int(cfg.get("max_tool_rounds", 5))
     rounds = 0
 
+    def _run_calls(calls: list[dict]) -> int:
+        """执行一批 tool_calls，写进 trace 与 messages。返回执行了几个。
+
+        抽成函数是为了让"正常路径"和下面的"强制补调路径"走**完全相同**的执行逻辑
+        —— 否则两条路容易长歪（一条改了权限校验、另一条没改）。
+        """
+        n = 0
+        for tc in calls:
+            fn = (tc.get("function") or {}).get("name", "")
+            try:
+                args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
+            except ValueError:
+                args = {}
+            result = execute(fn, args, ctx)
+            # v1.13.9：邮件草稿要**完整**带回（正文会被 900 字截断，
+            # 截断了前端就渲染不出卡片）；其余工具仍然只留摘要。
+            trace.append({"tool": fn, "args": args,
+                          "result": (result if fn in _FULL_RESULT_TOOLS else result[:900]),
+                          # v1.25：中文名给前端，HR 不需要看函数标识符
+                          "tool_label": _TOOL_LABEL.get(fn, fn),
+                          "write": fn in WRITE_TOOLS,
+                          "disabled": fn in DISABLED_TOOLS})
+            # 结果必须回灌给模型，否则它下一轮看不见工具返回、只能继续编
+            messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                             "name": fn, "content": result})
+            n += 1
+        return n
+
     try:
         for _ in range(max_rounds):
             rounds += 1
@@ -362,37 +474,59 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                 answer = (msg.get("content") or "").strip()
                 if not answer:
                     raise ValueError("模型返回了空答复")
-                # ---- v1.24.19：模型要收尾了，但它本轮一个工具都没调 ----
-                # 过去只在出口加一句"我没真做"，按钮依然不会出现，HR 看到
-                # 的是"系统说了要做却做不了"。既然答复里已经暴露出
-                # **它以为自己做了哪个动作**（推进阶段/改档位/加标签…），
-                # 那就按这个意图**补跑一次工具**，让提案真的落库。
-                # 补跑用的是同一批工具、同一套权限，不绕过"需 HR 确认"红线：
-                # set_stage 等仍然只生成提案，确认按钮由HR 点。
-                if not any(t.get("write") for t in trace):
-                    recovered = _recover_missed_action(answer, user_message, ctx, trace)
-                    if recovered:
-                        answer = recovered
+
+                # ---- v1.25：口头提案 → **强制它真调一次工具** ----
+                #
+                # 历史（两版，都留着记录为的是不再走回去）：
+                #   v1.24.18 —— 只在出口加一句"上面这段描述不算数"。结果 HR 看到的是
+                #               "系统说要改却没改"，比明说"做不了"更糟。
+                #   v1.24.19 —— 改用 `_recover_missed_action()` 按答案**猜**意图补跑。
+                #               但它是枚举中文动词的，实测「推进**至**」就抽不出来
+                #              （正则先吃掉`推进`，尾巴剩 `至「初面」` 匹配不上阶段名），
+                #               于是警告加了、补救没做——最坏的组合。
+                #               **枚举中文动词必然不全**，这是 MEMORY.md 3.7 第 7 条
+                #               已经用八版教训换来的结论，不该在补救里重犯。
+                #
+                # v1.25 的做法：**不猜词，让模型自己重发一次工具调用。**
+                # 它刚说完"已推进到初面"，就不可能不知道要调哪个工具。
+                # 用 tool_choice="required" 强制本轮必须出 tool_calls，
+                # 于是提案真的落库、确认按钮真的出现——
+                # 「真正实现了才是最重要的」，而不是加一句免责声明。
+                if not any(t.get("write") for t in trace) \
+                        and _looks_like_fake_proposal(answer, trace):
+                    forced = _force_tool_call(messages, answer, cfg, usage_total)
+                    if forced:
+                        n_ran = _run_calls(forced)
                         rounds += 1
+                        if n_ran and any(t.get("write") for t in trace):
+                            # 补调成功：让模型基于**真实工具结果**重说一遍，
+                            # 而不是把那段"我已做完"的幻觉话术留给 HR。
+                            follow = llm.chat(
+                                messages + [{"role": "user", "content":
+                                             "工具已按你的意图执行完毕。请基于上面的工具返回，"
+                                             "用简体中文向 HR 说明**实际发生了什么**"
+                                             "（如已生成待确认提案，就说『已提交待确认』），"
+                                             "不要重复你上一条里未经执行的说法。"}],
+                                tools=TOOL_SPECS, cfg=cfg)
+                            _accumulate(usage_total, follow.get("_usage"))
+                            model_used = follow.get("_model") or model_used
+                            rounds += 1
+                            txt = (follow.get("content") or "").strip()
+                            # 模型可能又调工具（如再查一次）；一并执行掉，保证一致性
+                            if follow.get("tool_calls"):
+                                _run_calls(follow["tool_calls"])
+                            if txt:
+                                answer = txt
+                            else:
+                                answer = _summarize_actions(trace)
+                        else:
+                            # 强制了还没调出写类工具 → 退到确定性文案
+                            answer = _summarize_actions(trace)
                 return _finalize(ctx, user_message, answer, trace, "llm", rounds,
                                  usage_total, started, model_used)
             messages.append({"role": "assistant", "content": msg.get("content") or "",
                              "tool_calls": calls})
-            for tc in calls:
-                fn = (tc.get("function") or {}).get("name", "")
-                try:
-                    args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
-                except ValueError:
-                    args = {}
-                result = execute(fn, args, ctx)
-                # v1.13.9：邮件草稿要**完整**带回（正文会被 900 字截断，
-                # 截断了前端就渲染不出卡片）；其余工具仍然只留摘要。
-                trace.append({"tool": fn, "args": args,
-                              "result": (result if fn == "draft_email" else result[:900]),
-                              "write": fn in WRITE_TOOLS,
-                              "disabled": fn in DISABLED_TOOLS})
-                messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
-                                 "name": fn, "content": result})
+            _run_calls(calls)
         # 轮次用尽，强制收敛
         messages.append({"role": "user", "content": "请基于已获取的信息直接给出最终答复。"})
         final = llm.chat(messages, cfg=cfg)
@@ -407,6 +541,46 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         answer = _rule_answer(user_message, ctx, reason=reason, trace=trace)
         return _finalize(ctx, user_message, answer, trace, "rule", rounds,
                          usage_total, started, model_used)
+
+
+def _proposal_id_of(t: dict) -> int | None:
+    """从一条 trace 的工具返回里取 proposal_id（没有就 None）。"""
+    r = t.get("result")
+    if isinstance(r, str):
+        try:
+            r = json.loads(r)
+        except Exception:
+            return None
+    if isinstance(r, dict) and r.get("proposal_id"):
+        try:
+            return int(r["proposal_id"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _draft_of(t: dict) -> dict | None:
+    """从 trace 里取出可渲染成草稿卡的内容（draft_email / preview_mail）。
+
+    两个工具都要：它们的区别只是"内容来自模型还是模板"，
+    对 HR 来说都是"一封待确认的邮件"。只带 draft_email 会让
+    "按模板写"那条路界面上没有草稿卡（用户反馈过：说了给草稿却没卡片）。
+    """
+    if t.get("tool") not in ("draft_email", "preview_mail"):
+        return None
+    r = t.get("result")
+    if isinstance(r, str):
+        try:
+            r = json.loads(r)
+        except Exception:
+            return None
+    if not isinstance(r, dict) or not r.get("body"):
+        return None
+    return {"candidate_id": r.get("candidate_id"), "name": r.get("name"),
+            "to": r.get("to"), "subject": r.get("subject"),
+            "body": r.get("body"), "job": r.get("job"),
+            "template": r.get("template"),
+            "missing_runtime": r.get("missing_runtime") or []}
 
 
 def _accumulate(total: dict, usage: dict | None) -> None:
@@ -452,9 +626,24 @@ def _proposal_brief(p: dict, conn=None) -> dict:
                     (aid,)).fetchone()
                 if row:
                     cid = _as_int(row["candidate_id"])
-    return {"proposal_id": p["id"], "tool": p["tool"], "summary": p["summary"],
-            "risk": p["risk"], "candidate_id": cid}
+    return {"proposal_id": p["id"], "tool": p["tool"],
+            # v1.25：给卡片一个**中文名**。原来显示的是 `set_stage` 这种函数名，
+            # HR 不需要看懂代码标识符。取不到就回落到原名，不至于空白。
+            "tool_label": _TOOL_LABEL.get(p["tool"], p["tool"]),
+            "summary": p["summary"],
+            "risk": p["risk"], "candidate_id": cid,
+            # v1.25：结构化前后值，让 HR 在卡片上就能核对完，不必跳去档案页盲签。
+            "changes": _proposal_changes(p, a if isinstance(a, dict) else {}, conn)}
 
+
+#: 提案工具名 → 中文。**定义在 db 层**，因为实时对话与历史回放都要用；
+#: 分成两份迟早分叉（本项目吃过"两处定义不一致"的亏）。
+_TOOL_LABEL = db.TOOL_LABEL
+
+
+def _proposal_changes(p: dict, a: dict, conn) -> list[dict]:
+    """实时对话路径的前后值计算 —— 直接复用 db 层的实现，不另写一份。"""
+    return db.proposal_changes(conn, {"tool": p.get("tool"), "args": a})
 
 def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode: str,
               rounds: int, usage: dict, started: float,
@@ -490,22 +679,30 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
         # 声称做了写操作却一个写类工具都没调 → 明确告诉 HR 提案不存在。
         _wrote = any(_t.get("write") for t in trace)
         if not _wrote and _looks_like_fake_proposal(answer, trace):
-            # 补救没成功才走到这里：说明抽不出「#投递ID」或"从X到Y"格式。
-            # 措辞要说清**为什么这次没成**，否则 HR 只会以为系统坏了。
-            answer = (answer.rstrip() +
-                      "\n\n⚠️ **上面这段描述不算数——我并没有真正执行这个操作，"
-                      "所以系统里没有可确认的提案（下面也不会有确认按钮）。**\n\n"
-                      "原因是我没能从这段话里确定**是哪一条投递**（需要投递编号 #数字）"
-                      "以及**推进到哪个阶段**。请把投递编号告诉我（例如"
-                      "「把 #1024 推进到已联系」），我就能生成真正可确认的提案。"
-                      "这是我这一轮的处理错误，不是你的操作有误。")
+            # v1.25：**不再加"上面这段描述不算数"那种警告。**
+            # 用户原话：「不要加那句什么没有实现警告，真正实现了才是最重要的」。
+            # 警告是补救，而且是最差的一种补救——HR 既没办成事，
+            # 又看了一句自我否定。真做不成的极端情况（比如模型两轮都不肯调工具、
+            # 或参数缺得没法执行），就**把话说清楚并给出下一步**，
+            # 由 `_summarize_actions` 用事实拼出确定性文案。
+            # 走到这里说明强制补调也没成功，属于罕见路径。
+            answer = _summarize_actions(trace)
         # 必须在 conn.close() 之前构造：_proposal_brief 里的
         # application_id → candidate_id 要查 applications 表，
         # 放到 return 里用已关闭的连接会抛 "Cannot operate on a closed database"。
         briefs = [_proposal_brief(p, conn) for p in proposals]
         db.log_agent_run(conn, {
             "session_id": ctx.session_id, "question": question, "answer": answer[:4000],
-            "model": model, "tool_calls": [{"tool": t["tool"], "args": t["args"]} for t in trace],
+            "model": model,
+            # v1.25：除了工具名与参数，还要存下**卡片所需的信息**——
+            # 提案 id（供历史回放重建提案卡）与邮件草稿全文（重建草稿卡）。
+            # 不存这两样，切页面/刷新后卡片就找不回来了（用户反馈"卡片消失"）。
+            "tool_calls": [{"tool": t["tool"], "args": t["args"],
+                            "tool_label": t.get("tool_label"),
+                            "recovered": bool(t.get("recovered")),
+                            **({"proposal_id": _pid} if (_pid := _proposal_id_of(t)) else {}),
+                            **({"draft": _draft_of(t)} if _draft_of(t) else {})}
+                           for t in trace],
             "rounds": rounds, "tokens_in": usage.get("prompt_tokens", 0),
             "tokens_out": usage.get("completion_tokens", 0),
             "latency_ms": latency, "status": "ok", "mode": mode, "operator": ctx.operator,
@@ -514,21 +711,13 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
         conn.close()
     # v1.13.7：把本轮起草出的邮件草稿带出去（前端渲染成卡片，一键进编辑器）。
     # 只带草稿内容，不带任何"已发送"含义——发送仍然由 HR 在编辑器里点。
-    drafts = []
-    for _t in trace:
-        if _t.get("tool") != "draft_email":
-            continue
-        _r = _t.get("result")
-        if isinstance(_r, str):
-            try:
-                _r = json.loads(_r)
-            except Exception:
-                continue
-        if isinstance(_r, dict) and _r.get("body"):
-            drafts.append({"candidate_id": _r.get("candidate_id"), "name": _r.get("name"),
-                           "to": _r.get("to"), "subject": _r.get("subject"),
-                           "body": _r.get("body"), "job": _r.get("job"),
-                           "missing_runtime": _r.get("missing_runtime") or []})
+    #
+    # v1.25：统一走 `_draft_of()`，**不再在这里另写一份组装**。
+    # 之前这里和 `_draft_of` 各有一份字段清单，于是新加的 `template`
+    # 只进了后者、没进前者 —— 草稿卡上「模板」那栏一直是空的
+    # （实测：模型明明用模板渲染了，卡片却不显示来源模板）。
+    # 又是"两处定义必须同源"，一份就够。
+    drafts = [d for d in (_draft_of(_t) for _t in trace) if d]
     return {
         "answer": answer,
         "drafts": drafts,
@@ -552,8 +741,21 @@ _NUM_RE = re.compile(r"(?:第\s*)?(#|id\s*=?\s*|编号\s*)?(\d{1,6})\s*(?:号|�
 _STAGE_HINTS = {s: s for s in STAGES}
 
 #: 写类工具。它们在 `tools.execute` 里只产出待确认提案，这里标记出来供留痕区分。
-WRITE_TOOLS = frozenset({"set_stage", "set_tier", "add_tag", "merge_candidates", "add_note"})
+#:
+#: ⚠️ v1.25 修：这里原来自成一份**只有 5 个**的写工具清单
+#: （set_stage/set_tier/add_tag/merge_candidates/add_note），
+#: 而 `tools.WRITE_TOOLS` 有 14 个。两份定义一分叉就出问题：
+#: 模型调 `assign_job`（真的产生了提案）时，trace 里 write=False，
+#: 于是 `_looks_like_fake_proposal` 会把它当成"口头提案"误报，
+#: 甚至触发下面那条强制补调 —— **明明做成了却要重做一遍**。
+#: 现在从 tools 引一份，单一事实来源。
+#: （同 MEMORY.md 记过的「两处判据定义必须同源」教训。）
+WRITE_TOOLS = tools_write.WRITE_TOOLS
 
+#: 结果需要**原样完整**带回前端的工具（不能被 900 字摘要截断）。
+#: 截断了前端就渲染不出卡片正文，HR 只能看到一行省略号。
+_FULL_RESULT_TOOLS = frozenset({"draft_email", "get_mail_template",
+                                "list_mail_templates", "preview_mail"})
 
 def _pick_candidate_id(q: str) -> int | None:
     m = _NUM_RE.search(q)

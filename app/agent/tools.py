@@ -32,7 +32,13 @@ WRITE_TOOLS = {"set_stage", "set_tier", "add_tag", "merge_candidates", "add_note
                # v1.16 补齐：这些动作以前只有界面能点，agent 调不到
                "assign_job", "suggest_job", "mark_review",
                "set_archive", "archive_batch", "split_candidate",
-               "create_job", "update_job_jd", "regrade_job"}
+               "create_job", "update_job_jd", "regrade_job",
+               # v1.25 补齐：配置类写操作（授权码等敏感项）一律走提案+审计
+               "save_mail_config", "update_interview_dict", "save_settings",
+               "save_model_config", "update_candidate_fields", "reanalyze_candidate",
+               "reanalyze_batch", "route_pending", "archive_by_year",
+               "restore_source_files", "remove_source_files", "rebuild_brief",
+               "run_proactive_scan", "clear_chat_history"}
 # ingest_resumes / export_resumes **不在** WRITE_TOOLS：它们是直接执行的
 # （取数据、给下载指引），标成"写·需确认"会让界面与实际行为不一致。
 
@@ -43,9 +49,14 @@ DISABLED_TOOLS = {"send_email", "send_message", "export_external", "delete_candi
 READ_TOOLS = {"search_candidates", "get_candidate", "pool_stats", "search_by_skills",
               "semantic_search", "similar_candidates", "pipeline_overview",
               "mailbox_status", "list_audit", "list_proposals", "explain_grade",
-              "list_jobs"}
+              "list_jobs",
+              # v1.25：邮件模板与配置（读只回掩码，绝不回明文密钥）
+              "list_mail_templates", "get_mail_template", "get_mail_config",
+              # v1.25：字典 / 来源 / 回收站 / 运行记录
+              "get_interview_dict", "list_source_files", "list_removed_files",
+              "list_agent_runs"}
 COMPUTE_TOOLS = {"analyze_fit", "compare_candidates", "draft_interview_questions",
-                 "draft_email"}
+                 "draft_email", "preview_mail"}
 
 STAGES = ["新投递", "已联系", "初面", "复面", "待offer", "已入职", "已结束"]
 
@@ -132,6 +143,49 @@ TOOL_SPECS = [
                             "description": "候选人 id 或**姓名**（两种都行，系统自动解析）"}},
            ["candidate_id"]),
 
+    # ------------------------------ 邮件模板与配置（v1.25） ------------------------------
+    # 为什么必须单独有这一组：截图里 HR 问「你能看到我系统配置里面的模版吗」，
+    # 助手答「我无法直接查看或读取您系统后台配置的内置模版」——
+    # **它说的是实话**，因为 draft_email 的参数里根本没有模板。
+    # 这不是模型能力问题，是我们没把能力交给它。
+    _spec("list_mail_templates",
+          "列出系统里配置的**邮件模板**：模板名、适用场景、主题、正文、启用状态。"
+          "HR 问『有哪些模板』『有哪些邮件模板』『面试邀请模板长什么样』"
+          "或要求**按模板**写邮件时，先调这个工具拿到真实模板，"
+          "不要凭印象编模板名。",
+          {"enabled_only": {"type": "boolean",
+                            "description": "只看启用的，默认 false（全部）"}}),
+    _spec("get_mail_template",
+          "按模板名或 id 取一个模板的**完整正文**（含 {变量} 占位符）。"
+          "用于「把面试邀请模板给我看看」「照 XX 模板改一份」这类要求；"
+          "只要名单不要正文用 list_mail_templates 就够。",
+          {"template": {"type": "string",
+                        "description": "模板名（可模糊，如『面试邀请』）或模板 id"}},
+          ["template"]),
+    _spec("preview_mail",
+          "把某个模板**套在某位候选人身上**渲染出来（变量替换后的真实效果），"
+          "返回主题与正文。用于『用面试邀请模板给陈志远生成一封』这类要求，"
+          "得到的就是可以直接发给 HR 看的成品草稿（仍然不会自动发送）。"
+          "额外参数（面试时间/地点等）可以一起传。",
+          {"template": {"type": "string", "description": "模板名或 id"},
+           "candidate_id": {"type": "string", "description": "候选人 id 或姓名"},
+           "extra_vars": {"type": "object",
+                          "description": "要填的运行时变量，如 {\"面试时间\":\"2026-10-20 14:00\"}"}},
+          ["template", "candidate_id"]),
+    _spec("get_mail_config",
+          "查看发信配置（发信账号、SMTP 服务器、端口、加密方式、抓信模式）。"
+          "**授权码/密码一律只返回掩码**，不返回明文。"
+          "用于回答『发信账号配好了吗』『用的是哪个邮箱』。"),
+    _spec("save_mail_config",
+          "修改发信配置（发信账号 / SMTP 服务器 / 端口 / 加密方式 / 授权码）。"
+          "【需 HR 确认】只生成待确认提案，不会直接改库。"
+          "⚠️ 授权码属于密钥，**只在 HR 明确给出时**才传，不要自行猜测或留空覆盖。",
+          {"user": {"type": "string", "description": "发信邮箱账号"},
+           "host": {"type": "string", "description": "SMTP 服务器，如 smtp.163.com"},
+           "port": {"type": "integer", "description": "端口，如 465 / 587"},
+           "ssl": {"type": "boolean", "description": "true=SSL(465)，false=STARTTLS(587)"},
+           "password": {"type": "string", "description": "授权码/密码（可空=不改）"}}),
+
     # ------------------------------ 算 ------------------------------
     _spec("analyze_fit",
           "用模型对某候选人做岗位匹配分析，输出亮点/风险/一句话结论/建议档位。"
@@ -144,11 +198,16 @@ TOOL_SPECS = [
     _spec("draft_email",
           "为某候选人**起草**一封邮件（面试邀请 / 跟进 / 婉拒 / offer 沟通 / 其他）。"
           "只起草、不发送——发送必须由 HR 在邮件编辑器里确认后亲自点。"
-          "返回主题、正文与收件人，可直接在对话里改或交给编辑器。",
+          "返回主题、正文与收件人，可直接在对话里改或交给编辑器。"
+          "**HR 要求按系统里配置的模板写时，传 template（模板名或 id）**——"
+          "若不确定有哪些模板，先用 list_mail_templates 查；"
+          "不传 template 就由模型自由撰写（适用于模板里没有的场景）。",
           {"candidate_id": {"type": "integer"},
            "purpose": {"type": "string",
                        "description": "面试邀请 / 跟进 / 婉拒 / offer沟通 / 其他（默认按用途猜）"},
            "tone": {"type": "string", "description": "语气：客气简洁 / 正式 / 轻松，可空"},
+           "template": {"type": "string",
+                        "description": "模板名（可模糊）或 id。传了就按该模板渲染，忽略 tone"},
            "interview_time": {"type": "string", "description": "面试时间，可空"},
            "interview_place": {"type": "string", "description": "面试地点/会议链接，可空"},
            "extra": {"type": "string", "description": "要特别说明的事项，可空"}},
@@ -222,11 +281,118 @@ TOOL_SPECS = [
                              "description": "为空则导出全部在库的人"},
            "what": {"type": "string", "description": "resumes=简历原件包（默认）/ csv=人才清单"}},
           []),
+    # ------------------------------ 面试字典 / 来源 / 回收站（v1.25） ------------------------------
+    _spec("get_interview_dict",
+          "读面试字典：面试单位、会议室、时段、联系人（含电话/部门）。"
+          "写邮件时要填「面试地点/单位/时段/联系人」就从这里取，**不要自己编会议室名**。"),
+    _spec("update_interview_dict",
+          "【需 HR 确认】维护面试字典（加/删单位、会议室、时段、联系人）。"
+          "只生成待确认提案。**改动会影响之后所有写邮件时的可选项**，"
+          "所以 HR 说改哪个就改哪个，不要顺带\"整理\"别的条目。",
+          {"kind": {"type": "string",
+                    "description": "units / rooms / slots / contacts 之一"},
+           "action": {"type": "string", "description": "add 或 remove"},
+           "value": {"type": "string",
+                     "description": "name / rooms/slots 的字面值；contacts 建议传 {name,phone,dept}"}},
+          ["kind", "action", "value"]),
+    _spec("list_source_files",
+          "列出「待导入简历」目录里的文件（文件名、大小、是否已入库、是否超大被跳过）。"
+          "用于回答『还有哪些简历没导』『收件夹里现在有什么』。"),
+    _spec("list_removed_files",
+          "列出回收站（被移入回收目录的简历）。系统**不做物理删除**，"
+          "「删除」只是挪进回收站，随时可恢复。"),
+    _spec("remove_source_files",
+          "【需 HR 确认】把来源文件移入**回收站**（不是删除，可恢复）。只生成待确认提案。",
+          {"names": {"type": "array", "items": {"type": "string"},
+                     "description": "文件名列表，先用 list_source_files 看清楚再传"}},
+          ["names"]),
+    _spec("restore_source_files",
+          "【需 HR 确认】把回收站里的简历恢复到来源目录。只生成待确认提案。"
+          "同名冲突时系统会拒绝而**不会覆盖**。",
+          {"names": {"type": "array", "items": {"type": "string"},
+                     "description": "文件名列表，先用 list_removed_files 看清楚再传"}},
+          ["names"]),
+
+    # ------------------------------ 字段更正 / 重算 / 批处理（v1.25） ------------------------------
+    _spec("update_candidate_fields",
+          "【需 HR 确认】更正候选人字段：姓名 / 学历 / 学校 / 专业 / 电话 / 邮箱。"
+          "只生成待确认提案；HR 确认后落库并记录改前改后（电话/邮箱加密存储）。"
+          "**技能与年限不在此处改**——那必须来自简历原文与证据核对。"
+          "HR 说『把陈志远的电话改成 138…』『这个人学校识别错了』时用这个。",
+          {"candidate_id": {"type": "string", "description": "候选人 id 或姓名"},
+           "name": {"type": "string"}, "education": {"type": "string",
+                     "description": "大专/本科/硕士/博士，留空表示未识别"},
+           "school": {"type": "string"}, "major": {"type": "string"},
+           "phone": {"type": "string"}, "email": {"type": "string"}},
+          ["candidate_id"]),
+    _spec("reanalyze_candidate",
+          "【需 HR 确认】对某位候选人**完整重跑分析**（重新解析原件 → 重抽字段 → 重建技能 "
+          "→ 重新归岗 → 重判建议档）。只生成待确认提案。"
+          "不动三样：HR 定的档、阶段、已归岗岗位；人工更正过的字段也保留。"
+          "每人约 6-15 秒，可以随时关页面。",
+          {"candidate_id": {"type": "string", "description": "候选人 id 或姓名"}},
+          ["candidate_id"]),
+    _spec("reanalyze_batch",
+          "【需 HR 确认】批量重跑分析。只生成待确认提案。"
+          "不传 candidate_ids 则处理所有「走规则通道」的档案（历史上模型不可用时入库的）。",
+          {"candidate_ids": {"type": "array", "items": {"type": "integer"},
+                             "description": "为空=所有规则通道档案"},
+           "limit": {"type": "integer", "description": "最多处理几人，默认 50"}}),
+    _spec("route_pending",
+          "【需 HR 确认】为「待指定岗位」的投递重新建议岗位并按最适岗位重算建议档。"
+          "只生成待确认提案。新建/改了岗位 JD 或批量导入没写岗位名的简历之后用。",
+          {"apply": {"type": "boolean", "description": "true=落库，默认 true"}}),
+    _spec("archive_by_year",
+          "【需 HR 确认】把「某年及以前」的投递整批归档。只生成待确认提案。"
+          "适合『新一年开始，把旧简历收起来』——人数太多不可能一个个勾。",
+          {"before_year": {"type": "integer", "description": "归档该年及以前的投递"}},
+          ["before_year"]),
+
+    # ------------------------------ 系统配置 / 待办 / 对话（v1.25） ------------------------------
+    _spec("get_settings",
+          "读系统设置与策略：访问策略、性别筛选开关、导入来源配置、数据存放路径等。"
+          "**密钥类一律只回掩码**。用于回答『这个开关打开了吗』『数据存在哪』。"),
+    _spec("save_settings",
+          "【需 HR 确认】修改系统设置。只生成待确认提案。"
+          "只改 HR 明确说的那一项，不要顺带调整别的开关。",
+          {"settings": {"type": "object",
+                        "description": "要改的键值对，如 {\"gender_filter_enabled\": true}"}},
+          ["settings"]),
+    _spec("get_model_config",
+          "读模型配置：模型地址、模型名、是否启用、最大工具轮数。"
+          "**API Key 只回报是否已设置，不回明文**。"),
+    _spec("save_model_config",
+          "【需 HR 确认】修改模型配置（地址 / 模型名 / API Key）。只生成待确认提案。"
+          "⚠️ API Key 只在 HR 明确给出时才传；HR 没提就**不要动它**。",
+          {"base_url": {"type": "string"}, "model": {"type": "string"},
+           "api_key": {"type": "string", "description": "可空=不改动"}}),
+    _spec("rebuild_brief",
+          "【需 HR 确认】重算「今日待办」摘要。只生成待确认提案。"
+          "use_llm=true 会调用模型（较慢，但结论更贴业务）。"),
+    _spec("run_proactive_scan",
+          "立即跑一次系统巡检：找出长期停滞的投递等，产出**待确认提案**。"
+          "巡检本身只建提案、不改任何数据，所以**直接执行**、不需要再确认。"
+          "同一件事 7 天内不重复提。"),
+    _spec("list_agent_runs",
+          "查看智能助手自己的历史运行记录（问过什么、调了哪些工具、耗时与 token 消耗）。"
+          "用于回答『你刚才做了什么』『这个月花了多少 token』。"),
+    _spec("clear_chat_history",
+          "【需 HR 确认】清空智能助手的对话历史（运行记录）。只生成待确认提案。"
+          "⚠️ 这只是清对话，**不会动任何候选人数据**。"),
+
     _spec("set_stage",
           "【需 HR 确认】把某条投递推进到新阶段（新投递/已联系/初面/复面/待offer/已入职/已结束）。"
-          "本工具只生成待确认提案，不会直接改库。",
-          {"application_id": {"type": "integer"}, "stage": {"type": "string"},
-           "reason": {"type": "string", "description": "变更理由"}}, ["application_id", "stage"]),
+          "本工具只生成待确认提案，不会直接改库。"
+          "目标可以给 **application_id（投递编号）**，"
+          "也可以只给 **candidate_id（姓名或编号）** —— 后者会自动找他的投递，"
+          "**只有一条时才用**，多条会要求你指明，不会替你挑。"
+          "HR 说『把 #N 推进到 X』时，先试投递编号，不行再试人名，不要一上来就反问。",
+          {"application_id": {"type": "integer", "description": "投递编号（二选一）"},
+           "candidate_id": {"type": "string",
+                            "description": "候选人 id 或姓名（二选一）"},
+           "stage": {"type": "string"},
+           "reason": {"type": "string", "description": "变更理由"}},
+          ["stage"]),
     _spec("set_tier",
           "【需 HR 确认】调整某条投递的档位。本工具只生成待确认提案，不会直接改库。"
           "注意：学历低于岗位门槛的投递，系统已直接判 D，"
@@ -339,6 +505,211 @@ def _resolve_cid(conn, value, what: str = "候选人") -> tuple[int | None, dict
                       "candidates": [{"id": r["id"], "name": r["name"]} for r in rows]}
     return None, {"error": f"库里没有叫「{v}」的候选人",
                   "hint": "先用 search_candidates 按姓名/技能搜一下；确实没有就让用户先导入简历"}
+
+
+def _find_template(conn, key: str) -> dict | None:
+    """按 id 或模板名找模板。名字支持**模糊匹配**（HR 会说「面试邀请」，
+    库里可能叫「初面邀约-标准版」），但只在唯一命中时才认——
+
+    为什么要求唯一：选错模板会让 HR 看到一封**内容完全不对的**草稿，
+    而他还以为这就是他要的。宁可回一句"有这几个，你要哪个"。
+    """
+    key = (key or "").strip()
+    if not key:
+        return None
+    if key.isdigit():
+        return db.get_mail_template(conn, int(key))
+    all_t = db.list_mail_templates(conn)
+    exact = [t for t in all_t if (t.get("name") or "").strip() == key]
+    if len(exact) == 1:
+        return exact[0]
+    part = [t for t in all_t
+            if key in (t.get("name") or "") or key in (t.get("scene") or "")]
+    if len(part) == 1:
+        return part[0]
+    return None
+
+
+#: 模板正文里的 `{变量}` 占位符。与 mail_template._VAR_RE 同口径，
+#: 单独写一份是为了不把私有正则带出来（那边没导出）。
+_TPL_VAR_RE = re.compile(r"\{([^{}\n]{1,15})\}")
+
+
+def _read_mail_cfg(ctx) -> dict:
+    """读发信配置。tools 层不 import server（循环依赖），自己按仓库根读 config。"""
+    import json as _json
+    import os as _os
+    _base = _os.path.dirname(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))))
+    for rel in ("config/mail.json", "config/mailbox.json"):
+        p = _os.path.join(_base, rel)
+        if _os.path.exists(p):
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    return _json.load(fh) or {}
+            except Exception:
+                continue
+    return {}
+
+
+def _repo_config_path(*rel: str) -> str:
+    """定位仓库根的 config/ 下某个文件。
+
+    tools 层**不 import server**（server → tools → server 会循环依赖），
+    所以自己按 __file__ 推路径 —— 与 server 的 BASE 算法同源
+    （app/agent/tools.py 上溯三层 = 仓库根）。
+    """
+    import os as _os
+    base = _os.path.dirname(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))))
+    return _os.path.join(base, "config", *rel)
+
+
+def _read_json_or(path: str, default):
+    import json as _json
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return _json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def _read_interview_dict() -> dict:
+    """读面试字典（config/interview.json）。读不到就回内置兜底。"""
+    d = _read_json_or(_repo_config_path("interview.json"), None)
+    if not isinstance(d, dict):
+        d = {}
+    fallback = {
+        "modes": ["现场面试", "线上面试"],
+        "slots": ["09:00-10:00", "10:00-11:00", "14:00-15:00", "15:00-16:00"],
+        "rooms": ["创新大楼1519会议室"],
+        "units": ["人事处", "财务处", "数字化中心"],
+        "contacts": [{"dept": "人力资源部", "name": "张老师", "phone": "029-8888XXXX"}],
+    }
+    for k, v in fallback.items():
+        if not d.get(k):
+            d[k] = v
+    return d
+
+
+def _data_dir() -> str:
+    """数据目录。优先认 TP_DATA_DIR / TP_HOME（与 paths.py 同口径）。"""
+    import os as _os
+    env = _os.environ.get("TP_DATA_DIR")
+    if env:
+        return env
+    home = _os.environ.get("TP_HOME")
+    if home:
+        return _os.path.join(home, "data")
+    base = _os.path.dirname(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))))
+    return _os.path.join(base, "data")
+
+
+def _source_files_snapshot(conn, ctx) -> dict:
+    """来源目录里的文件清单（待导入的简历）。
+
+    与界面 `/api/sources` 同口径：只列支持的扩展名，标出超大被跳过的。
+    """
+    import os as _os
+    try:
+        from ..pipeline import parse as _parse
+        supported = tuple(_parse.SUPPORTED)
+    except Exception:
+        supported = (".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg", ".txt")
+    cfg = _read_json_or(_repo_config_path("mailbox.json"), {}) or {}
+    folder = cfg.get("folder_dir") or _os.path.join(_data_dir(), "resumes")
+    abs_folder = _os.path.abspath(_os.path.expanduser(folder))
+    files: list[dict] = []
+    if _os.path.isdir(abs_folder):
+        limit_mb = int(cfg.get("max_attachment_mb", 20) or 20)
+        for nm in sorted(_os.listdir(abs_folder)):
+            full = _os.path.join(abs_folder, nm)
+            if not _os.path.isfile(full) or nm.startswith("."):
+                continue
+            if not nm.lower().endswith(supported):
+                continue
+            st = _os.stat(full)
+            files.append({"name": nm, "size": st.st_size,
+                          "oversize": st.st_size > limit_mb * 1024 * 1024})
+    return {"folder": abs_folder, "count": len(files), "files": files,
+            "max_attachment_mb": int(cfg.get("max_attachment_mb", 20) or 20),
+            "note": ("这些是**还没导入**的简历；导入用 ingest_resumes(source='folder')。"
+                     if files else "来源目录里没有待导入的简历文件。")}
+
+
+def _removed_month_dir():
+    import os as _os
+    from datetime import datetime as _dt
+    return _os.path.join(_data_dir(), "removed", _dt.now().strftime("%Y-%m"))
+
+
+def _removed_files_snapshot() -> dict:
+    """回收站清单。系统不做物理删除，「删除」只是挪进这里。"""
+    import os as _os
+    from datetime import datetime as _dt
+    root = _os.path.join(_data_dir(), "removed")
+    items: list[dict] = []
+    if _os.path.isdir(root):
+        for month in sorted(_os.listdir(root), reverse=True):
+            mdir = _os.path.join(root, month)
+            if not _os.path.isdir(mdir) or month.startswith("."):
+                continue
+            for nm in sorted(_os.listdir(mdir)):
+                full = _os.path.join(mdir, nm)
+                if not _os.path.isfile(full) or nm.startswith("."):
+                    continue
+                st = _os.stat(full)
+                items.append({"name": nm, "size": st.st_size, "month": month,
+                              "removed_at": _dt.fromtimestamp(
+                                  st.st_mtime).strftime("%Y-%m-%d %H:%M")})
+    return {"count": len(items), "items": items,
+            "note": ("这些文件没有丢，只是被移出了来源目录，可以恢复。"
+                     if items else "回收站是空的。"),
+            "keep_note": "回收**不会覆盖同名文件**——冲突时会跳过并告诉你。"}
+
+
+def _read_settings_safe() -> dict:
+    """读系统设置与策略。**密钥类一律脱敏。**"""
+    import os as _os
+    base = _os.path.dirname(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))))
+    out: dict = {}
+    pol = _read_json_or(_os.path.join(base, "config", "policy.json"), {})
+    if isinstance(pol, dict):
+        out["policy"] = pol
+    tiers = _read_json_or(_os.path.join(base, "config", "tiers.json"), {})
+    if isinstance(tiers, dict):
+        out["tiers"] = tiers
+    mb = _read_json_or(_os.path.join(base, "config", "mailbox.json"), {})
+    if isinstance(mb, dict):
+        out["mailbox"] = {k: v for k, v in mb.items()
+                          if k.lower() not in ("password", "pass", "secret",
+                                               "auth_code", "imap_secret")}
+        out["mailbox"]["password_set"] = bool(
+            mb.get("password") or mb.get("pass") or mb.get("imap_secret"))
+    out["data_dir"] = _data_dir()
+    out["paths"] = {"db": _os.path.join(_data_dir(), "workbench.db"),
+                    "resumes": _os.path.join(_data_dir(), "resumes"),
+                    "archive": _os.path.join(_data_dir(), "archive"),
+                    "removed": _os.path.join(_data_dir(), "removed")}
+    out["secret_note"] = "密钥只回报是否已设置，不返回明文。"
+    return out
+
+
+def _read_model_cfg_safe() -> dict:
+    """读模型配置。**API Key 只回报是否已设置。**"""
+    c = _read_json_or(_repo_config_path("model.json"), {}) or {}
+    safe = {k: v for k, v in c.items()
+            if k.lower() not in ("api_key", "apikey", "key", "token")}
+    has_key = bool(c.get("api_key") or c.get("apikey"))
+    safe["api_key_set"] = has_key
+    return {"config": safe, "base_url": c.get("base_url"), "model": c.get("model"),
+            "enabled": c.get("enabled", True),
+            "max_tool_rounds": c.get("max_tool_rounds"),
+            "api_key_set": has_key,
+            "api_key": ("（已设置）" if has_key else "（未设置）"),
+            "note": "API Key 不返回明文；要改请用 save_model_config（需 HR 确认）。"}
 
 
 def _jd_tiers() -> tuple[dict, dict]:
@@ -643,6 +1014,366 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                            "本工具不调模型，只做现算的学历门槛与技能/专业方向核对"),
             })
 
+        # ---------------- 邮件模板与配置（v1.25） ----------------
+        # 设计取舍：模板是**读**操作，直接返回正文，不做提案。
+        # 因为读模板不改变任何状态，走确认反而是骚扰。
+        if name == "list_mail_templates":
+            from .. import mail_template as _mt
+            only = bool(args.get("enabled_only"))
+            tpls = db.list_mail_templates(conn, enabled_only=only)
+            return _ok({
+                "count": len(tpls),
+                "items": [{"id": t["id"], "name": t["name"], "scene": t.get("scene") or "",
+                           "subject": t.get("subject") or "",
+                           "enabled": bool(t.get("enabled")),
+                           # 正文给个开头就够指认，要全文用 get_mail_template
+                           "body_preview": (t.get("body") or "")[:120]} for t in tpls],
+                "available_scenes": _mt.SCENES,
+                "scenes_note": "scene 是系统内置场景分类，不是模板名",
+                "note": ("要正文用 get_mail_template；要**套在某位候选人身上**生成成品"
+                         "用 preview_mail 或 draft_email(template=...)。"
+                         if tpls else
+                         "系统里还没有任何邮件模板。HR 可在「系统配置 → 模板管理」新建；"
+                         "这也是为什么我无法按模板写——目前无模板可用。"),
+            })
+
+        if name == "get_mail_template":
+            key = str(args.get("template") or "").strip()
+            if not key:
+                return _err("要指定模板名或 id")
+            t = _find_template(conn, key)
+            if not t:
+                names = [x["name"] for x in db.list_mail_templates(conn)]
+                return _err(f"没有找到叫「{key}」的模板",
+                            hint=("现有模板：" + "、".join(names)) if names
+                            else "系统里目前没有任何邮件模板。")
+            return _ok({
+                "id": t["id"], "name": t["name"], "scene": t.get("scene") or "",
+                "subject": t.get("subject") or "", "body": t.get("body") or "",
+                "enabled": bool(t.get("enabled")),
+                "placeholders": sorted(set(_TPL_VAR_RE.findall(t.get("body") or ""))),
+            })
+
+        if name == "preview_mail":
+            from .. import auth as _auth
+            from .. import mail_template as _mt
+            t = _find_template(conn, str(args.get("template") or "").strip())
+            if not t:
+                return _err("没有找到该模板，先用 list_mail_templates 看有哪些")
+            cid, _cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if _cerr:
+                return _err(_cerr["error"], _cerr.get("hint"))
+            d = db.candidate_detail(conn, cid)
+            if not d:
+                return _err(f"未找到候选人 #{cid}")
+            cand = _auth.present_candidate(d)
+            _jd, meta = db.resolve_candidate_job(conn, d)
+            rt = dict(args.get("extra_vars") or {})
+            r = _mt.render(t.get("body") or "",
+                           _mt.build_ctx(cand, (meta or {}).get("title") or "",
+                                         ctx.operator, rt))
+            subj = _mt.render(t.get("subject") or "",
+                              _mt.build_ctx(cand, (meta or {}).get("title") or "",
+                                            ctx.operator, rt)).get("text", "")
+            body = r.get("text") or ""
+            return _ok({
+                "candidate_id": cid, "name": cand.get("name"),
+                "to": (cand.get("email") or "").strip(),
+                "template": t["name"],
+                "subject": subj, "body": body,
+                "body_html": (body if _mt.looks_like_html(body) else _mt.to_html(body)),
+                "missing_runtime": r.get("missing") or [],
+                "note": "**这是按模板渲染的草稿，没有发送。**要改内容可以直接说，"
+                        "或点「在编辑器中修改」。",
+            })
+
+        if name == "get_mail_config":
+            from .. import mail_send as _ms
+            c = _ms.load_cfg() if hasattr(_ms, "load_cfg") else {}
+            if not c:
+                c = _read_mail_cfg(ctx)
+            safe = {k: v for k, v in (c or {}).items()
+                    if k.lower() not in ("password", "pass", "secret", "auth_code")}
+            has_pw = bool((c or {}).get("password") or (c or {}).get("pass"))
+            safe["password_set"] = has_pw
+            return _ok({
+                "config": safe,
+                "password_set": has_pw,
+                "note": "授权码/密码**只回报是否已设置，不返回明文**（安全口径）。",
+            })
+
+        if name == "save_mail_config":
+            from .. import mail_send as _ms
+            cur = (_ms.load_cfg() if hasattr(_ms, "load_cfg") else {}) or _read_mail_cfg(ctx)
+            new = dict(cur or {})
+            for k in ("user", "host", "port", "ssl"):
+                if args.get(k) is not None:
+                    new[k] = args[k]
+            if args.get("password"):
+                new["password"] = args["password"]
+            changed = [k for k in ("user", "host", "port", "ssl", "password")
+                       if str((cur or {}).get(k)) != str(new.get(k))]
+            if not changed:
+                return _err("没有要修改的配置项")
+            shown = {k: ("（已设置，新值不回显）" if k == "password" else new.get(k))
+                     for k in changed}
+            return _propose(conn, ctx, "save_mail_config",
+                            {"config": new},
+                            "修改发信配置：" + "、".join(
+                                f"{k}={v}" for k, v in shown.items()),
+                            risk="高")
+
+        # ---------------- 面试字典 / 来源 / 回收站（v1.25） ----------------
+        if name == "get_interview_dict":
+            return _ok({"dict": _read_interview_dict(),
+                        "note": "写邮件要填的面试地点/单位/时段/联系人都从这里取。"})
+
+        if name == "update_interview_dict":
+            kind = str(args.get("kind") or "").strip()
+            action = str(args.get("action") or "add").strip()
+            value = args.get("value")
+            if kind not in ("units", "rooms", "slots", "contacts", "modes"):
+                return _err("kind 只能是 units / rooms / slots / contacts / modes")
+            if action not in ("add", "remove"):
+                return _err("action 只能是 add 或 remove")
+            cur = _read_interview_dict()
+            before = list(cur.get(kind) or [])
+            if action == "add":
+                if isinstance(value, str) and value.strip() in \
+                        [str(x) if not isinstance(x, dict) else x.get("name") for x in before]:
+                    return _err(f"「{value}」已经在{kind}里了，不用重复添加")
+            else:
+                if isinstance(value, str):
+                    hit = [x for x in before
+                           if (x if isinstance(x, str) else x.get("name")) == value]
+                    if not hit:
+                        return _err(f"「{value}」不在{kind}里",
+                                    hint="先用 get_interview_dict 看看现有条目")
+            after = list(before)
+            if action == "add":
+                after.append(value)
+            else:
+                after = [x for x in after
+                         if (x if isinstance(x, str) else x.get("name")) != value]
+            _CN = {"units": "面试单位", "rooms": "会议室", "slots": "时段",
+                   "contacts": "联系人", "modes": "面试方式"}
+            verb = "添加" if action == "add" else "删除"
+            return _propose(conn, ctx, "update_interview_dict",
+                            {"interview_dict": {kind: after}},
+                            f"{verb}{_CN[kind]}：{value}"
+                            f"（原来 {len(before)} 项 → 改后 {len(after)} 项）",
+                            risk="中")
+
+        if name == "list_source_files":
+            return _ok(_source_files_snapshot(conn, ctx))
+
+        if name == "list_removed_files":
+            return _ok(_removed_files_snapshot())
+
+        if name == "remove_source_files":
+            names = [str(x) for x in (args.get("names") or []) if str(x).strip()]
+            if not names:
+                return _err("没有指定要移入回收站的文件名")
+            have = {f["name"] for f in _source_files_snapshot(conn, ctx).get("files", [])}
+            unknown = [n for n in names if n not in have]
+            if unknown:
+                return _err("这些文件不在来源目录里：" + "、".join(unknown[:5]),
+                            hint="先用 list_source_files 核对文件名（要写全名含扩展名）")
+            return _propose(conn, ctx, "remove_source_files", {"names": names},
+                            "把 %d 个来源文件移入回收站（可恢复）：%s"
+                            % (len(names), "、".join(names[:5])
+                               + ("…" if len(names) > 5 else "")),
+                            risk="中")
+
+        if name == "restore_source_files":
+            names = [str(x) for x in (args.get("names") or []) if str(x).strip()]
+            if not names:
+                return _err("没有指定要恢复的文件名")
+            have = {f["name"] for f in _removed_files_snapshot().get("items", [])}
+            unknown = [n for n in names if n not in have]
+            if unknown:
+                return _err("这些文件不在回收站里：" + "、".join(unknown[:5]),
+                            hint="先用 list_removed_files 核对文件名")
+            return _propose(conn, ctx, "restore_source_files", {"names": names},
+                            "把 %d 个文件从回收站恢复到来源目录：%s"
+                            % (len(names), "、".join(names[:5])
+                               + ("…" if len(names) > 5 else "")),
+                            risk="中")
+
+        # ---------------- 字段更正 / 重算 / 批处理（v1.25） ----------------
+        if name == "update_candidate_fields":
+            cid, _cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if _cerr:
+                return _err(_cerr["error"], _cerr.get("hint"))
+            d = db.candidate_detail(conn, cid)
+            if not d:
+                return _err(f"未找到候选人 #{cid}")
+            _LABEL = {"name": "姓名", "edu_level": "学历", "school": "学校",
+                      "major": "专业", "phone_enc": "电话", "email_enc": "邮箱"}
+            fields: dict = {}
+            if args.get("name") is not None:
+                nm = str(args.get("name") or "").strip()
+                if not re.fullmatch(r"[\u4e00-\u9fa5·A-Za-z\s]{1,30}", nm):
+                    return _err("姓名只应为 1-30 个汉字/字母")
+                fields["name"] = nm
+            if args.get("education") is not None:
+                edu = str(args.get("education") or "").strip()
+                if edu and edu not in db.EDU_RANK:
+                    return _err("学历只能填：大专 / 本科 / 硕士 / 博士（或留空表示未识别）")
+                fields["edu_level"] = edu or None
+            for k, col in (("school", "school"), ("major", "major")):
+                if args.get(k) is not None:
+                    fields[col] = str(args.get(k) or "").strip() or None
+            if args.get("phone") is not None:
+                ph = str(args.get("phone") or "").strip()
+                if ph and not re.fullmatch(r"[\d\s\-+()]{7,20}", ph):
+                    return _err("电话格式不对（7-20 位数字/符号）")
+                fields["phone_enc"] = ph
+            if args.get("email") is not None:
+                em = str(args.get("email") or "").strip()
+                if em and "@" not in em:
+                    return _err("邮箱格式不对")
+                fields["email_enc"] = em
+            if not fields:
+                return _err("没有要修改的字段")
+            from ..crypto import decrypt
+            _cur = {"name": d.get("name") or "", "edu_level": d.get("edu_level") or "",
+                    "school": d.get("school") or "", "major": d.get("major") or "",
+                    "phone_enc": decrypt(d.get("phone_enc")) or "",
+                    "email_enc": decrypt(d.get("email_enc")) or ""}
+            pairs = []
+            for k, v in fields.items():
+                old = _cur.get(k) or ""
+                if str(old) != str(v or ""):
+                    pairs.append(f"{_LABEL[k]}：{old or '（空）'} → {v or '（空）'}")
+            if not pairs:
+                return _ok({"candidate_id": cid, "changed": [],
+                            "note": "字段没有变化。"})
+            return _propose(conn, ctx, "update_candidate_fields",
+                            {"candidate_id": cid, "fields": fields},
+                            f"更正 {d.get('name') or ('#' + str(cid))} 的字段："
+                            + "；".join(pairs), risk="中")
+
+        if name == "reanalyze_candidate":
+            cid, _cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if _cerr:
+                return _err(_cerr["error"], _cerr.get("hint"))
+            d = db.candidate_detail(conn, cid)
+            if not d:
+                return _err(f"未找到候选人 #{cid}")
+            return _propose(conn, ctx, "reanalyze_candidate", {"candidate_id": cid},
+                            f"对 {d.get('name') or ('#' + str(cid))} 完整重跑分析"
+                            "（重解析→重抽→重建技能→重归岗→重判档；"
+                            "HR 定的档与人工更正的字段保持不动）", risk="中")
+
+        if name == "reanalyze_batch":
+            ids = [int(x) for x in (args.get("candidate_ids") or [])]
+            limit = int(args.get("limit") or 50)
+            if ids:
+                desc = f"批量重跑分析 {len(ids)} 位指定候选人"
+            else:
+                # ⚠️ extract_mode 在 **applications** 表，不在 candidates 表。
+                # 第一版写成 `FROM candidates ... extract_mode`，直接
+                # OperationalError: no such column —— 而且是**只在真调时才暴露**
+                # （静态看代码完全合理）。所以每个新工具都必须真跑一次。
+                n_heur = conn.execute(
+                    "SELECT count(DISTINCT a.candidate_id) FROM applications a "
+                    "JOIN candidates c ON c.id = a.candidate_id "
+                    "WHERE c.merged_into IS NULL AND COALESCE(c.archived_at,'') = '' "
+                    "AND COALESCE(a.extract_mode,'') != 'llm+rule'").fetchone()[0]
+                desc = (f"批量重跑分析所有「规则通道」档案（当前 {n_heur} 位，"
+                        f"本次最多 {limit} 位）")
+            return _propose(conn, ctx, "reanalyze_batch",
+                            {"candidate_ids": ids, "limit": limit}, desc, risk="中")
+
+        if name == "route_pending":
+            return _propose(conn, ctx, "route_pending",
+                            {"apply": bool(args.get("apply", True))},
+                            "为「待指定岗位」的投递重新建议岗位并重算建议档", risk="中")
+
+        if name == "archive_by_year":
+            try:
+                y = int(args.get("before_year"))
+            except (TypeError, ValueError):
+                return _err("before_year 要是年份数字，如 2026")
+            n = conn.execute(
+                "SELECT count(*) FROM candidates WHERE archived_at IS NULL "
+                "AND merged_into IS NULL").fetchone()[0]
+            return _propose(conn, ctx, "archive_by_year",
+                            {"before_year": y},
+                            f"归档 {y} 年及以前的投递（当前在池 {n} 位，"
+                            "仅最后一条投递早于该年的会被归档）", risk="高")
+
+        # ---------------- 系统配置 / 待办 / 对话（v1.25） ----------------
+        if name == "get_settings":
+            return _ok(_read_settings_safe())
+
+        if name == "save_settings":
+            st = args.get("settings")
+            if not isinstance(st, dict) or not st:
+                return _err("settings 要是一个非空对象，如 {\"gender_filter_enabled\": true}")
+            bad = [k for k in st if any(s in k.lower()
+                                        for s in ("key", "secret", "password", "token"))]
+            if bad:
+                return _err("这些键属于密钥，不能通过本工具修改：" + "、".join(bad),
+                            hint="密钥请在「系统配置」页手工填写")
+            cur = _read_settings_safe()
+            pairs = [f"{k}：{cur.get(k, '（未设置）')} → {v}" for k, v in st.items()]
+            return _propose(conn, ctx, "save_settings", {"settings": st},
+                            "修改系统设置：" + "；".join(pairs), risk="中")
+
+        if name == "get_model_config":
+            return _ok(_read_model_cfg_safe())
+
+        if name == "save_model_config":
+            cur = _read_model_cfg_safe()
+            new = dict(cur.get("config") or {})
+            pairs = []
+            for k in ("base_url", "model"):
+                if args.get(k):
+                    pairs.append(f"{k}：{cur.get(k, '（空）')} → {args[k]}")
+                    new[k] = args[k]
+            if args.get("api_key"):
+                pairs.append("api_key：（已设置，新值不回显）")
+                new["api_key"] = args["api_key"]
+            if not pairs:
+                return _err("没有要修改的模型配置项")
+            return _propose(conn, ctx, "save_model_config", {"config": new},
+                            "修改模型配置：" + "；".join(pairs), risk="高")
+
+        if name == "rebuild_brief":
+            use_llm = bool(args.get("use_llm"))
+            return _propose(conn, ctx, "rebuild_brief", {"use_llm": use_llm},
+                            "重算今日待办摘要" + ("（含模型判断，较慢）" if use_llm else "（规则版）"),
+                            risk="低")
+
+        if name == "run_proactive_scan":
+            # 巡检只建提案、不改任何业务数据 → **直接执行**，不再套一层确认。
+            # 再多一次确认会让 HR 觉得"点两遍才动"，而它本身是只读+提案的。
+            from . import proactive as _pa
+            r = _pa.scan_and_propose(conn, stuck_days=int(args.get("stuck_days") or 7))
+            return _ok({"created_count": r.get("created_count"),
+                        "scanned": r.get("scanned"),
+                        "skipped": r.get("skipped"),
+                        "note": (f"巡检完成，产出 {r.get('created_count')} 条待确认提案，"
+                                 "在下面的卡片里逐条确认或拒绝。"
+                                 if r.get("created_count") else
+                                 "巡检完成，本轮没有需要新建的提案"
+                                 "（已提过的在 7 天内不重复提）。")})
+
+        if name == "list_agent_runs":
+            runs = db.list_agent_runs(conn, limit=int(args.get("limit") or 10))
+            return _ok({"count": len(runs),
+                        "runs": [{"question": r.get("question"),
+                                  "rounds": r.get("rounds"),
+                                  "tokens": (r.get("tokens_in") or 0) + (r.get("tokens_out") or 0),
+                                  "latency_ms": r.get("latency_ms"),
+                                  "ts": r.get("ts")} for r in runs]})
+
+        if name == "clear_chat_history":
+            return _propose(conn, ctx, "clear_chat_history", {},
+                            "清空智能助手的对话历史（不影响任何候选人数据）", risk="低")
+
         # ---------------- 算 ----------------
         if name == "analyze_fit":
             cid, _cerr = _resolve_cid(conn, args.get("candidate_id"))
@@ -690,7 +1421,46 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             rt = {"面试时间": args.get("interview_time") or "",
                   "面试地点": args.get("interview_place") or "",
                   "联系人": ctx.operator, "补充说明": args.get("extra") or ""}
-            ctxd = _mt.build_ctx(cand, job_title, ctx.operator, rt)
+            # ---- v1.25：指定了模板就**按模板渲染**，不再自由撰写 ----
+            # 这是截图 2 的正面修法。过去只能自由撰写，于是 HR 问「能用我的模板吗」
+            # 时助手只能答"我读不到模板"——它说的是实话，因为压根没这条路。
+            # 现在：传了 template 就走真实模板（变量替换、条件块都走同一套 render），
+            # 渲染结果里没填的变量会变成【待填：xxx】，前端能直接指出缺什么。
+            tpl = None
+            _tkey = str(args.get("template") or "").strip()
+            if _tkey:
+                tpl = _find_template(conn, _tkey)
+                if not tpl:
+                    names = [x["name"] for x in db.list_mail_templates(conn)]
+                    return _err(
+                        f"没有找到叫「{_tkey}」的邮件模板",
+                        hint=("现有模板：" + "、".join(names)) if names
+                        else "系统里目前一个模板都没有，只能由我自由撰写（不传 template 即可）")
+
+            if tpl is not None:
+                # 模板渲染上下文：候选人字段 + 岗位 + 运行时变量（面试时间/地点等）。
+                # ⚠️ 必须在渲染**之前**构造——原来这行在自由撰写分支里，
+                # 我加模板分支时挪丢了它，于是模板路径直接 NameError: ctxd。
+                # 教训：新增分支改动了公共前置变量时，要检查另一条分支是否还在用。
+                ctxd = _mt.build_ctx(cand, job_title, ctx.operator, rt)
+                _r_sub = _mt.render(tpl.get("subject") or "", ctxd)
+                _r_body = _mt.render(tpl.get("body") or "", ctxd)
+                subj = (_r_sub.get("text") or "").strip()
+                body = (_r_body.get("text") or "").strip()
+                _miss = _r_body.get("missing") or []
+                body_html = body if _mt.looks_like_html(body) else _mt.to_html(body)
+                return _ok({
+                    "candidate_id": cid, "name": cand.get("name"),
+                    "to": to_addr, "subject": subj, "body": body, "body_html": body_html,
+                    "job": job_title,
+                    "template": tpl["name"],
+                    "missing_runtime": _miss,
+                    "note": ("**这是草稿，没有发送。**正文按系统里的模板「%s」渲染，"
+                             "变量已替换。" % tpl["name"])
+                            + (f" 还缺：{'、'.join(_miss)}（补上后我重渲染一版）。" if _miss else "")
+                            + ("" if to_addr else " ⚠️ 库里没有这个人的邮箱，发送前请先补联系方式。"),
+                })
+
             m = draft_mail(cand, job_title, args.get("purpose") or "",
                            args.get("tone") or "", rt)
             if m is None:
@@ -766,7 +1536,14 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
         if name == "ingest_resumes":
             # 导入是**真的读文件**，不是提案：它本身没有"改档案"的歧义，
             # 且 HR 明确要求 agent 能主动收简历。归档/改档仍然走提案。
-            from . import ingest as _ing
+            #
+            # ⚠️ v1.25 修：原来是 `from . import ingest` —— 在 app/agent/tools.py
+            # 里 `.` 指的是 **app.agent**，而 ingest 在 **app** 下，于是
+            # ImportError: cannot import name 'ingest' from 'app.agent'。
+            # 因为这个导入写在**函数体内**（延迟导入），模块加载不报错，
+            # 于是这个工具在清单里"一直都在"、却**从来没被真正调用过一次**。
+            # 教训：延迟导入的路径错误不会在启动时暴露 —— 新工具必须真跑一遍。
+            from .. import ingest as _ing
             src = (args.get("source") or "mailbox").strip()
             if src not in ("mailbox", "folder"):
                 return _err(f"source 只能是 mailbox 或 folder（收到的是 {src}）")
@@ -774,8 +1551,18 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             if src == "folder":
                 folder = (args.get("folder") or "").strip()
                 if not folder:
-                    return _err("source=folder 需要给 folder 路径",
-                                hint="可以去「系统配置 → 导入与来源」看已配置的目录")
+                    # 没给路径就用**系统配置里的「导入文件夹」**——
+                    # 界面上「导入简历」就是这么做的（server 端同口径）。
+                    # 原来这里直接报错要求 HR 手打路径，而路径本来就配好了、
+                    # 界面上也有，让 HR 再抄一遍纯属多余。
+                    import os as _os
+                    _mbcfg = _read_json_or(_repo_config_path("mailbox.json"), {}) or {}
+                    folder = _mbcfg.get("folder_dir") or _os.path.join(_data_dir(), "resumes")
+                    if not _os.path.isdir(folder):
+                        try:
+                            _os.makedirs(folder, exist_ok=True)
+                        except OSError as exc:
+                            return _err(f"导入目录不存在也建不出来：{folder}（{exc}）")
                 rep = _ing.ingest_dir(folder, _conn_jd[0], _conn_jd[1], ctx.db_path,
                                       job_id=None, use_llm=False)
             else:
@@ -963,16 +1750,51 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                                 f"请在「人才库」勾选后点「批量下载选中」"})
 
         if name == "set_stage":
-            aid = int(args["application_id"])
-            app = db.get_application(conn, aid)
-            if not app:
-                return _err(f"未找到投递 #{aid}")
+            # v1.25：支持用**候选人**指定目标，而不只是投递 id。
+            #
+            # 为什么必须加：HR 真实说法是「把 #1 推进至初面」——这个 `#1`
+            # 可能是投递 id 也可能是候选人 id，模型无法分辨，于是只能反问
+            # 「请告诉我是哪条投递」。**HR 已经把编号给出来了，再问一遍
+            # 就是把活儿推回去**。现在两种都认：
+            #   · 给了 application_id → 直接用（原有行为）
+            #   · 只给了 candidate → 找他的投递；**恰好一条**才用，多条则要求
+            #     HR 指明是哪条（替他挑一条＝替他做决定，绝对不做）
+            aid = args.get("application_id")
+            app = None
+            if aid is not None:
+                try:
+                    app = db.get_application(conn, int(aid))
+                except (TypeError, ValueError):
+                    app = None
+                if not app:
+                    return _err(f"未找到投递 #{aid}")
+            else:
+                cid, cerr = _resolve_cid(conn, args.get("candidate_id"))
+                if cerr:
+                    return _err(cerr["error"], cerr.get("hint"))
+                rows = conn.execute(
+                    "SELECT id FROM applications WHERE candidate_id=? ORDER BY id",
+                    (cid,)).fetchall()
+                if not rows:
+                    return _err("这位候选人还没有投递记录，无法推进阶段")
+                if len(rows) > 1:
+                    names = "、".join("#%s" % r["id"] for r in rows)
+                    return _err(
+                        f"这位候选人有 {len(rows)} 条投递（{names}），需要指明哪一条",
+                        hint="请告诉我要推进的是哪条投递（例如「推进投递 #%s」）"
+                             % rows[0]["id"])
+                app = db.get_application(conn, rows[0]["id"])
+                aid = app["id"]
             stage = (args.get("stage") or "").strip()
             if stage not in STAGES:
                 return _err(f"阶段取值非法：{stage}；只能是 {'/'.join(STAGES)}")
             cand = db.get_candidate(conn, app["candidate_id"]) or {}
+            # 已在目标阶段就不必再提一遍（否则卡片上会出现"初面 → 初面"）
+            if (app.get("stage") or "") == stage:
+                return _ok({"note": f"{cand.get('name') or '这位候选人'} 已经在「{stage}」阶段，"
+                                    "不需要再推进。", "no_change": True})
             return _propose(conn, ctx, "set_stage",
-                            {"application_id": aid, "stage": stage},
+                            {"application_id": int(aid), "stage": stage},
                             f"把 {cand.get('name') or '#' + str(app['candidate_id'])} 的投递 "
                             f"#{aid} 从「{app.get('stage')}」推进到「{stage}」"
                             + (f"（理由：{args['reason']}）" if args.get("reason") else ""))

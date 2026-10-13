@@ -1138,9 +1138,22 @@ def api_candidate_rename(cid: int, req: dict,
                    "school": d.get("school") or "", "major": d.get("major") or "",
                    "phone_enc": decrypt(d.get("phone_enc")) or "",
                    "email_enc": decrypt(d.get("email_enc")) or ""}
+        # ⚠️ v1.24.21 修（KeyError: 'phone_bidx' —— 保存必报 500 的根因）：
+        # `fields` 里除用户能改的 6 个字段外，还夹带 phone_bidx / email_bidx
+        # 两个**派生盲索引**（用于跨渠道身份比对）。它们没有中文名，
+        # 一起进 changed 就会让下面的 label[k] 抛 KeyError。
+        # 更糟的是 KeyError 发生在 update_candidate **之后**——字段其实已经落库了，
+        # 界面却弹「Internal Server Error」，HR 以为没保存、反复重存。
+        # 修法：只按**用户可见字段**判定"有没有变化"，派生字段照写不误、但不参与审计文案。
         changed = {k: (old_map.get(k), fields[k]) for k in fields
-                   if str(old_map.get(k) or "") != str(fields[k] or "")}
+                   if k in label and str(old_map.get(k) or "") != str(fields[k] or "")}
+        # 兜底：万一将来又加了无 label 的字段，宁可漏写审计文案也不要 500。
+        # —— 500 会让 HR 以为"没保存"，比审计少一行严重得多。
         if not changed:
+            # 派生字段可能单独变了（如电话没变但规范化结果变），此时仍要走更新，
+            # 但不必写审计（用户没改任何能看到的东西）。
+            if fields:
+                db.update_candidate(conn, cid, **fields)
             return {"ok": True, "id": cid, "changed": [], "note": "字段没有变化。"}
         db.update_candidate(conn, cid, **fields)
         before = "；".join(f"{label[k]}={v[0] or '（空）'}" for k, v in changed.items())

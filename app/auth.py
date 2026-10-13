@@ -25,7 +25,13 @@ ROLES = {
 
 _PERMS = {
     "hr": {"read", "chat", "propose", "confirm", "set_stage", "add_note", "export",
-           "ingest", "manage_users", "settings", "view_full_contact", "merge"},
+           "ingest", "manage_users", "settings", "view_full_contact", "merge",
+           # ⚠️ v1.25 修：原来缺 "archive"，而 actions.apply_proposal 里
+           # set_archive / archive_batch 判的正是 auth.can(role, "archive")。
+           # 于是**归档类提案永远无法确认**——HR 点「确认执行」会被
+           # _denied 判成权限不足并自动拒绝，提案直接作废。
+           # 这是"两处权限名必须同源"的又一个实例（MEMORY.md 3.4 那条）。
+           "archive"},
 }
 
 ROLE_DEFAULT_USERS = [
