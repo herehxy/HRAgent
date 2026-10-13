@@ -871,6 +871,10 @@ def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias=
             # HR 无从核查"到底哪些内容没给模型看"——隐私红线应当是可核查的。
             "sensitive_removed": _sensitive_of(latest_doc),
             "audit_snippet": db.candidate_audit(conn, cid, limit=20),
+            # v1.25：这位**发过邮件没有**（含最近时间与主题）。
+            # 用"发过没有"做标记，是为了避免重复发——同一个人被两个 HR
+            # 各发一封面试邀请，是最难解释的那类事故。
+            "email_state": db.candidate_email_state(conn, cid),
             "duplicates": db.suspicious_duplicates(conn, cid),
             "agent_runs": [],
             # 自动分析（入库即分析）：这是**系统自己看的结论**，
@@ -1100,6 +1104,13 @@ def api_candidate_rename(cid: int, req: dict,
         fields["school"] = str(req.get("school") or "").strip() or None
     if "major" in req:
         fields["major"] = str(req.get("major") or "").strip() or None
+    # v1.25.6：性别也能改（用户要求）——"简历没读到"时由 HR 补填；
+    # 它不参与档位判定，但界面展示与性别筛选都要用。
+    if "gender" in req:
+        g = str(req.get("gender") or "").strip()
+        if g and g not in ("男", "女"):
+            raise HTTPException(status_code=422, detail="性别只能填：男 / 女（清空表示未填）")
+        fields["gender"] = g or None
     if "phone" in req:
         phone = str(req.get("phone") or "").strip()
         if phone and not re.fullmatch(r"[\d\s\-+()]{7,20}", phone):
@@ -1133,9 +1144,11 @@ def api_candidate_rename(cid: int, req: dict,
         if not d:
             raise HTTPException(status_code=404, detail="未找到该候选人")
         label = {"name": "姓名", "edu_level": "学历", "school": "学校", "major": "专业",
+                 "gender": "性别",
                  "phone_enc": "电话", "email_enc": "邮箱"}
         old_map = {"name": d.get("name") or "", "edu_level": d.get("edu_level") or "",
                    "school": d.get("school") or "", "major": d.get("major") or "",
+                   "gender": d.get("gender") or "",
                    "phone_enc": decrypt(d.get("phone_enc")) or "",
                    "email_enc": decrypt(d.get("email_enc")) or ""}
         # ⚠️ v1.24.21 修（KeyError: 'phone_bidx' —— 保存必报 500 的根因）：
@@ -1156,8 +1169,12 @@ def api_candidate_rename(cid: int, req: dict,
                 db.update_candidate(conn, cid, **fields)
             return {"ok": True, "id": cid, "changed": [], "note": "字段没有变化。"}
         db.update_candidate(conn, cid, **fields)
-        before = "；".join(f"{label[k]}={v[0] or '（空）'}" for k, v in changed.items())
-        after = "；".join(f"{label[k]}={v[1] or '（空）'}" for k, v in changed.items())
+        # v1.25：审计文案统一走 db.audit_field_value（解密 + 电话打码）。
+        # 原样写入会把 `enc:…` 密文留在审计表里，对 HR 毫无意义。
+        before = "；".join(f"{label[k]}={db.audit_field_value(k, v[0])}"
+                           for k, v in changed.items())
+        after = "；".join(f"{label[k]}={db.audit_field_value(k, v[1])}"
+                          for k, v in changed.items())
         db.add_audit(conn, "candidate", str(cid), "edit_fields", before, after,
                      s["username"], s["role"])
         return {"ok": True, "id": cid, "changed": sorted(changed),
@@ -4113,7 +4130,7 @@ def api_mail_template_save(req: MailTemplateReq,
         tid = db.upsert_mail_template(conn, name, (req.scene or "其他通知").strip(),
                                       req.subject or "", req.body or "", req.id)
         db.add_audit(conn, "settings", f"mail_template#{tid}", "update", "",
-                     f"{s['username']} 保存邮件模板「{name}」", s["username"], s["role"])
+                     f"保存邮件模板「{name}」", s["username"], s["role"])
         return {"ok": True, "id": tid, "template": db.get_mail_template(conn, tid)}
     finally:
         conn.close()
@@ -4311,5 +4328,12 @@ def api_mail_send(req: MailSendReq,
     finally:
         conn.close()
     if not r.get("ok"):
-        raise HTTPException(status_code=400, detail=r.get("error") or "发送失败")
-    return {"ok": True, **r, "note": "邮件已发出，动作已写入审计。"}
+        # ⚠️ 必须把 hint 一起抛出去。原来只传 r["error"]，
+        # 于是 mail_send 里辛苦写好的那段"465 用 SSL、587 用 STARTTLS"的提示
+        # **根本没到 HR 眼前** —— 界面上只剩一句看不懂的 SSLError。
+        # "写了提示但传不出去"和"没写提示"对用户是同一回事。
+        _msg = r.get("error") or "发送失败"
+        if r.get("hint"):
+            _msg = f"{_msg}｜{r['hint']}"
+        raise HTTPException(status_code=400, detail=_msg)
+    return {"ok": True, **r, "note": r.get("note") or "邮件已发出，动作已写入审计。"}

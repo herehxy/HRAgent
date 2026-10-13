@@ -1259,6 +1259,17 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
     for it in items:
         bd = it.get("breakdown")
         it["missing_fields"] = (bd.get("missing_fields") or []) if isinstance(bd, dict) else []
+        # v1.25.6：旧数据（v1.24.9 之前的投递）breakdown 里没有清单，界面上只能显示
+        # 一个笼统的"待补录"。这里按**当前数据**实时兜底算一遍，让"缺什么"永远
+        # 说得出来（用户要求：要说明缺失的信息是什么，而不是只提示缺失）。
+        # 姓名/年限两项在列表端可靠可判；技能因轻量模式不装配，不在此处妄断。
+        if it.get("needs_review") and not it["missing_fields"]:
+            _mf = []
+            if not (it.get("name") or "").strip():
+                _mf.append("姓名")
+            if it.get("years_exp") is None:
+                _mf.append("年限")
+            it["missing_fields"] = _mf
         it["parse_failed"] = (it.get("doc_parse_ok") is not None
                               and not it.get("doc_parse_ok"))
     # 院校层次标签（v1.7.3）：每条都挂上（不限筛选时卡片也要显示 985/211 标签）。
@@ -1374,6 +1385,16 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         (cid,)).fetchall()]
     # 命中/缺失来自最近一次投递
     latest = apps[0] if apps else {}
+    # v1.25.6：完整档案里也给出"缺什么"——按**当前数据**实时算（姓名 / 年限 / 技能，
+    # 与 tier.py 的口径一致），不看旧 breakdown，老数据也能说清；
+    # 档案端有装配好的 skills，三项都可靠可判。
+    _missing: list[str] = []
+    if not (c.get("name") or "").strip():
+        _missing.append("姓名")
+    if c.get("years_exp") is None:
+        _missing.append("年限")
+    if not skills:
+        _missing.append("技能")
     return {
         **c,
         "applications": apps,
@@ -1388,6 +1409,10 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         "status": latest.get("status"),
         "note": latest.get("note"),
         "needs_review": latest.get("needs_review"),
+        # v1.25.6：给完整档案用的"缺什么"清单与"原文是否读得出"（界面直接展示）
+        "missing_fields": _missing,
+        "parse_failed": bool(docs) and docs[0].get("parse_ok") is not None
+                        and not docs[0].get("parse_ok"),
         "reasons": latest.get("reasons") or [],
         "risks": latest.get("risks") or [],
         "hits": latest.get("hits") or [],
@@ -2065,8 +2090,227 @@ def add_audit(conn: sqlite3.Connection, entity: str, entity_id: str, action: str
     conn.commit()
 
 
+# ============================================================
+# 操作审计的中文表述（v1.25）
+# ============================================================
+# 背景（用户反馈）：
+#   ① 界面上直接把 `view` / `set_stage` 这种**英文动作码**摊给 HR 看，读不懂；
+#   ② 「查看档案」这类**只看不改**的记录混在里面，纯噪音；
+#   ③ 已发过邮件的候选人没有标记。
+#
+# 口径：**审计照旧全量落库**（本地日志该留的都留），
+#       但**给 HR 看的列表只显示"确实改动了数据"的动作**，且一律中文、
+#       一句话说明"做了什么"。
+#
+# ⚠️ 动作名是从代码里 `add_audit(...)` 的真实调用点**扫出来**的
+#   （`_scan_audit_actions.py`，55 组），不是凭记忆列的 ——
+#   只看数据库会漏掉"将来才会用到"的动作，到时界面又冒英文。
+
+#: 只读 / 无数据变更的动作：不进 HR 视图（数据仍在库里，随时可查）。
+AUDIT_READONLY = {
+    "view",                 # 查看档案
+    "preview",              # 预览来源文件
+    "download",             # 下载原件
+    "bundle_download",      # 打包下载
+    "export",               # 导出
+    "scan",                 # 系统巡检（只建提案、不改档案）
+    "analyze_pending",      # 统计待分析数量
+    "duplicate_skipped",    # 导入时跳过重复
+    "oversize_skipped",     # 导入时跳过超大文件
+    "identity_weak_match",  # 弱身份匹配提示
+    # 系统自动重建技能：确实写库，但它是**系统自动触发**且量极大
+    # （实测一个库里 50 条），对 HR 的决策没有任何含义。
+    # 归入"不展示"，避免把真正该看的改动淹掉。
+    "refresh_skills",
+    "backfill_grad_date",   # 自动回填毕业时间，同上
+}
+
+#: 动作 → 中文。多个实体同名动作语义不同时，用 `AUDIT_LABEL_BY_ENTITY` 覆盖。
+AUDIT_LABEL = {
+    "view": "查看了档案", "preview": "预览了来源文件", "download": "下载了简历原件",
+    "bundle_download": "打包下载了简历", "export": "导出了数据", "scan": "跑了一次系统巡检",
+    "analyze_pending": "统计了待分析数量", "duplicate_skipped": "导入时跳过了重复简历",
+    "oversize_skipped": "导入时跳过了超大文件", "identity_weak_match": "提示了身份存疑",
+    "refresh_skills": "系统重建了技能", "backfill_grad_date": "系统回填了毕业时间",
+    "ingest": "导入了简历", "set_stage": "推进了阶段", "set_tier": "调整了档位",
+    "edit_fields": "更正了字段", "add_tag": "加了标签", "add_note": "加了备注",
+    "archive": "归档了", "unarchive": "取消归档了", "unarchive_on_reapply": "重新投递，自动取消归档",
+    "merge": "合并了重复档案", "split": "撤销了合并", "review": "标记为已复核",
+    "unreview": "取消了已复核", "reanalyze": "重跑了分析", "reanalyze_full": "完整重新分析",
+    "reanalyze_batch": "批量重跑了分析", "regrade": "按岗位 JD 重算了档位",
+    "regrade_batch": "批量重算了岗位档位", "update_jd": "修改了岗位 JD",
+    "job_bound": "归到了岗位", "assign_job": "归到了岗位", "reassign_job": "修改了岗位",
+    "suggest_job": "给出岗位建议", "route_suggest": "给出了岗位建议",
+    "auto_end_stage": "系统自动结束了投递", "purge": "清理了到期数据",
+    "delete": "删除了数据", "clear": "清空了数据", "remove": "移入了回收站",
+    "restore": "从回收站恢复", "archive_pinned": "归档了原件",
+    "import_domain": "导入了领域词表", "send": "发送了邮件",
+    "chat_clear": "清空了对话", "chat_restore": "恢复了对话", "chat_purge": "清理了对话记录",
+    "update": "修改了", "edit_settings": "修改了系统设置", "edit_config": "修改了配置",
+    # 提案的处置：`db.decide_proposal` 传的 action 就是 decision 本身
+    "approve": "确认执行了提案", "reject": "拒绝了提案",
+}
+
+#: 审计文案里**必须打码/解密**的字段。
+AUDIT_MASK_FIELDS = {"phone_enc", "email_enc", "phone", "email"}
+
+
+#: 字段名 → 中文（审计 before/after 里出现的裸字段名要翻译成 HR 能看懂的字）。
+AUDIT_FIELD_LABEL = {
+    "name": "姓名", "edu_level": "学历", "school": "学校", "major": "专业",
+    "years_exp": "工作年限", "gender": "性别", "grad_date": "毕业时间",
+    "current_org": "现单位", "phone": "电话", "email": "邮箱",
+    "phone_enc": "电话", "email_enc": "邮箱", "tier_suggested": "建议档",
+    "tier_final": "最终档", "stage": "阶段", "job_id": "岗位", "note": "备注",
+    "tags": "标签", "score": "匹配分",
+}
+
+
+#: 系统级操作人 → 中文展示名（单 HR 系统里用户名就是 hr，直接显示太像英文）。
+AUDIT_OPERATOR_LABEL = {"hr": "招聘 HR", "system": "系统", "anonymous": "未登录"}
+
+
+def audit_field_value(field: str, value) -> str:
+    """给审计文案用的字段值：**解密 + 电话打码**。
+
+    为什么要这一步（v1.25 实测踩到）：`update_candidate_fields` 的入参里，
+    电话/邮箱可能已经是 `enc:…` 密文（前端或工具层先加密过）。
+    原样写进 `after`，界面上就是这种东西：
+
+        更正了字段：… → 电话=enc:B+3i8tlA6rhm8ZztuDBjOfq0l0zswK4GEYQiGEmrK5YkRlBZxvb0
+
+    —— 对 HR 毫无意义，还等于把密文抄进了日志。**审计是为了给人读的**，
+    写进去的东西必须是人能看懂的。
+    顺带：电话一律打码，避免审计表变成一份新的 PII 台账。
+    """
+    v = str(value or "")
+    if v.startswith("enc:"):
+        try:
+            from .crypto import decrypt          # 延迟导入：避免 db↔crypto 循环
+            v = decrypt(v) or ""
+        except Exception:
+            return "（已加密，无法还原）"
+    v = v.strip()
+    if not v:
+        return "（空）"
+    if field in AUDIT_MASK_FIELDS and "phone" in field and len(v) >= 7:
+        return v[:3] + "*" * max(4, len(v) - 7) + v[-4:]
+    return v
+
+#: 同名的动作在实体不同时说法不同（如 create）。
+AUDIT_LABEL_BY_ENTITY = {
+    ("candidate", "create"): "新建了候选人档案",
+    ("job", "create"): "新建了岗位",
+    ("department", "create"): "新建了部门",
+    ("application", "new_version"): "收到该候选人的一份新投递",
+    ("application", "new_version_archived"): "收到新投递（档案已归档，未自动恢复）",
+    ("job", "deactivate"): "停用了岗位",
+    ("department", "deactivate"): "停用了部门",
+    ("settings", "update"): "修改了系统设置",
+}
+
+#: entity → 中文对象名（没有就用原值，避免显示成英文）
+AUDIT_ENTITY_LABEL = {
+    "candidate": "候选人", "application": "投递", "job": "岗位",
+    "department": "部门", "document": "简历原件", "mail": "邮件",
+    "proposal": "提案", "settings": "系统设置", "source_file": "来源文件",
+    "ontology": "领域词表", "chat": "对话", "bundle": "打包", "feedback": "反馈",
+    "insight": "分析", "interview_dict": "面试字典", "mailbox": "邮箱配置",
+}
+
+
+def audit_label(entity: str, action: str) -> str:
+    """把 (实体, 动作) 翻成一句中文。查不到就退化成去掉下划线的原文，
+    **绝不把英文动作码直接摊给 HR**。"""
+    key = (entity or "", action or "")
+    if key in AUDIT_LABEL_BY_ENTITY:
+        return AUDIT_LABEL_BY_ENTITY[key]
+    if action in AUDIT_LABEL:
+        return AUDIT_LABEL[action]
+    return (action or "").replace("_", " ")
+
+
+def audit_visible(entity: str, action: str) -> bool:
+    """这条记录该不该出现在 HR 的审计列表里（只看不改的不展示）。"""
+    return (action or "") not in AUDIT_READONLY
+
+
+_ENC_RE = re.compile(r"enc:[A-Za-z0-9+/=_\-]{8,}")
+
+
+def _translate_field_names(text: str) -> str:
+    """把审计文案里裸字段名替换成中文，兼容历史记录。
+
+    典型场景：完整重新分析写入
+        years_exp=（空）；current_org=（空） → years_exp=0；current_org=西安电子科技大学
+    展示层替换成：
+        工作年限=（空）；现单位=（空） → 工作年限=0；现单位=西安电子科技大学
+    """
+    if not text:
+        return text or ""
+    out = text
+    # 先替换最长的，避免短的把长的前缀吃掉（如 phone 不应影响 phone_enc）
+    for k, v in sorted(AUDIT_FIELD_LABEL.items(), key=lambda x: -len(x[0])):
+        pattern = rf"(^|[；：,\s]){re.escape(k)}(?==|[；：,\s]|$)"
+        out = re.sub(pattern, rf"\1{v}", out)
+    return out
+
+
+def sanitize_audit_text(text: str) -> str:
+    """把审计文案里嵌着的 `enc:…` 密文换成可读内容。
+
+    为什么展示层也要做一遍：写入点已经改成走 `audit_field_value` 了，
+    但**历史记录**里已经躺着几条密文（实测 3 条）。只修写入点的话，
+    老记录仍然是一串看不懂的字符 —— 而审计的意义就是让人看懂。
+    这层是**只读展示**的清洗，不回头改库（审计一经写入就不该被静默篡改）。
+    解密失败时只说"（加密内容）"，不猜、不留半截密文。
+    """
+    if not text:
+        return ""
+
+    def _rep(m):
+        try:
+            from .crypto import decrypt               # 延迟导入：避免循环依赖
+            plain = decrypt(m.group(0)) or ""
+        except Exception:
+            return "（加密内容）"
+        return _ENC_RE.sub("（加密内容）", plain) if "enc:" in plain else (plain or "（加密内容）")
+
+    out = _ENC_RE.sub(_rep, text)
+    # 顺手把电话打码，避免审计表变成新的 PII 台账
+    out = re.sub(r"(?<!\d)(1\d{2})\d{4}(\d{4})(?!\d)", r"\1****\2", out)
+    # 历史记录里曾有 Python None 直接字符串化：eg. "归到 ... 建议为 None（None）"
+    out = re.sub(r"\bNone\b", "—", out)
+    return out
+
+
+def _decorate_audit(row: dict) -> dict:
+    row["before"] = _translate_field_names(sanitize_audit_text(row.get("before") or ""))
+    row["after"] = _translate_field_names(sanitize_audit_text(row.get("after") or ""))
+    row["action_label"] = audit_label(row.get("entity"), row.get("action"))
+    row["entity_label"] = AUDIT_ENTITY_LABEL.get(row.get("entity"), row.get("entity"))
+    # 「做了什么」：一句中文 + 变化。before/after 都为空时（多数动作）就只留中文。
+    b, a = (row.get("before") or "").strip(), (row.get("after") or "").strip()
+    row["readable"] = row["action_label"] + (f"：{b} → {a}" if b and a else (f"：{a}" if a else ""))
+    # 操作人：系统默认角色用中文展示，真实用户名保持原样。
+    op = (row.get("operator") or "").strip().lower()
+    row["operator"] = AUDIT_OPERATOR_LABEL.get(op, row.get("operator"))
+    return row
+
+
 def list_audit(conn: sqlite3.Connection, entity: str | None = None,
-               entity_id: str | None = None, limit: int = 100) -> list[dict]:
+               entity_id: str | None = None, limit: int = 100,
+               include_readonly: bool = False) -> list[dict]:
+    """读审计记录。默认**只返回确实改动了数据的**（HR 视图）。
+
+    只读动作（查看档案、下载、预览…）默认不出现在这里 —— 它们量最大、
+    对 HR 的判断没有意义。但**数据一条没删**：需要全量时传
+    `include_readonly=True`（等价于查 `/api/audit?include_readonly=1`），
+    智能助手的 list_audit 工具走的就是这条全量路径。
+
+    每行都补三个给界面用的字段：`action_label`（中文动作）、
+    `entity_label`（中文对象）、`readable`（一句话"做了什么"）。
+    """
     sql, args = "SELECT * FROM audit_log", []
     where = []
     if entity:
@@ -2075,11 +2319,17 @@ def list_audit(conn: sqlite3.Connection, entity: str | None = None,
     if entity_id:
         where.append("entity_id = ?")
         args.append(str(entity_id))
+    if not include_readonly:
+        # 只读动作不进 HR 视图。数据仍在库里（这是**展示过滤**，不是删除），
+        # 需要全量时传 include_readonly=True。
+        skip = sorted(AUDIT_READONLY)
+        where.append("COALESCE(action,'') NOT IN (%s)" % ",".join("?" * len(skip)))
+        args.extend(skip)
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY id DESC LIMIT ?"
     args.append(int(limit))
-    return [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
+    return [_decorate_audit(_decode(dict(r))) for r in conn.execute(sql, args).fetchall()]
 
 
 def candidate_audit(conn: sqlite3.Connection, cid: int, limit: int = 50) -> list[dict]:
@@ -2098,13 +2348,44 @@ def candidate_audit(conn: sqlite3.Connection, cid: int, limit: int = 50) -> list
                           (cid,)).fetchall():
         if r["file_hash"]:
             keys.append(("document", r["file_hash"][:16]))
+    # v1.25：把**发信记录**并进这条时间线。
+    # 原来只并了 candidate/application/document 三类，于是"给这个人发过面试邀请"
+    # 这件事在他的档案里看不到 —— 而 HR 恰恰最需要这一条（重复发信就是这么发生的）。
+    keys.append(("mail", str(cid)))
     clauses = " OR ".join("(entity = ? AND entity_id = ?)" for _ in keys)
     args: list = []
     for ent, eid in keys:
         args.extend([ent, eid])
+    skip = sorted(AUDIT_READONLY)
+    clauses = f"({clauses}) AND COALESCE(action,'') NOT IN (%s)" % ",".join("?" * len(skip))
+    args.extend(skip)
     args.append(int(limit))
     sql = f"SELECT * FROM audit_log WHERE {clauses} ORDER BY id DESC LIMIT ?"
-    return [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
+    return [_decorate_audit(_decode(dict(r))) for r in conn.execute(sql, args).fetchall()]
+
+
+def candidate_email_state(conn: sqlite3.Connection, cid: int) -> dict:
+    """这位候选人**发过邮件没有**，以及最近一次的时间与主题。
+
+    为什么要单独查：审计表里的 `after` 是一句人写的摘要
+    （`发送邮件给 X｜主题：Y｜模板：Z｜成功`），要拿"发过没有"就得解析它。
+    直接把结论算好给前端，避免前端去正则抠字符串
+    —— 本项目吃过"靠匹配文案字符串做判断"的亏（改一次文案就静默失效）。
+    判定口径：`entity='mail'` + `action='send'` + `after` 含「成功」。
+    """
+    rows = conn.execute(
+        "SELECT ts, COALESCE(after,'') AS a FROM audit_log "
+        "WHERE entity='mail' AND action='send' AND entity_id=? "
+        "AND instr(COALESCE(after,''),'成功') > 0 ORDER BY id DESC LIMIT 20",
+        (str(cid),)).fetchall()
+    if not rows:
+        return {"sent": False, "count": 0, "last_at": "", "last_subject": ""}
+    subject = ""
+    m = re.search(r"主题：([^｜]*)", rows[0]["a"])
+    if m:
+        subject = m.group(1).strip()
+    return {"sent": True, "count": len(rows), "last_at": rows[0]["ts"] or "",
+            "last_subject": subject}
 
 
 # ============================================================
@@ -2163,7 +2444,16 @@ def list_proposals(conn: sqlite3.Connection, status: str | None = None, limit: i
     args.extend(cond_args)
     sql += " ORDER BY id DESC LIMIT ?"
     args.append(int(limit))
-    return [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
+    out = []
+    for r in conn.execute(sql, args).fetchall():
+        d = _decode(dict(r))
+        # v1.25：带上中文工具名。界面上原来直接显示 `set_stage` 这种英文码，
+        # HR 读不懂。复用已有的 TOOL_LABEL（与提案卡、对话历史同源，
+        # 不另建一份映射 —— 否则"三处说法不一致"的老问题会再来一遍）。
+        d["tool_label"] = TOOL_LABEL.get(d.get("tool") or "",
+                                         audit_label("proposal", d.get("tool") or ""))
+        out.append(d)
+    return out
 
 
 # ============================================================
@@ -2621,6 +2911,8 @@ TOOL_LABEL = {
     "save_settings": "修改系统设置",
     "remove_source_files": "移入回收站", "restore_source_files": "从回收站恢复",
     "rebuild_brief": "重算今日待办", "clear_chat_history": "清空对话历史",
+    "draft_email": "起草邮件", "preview_mail": "预览邮件模板",
+    "list_mail_templates": "查看邮件模板", "get_mail_template": "查看模板正文",
 }
 
 
@@ -3112,6 +3404,15 @@ def pool_stats(conn: sqlite3.Connection) -> dict:
     mails = conn.execute("SELECT COUNT(*) AS n FROM email_messages").fetchone()["n"]
     pending_mails = conn.execute(
         "SELECT COUNT(*) AS n FROM email_messages WHERE processed = 0").fetchone()["n"]
+    # v1.25.6：统计区新元素（HR 要求）——"近 7 天新增简历"与"最近导入"。
+    # received_at 是本地时间字符串；date('now','localtime') 保证与它同口径。
+    docs_7d = conn.execute(
+        "SELECT COUNT(*) AS n FROM documents "
+        "WHERE date(received_at) >= date('now','localtime','-6 days')").fetchone()["n"]
+    _last_doc_row = conn.execute(
+        "SELECT d.received_at, c.name FROM documents d "
+        "LEFT JOIN candidates c ON c.id = d.candidate_id "
+        "ORDER BY d.received_at DESC, d.id DESC LIMIT 1").fetchone()
     return {
         "people": people,
         # 含归档的总数：回答"这些年一共收了多少人"时才用得上
@@ -3151,6 +3452,9 @@ def pool_stats(conn: sqlite3.Connection) -> dict:
         "proposals_pending": conn.execute(
             "SELECT COUNT(*) AS n FROM proposals WHERE status = '待确认'").fetchone()["n"],
         "embeddings": embedding_count(conn),
+        "docs_7d": docs_7d,
+        "last_doc": ({"name": _last_doc_row["name"] or "未识别",
+                      "at": _last_doc_row["received_at"]} if _last_doc_row else None),
     }
 
 

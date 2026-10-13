@@ -199,15 +199,15 @@ TOOL_SPECS = [
           "为某候选人**起草**一封邮件（面试邀请 / 跟进 / 婉拒 / offer 沟通 / 其他）。"
           "只起草、不发送——发送必须由 HR 在邮件编辑器里确认后亲自点。"
           "返回主题、正文与收件人，可直接在对话里改或交给编辑器。"
-          "**HR 要求按系统里配置的模板写时，传 template（模板名或 id）**——"
-          "若不确定有哪些模板，先用 list_mail_templates 查；"
-          "不传 template 就由模型自由撰写（适用于模板里没有的场景）。",
+          "**HR 只要提到「用模板 / 套模板 / 按我的模板」，就必须传 template（模板名或 id），"
+          "用 list_mail_templates 查到名字后再传——此时忽略 tone/purpose 的自由撰写路径。**"
+          "不传 template 才由模型自由撰写（仅用于 HR 没要求模板、且系统模板里也没有合适模板时）。",
           {"candidate_id": {"type": "integer"},
            "purpose": {"type": "string",
-                       "description": "面试邀请 / 跟进 / 婉拒 / offer沟通 / 其他（默认按用途猜）"},
-           "tone": {"type": "string", "description": "语气：客气简洁 / 正式 / 轻松，可空"},
+                       "description": "面试邀请 / 跟进 / 婉拒 / offer沟通 / 其他（默认按用途猜）；传了 template 时本字段被忽略"},
+           "tone": {"type": "string", "description": "语气：客气简洁 / 正式 / 轻松，可空；传了 template 时本字段被忽略"},
            "template": {"type": "string",
-                        "description": "模板名（可模糊）或 id。传了就按该模板渲染，忽略 tone"},
+                        "description": "【关键】模板名（可模糊）或 id。HR 要求用模板时必须传；传了就按该模板渲染，tone/purpose 不再生效"},
            "interview_time": {"type": "string", "description": "面试时间，可空"},
            "interview_place": {"type": "string", "description": "面试地点/会议链接，可空"},
            "extra": {"type": "string", "description": "要特别说明的事项，可空"}},
@@ -472,9 +472,9 @@ def _skill_rows(conn, cid: int) -> list[dict]:
 
 
 def _resolve_cid(conn, value, what: str = "候选人") -> tuple[int | None, dict | None]:
-    """把"何晓宇"或 12 解析成候选人 id。**不支持时返回 (None, 错误信息)**。
+    """把候选人姓名（字符串）或数字 id 解析成候选人 id。**不支持时返回 (None, 错误信息)**。
 
-    为什么要有（v1.13.9）：HR 说"给何晓宇发邮件"，模型为了调工具只能先猜一个
+    为什么要有（v1.13.9）：HR 说「给张三发邮件」，模型为了调工具只能先猜一个
     数字 id——实测它猜了 12345，整条链路断在"未找到候选人 #12345"。
     人是用名字指人的，工具不该强迫模型先知道数据库主键。
     精确匹配优先；命中多个时把名单返回，让模型追问而不是继续猜。

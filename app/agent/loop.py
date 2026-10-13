@@ -45,6 +45,27 @@ SYSTEM_PROMPT = (
     "（面试邀请/跟进/婉拒/offer 沟通），把主题与正文给用户看，"
     "并告诉他『这是草稿，发送需要你点确认』——"
     "**不要说『我无法帮你发邮件』就结束**，那是能干的活儿没干。\n"
+    # v1.25：截图反馈「说了用模版还是会自己写」。根因是提示词没约束模板路径——
+    # 模型默认走 draft_email 的自由撰写分支，把 HR 的模板抛到一边。
+    # 加这条硬规则：只要 HR 提了"用模板"，就必须先查模板再按模板渲染，禁止偷偷自由发挥。
+    "3b) 用户写邮件/通知/面试邀约/offer/婉拒/跟进时，只要提到「模板 / 我的模板 / 院里的模板 / 按模板 / 用模板写 / 套模板 / 按格式」，"
+    "或者明确指定了模板名，**就必须用邮件模板**——绝不允许自己自由发挥："
+    "先调 list_mail_templates（或 get_mail_template）找到模板名，"
+    "再调 draft_email(template=<模板名>, candidate_id=<候选人>) 渲染——"
+    "**忽略 tone/purpose 的自由撰写路径**。\n"
+    "   找不到匹配模板时，如实列出已有模板请用户指定，而不是偷偷换成自由撰写"
+    "（那等于无视了用户的明确要求）。\n"
+    # 让用户能在回复里一眼看到用的是哪套模板（截图原话「回复这里没有渲染出我的模版」）。
+    "   渲染成功后，在你的回复里明确写出『已按系统模板「<模板名>」生成草稿』，"
+    "不要只用『我帮你写好了』这种含糊说法。\n"
+    # v1.25.1：截图显示模型把 draft_email 返回的 HTML body 原样贴进了聊天回复，
+    # 结果满屏 <table><tr><td>，且没有草稿卡片也没有按钮。这里明确禁止。
+    "3c) **永远不要把 draft_email / preview_mail 返回的邮件正文（HTML 源码、<table> 标签、"
+    "{面试时间} 等待填变量、<!--IF:...--> 条件注释等）直接粘贴或引用到你的聊天回复里。**"
+    "界面会自动把它渲染成『草稿卡片』，并附带「在编辑器中修改」「确认并发送」按钮。"
+    "你的回复只写一句简短确认（如『已按模板「X」生成草稿，点击下方卡片查看』）+"
+    "还缺哪些变量即可。若把 HTML 正文直接写进回复，HR 看到的是乱码标签，"
+    "而且点不到按钮，视为严重错误。\n"
     "4) 改档、改阶段、加标签、合并档案这类写操作，工具会返回"
     "『已提交待 HR 确认（pending_confirmation）』——此时要明确告诉用户"
     "『已提交待确认』，绝不能说『已经改好了』。\n"
@@ -66,8 +87,16 @@ SYSTEM_PROMPT = (
     "4d) 每个工具的参数里都写了它**什么时候不要用**，动手前先看清；"
     "工具返回 error 时如实转述原因，不要换个说法掩盖。\n"
     "5) 引用技能或结论时，尽量带上简历原文证据（工具会返回 evidence 字段）。\n"
-    "7) 人是用**姓名**指人的：candidate_id 可以直接写姓名（如 '何晓宇'），系统会自动解析；"
+    "7) 人是用**姓名**指人的：candidate_id 可以直接写候选人姓名（系统会自动解析成正确的 id）；"
     "**绝对不要凭空编数字 id**——编了会直接报'未找到候选人'。\n"
+    # v1.25.5（用户截图）：模型在零工具调用的一轮里输出「全量对比表」，
+    # 表格里 12 个"候选人"全是虚构的（含填进示例位的名字）。根因之一是
+    # 提示词只"劝说"（铁律 1 早有"严禁编造姓名"但它不听）。真正的拦截在
+    # 出口 `_data_claim_safety_net`；这里把红线说白，让模型少犯。
+    "7c) **回复里出现的每一个候选人姓名，都必须来自本轮工具返回或用户自己提供。**"
+    "严禁编造姓名；也不要把示例、常识或之前对话里提到的名字当库内数据。"
+    "**零工具调用时不要声称『已调用工具/已获取数据』**；要名单就先调 search_candidates，"
+    "要统计就先调 pool_stats；工具查不到的人，就如实回答『查不到』。\n"
     # v1.25：实测「把 #1 推进至初面」时模型**不查就反问**，
     # 而 HR 已经把编号给出来了 —— 再问一遍等于把活儿推回去。
     # 编号可能是投递 id 也可能是候选人 id，**两个都查一下**再决定要不要问。
@@ -475,6 +504,15 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                 if not answer:
                     raise ValueError("模型返回了空答复")
 
+                # ===== v1.25.x：邮件意图但没调邮件工具 → 兜底补调 =====
+                # 弱模型常把"用模板给X发面试邀请"当普通问答，直接吐 raw HTML。
+                # 这里在出口用事实兜住：认得出候选人 + 命中邮件意图，
+                # 系统自己调一次 draft_email，渲染出带按钮的草稿卡。
+                _ea, _fired = _email_safety_net(user_message, ctx, trace)
+                if _fired:
+                    return _finalize(ctx, user_message, _ea, trace, "llm", rounds,
+                                     usage_total, started, model_used)
+
                 # ---- v1.25：口头提案 → **强制它真调一次工具** ----
                 #
                 # 历史（两版，都留着记录为的是不再走回去）：
@@ -522,17 +560,37 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                         else:
                             # 强制了还没调出写类工具 → 退到确定性文案
                             answer = _summarize_actions(trace)
+
+                # v1.25.5：最后一道闸——数据来源校验（读类的编造）。
+                # 用户原话：「出现了编造的数据，这是不可容忍的，智能助手的回答
+                # 必须有真实数据来源」。上面拦"虚假完成态"（写），这里拦
+                # "编造姓名 / 零工具却出对比表"（读）。
+                _da, _d_fired = _data_claim_safety_net(
+                    user_message, answer, ctx, trace, messages, cfg, usage_total)
+                if _d_fired:
+                    answer = _da
                 return _finalize(ctx, user_message, answer, trace, "llm", rounds,
                                  usage_total, started, model_used)
             messages.append({"role": "assistant", "content": msg.get("content") or "",
                              "tool_calls": calls})
             _run_calls(calls)
         # 轮次用尽，强制收敛
+        # 出口前再给一次邮件兜底机会：弱模型可能调了别的工具却始终没起草邮件。
+        _ea, _fired = _email_safety_net(user_message, ctx, trace)
+        if _fired:
+            return _finalize(ctx, user_message, _ea, trace, "llm", rounds,
+                             usage_total, started, model_used)
         messages.append({"role": "user", "content": "请基于已获取的信息直接给出最终答复。"})
         final = llm.chat(messages, cfg=cfg)
         _accumulate(usage_total, final.get("_usage"))
         rounds += 1
-        return _finalize(ctx, user_message, (final.get("content") or "").strip(),
+        _fa = (final.get("content") or "").strip()
+        # v1.25.5：数据来源校验（与上一个出口同一道闸）
+        _da, _d_fired = _data_claim_safety_net(
+            user_message, _fa, ctx, trace, messages, cfg, usage_total)
+        if _d_fired:
+            _fa = _da
+        return _finalize(ctx, user_message, _fa,
                          trace, "llm", rounds, usage_total, started, model_used)
     except Exception as exc:
         # 模型不可用 → 规则路由兜底（不是罢工）
@@ -576,11 +634,402 @@ def _draft_of(t: dict) -> dict | None:
             return None
     if not isinstance(r, dict) or not r.get("body"):
         return None
+    # v1.25：必须带上 body_html。前端 openDraftInMailer 用 `d.body_html || esc(d.body)`
+    # 填富文本编辑器——free-write 分支如果不带 body_html，正文会被当成转义后的纯文本塞进
+    # contenteditable（换行变空格、排版全乱），HR 点「在编辑器中修改」看到的就是一团乱码/像没填。
+    # 模板分支本来就有 body_html，free-write 分支 draft_email 也产了 body_html，这里只是"漏带"。
     return {"candidate_id": r.get("candidate_id"), "name": r.get("name"),
             "to": r.get("to"), "subject": r.get("subject"),
-            "body": r.get("body"), "job": r.get("job"),
+            "body": r.get("body"), "body_html": r.get("body_html"), "job": r.get("job"),
             "template": r.get("template"),
             "missing_runtime": r.get("missing_runtime") or []}
+
+
+#: 邮件意图关键词。命中且能从消息里认出库里的候选人 → 才会触发兜底补调；
+#: 光有候选人不算（"查一下赵敏"不是发邮件），光有邮件词也不算（"邮件配置"不是起草）。
+_EMAIL_INTENT_RE = re.compile(
+    r"邮件|发信|发个|发一封|发一下|发邮件|邀请|邀约|通知|模板|草稿|拟一封|拟个|回执")
+
+
+def _has_email_draft(trace: list[dict]) -> bool:
+    """trace 里是否已经存在**成功**的邮件草稿（有正文才算，报错的不算）。"""
+    for t in trace:
+        if t.get("tool") in ("draft_email", "preview_mail"):
+            r = t.get("result")
+            if isinstance(r, str):
+                try:
+                    r = json.loads(r)
+                except Exception:
+                    r = {}
+            if isinstance(r, dict) and r.get("body"):
+                return True
+    return False
+
+
+def _force_email_draft(user_message: str, ctx: ToolCtx, trace: list[dict]) -> str | None:
+    """弱模型没调邮件工具、却明显要"给某人发（模板）邮件"时的**确定性兜底**。
+
+    为什么需要（v1.25.x）：本地 qwen 这类弱模型，HR 说"用模板给赵敏发面试邀请"，
+    它常常**一轮就停**，直接把模板 HTML 当聊天文字吐出来（截图实测：轮数 1、
+    无 tool_calls、聊天框里是一坨 `<table>`、`<{面试时间}>` 占位符）。
+    提示词规则（3b/3c）是"劝说"，小模型会不听；这里改在**出口用事实兜底**：
+    认得出库里的候选人 + 命中邮件意图 → 系统自己调一次 `draft_email`，
+    把草稿塞进 trace，前端就能渲染出带「在编辑器中修改 / 确认并发送」的卡片，
+    同时用一句简短确认替换掉那段 raw HTML。
+
+    返回：替换用的确认文案；不插手时返回 None（调用方继续走原逻辑）。
+    """
+    um = (user_message or "").strip()
+    conn = db.connect(ctx.db_path)
+    try:
+        # 1) 候选人在库里吗？—— 子串匹配姓名（HR 用全名指人，库里也是全名）。
+        #    认不出具体人就不瞎调，避免把"张三"的草稿发到"张"身上。
+        cands = conn.execute(
+            "SELECT id, name FROM candidates WHERE merged_into IS NULL").fetchall()
+        hit_cid = hit_name = None
+        for c in cands:
+            nm = (c["name"] or "").strip()
+            if nm and nm in um:
+                hit_cid, hit_name = int(c["id"]), nm
+                break
+        if not hit_cid:
+            return None
+
+        # 2) 模板：子串匹配模板名 / 场景；都命不中就取第一个启用模板（宁可给一个，
+        #    也比让弱模型自由发挥吐 raw HTML 强）。
+        tpls = db.list_mail_templates(conn, enabled_only=True)
+        tkey = None
+        for t in tpls:
+            nm = (t.get("name") or "")
+            sc = (t.get("scene") or "")
+            if nm and nm in um:
+                tkey = nm
+                break
+            if sc and sc in um:
+                tkey = nm
+                break
+        if not tkey and tpls:
+            tkey = tpls[0]["name"]
+
+        args = {"candidate_id": hit_cid}
+        if tkey:
+            args["template"] = tkey
+
+        # 3) 补调。模板没匹配上（名字像但不唯一）→ 退自由撰写再试一次，
+        #    保证"至少给封能发的草稿"而不是空手而归。
+        raw = execute("draft_email", args, ctx)
+        result = raw if not isinstance(raw, str) else _try_json(raw)
+        if result.get("error") and tkey:
+            raw2 = execute("draft_email", {"candidate_id": hit_cid}, ctx)
+            r2 = raw2 if not isinstance(raw2, str) else _try_json(raw2)
+            if not r2.get("error"):
+                raw, result, tkey = raw2, r2, None
+        if result.get("error"):
+            return None
+
+        trace.append({"tool": "draft_email", "args": args,
+                      "result": (raw if "draft_email" in _FULL_RESULT_TOOLS else raw[:900]),
+                      "tool_label": _TOOL_LABEL.get("draft_email", "draft_email"),
+                      "write": False, "disabled": False})
+        miss = result.get("missing_runtime") or []
+        tpl_used = result.get("template") or "自由撰写"
+        return (f"已按系统模板「{tpl_used}」为 **{hit_name}** 生成邮件草稿，"
+                f"请在下方卡片里确认，或点「在编辑器中修改」直接改。"
+                + (f" 还缺：{'、'.join(miss)}（告诉我具体时间 / 地点后我重渲染一版）。"
+                   if miss else ""))
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def _try_json(s: str) -> dict:
+    try:
+        v = json.loads(s)
+        return v if isinstance(v, dict) else {}
+    except Exception:
+        return {}
+
+
+def _email_safety_net(user_message: str, ctx: ToolCtx, trace: list[dict]):
+    """判定是否触发邮件兜底。返回 (answer, fired)。fired=True 时调用方应直接 finalize。"""
+    if _has_email_draft(trace):
+        return None, False
+    if not _EMAIL_INTENT_RE.search(user_message or ""):
+        return None, False
+    ans = _force_email_draft(user_message, ctx, trace)
+    if ans:
+        return ans, True
+    return None, False
+
+
+# ============================================================
+# 数据来源校验（出口兜底）—— v1.25.5
+# ============================================================
+#
+# 用户截图（2026-10-13）：模型在一轮**零工具调用**里输出了「全量对比表」，
+# 表格里 12 个"候选人"**全部是虚构的**——数据库、对话历史里都不存在这些名字。
+# 三类根因叠加：
+#   ① 铁律 1 早有"严禁编造姓名"，但提示词只是**劝说**，模型不听；
+#   ② 出口只拦「写操作的虚假完成态」（_looks_like_fake_proposal），
+#      **读类**的"已调用工具获取全量数据"从没被拦过；
+#   ③ 没有任何"回复内容 ↔ 库内真实数据"的核对。
+#
+# 判据（**结构位提取 + 白名单比对**，不做 NLP、不猜词义）：
+#   · 只从两个"展示姓名的固定位置"提取疑似人名：markdown 表格首列、粗体词；
+#   · 词必须"像名字"（常见姓氏开头、非字段词结尾）才进入判定；
+#   · 白名单 = 库内全部姓名 ∪ 用户消息里出现 ∪ 本轮工具返回文本里出现；
+#   · 白名单外 → 判定虚构。另有独立判据：答复带表格但本轮**没有任何成功的
+#     读类工具** → 数据无来源，同样触发。
+#
+# 触发后的处理（与 _email_safety_net 同款"出口兜底"模式）：
+#   1. 系统自己补调 search_candidates（真·全量）拿回真实名单；
+#   2. 连同一段"只许用真实数据"的系统指令注入上下文，让模型重写；
+#   3. 重写稿再复检；仍出现库外姓名 → 用**确定性文案**接管：
+#      明确指出哪些名字查无档案 + 给出数据库里的真实名单。
+#      —— 宁可说一句由事实拼成的话，也不让虚构数据留给 HR。
+#
+# 本版边界：只校验"姓名与来源"（人名幻觉是本次用户点名的形态）。
+# 数值级校验（学历/年限等逐字段核对）暂不做——重写时注入了真实数据，
+# 且名字全真时编数字的动机大减；先观察拦截日志再决定要不要加。
+#
+# 误报的代价 = 多一次真实检索 + 一次重写。**故意宁严勿松**：
+# 用户原话「出现了编造的数据，这是不可容忍的，智能助手的回答必须有真实数据来源」。
+
+#: 常见姓氏（百家姓高频段）。只用来**降低**误报：提取词首字不在集合里就不判人名。
+_SURNAMES = (
+    "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜"
+    "戚谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳史唐费廉"
+    "岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元卜顾孟平黄和穆"
+    "萧尹姚邵汪祁毛禹狄米贝明臧计伏成戴谈宋茅庞熊纪舒屈项祝董梁杜阮蓝"
+    "闵席季麻强贾路娄危江童颜郭梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞万支"
+    "柯管卢莫房裘解应宗丁宣贲邓郁单杭洪包诸左石崔吉龚程邢裴陆荣翁荀羊"
+    "甄曲家封芮储靳松井段富巫乌焦巴牧山谷车侯全班秋仲伊宫宁仇栾甘厉武"
+    "符刘景詹束龙叶幸司黎薄印宿白怀蒲鄂索咸赖卓蔺屠蒙池乔阴胥能苍双闻"
+    "党翟谭贡劳姬申扶堵冉宰郦雍桑桂牛寿通边扈燕冀浦尚农温别庄晏柴瞿阎"
+    "慕连茹习艾鱼容向古易慎戈廖终居衡步都耿满弘匡国文寇广东欧沃利越隆"
+    "师巩聂晁勾敖冷辛简饶曾沙鞠丰巢关蒯查红游竺权盖益桓"
+)
+_SURNAME2 = ("欧阳", "司马", "上官", "诸葛", "东方", "皇甫", "尉迟", "公孙",
+             "慕容", "长孙", "宇文", "司徒", "司空", "令狐", "夏侯", "西门")
+
+#: 不会出现在**人名末尾**的字（"高匹配组 / 优先级 / 覆盖率 / 下一步"这类）。
+_NAME_TAIL_BLACK = frozenset(
+    "组度率性化法则图册页项类档级期区内外上下前后中边单双多少新旧的了的吗呢吧啊么批条次个位种类")
+
+#: 常见非人名（字段词/统计词）——即便出现在表格首列或粗体里也不作人名判定。
+#: 注意收进"查/核"开头的功能短语：'查' 是罕见姓氏（zhā），
+#: 但"查无档案/查询结果"这类词的出现频率高得多（兜底文案自己就含它们）。
+_NAME_STOPWORDS = frozenset({
+    "查无档案", "查无此人", "查询结果", "查询记录", "核查结果", "核查记录", "调查结果",
+    "姓名", "学历", "年限", "院校", "技能", "档位", "备注", "建议", "档案", "候选人",
+    "人才库", "总览", "统计", "指标", "数值", "说明", "合计", "总计", "小计", "平均",
+    "分析", "报告", "结论", "原因", "依据", "操作", "步骤", "流程", "规则", "策略",
+    "问题", "诊断", "风险", "状态", "来源", "证据", "命中", "缺失", "提示", "名单",
+    "高匹配", "低匹配", "高潜力", "低潜力", "匹配度", "高匹配组", "低匹配组",
+    "优先", "优先级", "重点", "第一步", "第二步", "下一步", "综上", "综上所述",
+    "总结", "小结", "概览", "概况", "背景", "现状", "前言", "目标", "计划", "方法",
+    "方案", "行动", "执行", "结果", "数据", "信息", "内容", "细节", "字段", "参数",
+    "配置", "设置", "入口", "按钮", "页面", "功能", "权限", "表格", "列表", "清单",
+    "分类", "分组", "对比", "差异", "变化", "趋势", "分布", "结构", "构成", "比例",
+    "占比", "总数", "总人数", "数量", "人数", "投递", "阶段", "学历结构", "院校层次",
+    "材料研发", "数字化", "应届生", "应届", "在职", "离职", "实习", "正式", "试用",
+})
+
+#: 表格行首单元格：`| 某某 |` / `| **某某** |`
+_TABLE_ROW_RE = re.compile(r"^\s*\|\s*\**([\u4e00-\u9fa5]{2,4})\**\s*\|", re.M)
+#: 粗体词：`**某某某**`
+_BOLD_TEXT_RE = re.compile(r"\*\*([\u4e00-\u9fa5]{2,4})\*\*")
+#: markdown 表格分隔行 `|------|------|`（有它才认为"这是一个数据表"）
+_TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:]*-{3,}[\s:\-|]*\|?\s*$", re.M)
+
+#: "数据类"读工具——只有这些成功执行过，答复里的候选人数据才算"有来源"。
+#: 故意收窄：读了模板/审计/岗位等不算（它们不是候选人数据）。
+_READ_DATA_TOOLS = frozenset({
+    "search_candidates", "get_candidate", "pool_stats", "search_by_skills",
+    "semantic_search", "similar_candidates", "pipeline_overview",
+})
+
+
+def _looks_like_name(w: str) -> bool:
+    """启发式：这个词看起来像不像人名（用于收敛误报）。"""
+    if not (2 <= len(w) <= 4):
+        return False
+    if w in _NAME_STOPWORDS:
+        return False
+    if w[0] not in _SURNAMES and w[:2] not in _SURNAME2:
+        return False
+    if w[-1] in _NAME_TAIL_BLACK:
+        return False
+    return True
+
+
+def _extract_claimed_names(answer: str) -> list[str]:
+    """从答复中提取"疑似候选人姓名"。
+
+    **只认两个结构位**（表格首列、粗体词）——中文没有词边界，全文扫 2-4 字词
+    会把"档案/硕士/建议"全卷进来。**找结构，不找词义**（本项目判据的老规矩）。
+    """
+    if not answer:
+        return []
+    raw: list[str] = []
+    raw.extend(m.group(1) for m in _TABLE_ROW_RE.finditer(answer))
+    raw.extend(m.group(1) for m in _BOLD_TEXT_RE.finditer(answer))
+    out: list[str] = []
+    for w in raw:
+        w = w.strip()
+        if _looks_like_name(w) and w not in out:
+            out.append(w)
+    return out
+
+
+def _has_markdown_table(answer: str) -> bool:
+    return bool(_TABLE_SEP_RE.search(answer or ""))
+
+
+def _has_ok_read(trace: list[dict]) -> bool:
+    """本轮是否有**成功的**数据类读工具（返回里没有 error 才算）。"""
+    for t in trace:
+        if t.get("tool") not in _READ_DATA_TOOLS:
+            continue
+        r = t.get("result")
+        if isinstance(r, str):
+            try:
+                r = json.loads(r)
+            except Exception:
+                continue
+        if isinstance(r, dict) and not r.get("error"):
+            return True
+    return False
+
+
+def _db_names_and_roster(ctx: ToolCtx) -> tuple[set[str], list[dict]]:
+    """库内真实名单：姓名全集 + 渲染兜底文案用的行（只读）。"""
+    conn = db.connect(ctx.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT name, edu_level, years_exp, school FROM candidates "
+            "WHERE merged_into IS NULL AND coalesce(name,'') != '' ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    names: set[str] = set()
+    roster: list[dict] = []
+    for r in rows:
+        nm = (r["name"] or "").strip()
+        if not nm:
+            continue
+        names.add(nm)
+        roster.append({"name": nm, "edu": r["edu_level"],
+                       "years": r["years_exp"], "school": r["school"]})
+    return names, roster
+
+
+def _trace_text(trace: list[dict]) -> str:
+    """本轮全部工具返回拼成一段文本（用于"名字在工具结果里出现过吗"）。"""
+    parts: list[str] = []
+    for t in trace:
+        r = t.get("result")
+        parts.append(r if isinstance(r, str)
+                     else json.dumps(r, ensure_ascii=False, default=str))
+    return "\n".join(parts)
+
+
+def _truth_fallback_answer(ctx: ToolCtx, bad_names: list[str]) -> str:
+    """确定性兜底：明确提出查无档案的名字 + 数据库里的真实名单。
+
+    **不经过模型**——这是最后一道防线；宁可少说，不可说错。
+    """
+    _, roster = _db_names_and_roster(ctx)
+    head = "【系统核对】"
+    if bad_names:
+        head += ("上一条回复中的 " + "、".join(f"「{w}」" for w in bad_names[:12])
+                 + " 在人才库中查无档案——相关内容已拦下，智能助手只使用库内真实数据。")
+    else:
+        head += "上一条回复中的表格没有任何检索结果支撑，已拦下。"
+    if not roster:
+        return head + "\n\n当前人才库中没有候选人。"
+    body = []
+    for it in roster:
+        y = "年限未知" if it.get("years") is None else f"{it['years']} 年"
+        body.append(f"· {it['name']}（{it.get('edu') or '学历未知'} · {y} · "
+                    f"{it.get('school') or '院校未知'}）")
+    return (head + f"\n\n以上为数据库中的真实候选人（共 {len(roster)} 人）：\n"
+            + "\n".join(body)
+            + "\n\n如需对比分析，请直接说名字或条件，我来实时检索。")
+
+
+def _data_claim_safety_net(user_message: str, answer: str, ctx: ToolCtx,
+                           trace: list[dict], messages: list[dict],
+                           cfg: dict, usage_total: dict) -> tuple[str | None, bool]:
+    """出口数据来源校验。命中疑似编造 → 补真实数据 → 重写 → 复检 → 兜底。
+
+    返回 (new_answer, fired)。fired=False 时调用方保持原答复不动。
+    """
+    try:
+        a = answer or ""
+        claimed = _extract_claimed_names(a)
+        table_no_source = bool(a) and _has_markdown_table(a) and not _has_ok_read(trace)
+        if not claimed and not table_no_source:
+            return None, False
+
+        names_in_db, _roster = _db_names_and_roster(ctx)
+        um = user_message or ""
+        trace_txt = _trace_text(trace)
+        bad = [w for w in claimed
+               if w not in names_in_db and w not in um and w not in trace_txt]
+        if not bad and not table_no_source:
+            return None, False
+
+        # 1) 补调真实全量（读操作，安全；结果并入 trace 供界面与留痕）
+        truth = execute("search_candidates", {"limit": 100}, ctx)
+        truth_txt = truth if isinstance(truth, str) else json.dumps(
+            truth, ensure_ascii=False, default=str)
+        trace.append({"tool": "search_candidates",
+                      "args": {"limit": 100, "reason": "系统数据来源校验自动补调"},
+                      "result": truth_txt[:4000],
+                      "tool_label": _TOOL_LABEL.get("search_candidates", "search_candidates"),
+                      "write": False, "disabled": False, "recovered": True})
+
+        # 2) 让模型基于真实数据重写（注入用 user 角色，兼容各类兼容端点）
+        why = ("你上一条答复里出现了人才库中**查无档案**的名字：" + "、".join(bad)) if bad else \
+              "你上一条答复包含候选人数据表格，但本轮没有任何检索结果支撑"
+        rewrite_messages = messages + [{"role": "user", "content":
+            f"【系统核查】{why}。智能助手只允许使用真实数据，这条内容已被系统拦下。\n"
+            "系统已重新检索，结果如下（真实数据，必须以此为准）：\n"
+            f"{truth_txt}\n\n"
+            "请用简体中文重写答复：只允许出现上述检索结果里真实存在的姓名与数据；"
+            "检索结果没有的内容（如某人的技能命中、档位）就说明需要另行查询，"
+            "不要补全、不要猜测；若用户要求的表格无法用真实数据完成，如实说明缺什么。"}]
+        new_a = ""
+        try:
+            rw = llm.chat(rewrite_messages, cfg=cfg)
+            _accumulate(usage_total, rw.get("_usage"))
+            new_a = (rw.get("content") or "").strip()
+            # 模型可能顺手又调工具：执行掉保持一致（正常不应发生）
+            if rw.get("tool_calls"):
+                for tc in rw["tool_calls"]:
+                    fn = (tc.get("function") or {}).get("name", "")
+                    try:
+                        _args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
+                    except ValueError:
+                        _args = {}
+                    execute(fn, _args, ctx)
+        except Exception:
+            new_a = ""
+
+        # 3) 复检；仍不干净 → 确定性兜底（不经过模型）
+        if new_a:
+            names2, _ = _db_names_and_roster(ctx)
+            bad2 = [w for w in _extract_claimed_names(new_a)
+                    if w not in names2 and w not in um and w not in trace_txt
+                    and w not in truth_txt]
+            if not bad2:
+                return new_a, True
+        return _truth_fallback_answer(ctx, bad), True
+    except Exception:
+        # 校验器自身出问题时不改变原答复（保守放行），但绝不让异常击穿整轮对话
+        return None, False
 
 
 def _accumulate(total: dict, usage: dict | None) -> None:

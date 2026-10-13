@@ -232,21 +232,24 @@ _PAGE = """<!DOCTYPE html>
      **库存层（背景信息）缩小并弱化**，A/B/C/D 四档收成一条比例条。
      这不是装饰，是把"该看哪里"写进视觉层级里。 */
   .grid-stats{margin:18px 0 4px}
-  /* 待办层：三块并排，每块一条竖线分隔，不做成卡片——卡片会让它显得像"另一件事" */
-  .stat-act{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
-    border-bottom:1px solid var(--line-2);padding-bottom:14px;margin-bottom:14px}
+  /* 统计区（v1.25.6 二次重排）：上下两行用**同一套 4 列网格**——
+     行与行的列沿严格对齐；字号放大一档；右侧环跨两行。
+     不做成卡片、以细竖线分列（内部工具的数据表观感）。 */
+  .stat-act{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0 20px;
+    border-bottom:1px solid var(--line-2);padding-bottom:12px;margin-bottom:12px}
   .stat-act .stat{padding:4px 16px 4px 0}
   .stat-act .stat + .stat{border-left:0;padding-left:16px;border-left:1px solid var(--line)}
-  .stat-act .stat .k{font-size:12px;letter-spacing:.02em}
-  .stat-act .stat .v{font-size:34px;font-weight:600;line-height:1.15;
-    font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .stat-act .stat .k{font-size:13px;letter-spacing:.02em}
+  .stat-act .stat .v{font-size:26px;font-weight:600;line-height:1.2;
+    font-variant-numeric:tabular-nums;letter-spacing:-.01em}
   /* 为 0 时不该吸引注意——"没有待确认"是好消息，不是警报 */
   .stat-act .stat.is-zero .v{color:var(--ink-3)!important;font-weight:500}
-  /* 库存层：小而安静，单行密排 */
-  .stat-rest{display:flex;flex-wrap:wrap;gap:0 26px}
-  .stat-rest .stat{padding:2px 0;border-left:0;min-width:64px}
-  .stat-rest .stat .k{font-size:12px;color:var(--ink-3);display:inline}
-  .stat-rest .stat .v{font-size:14px;font-weight:600;margin-left:6px;
+  /* 库存层：与上一行**同一网格**（列沿对齐），字号次一级 */
+  .stat-rest{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0 20px}
+  .stat-rest .stat{padding:2px 0}
+  .stat-rest .stat + .stat{border-left:1px solid var(--line);padding-left:16px}
+  .stat-rest .stat .k{font-size:13px;color:var(--ink-3);display:inline}
+  .stat-rest .stat .v{font-size:20px;font-weight:600;margin-left:6px;
     font-variant-numeric:tabular-nums}
   .stat{line-height:1.4}
   .stat .k{color:var(--ink-3);font-size:13px}
@@ -257,6 +260,11 @@ _PAGE = """<!DOCTYPE html>
   .tierbar i{display:block;height:100%}
   .tierbar.is-empty{background:var(--line-2)}
   .tier-note{font-size:11px;color:var(--ink-3);margin-top:5px}
+  /* v1.25.6：统计区改为"库存数字行 + 右侧投递进度环"；环段与图例都可点（穿透筛选） */
+  .stat-row{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .tier-donut{display:flex;align-items:center;gap:14px;flex:none}
+  .tier-donut svg .td-seg{cursor:pointer;transition:stroke-width .12s}
+  .tier-donut svg .td-seg:hover{stroke-width:14}
   .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:16px 0 12px}
   .tab{padding:7px 15px;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--surface);cursor:pointer;font-size:14px;color:var(--ink-2)}
   .tab:hover{color:var(--accent);border-color:var(--accent-line)}
@@ -534,7 +542,7 @@ _PAGE = """<!DOCTYPE html>
 <div class="modal" id="modal" onclick="if(event.target===this)closeModal()">
   <div class="sheet"><div class="flexbetween" style="margin-bottom:14px">
     <div style="font-size:18px;font-weight:600" id="mTitle">详情</div>
-    <button onclick="closeModal()">关闭</button></div>
+    <div class="bar"><span id="mHeadBtn"></span><button onclick="closeModal()">关闭</button></div></div>
     <div id="mBody"></div></div>
 </div>
 
@@ -797,7 +805,7 @@ function resultModal(opts){
   __afterClose = o.afterClose || null;
   const kind = o.kind || 'info';
   const color = kind==='ok' ? 'var(--ok)' : (kind==='danger' ? 'var(--bad)' : (kind==='warn' ? 'var(--warn)' : 'var(--accent)'));
-  document.getElementById('mTitle').textContent = o.title || '完成';
+  setModalTitle(o.title || '完成');
   document.getElementById('mBody').innerHTML =
     `<div style="line-height:1.8;white-space:pre-wrap">
        <div style="font-size:15px;color:${color};font-weight:600;margin-bottom:8px">${o.headline || ''}</div>
@@ -817,7 +825,7 @@ function progressModal(taskId, opts){
   const o = opts || {};
   if (!taskId){ resultModal({title: o.title||'处理中', body:o.body||'', kind:'info'}); return; }
   if (__progressTimer){ clearInterval(__progressTimer); __progressTimer = null; }
-  document.getElementById('mTitle').textContent = o.title || '处理中…';
+  setModalTitle(o.title || '处理中…');
   document.getElementById('mBody').innerHTML =
     `<div>
        <div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">${esc(o.desc || '正在处理，请稍候')}</div>
@@ -972,8 +980,8 @@ async function boot(){
 
 // 侧栏顺序（v1.15）：写邮件提到人才库之后——它是日常最高频动作之一，
 // 归档沉到靠后（一年用一次，不该占黄金位）。
-const VIEWS = [['brief','今日待办'],['pool','人才库'],['mail','写邮件'],
-               ['chat','智能助手'],['org','岗位管理'],['archive','归档'],
+const VIEWS = [['brief','今日待办'],['pool','人才库'],['chat','智能助手'],
+               ['mail','写邮件'],['org','岗位管理'],['archive','归档'],
                ['sys','系统配置']];
 // 侧栏导航图标：内联 SVG（stroke 跟随文字色），不引外部图标库
 const _I = p => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -1020,9 +1028,10 @@ async function refresh(){
   // 首屏初始化走的是 readHash() 而不是 go()（实测 go() 里打首屏就漏了这一下，
   // body 上没有 main-on-chat，整套 CSS 静默不生效）。
   document.body.classList.toggle('main-on-chat', VIEW === 'chat');
-  // 顶部统计卡片只在「今日待办」与「人才库」展示。
+  // 顶部统计卡片只在「人才库」展示（v1.25.6：今日待办页不再重复——
+  // 两页顶部摆同一排数字，HR 反馈"和人才库重复的东西不需要展示"）。
   // 其他页面放一排数字只是噪音：看岗位管理或写邮件时，那排总数帮不上任何忙。
-  const showStats = (VIEW === 'brief' || VIEW === 'pool');
+  const showStats = (VIEW === 'pool');
   const statsBox = document.querySelector('.grid-stats');
   if (statsBox) statsBox.style.display = showStats ? '' : 'none';
   if (showStats) renderStats(await api('/api/stats'));
@@ -1051,11 +1060,19 @@ function renderStats(s){
   const n = v => (v == null ? 0 : v);
   const sum = n(t.A) + n(t.B) + n(t.C) + n(t.D);
 
-  // 待办层：数字大、颜色语义明确
+  // 待办层：数字大、颜色语义明确；**每张卡都可点**（v1.25.6，HR 要求）——
+  // 与右侧环同一套"数字即入口"的心智：点一下直接到该去的地方。
   const acts = [
-    card('A 档 · 优先面试', t.A, 'var(--ok)',    n(t.A) > 0),
-    card('待你确认',          s.pending, 'var(--bad)',  n(s.pending) > 0),
-    card('待确认提案',        s.proposals_pending, 'var(--bad)', n(s.proposals_pending) > 0),
+    card('A 档 · 优先面试', t.A, 'var(--ok)', n(t.A) > 0,
+         '点击 → 在人才库筛出 A 档', "TAB='A';STAGE_F='';poolPageReset();go('pool')"),
+    card('待你确认', s.pending, 'var(--bad)', n(s.pending) > 0,
+         '点击 → 筛出未复核的人', "TAB='UNCONFIRMED';STAGE_F='';poolPageReset();go('pool')"),
+    card('待确认提案', s.proposals_pending, 'var(--bad)', n(s.proposals_pending) > 0,
+         '点击 → 查看并逐条处理', 'openProposals()'),
+    // v1.25.6 二改：信息缺失上移第一行（它是"要动手"的事，不是库存），且可点穿透。
+    card('信息缺失', s.needs_review, 'var(--warn)', n(s.needs_review) > 0,
+         '点击 → 在人才库筛出信息缺失（缺字段）的投递；打开档案可看到缺什么并更正',
+         "TAB='REVIEW';STAGE_F='';poolPageReset();go('pool')"),
   ].join('');
 
   // 库存层：小而安静
@@ -1063,29 +1080,93 @@ function renderStats(s){
     card('候选人数', s.people, 'var(--ink)') +
     card('投递数',   s.applications, 'var(--ink)') +
     card('简历附件', s.documents, 'var(--ink)') +
-    card('信息缺失', s.needs_review, 'var(--warn)');
+    // v1.25.6 二改：原"信息缺失"上移第一行；这里换成"近 7 天新增简历"（库存动态）。
+    card('近 7 天新增简历', s.docs_7d, 'var(--ink)', false,
+         '最近 7 天新导入的简历份数（按简历接收日期统计）');
 
-  // 档位分布条：四段比例比"A 3 / B 2 / C 4 / D 1"四个数字更快读出结构
-const seg = (v, c) => (sum ? `<i style="flex:${n(v) || 0};background:${c}"></i>` : '');
-        // 一条都还没判档时，四段全空 = 一条看不见的线，HR 会以为这里坏了。
-        // 没数据时给一条中性灰底，并说明原因。
-        const bar = sum
-          ? `<div class="tierbar" title="档位分布：A ${n(t.A)} · B ${n(t.B)} · C ${n(t.C)} · D ${n(t.D)}"
-              role="img" aria-label="档位分布：A ${n(t.A)}、B ${n(t.B)}、C ${n(t.C)}、D ${n(t.D)}">
-              ${seg(t.A, 'var(--ok)')}${seg(t.B, 'var(--tier-b)')}${seg(t.C, 'var(--warn)')}${seg(t.D, 'var(--line-2)')}
-            </div>`
-          : `<div class="tierbar is-empty" title="还没有任何一份简历被判过档位"></div>
-             <div class="tier-note">档位分布：暂无（简历尚未判档）</div>`;
+  // 投递进度环（v1.25.6，用户要求"展示人才库每个人进度"）——统计区右侧环形比例图：
+  //   · 每段 = 一个投递阶段（新投递 → 已联系 → 初面 → 复面 → 待offer → 已入职 → 已结束）；
+  //   · 悬停看人数；点击一段（或图例一行）**穿透到人才库并按该阶段筛选**；
+  //   · 点击时重置档位筛选（TAB='ALL'），避免"两个筛选叠加后人数变少"的困惑。
+  const STAGE_COLOR = {
+    '新投递': '#3370ff', '已联系': '#0ea5a5', '初面': '#f0b429', '复面': '#ef7c3a',
+    '待offer': '#9254de', '已入职': '#12b76a', '已结束': '#a7b0bf',
+  };
+  const stageRing = (() => {
+    const st = s.stages || {};
+    const segs = STAGES.map(k => [k, n(st[k]), STAGE_COLOR[k] || '#a7b0bf']);
+    const total = segs.reduce((a, x) => a + x[1], 0);
+    if (!total) {
+      return `<div class="tier-note" style="flex:none">投递进度：暂无（还没有投递）</div>`;
+    }
+    const R = 26, CIRC = 2 * Math.PI * R;
+    let acc = 0;
+    const arcs = segs.filter(x => x[1] > 0).map(([k, v, color]) => {
+      const len = CIRC * v / total;
+      const el = `<circle class="td-seg" r="${R}" cx="34" cy="34" fill="none"
+          stroke="${color}" stroke-width="11"
+          stroke-dasharray="${len} ${CIRC - len}" stroke-dashoffset="${-acc}"
+          transform="rotate(-90 34 34)"
+          onclick="STAGE_F='${k}';TAB='ALL';poolPageReset();go('pool')"
+        ><title>${k}：${v} 人 —— 点击筛选</title></circle>`;
+      acc += len;
+      return el;
+    }).join('');
+    const legend = segs.map(([k, v, color]) =>
+      `<div onclick="STAGE_F='${k}';TAB='ALL';poolPageReset();go('pool')"
+            title="${k}：${v} 人 —— 点击筛选"
+            style="cursor:pointer;display:flex;align-items:center;gap:5px;font-size:13px;color:var(--ink-2)">
+        <i style="width:8px;height:8px;border-radius:2px;background:${color};display:inline-block"></i>
+        ${k} ${v}
+      </div>`).join('');
+    return `<div class="tier-donut" title="投递进度（点环或图例 → 筛出该阶段）">
+      <svg width="128" height="128" viewBox="0 0 68 68" role="img"
+           aria-label="投递进度：${segs.map(x => x[0] + ' ' + x[1]).join('、')}">
+        ${arcs}
+        <text x="34" y="34" text-anchor="middle" dominant-baseline="central"
+              font-size="13" font-weight="600" fill="var(--ink)">${total}</text>
+      </svg>
+      <div style="display:grid;gap:2px">${legend}</div>
+    </div>`;
+  })();
 
+  // "最近导入"（v1.25.6，HR 要求）：右列环下的一行动态——给整块一点时间感。
+  const lastDoc = s.last_doc;
+  const recentLine = (lastDoc && lastDoc.at)
+    ? `<div class="small" style="color:var(--ink-3)">最近导入：${esc(lastDoc.name)} · ${esc(ago(lastDoc.at))}</div>`
+    : '';
   document.getElementById('stats').innerHTML =
-    `<div class="stat-act">${acts}</div>
-     <div class="stat-rest">${rest}</div>${bar}`;
+    `<div class="stat-row">
+       <div style="flex:1;min-width:0;max-width:calc(100% - 300px)">
+         <div class="stat-act">${acts}</div>
+         <div class="stat-rest">${rest}</div>
+       </div>
+       <div style="display:grid;gap:8px;justify-items:end;flex:none">
+         ${stageRing}
+         ${recentLine}
+       </div>
+     </div>`;
 }
-/* hot=false 时该数字为 0，加 is-zero 让它自动褪成灰色 */
-function card(k, v, c, hot){
+/* 相对时间（v1.25.6）：'YYYY-MM-DD HH:MM:SS' → "2 小时前"。用于"最近导入"。 */
+function ago(ts){
+  const t = new Date(String(ts || '').replace(' ', 'T'));
+  if (isNaN(t.getTime())) return ts || '';
+  const s = (Date.now() - t.getTime()) / 1000;
+  if (s < 60) return '刚刚';
+  if (s < 3600) return Math.round(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.round(s / 3600) + ' 小时前';
+  return Math.round(s / 86400) + ' 天前';
+}
+/* hot=false 时该数字为 0，加 is-zero 让它自动褪成灰色；
+   tip（可选）：鼠标悬停的解释，统计口径写在这里；
+   go（可选，v1.25.6）：点击动作（内联 JS 字面量，如 "TAB='A';go('pool')"）——
+   传了就整卡可点（手型光标），统计数字成为"入口"。 */
+function card(k, v, c, hot, tip, go){
   const zero = (v == null || v === 0);
-  return `<div class="stat${(zero && !hot) ? ' is-zero' : ''}">`
-       + `<div class="k">${k}</div><div class="v" style="color:${c}">${v == null ? '—' : v}</div></div>`;
+  return `<div class="stat${(zero && !hot) ? ' is-zero' : ''}"`
+       + (tip?(' title="'+esc(tip)+'"'):'')
+       + (go?(' onclick="'+go+'" style="cursor:pointer"'):'')
+       + `><div class="k">${k}</div><div class="v" style="color:${c}">${v == null ? '—' : v}</div></div>`;
 }
 
 /* ------------------------------ 今日待办 ------------------------------ */
@@ -1159,10 +1240,12 @@ async function rebuildBrief(){
    校招里"能不能投"看的是身份，不是一个年限数字。 */
 function expBadge(x){
   const e = x.exp_display;
-  // 校招口径：**不展示工作年限**。只有"往届未就业"这种值得提醒的情况才显示身份，
-  // 其余统一显示"应届"——显示"1 年"只会制造噪音（HR 原话：不要展示工作年限）。
+  // 校招口径：**不展示工作年限**。
+  // v1.25.6（HR 反馈）：默认**连"应届"也不展示**——招聘默认都是校招，
+  // 每个人挂一枚绿色"应届"没有任何信息量。只有"往届未就业"这种
+  // 值得提醒的例外才标出来，其余一律返回空（调用方按空串处理分隔符）。
   if (e && e.kind === 'past_idle') return expBadgeReal(e);
-  return '<span style="color:var(--ok)">应届</span>';
+  return '';
 }
 function expBadgeReal(e){
   if (!e) return '应届';
@@ -1366,16 +1449,19 @@ async function viewPool(){
     ? `<div class="warn" style="margin-top:8px">有 <b>${ef.hidden_unknown}</b> 人学历无法判定，未计入「${esc(ef.min)}及以上」筛选结果；选「不限」可看到全部。</div>` : '';
   host.innerHTML = `
   <div class="panel">
-    <div class="flexbetween">
-      <div class="bar">
+    <!-- v1.25.6：工具栏重排——找（搜索/筛选）、收（导入）、析（分析）三簇左对齐连续排列，
+         竖线分隔，不再用 flexbetween 把两组拉到两端（中宽度下会形成大片空隙、显散） -->
+    <div class="bar" style="flex-wrap:wrap;row-gap:8px">
         <input id="kwBox" placeholder="搜索姓名 / 院校 / 专业 / 技能"
                style="width:280px" value="${esc(KW)}"
                onkeydown="if(event.key==='Enter'){doSearch()}">
         <button class="btn-primary" onclick="doSearch()">搜索</button>
         <button onclick="KW='';GENDER='';EDU_MIN='';UNIV='';poolPageReset();refresh()">清空</button>
         ${gsel}${eduSel}${uniSel}${stageSel}
-      </div>
-      <div class="bar">
+        <!-- v1.25.6：**强制换行**——导入组固定从第二行开始（HR 要求"收取邮箱简历
+             应该在第二行"），不再看窗口宽度随机挤到第一行末尾。
+             flex-basis:100% 的空元素在 flex-wrap 容器里起 line-break 作用。 -->
+        <span style="flex-basis:100%;height:0"></span>
         <button id="btnIngestMailbox" onclick="doIngest('mailbox')">收取邮箱简历</button>
         <button id="btnIngestFolder" onclick="doIngest('folder')">导入本地文件夹</button>
         <button onclick="document.getElementById('upFile').click()"
@@ -1384,23 +1470,23 @@ async function viewPool(){
                accept=".jpg,.jpeg,.png,.bmp,.webp,.pdf,.docx,.doc,.txt"
                onchange="doUpload(this.files)">
         <button onclick="exportCsv()">导出 CSV</button>
-      </div>
-      <div class="bar" style="margin-top:4px">
+        <span class="vdiv"></span>
         <span class="small">入库即分析</span>
         <label class="small" style="display:flex;align-items:center;gap:4px;cursor:pointer"
                title="开启：新简历入库后自动分析一次（每人约 2-8 秒、消耗模型额度）；关掉：入库不调模型，改由你按需批量补">
           <input type="checkbox" ${isw.enabled?'checked':''}
-                 onchange="setAutoInsight(this.checked)"> ${isw.enabled?'开（进门就有判断）':'关（改为手动批量分析）'}
+                 onchange="setAutoInsight(this.checked)"> ${isw.enabled?'开':'关'}
         </label>
+        <!-- v1.25.6：没有待分析的人时**隐藏**（不用一个灰色禁用按钮占版面，界面更干净；
+             JS 端 analyzePendingBatch 已做 !btn 防御，隐藏不影响引用） -->
         <button id="btnAnalyzePending" data-pending="${isw.pending}"
-                onclick="analyzePendingBatch()" ${isw.pending?'':'disabled'}>
-          ${isw.pending ? ('分析待分析的人（'+isw.pending+'）') : '无需补充分析'}
+                onclick="analyzePendingBatch()" ${isw.pending?'':'disabled style="display:none"'}>
+          ${isw.pending ? ('分析待分析的人（'+isw.pending+'）') : ''}
         </button>
         <button id="btnReanalyzeBatch" onclick="reanalyzeBatch()"
                 title="把「抽取方式=规则通道」的档案按当前配置完整重跑一遍：重读原件 → 模型重抽字段 → 重建技能 → 重新归岗 → 重判建议档。HR 已定的档位/阶段/岗位不动，人工更正过的字段保留。">
           批量按模型重跑
         </button>
-      </div>
     </div>
     <div class="bar" style="margin-top:8px">
       ${(()=>{
@@ -1428,11 +1514,13 @@ async function viewPool(){
     </div>
     ${gtip}
     ${eduWarn}
-    <div class="tabs" style="margin-bottom:0">
-      ${tabs.map(([k,l])=>`<div class="tab ${TAB===k?'on':''}" onclick="TAB='${k}';poolPageReset();refresh()">${l}${k==='ALL'?(' '+n.ALL):''}</div>`).join('')}
-    </div>
   </div>
   ${pipeBoardHtml(p)}
+  <!-- v1.25.6：档位筛选条移到投递管道**下面**（HR 要求：先看管道全局，
+       再在这里筛列表——而不是挤在工具栏面板里） -->
+  <div class="tabs" style="margin:10px 0 12px">
+    ${tabs.map(([k,l])=>`<div class="tab ${TAB===k?'on':''}" onclick="TAB='${k}';poolPageReset();refresh()">${l}${k==='ALL'?(' '+n.ALL):''}</div>`).join('')}
+  </div>
   ${ITEMS.length ? ITEMS.map(cardHtml).join('') : '<div class="card">没有符合条件的候选人。到「导入与来源」收一次简历试试。</div>'}
   ${pgBar(pg)}`;
 }
@@ -1525,7 +1613,7 @@ function cardHtml(x){
     : (x.needs_review
         ? (_miss.length
             ? `<span class="chip" style="color:var(--warn);background:var(--warn-soft)" title="简历读出来了，但这些字段没抽到：${esc(_miss.join('、'))}，可手动更正">缺：${esc(_miss.join('、'))}</span>`
-            : '<span class="chip" style="color:var(--warn);background:var(--warn-soft)" title="这条投递有字段没抽到或原文未解析，可打开档案手动补录">待补录</span>')
+            : '<span class="chip" style="color:var(--warn);background:var(--warn-soft)" title="这条投递有字段没抽到；打开完整档案会列出具体缺什么（姓名/年限/技能），并提供更正入口">信息缺失 · 点开档案核对</span>')
         : '');
   const stage = x.stage || '新投递';
   const tiers = ['A','B','C','D'].map(k=>`<option value="${k}" ${k===t?'selected':''}>${k} · ${TIER_LABELS[k]}</option>`).join('');
@@ -1540,7 +1628,7 @@ function cardHtml(x){
       <div class="avatar">${esc((x.name||'?').slice(0,1))}</div>
       <div style="flex:1;min-width:0">
         <div class="nm">${esc(x.name||'未识别')} ${rev} ${genderTag} ${jobTag}</div>
-        <div class="meta">${eduBadge(x)} · ${expBadge(x)} ·
+        <div class="meta">${eduBadge(x)}${expBadge(x) ? (' · ' + expBadge(x)) : ''} ·
           ${esc(x.school||'—')}${uniTag(x.uni_tier)} · 阶段 ${esc(stage)} ·
           来源 ${esc(x.channel||'—')} · 投递 ${esc((x.applied_at||'').slice(0,10))}</div>
         <div class="meta" style="margin-top:2px"><b>联系方式</b>：${contact}</div>
@@ -1589,7 +1677,9 @@ async function setStage(aid, stage){
 async function showDetail(cid){
   const d = await api('/api/candidates/'+cid);
   if (d.__http_error){ toast(d.detail||'读取失败','danger'); return; }
-  document.getElementById('mTitle').textContent = (d.name||'未识别') + ' · 完整档案';
+  setModalTitle((d.name||'未识别') + ' · 完整档案',
+    `<button class="btn-primary" onclick="saveFields(${d.id})"
+      title="更正范围：姓名 / 学历 / 学校 / 专业 / 性别 / 电话 / 邮箱（技能与年限须以简历原文为准，不在这里改）">保存更正</button>`);
   const skills = (d.skills||[]).map(s=>`<span class="chip" style="color:${s.verified?'var(--accent)':'var(--ink-3)'};
       background:${s.verified?'var(--accent-soft)':'var(--surface-2)'}">${esc(s.name)}${s.verified?'':'(未核验)'}</span>`).join('');
   const evs = (d.skills||[]).filter(s=>s.evidence).slice(0,10).map(s=>
@@ -1610,7 +1700,7 @@ async function showDetail(cid){
       const acts = okFile
         ? `<button onclick="openDoc(${x.id},1)">在线打开</button>
            <button class="btn-primary" onclick="openDoc(${x.id},0)">下载原件</button>`
-        : '<span class="small bad-txt">原件路径缺失</span>';
+        : '<span class="small bad-txt" title="该附件的原件文件没有归档，无法打开或下载；可重新导入简历以补上留档">原件未留档</span>';
       return `<tr><td>${esc(x.file_name)}<div class="small">${esc(x.mime||'')} ·
          ${x.size?Math.round(x.size/1024)+' KB':''}</div></td>
       <td>${esc(x.parse_engine||'—')}<div class="small">${x.text_len?x.text_len+' 字':''}</div></td>
@@ -1625,23 +1715,49 @@ async function showDetail(cid){
       </div>` : '';
   document.getElementById('mBody').innerHTML = `
     <div class="kv">
-      <div class="k">姓名 / 学历 / 学校 / 专业</div><div class="bar" style="flex-wrap:wrap">
-        <input id="edName" value="${esc(d.name||'')}" style="width:120px" placeholder="姓名">
-        <select id="edEdu" style="width:120px">
-          ${['', '大专', '本科', '硕士', '博士'].map(v =>
-            `<option value="${v}" ${(d.edu_level||'')===v?'selected':''}>${v||'（学历未识别）'}</option>`).join('')}
-        </select>
-        <input id="edSchool" value="${esc(d.school||'')}" style="width:170px" placeholder="学校">
-        <input id="edMajor" value="${esc(d.major||'')}" style="width:170px" placeholder="专业">
+      <div class="k">基本信息</div>
+      <div style="background:var(--surface-2);border-radius:8px;padding:10px 12px">
+        <div class="bar" style="flex-wrap:wrap;gap:8px">
+          <input id="edName" value="${esc(d.name||'')}" style="width:110px" placeholder="姓名">
+          <select id="edEdu" style="width:110px">
+            ${['', '大专', '本科', '硕士', '博士'].map(v =>
+              `<option value="${v}" ${(d.edu_level||'')===v?'selected':''}>${v||'（学历未识别）'}</option>`).join('')}
+          </select>
+          <input id="edSchool" value="${esc(d.school||'')}" style="width:160px" placeholder="学校">
+          <input id="edMajor" value="${esc(d.major||'')}" style="width:160px" placeholder="专业">
+          <select id="edGender" style="width:104px" title="简历没写就由你补填（已提取的会自动选中）；不参与档位判定">
+            ${['', '男', '女'].map(v =>
+              `<option value="${v}" ${((d.gender||'').trim())===v?'selected':''}>${v||'性别未填'}</option>`).join('')}
+          </select>
+        </div>
+        <div class="bar" style="flex-wrap:wrap;gap:8px;margin-top:8px">
+          <input id="edPhone" value="${esc(contactValue(d.phone)||'')}" style="width:160px" placeholder="电话">
+          <input id="edEmail" value="${esc(contactValue(d.email)||'')}" style="width:220px" placeholder="邮箱">
+        </div>
+        <div class="small" style="margin-top:8px">识别错 / 识别不出时在这里直接改——改完点
+          <b>右上角「保存更正」</b>；改前改后写入审计（电话 / 邮箱加密存储）；
+          <b>技能与年限不在此处改</b>（必须来自简历原文与证据核对）</div>
       </div>
-      <div class="k">联系方式</div><div class="bar" style="flex-wrap:wrap">
-        <input id="edPhone" value="${esc(contactValue(d.phone)||'')}" style="width:170px" placeholder="电话">
-        <input id="edEmail" value="${esc(contactValue(d.email)||'')}" style="width:220px" placeholder="邮箱">
-        <button onclick="saveFields(${d.id})">保存更正</button>
-        <span class="small">识别错/识别不出时在这里改，改前改后写入审计（电话/邮箱加密存储）；
-          <b>技能与年限不在此处改</b>（必须来自简历原文与证据核对）</span></div>
-      <div class="k">学历 / 身份</div><div>${eduBadge(d)} · ${expBadge(d)}</div>
-      <div class="k">院校 / 专业</div><div>${esc(d.school||'—')} · ${esc(d.major||'—')}</div>
+      ${(()=>{
+        /* v1.25.6：信息缺失只在**真的有问题**时出现（说清"缺什么 + 下一步"，
+           用户要求：说明缺失的信息是什么，而不是只提示缺失）；
+           一切正常时不占版面（"没有重点有点乱"的另一半解法）。 */
+        if (d.parse_failed) return `<div class="k">信息缺失</div>
+          <div style="background:var(--bad-soft);border-radius:6px;padding:6px 10px">
+            <b class="bad-txt">简历原文读不出</b>
+            <span class="small">——去下方「简历附件」打开/下载原件人工核对，或重新导入一份可解析的文件</span></div>`;
+        const mf = d.missing_fields || [];
+        if (!mf.length) return '';
+        const act = { '姓名': '在上方编辑区补填即可',
+                      '年限': '以简历原文为准（核对后点「完整重新分析」重抽）',
+                      '技能': '以简历原文为准（重新分析时按原文重建）' };
+        const tips = [...new Set(mf.map(k=>act[k]).filter(Boolean))];
+        return `<div class="k">信息缺失</div>
+          <div style="background:var(--warn-soft);border-radius:6px;padding:6px 10px">
+            <b style="color:var(--warn)">缺：${mf.map(esc).join('、')}</b>
+            <span class="small">${tips.length?('——'+esc(tips.join('；'))):''}</span></div>`;
+      })()}
+      <div class="k">学历核验</div><div>${eduBadge(d)}${expBadge(d) ? (' · ' + expBadge(d)) : ''}</div>
       ${(()=>{
         // v1.17.1：紧跟院校/专业——荣誉、奖学金、论文、专利是**基础画像**的一部分，
         // 放在档案最底部等于藏起来。展示的是**简历原文那一行**（逐字来自原文，可核对）。
@@ -1657,9 +1773,6 @@ async function showDetail(cid){
           <div class="small" style="margin-top:4px">按简历原文规则识别，未逐条核实，请以原件为准</div>
         </div>`;
       })()}
-      <div class="k">性别</div><div>${(d.gender||'').trim()
-        ? esc(d.gender) + ' <span class="small">（简历明写；不参与档位判定）</span>'
-        : '<span class="small">简历未写性别（系统不做推断）</span>'}</div>
       <div class="k">联系方式</div><div>${(()=>{
         const p=contactValue(d.phone), m=contactValue(d.email);
         if(!p && !m) return '<span class="small">未识别到联系方式（简历里可能确实没写）</span>';
@@ -1693,7 +1806,19 @@ async function showDetail(cid){
             <span class="small">改岗位后会按新岗位的 JD 重算建议档位，动作写入审计</span>`;
         })()}</div>
       <div class="k">档案状态</div><div>${esc(d.pool_status||'—')} · 密级标记 ${esc(d.pii_level||'普通')}
-        · 投递 ${(d.applications||[]).length} 次 · 附件 ${(d.documents||[]).length} 份</div>
+        · 投递 ${(d.applications||[]).length} 次 · 附件 ${(d.documents||[]).length} 份
+        ${(function(){
+          /* v1.25：已发过邮件的**打一个显眼标记**。
+             为什么必须显眼：同一个人被两个 HR 各发一封面试邀请，
+             是最难解释的一类事故。标记放在档案状态这一行、紧挨着"投递次数"，
+             一进来就能看到，不用点进审计去找。 */
+          const e = d.email_state || {};
+          if (!e.sent) return '';
+          const when = String(e.last_at||'').replace('T',' ').slice(0,16);
+          return ` · <b style="color:var(--ok)">已发过邮件</b>`
+            + `<span class="small">（共 ${e.count} 次${when?('，最近 '+esc(when)):''}`
+            + `${e.last_subject?('，「'+esc(e.last_subject)+'」'):''}）</span>`;
+        })()}</div>
     </div>
     ${dup}
     <div class="spacer"></div><div style="font-weight:600;font-size:15px">技能（均带原文证据）</div>
@@ -1706,11 +1831,17 @@ async function showDetail(cid){
     <div class="spacer"></div><div style="font-weight:600;font-size:15px">简历附件（原件留档，可下载）</div>
     <table><thead><tr><th>文件</th><th>解析</th><th>结果</th><th>接收时间</th><th>归档位置</th><th>操作</th></tr></thead>
       <tbody>${docs||'<tr><td colspan="6">—</td></tr>'}</tbody></table>
-    <div class="spacer"></div><div style="font-weight:600;font-size:15px">操作审计</div>
-    <table><thead><tr><th>时间</th><th>动作</th><th>变更前</th><th>变更后</th><th>操作人</th></tr></thead>
-      <tbody>${(d.audit_snippet||[]).map(a=>`<tr><td>${esc(a.ts)}</td><td>${esc(a.action)}</td>
-        <td class="small">${esc(a.before)}</td><td class="small">${esc(a.after)}</td>
-        <td>${esc(a.operator)}</td></tr>`).join('')||'<tr><td colspan="5">—</td></tr>'}</tbody></table>
+    <div class="spacer"></div><div style="font-weight:600;font-size:15px">操作审计
+      <span class="small">只列确实改动了数据的操作；单纯"看了一下"的不在这儿
+      （本地日志里都留着，需要时可调出）</span></div>
+    <table><thead><tr><th style="width:170px">时间</th><th>做了什么</th><th style="width:90px">操作人</th>
+      </tr></thead>
+      <tbody>${(d.audit_snippet||[]).map(a=>`<tr>
+        <td class="small">${esc(a.ts)}</td>
+        <td>${esc(a.readable || a.action_label || a.action)}${
+          a.entity === 'mail' ? ' <b style="color:var(--ok)">（邮件）</b>' : ''}</td>
+        <td>${esc(a.operator)}</td></tr>`).join('')||'<tr><td colspan="3">还没有改动记录</td></tr>'}
+      </tbody></table>
     <div class="spacer"></div><div style="font-weight:600;font-size:15px">简历原文</div>
     ${extractModeLine(d)}
     ${sensitiveLine(d.sensitive_removed)}
@@ -1772,6 +1903,15 @@ function sensitiveLine(removed){
     <div class="small" style="margin-top:3px">下面是<b>原件解析出的完整原文</b>（含上述敏感信息，供人工核对）；
       送进模型的是剔除后的版本。剔除发生在调模型之前，且不改动原件。</div></div>`;
 }
+/* v1.25.6：弹层标题 + 头部动作按钮的统一入口。
+   为什么统一：弹层是共用的（详情/进度/确认/上传都用一个 #modal），
+   "保存更正"这类跟随弹层的按钮如果只由 showDetail 注入而别处不清，
+   会残留在下一个弹层上。所有改标题的地方都走这里，头部动作就
+   "随该弹层出现、随下一个弹层消失"。 */
+function setModalTitle(title, headHtml){
+  document.getElementById('mTitle').textContent = title;
+  document.getElementById('mHeadBtn').innerHTML = headHtml || '';
+}
 function closeModal(){
   document.getElementById('modal').classList.remove('on');
   // v1.24.11：关闭后按需接续下一个动作（如收取完成 → 自动分析进度）
@@ -1789,6 +1929,7 @@ async function saveFields(cid){
     education: document.getElementById('edEdu').value,
     school: (document.getElementById('edSchool').value || '').trim(),
     major: (document.getElementById('edMajor').value || '').trim(),
+    gender: document.getElementById('edGender').value,
     phone: (document.getElementById('edPhone').value || '').trim(),
     email: (document.getElementById('edEmail').value || '').trim(),
   };
@@ -1818,7 +1959,7 @@ async function saveFields(cid){
 function askConfirm(opts){
   const o = (typeof opts === 'string') ? {body: opts} : (opts || {});
   return new Promise(resolve => {
-    document.getElementById('mTitle').textContent = o.title || '请确认';
+    setModalTitle(o.title || '请确认');
     document.getElementById('mBody').innerHTML =
       `<div style="line-height:1.8;white-space:pre-wrap">${o.body || ''}</div>
        <div class="bar" style="margin-top:18px;justify-content:flex-end">
@@ -1900,7 +2041,7 @@ async function doUpload(files){
   // toast 3.5 秒自动消失，而多份文件的裸字节上传常常要十几秒——
   // 之后界面就完全没反馈了，和"导入弹窗不动"是同一类毛病。
   // 现在给出**可数的**进度（第几份/共几份），上传完自动换成结果弹窗。
-  document.getElementById('mTitle').textContent = '上传简历文件';
+  setModalTitle('上传简历文件');
   document.getElementById('mBody').innerHTML =
     `<div>
        <div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">
@@ -1959,7 +2100,7 @@ async function doUpload(files){
    · 旁边挂一个秒表，让"还在跑"变成可验证的事实而不是猜；
    · 超过 20 秒提示可能是在等模型，让 HR 知道没死。 */
 function ingestStartModal(label){
-  document.getElementById('mTitle').textContent = label + '进行中';
+  setModalTitle(label + '进行中');
   document.getElementById('mBody').innerHTML =
     `<div>
        <div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">
@@ -2250,7 +2391,7 @@ async function viewArchive(){
         <div class="avatar">${esc((x.name||'?').slice(0,1))}</div>
         <div style="flex:1;min-width:0">
           <div class="nm">${esc(x.name||'未识别')} ${leftTxt}</div>
-          <div class="meta">${eduBadge(x)} · ${expBadge(x)} ·
+          <div class="meta">${eduBadge(x)}${expBadge(x) ? (' · ' + expBadge(x)) : ''} ·
             ${esc(x.school||'—')} · 阶段 ${esc(x.stage||'新投递')} ·
             归档于 ${esc((x.archived_at||'').slice(0,16)||'—')}</div>
           <div class="meta" style="margin-top:2px"><b>联系方式</b>：${contactLine(x)}</div>
@@ -2852,6 +2993,50 @@ async function decideProposal(pid, decision, btn){
   if (VIEW !== 'chat') refresh();
 }
 
+/* v1.25.6：待确认提案清单弹窗（统计卡"待确认提案"的落点）。
+   与对话卡片同一套动作（复用 /api/proposals/{pid}/decide，不新增写接口）；
+   每行带 id="prop-{pid}"，decideProposal 的"已执行/已拒绝"就地替换逻辑直接可用。
+   注意 askConfirm 与列表共用同一个 #modal，所以确认/取消之后都要把列表重开。 */
+async function openProposals(){
+  const r = await api('/api/proposals?status=' + encodeURIComponent('待确认'));
+  const items = (r && r.items) || [];
+  setModalTitle('待确认提案（' + items.length + '）');
+  document.getElementById('mBody').innerHTML = items.length
+    ? `<div class="small" style="margin-bottom:8px">提案由智能体生成，逐条确认后才会真正落库。
+        ${(r && r.can_confirm === false) ? '<b>你没有「确认」权限</b>' : ''}</div>`
+      + items.map(p =>
+        `<div class="card" id="prop-${p.id}" style="margin:8px 0;padding:10px 12px">
+           <div style="font-weight:600">${esc(p.tool_label || p.tool || '')}
+             <span class="small">提案 #${p.id}${p.risk ? (' · 风险 ' + esc(p.risk)) : ''}</span></div>
+           <div style="margin-top:4px">${esc(p.summary || '')}</div>
+           <div class="bar" style="margin-top:8px">
+             <button class="btn-primary" onclick="decideProposalInModal(${p.id},'approve',this)">确认执行</button>
+             <button onclick="decideProposalInModal(${p.id},'reject',this)">拒绝</button>
+           </div>
+         </div>`).join('')
+    : '<div class="small">没有待确认的提案。</div>';
+  document.getElementById('modal').classList.add('on');
+}
+
+/* 弹窗版提案处理：先确认、后提交；askConfirm 会顶掉本列表，所以结束后重开列表。 */
+async function decideProposalInModal(pid, decision, btn){
+  const q = decision === 'approve'
+    ? '确认执行这条提案吗？\\n\\n它会真的改档案（写审计）。'
+    : '拒绝这条提案？\\n\\n拒绝也会写入审计（谁在什么时候拒的）。';
+  if (!await askConfirm(q)) { openProposals(); return; }
+  if (btn) btn.disabled = true;
+  const r = await api('/api/proposals/' + pid + '/decide',
+    {method:'POST', body:JSON.stringify({decision: decision})});
+  if (r.__http_error || r.error){
+    toast(r.detail || r.error || '处理失败','danger');
+    openProposals();
+    return;
+  }
+  toast(decision === 'approve' ? '已执行（写入了审计）' : '已拒绝', 'ok');
+  refresh();           // 页面统计 / 列表同步（#modal 不受 refresh 影响）
+  openProposals();     // 重开列表：该提案已从"待确认"里消失
+}
+
 /* 智能体起草的邮件：渲染成卡片 + 一键送进邮件编辑器（v1.13.7）。
    为什么要有这个卡：智能体说"我无法发送邮件"时，HR 真正缺的是**能用的草稿**。
    这里把草稿原样亮出来，HR 可以直接复制，或点按钮进编辑器改完自己点发送——
@@ -2863,6 +3048,12 @@ async function decideProposal(pid, decision, btn){
    id 用递增序号，历史卡片永远指向自己那份数据。 */
 let DRAFTS = {};
 let _draftSeq = 0;
+/* v1.25：从对话草稿卡点「在编辑器中修改」时，先把草稿挂到这个全局变量，
+   再切到写邮件页。viewMail() 渲染完编辑器后会来取它填进正文——
+   这样即使切页后再次 refresh（比如用户又点了一下导航），草稿也不会被冲掉。
+   旧实现直接 `await viewMail()` 但不切 VIEW，结果 refresh 一触发就回到聊天页，
+   HR 看到的就是"点过去啥也没有"。 */
+let PENDING_DRAFT = null;
 /* key 必须**全局递增**，不能每轮从 d0 重来。
    renderDraftCards 每轮都被调用一次，i 是本轮内的下标——
    若直接 `'d' + i`，第二轮的 d0 又会盖掉第一轮的 d0，历史卡片照样串。
@@ -2907,7 +3098,10 @@ function renderDraftCards(holder, drafts){
         <span class="small">收件人：${esc(d.to || '（无邮箱）')}${d.job?(' · 岗位：'+esc(d.job)):''}`
       + `${d.template?( ' · 模板：'+esc(d.template)):''}</span></div>
       <div class="small" style="margin-top:6px">主题：${esc(d.subject||'')}</div>
-      <div style="margin-top:6px;white-space:pre-wrap">${esc(d.body||'')}</div>
+      <div class="small" style="margin-top:6px;color:var(--ink-3)">正文预览：</div>
+      <div class="mail-prev" style="margin-top:4px;border:1px solid #e3e6ea;border-radius:8px;
+        padding:8px;max-height:260px;overflow:auto;background:#fff;font-size:13px">
+        ${d.body_html || esc(d.body||'')}</div>
       ${miss}${noMail}${sentNote}
       <div class="bar" style="margin-top:8px">${acts}
         <span class="small">${!d.to ? '没有邮箱就发不出去'
@@ -2961,15 +3155,44 @@ async function sendDraftNow(key, btn){
 }
 
 async function openDraftInMailer(idx, d){
-  await viewMail();
+  if (!d || (!d.body && !d.body_html)){
+    toast('这封草稿没有正文，请让助手重新起草','danger'); return;
+  }
+  // v1.25：先挂全局，再切到写邮件页（VIEW='mail' + 重新渲染 viewMail）。
+  // ⚠️ v1.25.x 修「跳转过去是空白」：原来用 `location.hash='mail'` 切页，
+  // 它会**异步**触发 hashchange 事件，其处理函数 go('mail',true) 会再 render 一遍 viewMail——
+  // 第二次渲染发生在 PENDING_DRAFT 已被第一次 viewMail 消费清空之后，
+  // 于是刚填好的正文被冲掉，表现就是"点『在编辑器中修改』跳转过去是空白"。
+  // 改用 history.replaceState 改 hash：**不触发 hashchange**，于是只有一次渲染，正文留存。
+  PENDING_DRAFT = d;
+  closeModal();
+  VIEW = 'mail';
+  if (location.hash !== '#mail'){
+    try { history.replaceState(null, '', '#mail'); } catch(e){}
+  }
+  renderTabs();
+  try {
+    // 唯一的一次渲染：viewMail 渲染完编辑器后会读 PENDING_DRAFT 自动填正文。
+    await refresh();
+  } catch (e) {
+    // viewMail 万一抛错也要尽量把草稿填进去，而不是静默失败。
+    console.error('openDraftInMailer refresh 失败', e);
+  }
+  // 兜底再填一次：即便极端时序下 viewMail 没消费 PENDING_DRAFT，这里也能保证填好。
+  applyDraftToMailer(d);
+  toast('已填入编辑器：确认内容后由你点「确认发送」','ok');
+}
+
+/* v1.25：把草稿填进写邮件页的控件（抽出来，viewMail 与 openDraftInMailer 共用）。
+   优先用 body_html（模板渲染结果 / free-write 的 to_html 结果，带 <p>/<br>，换行正确）；
+   没有 body_html 才回落到转义后的纯文本 body。 */
+function applyDraftToMailer(d){
+  if (!d) return;
   try {
     const sel = document.getElementById('mCand');
-    if (sel && d.candidate_id) sel.value = String(d.candidate_id);
+    if (sel && d.candidate_id != null) sel.value = String(d.candidate_id);
     // 智能助手起草的草稿里带着收件人地址（v1.24.9）。
-    // 原来这里调fillMailTo()——那是 <select> 时代的函数，从 option 文本里split 出邮箱，
-    // mCand 变成 hidden input 之后它既没意义也早已删除，结果是：
-    // **候选人 id 设了、邮箱不显示**，HR 不知道这封要发给谁。
-    // 现在直接用草稿里的 to 字段填，并走 setMailTo() 醒目显示。
+    // 直接用草稿里的 to 字段填，并走 setMailTo() 醒目显示（邮箱错一位就是发错人）。
     if (d.to) setMailTo(d.to, d.name || '');
     const inp = document.getElementById('mCandInput');
     if (inp) inp.value = d.name || (d.to ? String(d.to) : '');
@@ -2979,8 +3202,7 @@ async function openDraftInMailer(idx, d){
     if (ed) ed.innerHTML = d.body_html || esc(d.body || '');
     const pv = document.getElementById('mailPreview');
     if (pv && d.body_html) pv.innerHTML = d.body_html;
-    toast('已填入编辑器：确认内容后由你点「确认发送」','ok');
-  } catch (e) { toast('打开编辑器失败：' + e, 'danger'); }
+  } catch (e) { toast('填充编辑器失败：' + e, 'danger'); }
 }
 
 /* ------------------------------ 导入与来源 ------------------------------ */
@@ -3072,7 +3294,7 @@ async function removeSourceFiles(names){
 }
 async function showRecycle(){
   const r = await api('/api/sources/removed');
-  document.getElementById('mTitle').textContent = '回收目录 · ' + (r.recycle_dir||'');
+  setModalTitle('回收目录 · ' + (r.recycle_dir||''));
   const rows = (r.items||[]).map(x=>`<tr>
     <td>${esc(x.name)}</td><td class="nw">${fmtSize(x.size)}</td>
     <td class="nw">${esc(x.removed_at)}</td>
@@ -3368,7 +3590,7 @@ function jdEditorHtml(jid, jd){
 async function editJd(jid){
   const d = await api('/api/jobs/'+jid);
   if (d.__http_error){ toast(d.detail||'读取失败','danger'); return; }
-  document.getElementById('mTitle').textContent = (d.job.title||'岗位') + ' · 岗位 JD';
+  setModalTitle((d.job.title||'岗位') + ' · 岗位 JD');
   document.getElementById('mBody').innerHTML = jdEditorHtml(jid, d.jd||{});
   document.getElementById('modal').classList.add('on');
   // 多值组件要在 DOM 到位后初始化（顺序反了就是"控件是空的"——踩过）
@@ -3429,7 +3651,7 @@ async function saveJd(jid){
 
 /* -------- 重新分析（JD 改完后按新尺子重算已有投递；默认先看不改） -------- */
 async function regradeJob(jid, apply){
-  document.getElementById('mTitle').textContent = '重新分析 · 按当前 JD 重算已有投递';
+  setModalTitle('重新分析 · 按当前 JD 重算已有投递');
   document.getElementById('mBody').innerHTML =
     `<div class="note">正在按当前 JD 重算该岗位下的投递…（从简历原文重跑规则通道，不调模型，结果可重复）</div>`;
   document.getElementById('modal').classList.add('on');
@@ -3529,7 +3751,7 @@ async function toggleJob(id, active){
 async function renderPropsInto(boxId){
   const box = document.getElementById(boxId);
   if (!box) return;
-  const [p, a] = await Promise.all([api('/api/proposals'), api('/api/audit?limit=40')]);
+  const p = await api('/api/proposals');
   const all = p.items || [];
   const auto = all.filter(x=>x.source==='agent_auto' && x.status==='待确认');
   const srcTag = x => x.source === 'agent_auto'
@@ -3546,7 +3768,8 @@ async function renderPropsInto(boxId){
     <table><thead><tr><th>#</th><th>来源</th><th>类型</th><th>内容</th><th>风险</th><th>状态</th>
       <th>提交时间</th><th>操作</th></tr></thead>
       <tbody>${all.map(x=>`<tr>
-        <td>${x.id}</td><td>${srcTag(x)}</td><td>${esc(x.tool)}</td><td>${esc(x.summary)}</td>
+        <td>${x.id}</td><td>${srcTag(x)}</td>
+        <td>${esc(x.tool_label || x.tool)}</td><td>${esc(x.summary)}</td>
         <td>${esc(x.risk)}</td><td>${esc(x.status)}</td><td class="small">${esc(x.created_at||'')}</td>
         <td>${x.status==='待确认'?`<button class="btn-ok"
             onclick="decide(${x.id},'approve')">确认执行</button>
@@ -3554,15 +3777,14 @@ async function renderPropsInto(boxId){
             onclick="decide(${x.id},'reject')">拒绝</button>`:'—'}</td>
         </tr>`).join('')||'<tr><td colspan="8">暂无提案</td></tr>'}</tbody></table>
   </div>
-  <details style="margin-top:12px"><summary class="small" style="cursor:pointer;color:var(--accent-ink)">
-    操作审计（最近 40 条）· 谁在何时看了谁的简历、改了什么档、确认了什么提案，全部留痕</summary>
-    <table style="margin-top:8px"><thead><tr><th>时间</th><th>对象</th><th>动作</th><th>变更前</th><th>变更后</th>
-      <th>操作人</th></tr></thead>
-      <tbody>${(a.items||[]).map(r=>`<tr>
-        <td class="small">${esc(r.ts)}</td><td>${esc(r.entity)}#${esc(r.entity_id)}</td>
-        <td>${esc(r.action)}</td><td class="small">${esc(r.before)}</td>
-        <td class="small">${esc(r.after)}</td><td>${esc(r.operator)}</td>
-        </tr>`).join('')||'<tr><td colspan="6">—</td></tr>'}</tbody></table></details>`;
+  `;
+  /* v1.25：这里原来的「操作审计（最近 40 条）」整块已删除（用户要求）。
+     理由：那一份是**系统所有操作**的全量日志（含"谁看了谁"的浏览记录），
+     对 HR 是噪音——"只有改动才值得占版面"，而改动记录在
+     **每个候选人自己的档案页**里，那才是 HR 真正会去的地方。
+     ⚠️ 只是**不再展示**，数据一条没删：`audit_log` 照旧全量落库，
+     查法是 `/api/audit?include_readonly=1`，智能助手的 list_audit 也还能用。
+     所以"以后想查还能查到"，不是"把记录毁了"。 */
 }
 
 /* 批量处理「系统巡检」提案：逐条走同一个 decide 接口，
@@ -3839,6 +4061,12 @@ async function viewMail(){
     <div id="mailSentBox"></div>
   </div>
 `;
+  // v1.25：若是从对话草稿卡"在编辑器中修改"切过来的，自动把草稿填进编辑器。
+  // 放在渲染末尾（编辑器元素已存在），且消费后清空，避免后续普通进邮件页也被填上旧草稿。
+  if (PENDING_DRAFT){
+    applyDraftToMailer(PENDING_DRAFT);
+    PENDING_DRAFT = null;
+  }
 }
 
 function applySmtpPreset(){
@@ -4092,7 +4320,7 @@ function onEditorInput(id){
    直接插真表格，没有"语法漏写"这种失败模式。 */
 function insertTableDialog(id){
   EDITOR_TARGET = id || 'mailEditor';
-  document.getElementById('mTitle').textContent = '插入表格';
+  setModalTitle('插入表格');
   document.getElementById('mBody').innerHTML = `
     <div class="bar">
       <span class="small">行（含表头）</span>
@@ -4346,7 +4574,7 @@ function insertVar(id, key){
    存 HTML 才不会被简化掉；生成草稿时会原样渲染回来。 */
 function saveCurrentAsTemplate(){
   if (!editorBody('mailEditor').trim()){ toast('正文是空的，先把内容写好','warn'); return; }
-  document.getElementById('mTitle').textContent = '把当前正文存为模板';
+  setModalTitle('把当前正文存为模板');
   document.getElementById('mBody').innerHTML = `
     <div class="kv">
       <div class="k">模板名</div><div><input id="tplSaveName" style="width:60%"
@@ -4453,11 +4681,16 @@ async function checkSmtp(){
   const msg = document.getElementById('smtpMsg');
   msg.textContent = '检查中…';
   const r = await api('/api/mail/test-smtp', {method:'POST'});
+  /* v1.25：hint 必须一起显示。
+     原来失败时只渲染 r.detail||r.error，把后端写好的**解决办法**整段丢了，
+     HR 只能看到一句 SSLError —— 等于没提示。成功时也可能带 hint
+     （自动纠正了端口/加密方式的时候）。 */
+  const _hint = r.hint ? `<div class="small" style="margin-top:4px">${esc(r.hint)}</div>` : '';
   if (r.__http_error || r.error){
-    msg.innerHTML = `<span style="color:var(--bad)">${esc(r.detail||r.error||'检查失败')}</span>`;
+    msg.innerHTML = `<span style="color:var(--bad)">${esc(r.detail||r.error||'检查失败')}</span>${_hint}`;
     return;
   }
-  msg.innerHTML = `<span style="color:var(--ok)">${esc(r.note||'配置可用')}</span>`;
+  msg.innerHTML = `<span style="color:var(--ok)">${esc(r.note||'配置可用')}</span>${_hint}`;
 }
 
 /* 收件人邮箱展示（v1.24.9）：统一走这里，醒目显示 + 同时写隐藏字段。
