@@ -260,6 +260,25 @@ _PAGE = """<!DOCTYPE html>
   .tierbar i{display:block;height:100%}
   .tierbar.is-empty{background:var(--line-2)}
   .tier-note{font-size:11px;color:var(--ink-3);margin-top:5px}
+  /* v1.25.7：列表卡片上的备注行（有备注才显示；一行截断、悬停看全文） */
+  .note-line{margin-top:4px;font-size:12px;color:var(--ink-2);white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;max-width:100%}
+  .note-line b{color:var(--accent-ink);font-weight:600}
+  /* v1.25.7：名字后的"学历 · 学校 · 985"——与姓名同字号（inherit）、天蓝色文字；
+     985/211 加粗。不用底色块（用户要求：不要淡黄、跟名字一样大） */
+  .edu-tag{font-size:inherit;font-weight:600;color:#0f80d6;margin-left:2px}
+  .edu-tag b{font-weight:700}
+  /* v1.25.7：卡片内技能证据折叠区（默认收起）与"推荐理由"强调行 */
+  .evsec{margin-top:8px}
+  .evsec summary{cursor:pointer;font-size:14px;font-weight:600;color:var(--ink-2);user-select:none;
+    list-style:none;display:inline-flex;align-items:center;gap:4px}
+  /* v1.25.7：命中 / 缺 / 状态这一行放大一号（用户反馈偏小） */
+  .hitrow .chip{font-size:14px;padding:3px 10px}
+  .evsec summary::-webkit-details-marker{display:none}
+  .evsec summary::before{content:'▸';font-size:10px;transition:transform .12s}
+  .evsec[open] summary::before{content:'▾'}
+  .evsec .evs{margin-top:6px}
+  .why-line{margin-top:4px;font-size:13px;font-weight:600;color:var(--ok)}
   /* v1.25.6：统计区改为"库存数字行 + 右侧投递进度环"；环段与图例都可点（穿透筛选） */
   .stat-row{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
   .tier-donut{display:flex;align-items:center;gap:14px;flex:none}
@@ -361,7 +380,7 @@ _PAGE = """<!DOCTYPE html>
     color:var(--ink-2);background:var(--surface-2)}
   .nm{font-size:18px;font-weight:600;letter-spacing:-.01em}
   .meta{font-size:13px;color:var(--ink-3);margin-top:3px}
-  .acts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px;line-height:1.5}
+  .acts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;line-height:1.5}
   .why{font-size:14px;color:var(--ink-2);margin-top:10px;line-height:1.75}
   .ev{font-size:13px;color:var(--ink-3);background:var(--surface-2);border-left:2px solid var(--line-2);
     padding:5px 9px;margin:4px 0;border-radius:0 4px 4px 0}
@@ -1294,11 +1313,11 @@ function insightBlock(x){
     <b>系统自动分析</b> <span class="small">${esc(src)}${ins.model?' · '+esc(ins.model):''}</span>
     <div style="margin-top:4px">${esc(ins.summary||'')}</div>
     ${ins.business_direction ? `<div class="small" style="margin-top:4px">业务方向：
-      <b style="color:var(--accent-ink)">${esc(ins.business_direction)}</b>
-      <span class="small" style="color:var(--ink-3)">（模型从简历提炼，仅展示）</span></div>` : ''}
+      <b style="color:var(--accent-ink)">${esc(ins.business_direction)}</b></div>` : ''}
     ${(ins.reasons||[]).length ? `<div class="small">依据：${esc(ins.reasons.join('；'))}</div>` : ''}
     ${(ins.risks||[]).length ? `<div class="small">风险：${esc(ins.risks.slice(0,2).join('；'))}</div>` : ''}
     ${ev ? `<div class="small">证据：${esc(ev)}</div>` : ''}
+    ${(x.reasons||[]).length ? `<div class="why-line">推荐理由：${esc(x.reasons.join('；'))}</div>` : ''}
     ${tierSourceLine(x)}
   </div>` + '';
 }
@@ -1560,6 +1579,22 @@ function uniTag(t){
   return `<span class="chip" style="color:var(--warn);background:var(--warn-soft)"
     title="按教育部 985/211 名单匹配院校名（含常见简称与校区后缀），仅展示标签，不参与档位判定">${esc(t)}</span>`;
 }
+// 备注行（v1.25.7）：有备注才显示——一行截断、悬停看全文；在完整档案里可修改。
+function noteLine(x){
+  const n = (x.note || '').trim();
+  if (!n) return '';
+  return `<div class="note-line" title="${esc(n)}"><b>备注</b>：${esc(n)}</div>`;
+}
+// 学历 · 学校亮色标签（v1.25.7）：放在名字后面——扫列表第一眼看到教育背景；
+// 985/211 并进同一个标签（原来散在 meta 行，信息被拆散）。
+function eduSchoolTag(x){
+  const edu = (x.edu_level || '').trim();
+  const school = (x.school || '').trim();
+  const uni = (x.uni_tier || '').trim();
+  if (!edu && !school && !uni) return '';
+  return `<span class="edu-tag">${esc(edu)}${edu && school ? ' · ' : ''}${esc(school)}`
+    + `${uni ? (' <b>' + esc(uni) + '</b>') : ''}</span>`;
+}
 function cardHtml(x){
   const t = x.tier_effective || 'D';
   const [fg,bg] = TIER_COLOR[t] || TIER_COLOR.D;
@@ -1572,16 +1607,15 @@ function cardHtml(x){
     ? `<span class="chip" style="color:var(--accent-ink);background:var(--accent-soft)"
          title="模型判断这份简历最像哪个在招岗位（结论已落库，展示时不再调用模型）；采纳后才真正归岗">建议岗位：${esc(sug.title)}${sug.reason?'（'+esc(sug.reason)+'）':''}</span>`
     : (job ? '' : (x.job_suggestion_missing
-        ? `<span class="chip" style="color:var(--ink-3);background:var(--surface-2)"
-             title="系统还没为这份简历判断过建议岗位（库里没有结论）。点「判断建议岗位」让模型判断一次，结论会存下来">尚未判断建议岗位</span>`
+        ? ''   /* v1.25.7：与「岗位待指定」合并成一个入口（说明见 jobTag 的 title），不再单独出 chip */
         : `<span class="chip" style="color:var(--ink-3);background:var(--surface-2)"
              title="模型从在招岗位里也没判断出最像哪个（例如跨行业简历）">模型未判断出对应岗位</span>`));
-  // 「所属岗位待指定」直接做成可点的入口：没有它，HR 只能看着标签干瞪眼——
-  // 原来"归岗"只在系统给出建议时才有按钮，模型不启用时完全没有入口（实测反馈）。
+  // 「岗位待指定」是可点入口（v1.25.7：两个岗位 chip 合并成一个，点击直接进入指定流程）。
   const jobTag = job
     ? `<span class="chip job-tag">${esc(job)}</span>`
-    : `<span class="chip job-tag pending" style="cursor:pointer" title="点击指定岗位"
-         onclick="assignJobPick(${x.id})">所属岗位待指定（点此指定）</span>${sugChip}`;
+    : `<span class="chip job-tag pending" style="cursor:pointer"
+         title="点击指定岗位${x.job_suggestion_missing ? '；系统还没判断过建议岗位，也可用下方「判断建议岗位」按钮' : ''}"
+         onclick="assignJobPick(${x.id})">岗位待指定</span>${sugChip}`;
   // 性别标签：只在简历**明写**时才有值（系统不做推断），提示里说明它不参与档位判定
   const genderTag = (x.gender||'').trim()
     ? `<span class="chip" style="color:var(--ink-2);background:var(--surface-2)" title="来自简历明写标签，不参与档位判定">${esc(x.gender)}</span>`
@@ -1618,7 +1652,6 @@ function cardHtml(x){
   const stage = x.stage || '新投递';
   const tiers = ['A','B','C','D'].map(k=>`<option value="${k}" ${k===t?'selected':''}>${k} · ${TIER_LABELS[k]}</option>`).join('');
   const stages = STAGES.map(k=>`<option value="${k}" ${k===stage?'selected':''}>${k}</option>`).join('');
-  const skillChips = (x.skills||[]).slice(0,12).map(s=>`<span class="chip chip-skill">${esc(s)}</span>`).join('');
   const contact = contactLine(x);
   const scoreTip = (!job && sug)
     ? ` title="档位按「建议岗位 · ${esc(sug.title)}」的 JD 判断：学历不达标判 D，其余由模型给出"` : '';
@@ -1627,20 +1660,25 @@ function cardHtml(x){
       <input type="checkbox" class="pickChk" value="${x.id}" style="margin-right:10px">
       <div class="avatar">${esc((x.name||'?').slice(0,1))}</div>
       <div style="flex:1;min-width:0">
-        <div class="nm">${esc(x.name||'未识别')} ${rev} ${genderTag} ${jobTag}</div>
-        <div class="meta">${eduBadge(x)}${expBadge(x) ? (' · ' + expBadge(x)) : ''} ·
-          ${esc(x.school||'—')}${uniTag(x.uni_tier)} · 阶段 ${esc(stage)} ·
-          来源 ${esc(x.channel||'—')} · 投递 ${esc((x.applied_at||'').slice(0,10))}</div>
+        <div class="nm">${esc(x.name||'未识别')} ${eduSchoolTag(x)} ${rev} ${genderTag} ${jobTag}</div>
+        ${expBadge(x) ? `<div class="meta" style="margin-top:2px">${expBadge(x)}</div>` : ''}
         <div class="meta" style="margin-top:2px"><b>联系方式</b>：${contact}</div>
+        ${noteLine(x)}
       </div>
       <div class="badge"${scoreTip} style="color:${fg};background:${bg}"><b>${t}</b><span>${TIER_LABELS[t]}</span></div>
     </div>
-    <div style="margin-top:10px">${hits}${miss}${conf}</div>
-    <div style="margin-top:8px">${skillChips}</div>
-    <div class="evs">${(x.skill_detail||[]).filter(k=>k.evidence).slice(0,3).map(k=>
-      `<div class="ev">证据[${esc(k.name)}]：${esc(k.evidence)}</div>`).join('')}</div>
+    <div class="hitrow" style="margin-top:10px;border-top:1px solid var(--line-2);padding-top:10px">${hits}${miss}${conf}</div>
+    ${(()=>{
+      /* v1.25.7：技能证据**默认折叠**；灰色技能全集不再展示（那是"核对模式"的信息，
+         完整档案里有全量；卡片只留决策所需）。展开仍能看到逐条证据。 */
+      const evs = (x.skill_detail||[]).filter(k=>k.evidence).slice(0,3);
+      if (!evs.length) return '';
+      return `<details class="evsec"><summary>技能证据</summary>
+        <div class="evs">${evs.map(k=>
+          `<div class="ev">证据[${esc(k.name)}]：${esc(k.evidence)}</div>`).join('')}</div>
+      </details>`;
+    })()}
     ${insightBlock(x)}
-    <div class="why">推荐理由：${esc((x.reasons||[]).join('；')||'—')}</div>
     <div class="acts">
       <select onchange="setTier(${x.application_id},this.value)">${tiers}</select>
       <select onchange="setStage(${x.application_id},this.value)">${stages}</select>
@@ -1734,9 +1772,15 @@ async function showDetail(cid){
           <input id="edPhone" value="${esc(contactValue(d.phone)||'')}" style="width:160px" placeholder="电话">
           <input id="edEmail" value="${esc(contactValue(d.email)||'')}" style="width:220px" placeholder="邮箱">
         </div>
-        <div class="small" style="margin-top:8px">识别错 / 识别不出时在这里直接改——改完点
-          <b>右上角「保存更正」</b>；改前改后写入审计（电话 / 邮箱加密存储）；
-          <b>技能与年限不在此处改</b>（必须来自简历原文与证据核对）</div>
+      </div>
+      <div class="k">备注</div>
+      <div>
+        <textarea id="edNote" rows="2" maxlength="500"
+          placeholder="给这个人的工作备注：沟通印象、内推关系、谈薪情况……"
+          style="width:100%;box-sizing:border-box;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;resize:vertical">${esc(d.note||'')}</textarea>
+        <div class="bar" style="margin-top:6px">
+          <button onclick="saveNote(${d.id})">保存备注</button>
+        </div>
       </div>
       ${(()=>{
         /* v1.25.6：信息缺失只在**真的有问题**时出现（说清"缺什么 + 下一步"，
@@ -1770,7 +1814,6 @@ async function showDetail(cid){
             <span class="small" style="color:var(--ink-3)">${label}</span>
             ${arr.map(h=>`<div class="ev" style="margin:2px 0">${esc(h.evidence||h.name||label)}</div>`).join('')}
           </div>`).join('')}
-          <div class="small" style="margin-top:4px">按简历原文规则识别，未逐条核实，请以原件为准</div>
         </div>`;
       })()}
       <div class="k">联系方式</div><div>${(()=>{
@@ -1778,8 +1821,7 @@ async function showDetail(cid){
         if(!p && !m) return '<span class="small">未识别到联系方式（简历里可能确实没写）</span>';
         return `<span class="contact">${p?`<a href="tel:${esc(p)}">${esc(p)}</a>`:''}
           ${p&&m?' · ':''}${m?`<a href="mailto:${esc(m)}">${esc(m)}</a>`:''}</span>
-          <button class="mini" onclick="copyText('${esc((p||'')+(p&&m?' / ':'')+(m||''))}')">复制</button>
-          <span class="small">（库内加密存储）</span>`;
+          <button class="mini" onclick="copyText('${esc((p||'')+(p&&m?' / ':'')+(m||''))}')">复制</button>`;
       })()}</div>
       <div class="k">信息复核</div><div>
         ${(()=>{
@@ -1790,9 +1832,7 @@ async function showDetail(cid){
           const _done = (_a.status === '已确认');
           return `<b>${_done ? '已复核' : '未复核'}</b>
             <button class="btn-primary" onclick="markReview(${_a.id||'null'},${_done},${cid})">
-              ${_done ? '撤销复核' : '我已核对过这个人的信息'}</button>
-            <span class="small">复核只表示"看过并认可"，**不会改动档位**；
-              不同意就直接改档位或拒绝。</span>`;
+              ${_done ? '撤销复核' : '我已核对过这个人的信息'}</button>`;
         })()}</div>
       <div class="k">所属岗位</div><div>
         ${(()=>{
@@ -1802,11 +1842,20 @@ async function showDetail(cid){
           const _t = _a.job_title || '待指定';
           const _label = (_a.job_id ? '修改岗位' : '指定岗位');
           return `<b>${esc(_t)}</b>
-            <button onclick="assignJobPick(${d.id},'pickjobD-${d.id}',${_a.id||'null'})">${_label}</button>
-            <span class="small">改岗位后会按新岗位的 JD 重算建议档位，动作写入审计</span>`;
+            <button onclick="assignJobPick(${d.id},'pickjobD-${d.id}',${_a.id||'null'})">${_label}</button>`;
         })()}</div>
-      <div class="k">档案状态</div><div>${esc(d.pool_status||'—')} · 密级标记 ${esc(d.pii_level||'普通')}
-        · 投递 ${(d.applications||[]).length} 次 · 附件 ${(d.documents||[]).length} 份
+      <div class="k">档案状态</div><div>${(()=>{
+        /* v1.25.7：阶段/来源/投递日期综合进这一行；
+           "密级标记 普通"这类**默认值不展示**（用户：没什么有用信息）——
+           只有非普通（敏感/涉密）时才标出来，那种才需要一眼看到。 */
+        const _a = (d.applications||[])[0] || {};
+        const _date = (_a.applied_at||'').slice(0,10);
+        const _pii = d.pii_level || '普通';
+        const _piiTxt = (_pii && _pii !== '普通') ? ('密级标记 ' + esc(_pii) + ' · ') : '';
+        return `${esc(d.pool_status||'—')} · ${_piiTxt}阶段 ${esc(_a.stage||'新投递')}
+          · 投递 ${(d.applications||[]).length} 次${_date?('（最近 '+esc(_date)+'）'):''}
+          · 来源 ${esc(_a.channel||'—')} · 附件 ${(d.documents||[]).length} 份`;
+      })()}
         ${(function(){
           /* v1.25：已发过邮件的**打一个显眼标记**。
              为什么必须显眼：同一个人被两个 HR 各发一封面试邀请，
@@ -1821,19 +1870,17 @@ async function showDetail(cid){
         })()}</div>
     </div>
     ${dup}
-    <div class="spacer"></div><div style="font-weight:600;font-size:15px">技能（均带原文证据）</div>
+    <div class="spacer"></div><div style="font-weight:600;font-size:15px">技能</div>
     <div style="margin-top:6px">${skills||'<span class="small">未识别到已核验技能</span>'}</div>
     <div style="margin-top:8px">${evs}</div>
     <div class="spacer"></div><div style="font-weight:600;font-size:15px">投递记录</div>
     <table><thead><tr><th>投递</th><th>岗位</th><th>渠道</th><th>投递时间</th><th>档位</th>
       <th>阶段</th><th>状态</th></tr></thead><tbody>${apps||'<tr><td colspan="7">—</td></tr>'}</tbody></table>
     <div id="pickjobD-${d.id}"></div>
-    <div class="spacer"></div><div style="font-weight:600;font-size:15px">简历附件（原件留档，可下载）</div>
+    <div class="spacer"></div><div style="font-weight:600;font-size:15px">简历附件</div>
     <table><thead><tr><th>文件</th><th>解析</th><th>结果</th><th>接收时间</th><th>归档位置</th><th>操作</th></tr></thead>
       <tbody>${docs||'<tr><td colspan="6">—</td></tr>'}</tbody></table>
-    <div class="spacer"></div><div style="font-weight:600;font-size:15px">操作审计
-      <span class="small">只列确实改动了数据的操作；单纯"看了一下"的不在这儿
-      （本地日志里都留着，需要时可调出）</span></div>
+    <div class="spacer"></div><div style="font-weight:600;font-size:15px">操作审计</div>
     <table><thead><tr><th style="width:170px">时间</th><th>做了什么</th><th style="width:90px">操作人</th>
       </tr></thead>
       <tbody>${(d.audit_snippet||[]).map(a=>`<tr>
@@ -1849,9 +1896,6 @@ async function showDetail(cid){
     <div class="bar" style="margin-top:10px">
       <button data-reanalyze="${d.id}" onclick="reanalyze(${d.id},true)"
         title="重新解析原件 → 模型重抽字段 → 重建技能 → 重新归岗 → 重判建议档 → 重算分析。约 10 秒。">完整重新分析</button>
-      <span class="small">抽取方式是「规则通道」时用它重跑一遍，就能换成模型抽取
-        （不用重新导入，也不会多出一条投递）。HR 已定的档位/阶段/岗位不受影响，
-        手动更正过的字段会保留。</span>
     </div>
     <div id="out-${d.id}"></div>`;
   document.getElementById('modal').classList.add('on');
@@ -1947,6 +1991,23 @@ async function saveFields(cid){
   toast(r.note || '已更正', 'ok');
   await showDetail(cid);
   refresh();          // 背后的列表/卡片也同步（改完姓名后列表要跟着变）
+}
+
+/* v1.25.7：保存人工备注（独立于「保存更正」——备注是长文本、改得频繁）。
+   成功后原地刷新弹层 + 列表（卡片上的备注行要跟着变）。 */
+async function saveNote(cid){
+  const el = document.getElementById('edNote');
+  if (!el) return;
+  const r = await api('/api/candidates/'+cid+'/note',
+                      {method:'POST', body:JSON.stringify({note: el.value})});
+  if (r.__http_error || r.error){
+    toast(r.detail||r.error||'保存失败','danger'); return;
+  }
+  toast(r.note || '备注已保存', 'ok');
+  if (r.changed && r.changed.length){
+    await showDetail(cid);   // 原地刷新弹层（能看到最新值）
+    refresh();               // 列表卡片上的备注行同步
+  }
 }
 
 /* 页面内确认弹窗：替代浏览器原生 await askConfirm()。
@@ -2275,10 +2336,43 @@ function goStageFilter(stage){
 }
 
 function pipeToggle(){ PIPE_OPEN = !PIPE_OPEN; refresh(); }
+/* v1.25.7：超期阈值设置（用户要求"超期时间这里加一个设置按钮"）——
+   只改"停留多少天算超期"的标红口径，存 settings，改完立即生效。 */
+async function pipeOverdueSet(){
+  let cur = 15;
+  try {
+    const r = await api('/api/settings');
+    if (r && r.pipeline_overdue_days != null) cur = r.pipeline_overdue_days;
+  } catch(e){}
+  setModalTitle('超期设置');
+  document.getElementById('mBody').innerHTML =
+    `<div class="bar">停留超过
+       <input id="odDays" type="number" min="1" max="365" value="${cur}" style="width:90px">
+       天，在管道里标红</div>
+     <div class="bar" style="margin-top:12px">
+       <button class="btn-primary" onclick="pipeOverdueSave()">保存</button>
+       <button onclick="closeModal()">取消</button>
+     </div>`;
+  document.getElementById('modal').classList.add('on');
+}
+async function pipeOverdueSave(){
+  const el = document.getElementById('odDays');
+  const n = parseInt(el ? el.value : '', 10);
+  if (!n || n < 1 || n > 365){ toast('请填 1-365 之间的天数','warn'); return; }
+  const r = await api('/api/settings', {method:'POST',
+                                        body:JSON.stringify({pipeline_overdue_days: n})});
+  if (r.__http_error || r.error){ toast(r.detail||r.error||'保存失败','danger'); return; }
+  closeModal();
+  toast('超期已设为 ' + n + ' 天', 'ok');
+  refresh();
+}
 function pipeBoardHtml(p){
   const order = (p && p.stage_order) || STAGES;
   const st = (p && p.stages) || {};
   const openTotal = (p && p.open_total) || 0;
+  // v1.25.7：超期阈值来自设置（默认 15 天）——标红口径与后端 overdue 计数同源；
+  // 头部的「超期设置」按钮可改。
+  const _od = (p && p.overdue_days) || 15;
   // 折叠行：在招流程各阶段人数，一段一行放下（超期红字提醒），已入职/已结束不计
   const counts = _PIPE_STAGES.map(s=>{
     const v = st[s] || {count:0, overdue:0};
@@ -2289,6 +2383,7 @@ function pipeBoardHtml(p){
       <b>投递管道</b>
       <span class="small" style="color:var(--ink-2)">在流程中 ${openTotal} 条</span>
       <span style="flex:1"></span>
+      <button onclick="pipeOverdueSet()" title="设置停留多少天算超期（管道里标红）">超期设置</button>
       <button id="pipeBtn" class="${PIPE_OPEN?'':'btn-primary'}" onclick="pipeToggle()">${PIPE_OPEN?'收起 ▲':'展开 ▼'}</button>
     </div>
     <div class="bar" style="margin-top:8px;flex-wrap:wrap;gap:6px 10px">${counts || '<span class="small" style="color:var(--ink-3)">各阶段暂无人</span>'}</div>`;
@@ -2310,7 +2405,7 @@ function pipeBoardHtml(p){
         <span class="pipe-nm" title="点击打开完整档案"
               onclick="showDetail(${i.candidate_id})">${esc(i.candidate_name||'未识别')}</span>
         ${i.job_title?`<span class="pipe-job">${esc(i.job_title)}</span>`:''}
-        <span class="pipe-day${i.days>=15?' is-over':''}">${i.days}天</span>
+        <span class="pipe-day${i.days>=_od?' is-over':''}">${i.days}天</span>
         ${i.application_id?`<select class="pipe-sel" onchange="setStage(${i.application_id},this.value)"
           title="推进到所选阶段（写入审计）">
           ${STAGES.map(k=>`<option value="${k}" ${k===s?'selected':''}>${k}</option>`).join('')}
@@ -2333,7 +2428,7 @@ function pipeBoardHtml(p){
   return `<div class="card" id="pipeCard" style="margin-bottom:12px">${head}
     <div class="cols" style="margin-top:10px">${cols}</div>
     <div class="small" style="color:var(--ink-3);margin-top:8px"
-         title="点姓名打开完整档案；行内下拉可直接推进阶段（写审计）；停留超过 15 天标红">每列最多显示 ${PIPE_PER_COL} 人（超出可展开或去人才库按阶段筛）· 点姓名看档案 · 超 15 天标红</div>
+         title="点姓名打开完整档案；行内下拉可直接推进阶段（写审计）；停留超过 ${_od} 天标红">每列最多显示 ${PIPE_PER_COL} 人（超出可展开或去人才库按阶段筛）· 点姓名看档案 · 超 ${_od} 天标红</div>
   </div>`;
 }
 
@@ -2390,11 +2485,11 @@ async function viewArchive(){
         <input type="checkbox" class="archChk" value="${x.id}" style="margin-right:10px">
         <div class="avatar">${esc((x.name||'?').slice(0,1))}</div>
         <div style="flex:1;min-width:0">
-          <div class="nm">${esc(x.name||'未识别')} ${leftTxt}</div>
-          <div class="meta">${eduBadge(x)}${expBadge(x) ? (' · ' + expBadge(x)) : ''} ·
-            ${esc(x.school||'—')} · 阶段 ${esc(x.stage||'新投递')} ·
+          <div class="nm">${esc(x.name||'未识别')} ${eduSchoolTag(x)} ${leftTxt}</div>
+          <div class="meta">${expBadge(x) ? (expBadge(x) + ' · ') : ''}阶段 ${esc(x.stage||'新投递')} ·
             归档于 ${esc((x.archived_at||'').slice(0,16)||'—')}</div>
           <div class="meta" style="margin-top:2px"><b>联系方式</b>：${contactLine(x)}</div>
+          ${noteLine(x)}
         </div>
         <div class="badge" style="color:${fg};background:${bg}"><b>${t}</b><span>${TIER_LABELS[t]}</span></div>
       </div>

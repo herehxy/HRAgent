@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     blind INTEGER DEFAULT 0,
     merged_into INTEGER,               -- 软合并指向主档
     archived_at TEXT,                  -- 软归档时间戳（v1.4）：NULL=在库，非空=已归档
+    note TEXT,                         -- 人工备注（v1.25.7）：HR 工作记录，不参与档位判定
     created_at TEXT, updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_cand_bidx   ON candidates(phone_bidx, email_bidx);
@@ -477,6 +478,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "grad_date": "TEXT",
             # v1.17：奖学金/荣誉/论文/专利
             "honors_json": "TEXT",
+            # v1.25.7：人工备注（HR 工作记录：沟通印象/内推关系/谈薪情况……），不参与档位判定
+            "note": "TEXT",
         },
         # v1.5：待指定投递的「建议岗位」（轮询在招岗位取最适者，只建议不归岗）
         "applications": {
@@ -1079,7 +1082,7 @@ SELECT c.*,
        a.tier_final    AS tier_final,
        a.stage         AS stage,
        a.status        AS app_status,
-       a.note          AS note,
+       a.note          AS app_note,     -- v1.25.7：投递备注改用 app_note（note 让位给候选人备注）
        a.needs_review  AS needs_review,
        a.reasons       AS reasons,
        a.risks         AS risks,
@@ -1236,10 +1239,11 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
             " OR LOWER(COALESCE(c.school,'')) LIKE ? OR LOWER(COALESCE(c.major,'')) LIKE ?"
             " OR LOWER(COALESCE(j.title,'')) LIKE ?"
             " OR LOWER(COALESCE(sj2.title,'')) LIKE ?"
+            " OR LOWER(COALESCE(c.note,'')) LIKE ?"   # v1.25.7：备注可搜（"内推""谈薪"能找到人）
             " OR EXISTS (SELECT 1 FROM candidate_skills cs3 JOIN skills s3 ON s3.id = cs3.skill_id"
             "            WHERE cs3.candidate_id = c.id"
             "              AND LOWER(COALESCE(s3.canonical_name,'')) LIKE ?))")
-        args.extend([like] * 7)
+        args.extend([like] * 8)
     if where:
         sql += " WHERE " + " AND ".join(where)
     # 排序（v1.8.8，HR 口径）：**D 档一律沉底**，其余不看分数、按导入时间倒序。
@@ -1407,7 +1411,9 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         "score": latest.get("score"),
         "stage": latest.get("stage"),
         "status": latest.get("status"),
-        "note": latest.get("note"),
+        # v1.25.7：投递备注不再占用顶层 note（改名 app_note 保留数据）；
+        # 顶层 note 现在由 **c 提供 = 候选人的人工备注（HR 工作记录）。
+        "app_note": latest.get("note"),
         "needs_review": latest.get("needs_review"),
         # v1.25.6：给完整档案用的"缺什么"清单与"原文是否读得出"（界面直接展示）
         "missing_fields": _missing,
@@ -3492,14 +3498,18 @@ def pipeline_stats(conn: sqlite3.Connection) -> dict:
                 "channel": r["channel"]}
         stages.setdefault(st, []).append(item)
         channels[r["channel"] or "未知"] = channels.get(r["channel"] or "未知", 0) + 1
+    # v1.25.7：超期阈值可配置（HR 在管道上的「超期设置」里改；默认 15 天）。
+    # 在这里读一次设置，别在列表推导里反复查。
+    _overdue_days = int(get_setting(conn, "pipeline_overdue_days", 15) or 15)
     return {
         # v1.7.4：管道看板嵌入人才库后要**全部展示**，不再截断每阶段前 20 条
         # （本地单 HR 场景量级小；此前下拉形态截断是为省那一屏）。
         "stages": {s: {"count": len(v), "items": v,
-                       "overdue": sum(1 for i in v if i["days"] >= 15)}
+                       "overdue": sum(1 for i in v if i["days"] >= _overdue_days)}
                    for s, v in stages.items()},
         "channels": channels,
         "open_total": sum(len(v) for s, v in stages.items() if s not in ("已入职", "已结束")),
+        "overdue_days": _overdue_days,
     }
 
 

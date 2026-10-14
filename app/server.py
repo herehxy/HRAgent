@@ -216,7 +216,8 @@ AUTO_INSIGHT_KEY = "auto_insight_on_ingest"
 
 def _settings(conn) -> dict:
     return {"gender_filter_enabled": bool(db.get_setting(conn, GENDER_FILTER_KEY, False)),
-            "auto_insight_on_ingest": bool(db.get_setting(conn, AUTO_INSIGHT_KEY, True))}
+            "auto_insight_on_ingest": bool(db.get_setting(conn, AUTO_INSIGHT_KEY, True)),
+            "pipeline_overdue_days": int(db.get_setting(conn, "pipeline_overdue_days", 15) or 15)}
 
 
 def _auth_enabled() -> bool:
@@ -1180,6 +1181,39 @@ def api_candidate_rename(cid: int, req: dict,
         return {"ok": True, "id": cid, "changed": sorted(changed),
                 "note": "已更正：" + "、".join(label[k] for k in changed)
                         + "（改前改后都记在操作审计里）。"}
+    finally:
+        conn.close()
+
+
+@app.post("/api/candidates/{cid}/note")
+def api_candidate_note(cid: int, req: dict,
+                       x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """人工备注（v1.25.7）：每位候选人一条自由文本，**挂在人上**（跨投递保留）。
+
+    为什么独立于「保存更正」：备注是长文本、改得频繁，且**不参与档位判定**；
+    独立接口单独保存更顺手。修改写审计（改前/改后全文留痕）；备注内容可被搜索。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    req = req or {}
+    note = str(req.get("note") or "").strip()
+    if len(note) > 500:
+        raise HTTPException(status_code=422, detail="备注最多 500 字")
+    conn = db.connect(DB_PATH)
+    try:
+        d = db.candidate_detail(conn, cid)
+        if not d:
+            raise HTTPException(status_code=404, detail="未找到该候选人")
+        old = (d.get("note") or "").strip()
+        if old == note:
+            return {"ok": True, "id": cid, "changed": [], "note": "备注没有变化。"}
+        db.update_candidate(conn, cid, note=note or None)
+        db.add_audit(conn, "candidate", str(cid), "edit_fields",
+                     f"备注={old or '（空）'}", f"备注={note or '（空）'}",
+                     s["username"], s["role"])
+        return {"ok": True, "id": cid, "changed": ["note"],
+                "note": ("备注已保存。" if note else "备注已清空。")}
     finally:
         conn.close()
 
@@ -3090,6 +3124,8 @@ class SettingsReq(BaseModel):
     gender_filter_enabled: bool | None = None
     # v1.13.4：入库即分析开关（默认开）。关掉后入库不自动调模型，改由 HR 手动批量补。
     auto_insight_on_ingest: bool | None = None
+    # v1.25.7：投递管道的"超期"标红阈值（天），默认 15。
+    pipeline_overdue_days: int | None = None
 
 
 @app.get("/api/settings")
@@ -3194,14 +3230,23 @@ def api_settings_set(req: SettingsReq,
             db.set_setting(conn, GENDER_FILTER_KEY, bool(req.gender_filter_enabled))
         if getattr(req, "auto_insight_on_ingest", None) is not None:
             db.set_setting(conn, AUTO_INSIGHT_KEY, bool(req.auto_insight_on_ingest))
+        if getattr(req, "pipeline_overdue_days", None) is not None:
+            # v1.25.7：投递管道超期阈值（标红口径）——1~365 天
+            _od = int(req.pipeline_overdue_days)
+            if not (1 <= _od <= 365):
+                raise HTTPException(status_code=422, detail="超期天数应在 1-365 之间")
+            db.set_setting(conn, "pipeline_overdue_days", _od)
         after = _settings(conn)
         on_before = bool(before.get("gender_filter_enabled"))
         on_after = bool(after.get("gender_filter_enabled"))
         _ai_before = bool(before.get("auto_insight_on_ingest"))
         _ai_after = bool(after.get("auto_insight_on_ingest"))
+        _od_b = int(before.get("pipeline_overdue_days") or 15)
+        _od_a = int(after.get("pipeline_overdue_days") or 15)
         if before != after:
             for _k, _b, _a in (("gender_filter_enabled", on_before, on_after),
-                               ("auto_insight_on_ingest", _ai_before, _ai_after)):
+                               ("auto_insight_on_ingest", _ai_before, _ai_after),
+                               ("pipeline_overdue_days", _od_b, _od_a)):
                 if _b != _a:
                     db.add_audit(conn, "settings", _k, "update",
                                  f"{_k}={_b}", f"{_k}={_a}",
@@ -3216,6 +3261,8 @@ def api_settings_set(req: SettingsReq,
                             "消耗模型额度）。" if _ai_after
                             else "入库即分析已关闭：新简历入库不再自动调模型，"
                                  "可在人才库点「分析待分析的人」批量补上（已写入审计）。")
+        if _od_a != _od_b:
+            _changed.append(f"超期天数已改为 {_od_a} 天。")
         note = " ".join(_changed) if _changed else "设置未变化。"
         return {"ok": True, **after, "changed": before != after, "note": note}
     finally:

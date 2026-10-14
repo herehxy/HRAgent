@@ -241,9 +241,11 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
                     db_fields[k] = v if v != "" else None
             d0 = db.candidate_detail(conn, cid) or {}
             label = {"name": "姓名", "edu_level": "学历", "school": "学校",
-                     "major": "专业", "phone_enc": "电话", "email_enc": "邮箱"}
+                     "major": "专业", "phone_enc": "电话", "email_enc": "邮箱",
+                     "note": "备注"}   # v1.25.7：人工备注也进审计文案
             old_map = {"name": d0.get("name") or "", "edu_level": d0.get("edu_level") or "",
                        "school": d0.get("school") or "", "major": d0.get("major") or "",
+                       "note": d0.get("note") or "",
                        "phone_enc": decrypt(d0.get("phone_enc")) or "",
                        "email_enc": decrypt(d0.get("email_enc")) or ""}
             # ⚠️ 只按**用户可见字段**写审计文案：phone_bidx/email_bidx 是派生字段、
@@ -251,8 +253,11 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             # 那个"保存成功却报 500"的根因。这里从一开始就按 label 过滤。
             changed = {k: v for k, v in fields.items() if k in label}
             db.update_candidate(conn, cid, **db_fields)
-            before = "；".join(f"{label[k]}={old_map.get(k) or '（空）'}" for k in changed)
-            after = "；".join(f"{label[k]}={(fields[k] or '（空）')}" for k in changed)
+            # v1.25：同 server.py —— 解密 + 打码，别把 enc: 密文写进审计。
+            before = "；".join(f"{label[k]}={db.audit_field_value(k, old_map.get(k))}"
+                               for k in changed)
+            after = "；".join(f"{label[k]}={db.audit_field_value(k, fields[k])}"
+                              for k in changed)
             db.add_audit(conn, "candidate", str(cid), "edit_fields", before, after,
                          operator, role)
             result["after"] = {"candidate_id": cid, "changed": sorted(changed)}

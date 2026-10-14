@@ -23,6 +23,9 @@ _FIT_SYSTEM = (
     "**suggested_tier 必须输出 A/B/C/D 之一，这是最重要的字段，漏了等于没做分析。**"
     "档位口径：A=必需条件全中且明显匹配；B=基本匹配、缺1项可培养；C=条件偏弱但有潜力；"
     "D=本岗位暂不匹配（仍会保留进人才库）。"
+    "**科研产出要展示**（v1.25.7）：若简历里有论文/专利/荣誉/奖学金，"
+    "必须在 highlights 里单独列一条，按简历原文列出（或概述数量与方向），"
+    "不要丢弃这部分信息。"
     "判断时**先看专业方向是否对口**：若候选人技能集中在与岗位侧重完全不同的大类"
     "（例如候选人是软件/计算机方向、岗位要求工艺与材料方向），要在 risks 里明确写成"
     "『专业方向不对口』并说明大类差异，而不是笼统地说『技能缺失X项』——"
@@ -69,6 +72,29 @@ def _names(v) -> list[str]:
     return out
 
 
+def _honors_summary(cand: dict) -> str:
+    """把科研产出（论文/专利/荣誉/奖学金）概述成一段简短文本（v1.25.7）。
+
+    按简历原文列名（前几条），不编造；无则返回空串。
+    """
+    try:
+        h = cand.get("honors") or {}
+        parts = []
+        for label in ("论文", "专利", "荣誉", "奖学金"):
+            arr = h.get(label) or []
+            names = []
+            for x in arr:
+                n = (x.get("name") or x.get("evidence") or "").strip()
+                if n and n not in names:
+                    names.append(n)
+            if names:
+                shown = names[:4]
+                parts.append(f"{label} {len(names)} 项" + (f"（{'、'.join(shown)}）" if shown else ""))
+        return "；".join(parts)
+    except Exception:
+        return ""
+
+
 def _cand_brief(cand: dict) -> str:
     skills = _names(cand.get("skills"))
     certs = _names(cand.get("certificates"))
@@ -77,6 +103,20 @@ def _cand_brief(cand: dict) -> str:
     major = cand.get("major")
     family = guess_major_family(major)
     canon = cand.get("major_canonical")
+    # v1.25.7：科研产出（论文/专利/荣誉/奖学金）进分析上下文——让模型在 highlights 里
+    # 把这部分**按简历原文列出或概述**（HR 要求：科研产出要展示出来）。
+    honors_txt = ""
+    try:
+        h = cand.get("honors") or {}
+        for label in ("论文", "专利", "荣誉", "奖学金"):
+            arr = h.get(label) or []
+            if arr:
+                names = [x.get("name") or x.get("evidence") or "" for x in arr]
+                names = [n for n in names if n]
+                if names:
+                    honors_txt += f"\n{label}:{'、'.join(names[:8])}"
+    except Exception:
+        honors_txt = ""
     return (
         f"姓名:{cand.get('name')}；学历:{edu}；年限:{years}；"
         f"院校:{cand.get('school')}；专业:{major}"
@@ -84,8 +124,9 @@ def _cand_brief(cand: dict) -> str:
         + (f"（归一专业：{canon}）" if canon and canon != major else "") + "；"
         f"\n技能:{'、'.join(skills) or '未识别'}"
         f"\n技能专业大类分布:{_cat_text(skills)}"
-        f"\n证书:{'、'.join(certs) or '无'}\n"
-        f"系统规则评分:{cand.get('score')}（建议档 {cand.get('tier_suggested')}，"
+        f"\n证书:{'、'.join(certs) or '无'}"
+        + honors_txt
+        + f"\n系统规则评分:{cand.get('score')}（建议档 {cand.get('tier_suggested')}，"
         f"命中{cand.get('hits') or []}，缺失{cand.get('miss') or []}）\n"
         f"简历原文:\n{(cand.get('raw_text') or '')[:3000]}"
     )
@@ -349,6 +390,11 @@ def auto_insight(cand: dict, jd: dict | None, grade_result: dict | None = None) 
         summary = "｜".join(bits)
         if verified:
             summary += f"；已核实技能 {len(verified)} 项"
+        # v1.25.7：科研产出（论文/专利/荣誉/奖学金）也要在画像里展示——
+        # 规则拼接（不依赖模型，避免未归岗时模型不可用导致这部分丢失）。
+        honors_txt = _honors_summary(cand)
+        if honors_txt:
+            summary += "；" + honors_txt
         # 理由取已核实技能（有原文出处的那些），而不是全部技能名
         reasons = verified[:4]
         risks = ["尚未归岗，本条未做岗位匹配判断——在「岗位管理」建岗位后可重算"]

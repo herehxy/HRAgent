@@ -315,15 +315,18 @@ TOOL_SPECS = [
 
     # ------------------------------ 字段更正 / 重算 / 批处理（v1.25） ------------------------------
     _spec("update_candidate_fields",
-          "【需 HR 确认】更正候选人字段：姓名 / 学历 / 学校 / 专业 / 电话 / 邮箱。"
+          "【需 HR 确认】更正候选人字段：姓名 / 学历 / 学校 / 专业 / 电话 / 邮箱 / 备注。"
           "只生成待确认提案；HR 确认后落库并记录改前改后（电话/邮箱加密存储）。"
+          "备注是 HR 的自由工作记录（沟通印象、内推关系、谈薪情况……），≤500 字，空串表示清空。"
           "**技能与年限不在此处改**——那必须来自简历原文与证据核对。"
-          "HR 说『把陈志远的电话改成 138…』『这个人学校识别错了』时用这个。",
+          "HR 说『把陈志远的电话改成 138…』『这个人学校识别错了』『给沈亦舟加备注：周四电话沟通』时用这个。",
           {"candidate_id": {"type": "string", "description": "候选人 id 或姓名"},
            "name": {"type": "string"}, "education": {"type": "string",
                      "description": "大专/本科/硕士/博士，留空表示未识别"},
            "school": {"type": "string"}, "major": {"type": "string"},
-           "phone": {"type": "string"}, "email": {"type": "string"}},
+           "phone": {"type": "string"}, "email": {"type": "string"},
+           "note": {"type": "string",
+                    "description": "人工备注（≤500 字）：沟通印象/内推关系/谈薪情况等；空串表示清空"}},
           ["candidate_id"]),
     _spec("reanalyze_candidate",
           "【需 HR 确认】对某位候选人**完整重跑分析**（重新解析原件 → 重抽字段 → 重建技能 "
@@ -1209,7 +1212,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             if not d:
                 return _err(f"未找到候选人 #{cid}")
             _LABEL = {"name": "姓名", "edu_level": "学历", "school": "学校",
-                      "major": "专业", "phone_enc": "电话", "email_enc": "邮箱"}
+                      "major": "专业", "phone_enc": "电话", "email_enc": "邮箱",
+                      "note": "备注"}   # v1.25.7：人工备注
             fields: dict = {}
             if args.get("name") is not None:
                 nm = str(args.get("name") or "").strip()
@@ -1234,11 +1238,17 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 if em and "@" not in em:
                     return _err("邮箱格式不对")
                 fields["email_enc"] = em
+            if args.get("note") is not None:            # v1.25.7：人工备注（≤500 字，空串=清空）
+                nt = str(args.get("note") or "").strip()
+                if len(nt) > 500:
+                    return _err("备注最多 500 字（当前 %d 字）" % len(nt))
+                fields["note"] = nt or None
             if not fields:
                 return _err("没有要修改的字段")
             from ..crypto import decrypt
             _cur = {"name": d.get("name") or "", "edu_level": d.get("edu_level") or "",
                     "school": d.get("school") or "", "major": d.get("major") or "",
+                    "note": d.get("note") or "",
                     "phone_enc": decrypt(d.get("phone_enc")) or "",
                     "email_enc": decrypt(d.get("email_enc")) or ""}
             pairs = []
