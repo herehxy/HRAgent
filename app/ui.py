@@ -283,7 +283,10 @@ _PAGE = """<!DOCTYPE html>
   .stat-row{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
   .tier-donut{display:flex;align-items:center;gap:14px;flex:none}
   .tier-donut svg .td-seg{cursor:pointer;transition:stroke-width .12s}
-  .tier-donut svg .td-seg:hover{stroke-width:14}
+  .tier-donut svg .td-seg:hover{stroke-width:18}
+  /* 点中间的总人数 = 回到"所有人"（清除全部筛选条件） */
+  .tier-donut svg .td-total{cursor:pointer;transition:fill .12s}
+  .tier-donut svg .td-total:hover{fill:var(--accent-ink)}
   .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:16px 0 12px}
   .tab{padding:7px 15px;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--surface);cursor:pointer;font-size:14px;color:var(--ink-2)}
   .tab:hover{color:var(--accent);border-color:var(--accent-line)}
@@ -1118,19 +1121,26 @@ function renderStats(s){
   };
   const stageRing = (() => {
     const st = s.stages || {};
-    const segs = STAGES.map(k => [k, n(st[k]), STAGE_COLOR[k] || '#a7b0bf']);
+    const n = k => st[k] || 0;
+    // v1.25.10 兜底：前端只渲染 STAGES 那 7 个键，若库里还有别的 stage 值
+    // （旧数据/手工改过），那些人会在环里凭空消失——并入「新投递」，
+    // 保证环总数 == 候选人数。后端也做了同样归并，这里是第二道防线。
+    let _extra = 0;
+    for (const k in st){ if (!STAGES.includes(k)) _extra += (st[k] || 0); }
+    const segs = STAGES.map(k => [k, n(k) + (k === '新投递' ? _extra : 0),
+                                  STAGE_COLOR[k] || '#a7b0bf']);
     const total = segs.reduce((a, x) => a + x[1], 0);
     if (!total) {
       return `<div class="tier-note" style="flex:none">投递进度：暂无（还没有投递）</div>`;
     }
-    const R = 26, CIRC = 2 * Math.PI * R;
+    const R = 30, CIRC = 2 * Math.PI * R;
     let acc = 0;
     const arcs = segs.filter(x => x[1] > 0).map(([k, v, color]) => {
       const len = CIRC * v / total;
-      const el = `<circle class="td-seg" r="${R}" cx="34" cy="34" fill="none"
-          stroke="${color}" stroke-width="11"
+      const el = `<circle class="td-seg" r="${R}" cx="38" cy="38" fill="none"
+          stroke="${color}" stroke-width="15"
           stroke-dasharray="${len} ${CIRC - len}" stroke-dashoffset="${-acc}"
-          transform="rotate(-90 34 34)"
+          transform="rotate(-90 38 38)"
           onclick="STAGE_F='${k}';TAB='ALL';poolPageReset();go('pool')"
         ><title>${k}：${v} 人 —— 点击筛选</title></circle>`;
       acc += len;
@@ -1144,11 +1154,12 @@ function renderStats(s){
         ${k} ${v}
       </div>`).join('');
     return `<div class="tier-donut" title="投递进度（点环或图例 → 筛出该阶段）">
-      <svg width="128" height="128" viewBox="0 0 68 68" role="img"
+      <svg width="142" height="142" viewBox="0 0 76 76" role="img"
            aria-label="投递进度：${segs.map(x => x[0] + ' ' + x[1]).join('、')}">
         ${arcs}
-        <text x="34" y="34" text-anchor="middle" dominant-baseline="central"
-              font-size="13" font-weight="600" fill="var(--ink)">${total}</text>
+        <text class="td-total" x="38" y="38" text-anchor="middle" dominant-baseline="central"
+              font-size="16" font-weight="600" fill="var(--ink)"
+              onclick="goAllPool()"><title>全部 ${total} 人 —— 点击清除所有筛选</title>${total}</text>
       </svg>
       <div style="display:grid;gap:2px">${legend}</div>
     </div>`;
@@ -2329,6 +2340,15 @@ async function exportCsv(){
    数据仍是 /api/pipeline 一份；折叠态记在 PIPE_OPEN，refresh 重渲染后不丢。 */
 const PIPE_PER_COL = 15;   // 每列最多显示多少人（v1.15）：看板是"看积压"，不是"浏览全部"
 const _PIPE_STAGES = STAGES.filter(s=>s!=='已入职' && s!=='已结束');   // 在招流程阶段
+function goAllPool(){
+  /* v1.25.10：点环中间的总人数 = 回到"所有人"。
+     环是**全库口径**（/api/stats 不带任何筛选），所以点它就该把列表也恢复成
+     全库未归档的同一批人——否则数字和列表对不上。阶段/页签/搜索词/性别/学历/
+     院校全部清掉，与工具栏「清空」按钮同义，只是额外把 STAGE_F 也清了。 */
+  STAGE_F = ''; TAB = 'ALL'; KW = ''; GENDER = ''; EDU_MIN = ''; UNIV = '';
+  const _kb = document.getElementById('kwBox'); if (_kb) _kb.value = '';
+  poolPageReset(); go('pool');
+}
 function pipeExpand(stage){
   PIPE_ALL[stage] = !PIPE_ALL[stage];
   refresh();

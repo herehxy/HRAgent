@@ -3484,12 +3484,23 @@ def pool_stats(conn: sqlite3.Connection) -> dict:
         if r["t"]:
             tiers[r["t"]] = tiers.get(r["t"], 0) + r["n"]
     stages = {s: 0 for s in STAGES}
+    # v1.25.10：环的统计口径 = 人才库里的**所有人**，不看"怎么来的"。
+    # 原来 INNER JOIN applications 只数"有投递记录"的人，没投递记录的人凭空消失，
+    # 导致环总数 ≠ 候选人数。改 LEFT JOIN：没投递 / stage 为空的都归「新投递」，
+    # 保证环总数 == people（候选人数）。
+    #
+    # 再加一层归并（旧数据/手工改过的 stage 值不在 STAGES 里，前端只渲染那 7 个键
+    # → 这些人会在环里凭空消失，表现为"比例显示不全"）：非标准值一律并入「新投递」。
     for r in conn.execute(
-            f"""SELECT COALESCE(a.stage, '新投递') AS s, COUNT(*) AS n
-                FROM candidates c JOIN applications a ON {_LATEST}
+            f"""SELECT COALESCE(NULLIF(a.stage, ''), '新投递') AS s, COUNT(*) AS n
+                FROM candidates c LEFT JOIN applications a
+                  ON a.candidate_id = c.id AND a.id = (
+                     SELECT id FROM applications WHERE candidate_id = c.id
+                     ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT 1)
                 WHERE {_ARCH} AND c.merged_into IS NULL
                 GROUP BY s""").fetchall():
-        stages[r["s"]] = stages.get(r["s"], 0) + r["n"]
+        _k = r["s"] if r["s"] in stages else "新投递"
+        stages[_k] = stages.get(_k, 0) + r["n"]
     apps = conn.execute(
         f"""SELECT COUNT(*) AS n FROM applications a
             JOIN candidates c ON c.id = a.candidate_id WHERE {_ARCH}""").fetchone()["n"]
