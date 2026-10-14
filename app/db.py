@@ -1790,9 +1790,9 @@ def purge_due_candidates(conn: sqlite3.Connection, days: int | None = None,
       v1.24.8 起HR 要求取消冷静期：归档页点「立即彻底删除」当场生效。
       防误删改由这几道承担：必须先归档 → 界面二次确认 → 审计永久留痕
       → 原件移入 `data/removed/` 而不是直接抹掉（可手工捞回）。
-    - 只删数据库记录，**原件区文件由调用方回收**（`file_path` / `archived_path`
-      随返回值一起给出，服务层把它们移进回收目录 `data/removed/`），
-      这样"库删了、文件还在回收目录里"——比直接 `unlink` 安全。
+    - 只删数据库记录，**原件区文件由调用方物理删除**（`file_path` / `archived_path`
+      随返回值一起给出，服务层逐个 `unlink`）。
+      v1.25.9：归档页「彻底删除」就是真删，不再移入回收目录堆文件。
     - 每个被删除的人写一条 `purge` 审计（含归档时间与投递/附件数量），
       审计本身**不删除**——"谁什么时候被清掉的"必须留痕。
 
@@ -1809,7 +1809,7 @@ def purge_due_candidates(conn: sqlite3.Connection, days: int | None = None,
     # 只要求"已归档"（archived_at 非空），**不再要求归档满 30 天**——
     # HR 要求取消冷静期：归档页点"立即彻底删除"就能删。
     # 防误删的两道闸移到别处：① 必须先归档（回收站外的人根本没这个按钮）
-    # ② 界面删除前有二次确认；③ 审计永久留痕；④ 原件移入 data/removed/ 不直接抹掉。
+    # ② 界面删除前有二次确认；③ 审计永久留痕；④ 原件一并物理删除（不可恢复）。
     rows_all = conn.execute(
         "SELECT id, name, archived_at FROM candidates "
         "WHERE COALESCE(archived_at,'') != '' ORDER BY id").fetchall()
@@ -1847,7 +1847,7 @@ def purge_due_candidates(conn: sqlite3.Connection, days: int | None = None,
               else f"归档满 {days} 天自动清理")
         add_audit(conn, "candidate", str(cid), "purge",
                   f"{r['name']}（{r['archived_at']} 归档）",
-                  f"{how}：{n_app} 条投递、{n_doc} 份附件（原件移入回收目录）",
+                  f"{how}：{n_app} 条投递、{n_doc} 份附件（原件已物理删除）",
                   operator, role)
         people.append({"id": cid, "name": r["name"], "archived_at": r["archived_at"],
                        "applications": n_app, "documents": n_doc})

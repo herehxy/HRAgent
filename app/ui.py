@@ -601,10 +601,10 @@ let GENDER = '';
 let EDU_MIN = '', UNIV = '';
 let STAGE_F = '';          // v1.16.1：阶段筛选（管道"看全部"跳过来时用）
 const PIPE_ALL = {};      // 管道里手动展开的列：{阶段名: true}
-// 人才库分页（v1.7.1）：每页 10 人。切档位 / 搜索 / 清空都会把页码拨回第 1 页——
+// 人才库分页（v1.7.1）：每页 20 人。切档位 / 搜索 / 清空都会把页码拨回第 1 页——
 // 否则"在第 3 页改了搜索词"会落在一个不存在的页上（后端会兜底夹到末页，但那不是用户想要的）。
 // 导出 CSV 不分页：另发一次不带 page 参数的请求拿全量，见 exportCsv。
-let POOL_PAGE = 1;const POOL_SIZE = 10;
+let POOL_PAGE = 1;const POOL_SIZE = 20;
 // 投递管道看板折叠态（v1.7.5）：默认收起只看一行人数，展开才是完整看板；
 // 记在全局变量上，翻页 / 搜索 / 改档位等 refresh 重渲染后不丢。
 let PIPE_OPEN = false;
@@ -1548,7 +1548,7 @@ async function viewPool(){
   ${ITEMS.length ? ITEMS.map(cardHtml).join('') : '<div class="card">没有符合条件的候选人。到「导入与来源」收一次简历试试。</div>'}
   ${pgBar(pg)}`;
 }
-// 分页条（v1.7.1）：每页 10 人。"共 N 人"始终是**筛后总数**（后端算好），不是本页条数，
+// 分页条（v1.7.1）：每页 20 人。"共 N 人"始终是**筛后总数**（后端算好），不是本页条数，
 // 避免出现"明明写着 3/2 页、总数却写 10"这种口径打架。只有一页时不渲染，省一行噪音。
 function pgBar(pg){
   if (!pg || (pg.total_pages||1) <= 1) return '';
@@ -2552,11 +2552,11 @@ async function archiveByYear(selId){
 }
 function archiveByYearFrom(elId){ return archiveByYear(elId); }
 async function purgeOne(cid){
-  if (!await askConfirm('彻底删除后**不可恢复**：档案、投递、附件记录都会删除，'
-    + '原件会移入回收目录（需要时请先在磁盘上复制一份）。\\n\\n确定彻底删除？')) return;
+  if (!await askConfirm('彻底删除后**不可恢复**：档案、投递、附件记录与原件文件都会删除。'
+    + '\\n\\n确定彻底删除？')) return;
   const r = await api('/api/candidates/'+cid+'/purge', {method:'POST'});
   if (r.__http_error || r.error){ toast(r.detail||r.error||'彻底删除失败','danger'); return; }
-  toast('已彻底删除（原件移入回收目录，审计已留痕）','ok');
+  toast('已彻底删除（原件已物理删除，审计已留痕）','ok');
   refresh();
 }
 async function purgeSelected(){
@@ -2566,7 +2566,7 @@ async function purgeSelected(){
   const shown = names.slice(0,12).join('、') + (names.length>12?' 等':'');
   if (!await askConfirm('即将彻底删除 <b>'+ids.length+'</b> 份已归档档案：'
     + '<br>'+esc(shown)
-    + '<br><br>档案、投递、附件记录都会删除，原件移入回收目录，<b>不可恢复</b>。'
+    + '<br><br>档案、投递、附件记录与原件文件都会删除，<b>不可恢复</b>。'
     + '<br><br>确定删除？')) return;
   let ok = 0, fail = [];
   for (const cid of ids){

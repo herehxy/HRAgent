@@ -64,6 +64,7 @@ from datetime import datetime
 from fastapi import Body, FastAPI, Header, HTTPException, Request, Query
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from . import actions, auth, db, feedback as feedback_mod
 from . import ingest as ingest_mod, mailbox as mb, regrade, search
@@ -462,6 +463,36 @@ def _edu_check(item: dict, jobs_map: dict) -> dict | None:
             "job_title": job.get("title")}
 
 
+#: 单个上传的体积上限。简历是 PDF/Word/图片，正常几 MB 以内；
+#: 留 50MB 是给扫描版高清图，超过就没意义了（也挡住"打满内存/磁盘"这条路）。
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
+def _store_upload_and_ingest(body: bytes, safe: str, jd, tiers,
+                             use_llm: bool, conf: dict | None) -> tuple[str, dict]:
+    """落盘 + 解析（**同步、耗时**：含 OCR 与模型调用）。
+
+    放进线程池跑的原因见 `api_upload`——它是整个服务里唯一会在事件循环里
+    长时间阻塞的一段，期间进度轮询和别的上传都会一起卡住。
+    """
+    import os as _os
+    import time as _t
+    from . import ingest as _ing
+    inbox = _os.path.join(DATA_DIR, "inbox")
+    _os.makedirs(inbox, exist_ok=True)
+    stamp = _t.strftime("%Y%m%d_%H%M%S")
+    dest = _os.path.join(inbox, f"{stamp}_{safe}")
+    i = 1
+    while _os.path.exists(dest):
+        dest = _os.path.join(inbox, f"{stamp}_{i}_{safe}")
+        i += 1
+    with open(dest, "wb") as fh:
+        fh.write(body)
+    rep = _ing.ingest_dir(inbox, jd, tiers, DB_PATH, job_id=None,
+                          use_llm=use_llm, llm_conf=conf)
+    return _os.path.basename(dest), rep
+
+
 @app.post("/api/upload")
 async def api_upload(request: Request, name: str = Query(...),
                      x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
@@ -471,28 +502,34 @@ async def api_upload(request: Request, name: str = Query(...),
     为什么不用 multipart：打包产物里没有 python-multipart，引入依赖会让
     "能不能跑"取决于打包有没有收进去——而这条路径恰恰是**离线兜底**，
     不能再引入任何"看心情装上"的依赖。一个文件一个请求，前端循环即可。
+
+    v1.25.9 加固两处（代码审查 P1-15 / P1-16）：
+    · **体积上限**：先用 `Content-Length` 早拒（超限的请求根本不读进内存），
+      读完再按实收字节核一次——头可以撒谎；
+    · **类型白名单**：只收 `parse.SUPPORTED`，不让任意二进制落进 inbox；
+    · **解析改到线程池**：`ingest_dir` 是同步的、要跑数秒到数十秒，
+      直接在 `async def` 里调用会占死事件循环，进度轮询 `/api/tasks/*`
+      和其他上传在这期间全部无响应。
     """
     s = _session(x_tp_token, x_tp_role)
     require(s, "ingest")
-    import os as _os
-    from . import ingest as _ing
+    declared = (request.headers.get("content-length") or "").strip()
+    if declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"文件超过 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB 上限：{name}")
     body = await request.body()
     if not body:
         raise HTTPException(status_code=400, detail="文件是空的")
-    inbox = _os.path.join(DATA_DIR, "inbox")
-    _os.makedirs(inbox, exist_ok=True)
+    if len(body) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"文件超过 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB 上限：{name}")
     # 文件名只留 basename，去掉路径分隔符（防目录穿越）
-    safe = _os.path.basename(name or "resume").strip() or "resume"
+    safe = os.path.basename(name or "resume").strip() or "resume"
     for ch in ("\\", "/", ":", "*", "?", "\"", "<", ">", "|"):
         safe = safe.replace(ch, "_")
-    stamp = _time.strftime("%Y%m%d_%H%M%S")
-    dest = _os.path.join(inbox, f"{stamp}_{safe}")
-    i = 1
-    while _os.path.exists(dest):
-        dest = _os.path.join(inbox, f"{stamp}_{i}_{safe}")
-        i += 1
-    with open(dest, "wb") as fh:
-        fh.write(body)
+    if not safe.lower().endswith(tuple(parse_mod.SUPPORTED)):
+        raise HTTPException(status_code=415,
+                            detail=f"不支持的文件类型：{safe}（只收 {'/'.join(parse_mod.SUPPORTED)}）")
     jd, tiers = _jd_tiers()
     # v1.23.2：**必须和「导入本地文件夹」同一口径**。
     # 这里原来写死 use_llm=False，等于上传的照片永远不做模型分析——
@@ -504,9 +541,9 @@ async def api_upload(request: Request, name: str = Query(...),
         _c = llm.load_cfg()
         _conf = {"api_key": _c.get("api_key"), "base_url": _c.get("base_url"),
                  "model": _c.get("model")}
-    rep = _ing.ingest_dir(inbox, jd, tiers, DB_PATH, job_id=None,
-                          use_llm=_use_llm, llm_conf=_conf)
-    return {"ok": True, "stored": _os.path.basename(dest),
+    stored, rep = await run_in_threadpool(_store_upload_and_ingest, body, safe, jd, tiers,
+                                          _use_llm, _conf)
+    return {"ok": True, "stored": stored,
             "bytes": len(body), "index": rep.get("index"),
             "notes": rep.get("notes") or [],
             "analyzed": bool(_use_llm),
@@ -1633,37 +1670,30 @@ def api_candidates_archive_batch(req: ArchiveBatchReq,
 
 def _purge_expired(conn=None, actor: str = "system", role: str = "system",
                    only_ids: list[int] | None = None) -> dict:
-    """把归档满 30 天的档案彻底删除，并把原件移进回收目录。
+    """把归档满 30 天的档案彻底删除，**原件一并物理删除（不可恢复）**。
 
-    自有连接便于被定时任务与接口两处复用。**先移文件再删库**：万一移动失败，
-    库里记录还在（下次还能重试），不会出现"记录没了、文件也不知在哪"。
+    自有连接便于被定时任务与接口两处复用。**先删库再删文件**：先拿到原件路径清单，
+    删库成功后逐个 `unlink`；删除失败只记录、不阻断（残留文件下次手动处理）。
+    v1.25.9：归档页「彻底删除」就是真删——不再移入回收目录堆着占空间。
     """
     own = conn is None
     conn = conn or db.connect(DB_PATH)
     try:
         out = db.purge_due_candidates(conn, db.PURGE_AFTER_DAYS, actor, role,
                                       only_ids=only_ids)
-        moved, missing = [], []
+        deleted, failed = [], []
         for rel in out["files"]:
             src = _abs_stored(rel)
             if not os.path.exists(src):
-                missing.append(rel)
+                failed.append(rel)
                 continue
-            dest_dir = os.path.join(REMOVED_DIR, "purged")
-            os.makedirs(dest_dir, exist_ok=True)
-            dest = os.path.join(dest_dir, os.path.basename(src))
             try:
-                if os.path.exists(dest):
-                    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-                    dest = os.path.join(dest_dir,
-                                        f"{os.path.splitext(os.path.basename(src))[0]}"
-                                        f"_{stamp}{os.path.splitext(src)[1]}")
-                shutil.move(src, dest)
-                moved.append(rel)
+                os.remove(src)
+                deleted.append(rel)
             except OSError:
-                missing.append(rel)
-        out["files_moved"] = len(moved)
-        out["files_missing"] = missing
+                failed.append(rel)
+        out["files_deleted"] = len(deleted)
+        out["files_failed"] = failed
         return out
     finally:
         if own:
@@ -1694,7 +1724,7 @@ def api_archive_purge_due(x_tp_token: str | None = Header(default=None, alias="X
     require(s, "set_stage")
     out = _purge_expired(actor=s["username"], role=s["role"])
     out["note"] = (f"已彻底删除 {out['purged']} 人（归档满 {out['days']} 天），"
-                   f"原件移入回收目录 {out['files_moved']} 份")
+                   f"原件已物理删除 {out['files_deleted']} 份")
     return out
 
 
@@ -1705,7 +1735,7 @@ def api_candidate_purge(cid: int,
     """彻底删除**单个**已归档的人（v1.24.8：取消 30 天冷静期，当场生效）。
 
     仍然要求"已归档"——人才库和检索里的人不给这条按钮，得先归档，
-    避免误点直接抹掉在用的人。审计留痕 + 原件移入 data/removed/。
+    避免误点直接抹掉在用的人。审计留痕 + 原件一并物理删除（不可恢复）。
     """
     s = _session(x_tp_token, x_tp_role)
     require(s, "set_stage")
@@ -1724,8 +1754,8 @@ def api_candidate_purge(cid: int,
                                 detail="未删除：该档案可能已被取消归档或并发改过。"
                                        "请刷新后重试")
         return {"ok": True, "id": cid, "purged": got[0],
-                "files_moved": out["files_moved"],
-                "note": f"已彻底删除（原件移入回收目录 {REMOVED_DIR}）"}
+                "files_deleted": out["files_deleted"],
+                "note": "已彻底删除（原件已物理删除，不可恢复）"}
     finally:
         conn.close()
 
@@ -1764,7 +1794,7 @@ def _startup_purge_task() -> None:
         out = _purge_expired()
         if out.get("purged"):
             print(f"[purge] 启动清理：彻底删除 {out['purged']} 位归档满 "
-                  f"{out['days']} 天的人（原件移入 {REMOVED_DIR}）")
+                  f"{out['days']} 天的人（原件已物理删除 {out['files_deleted']} 份）")
     except Exception as exc:                               # noqa: BLE001
         print(f"[purge] 启动清理失败（不影响使用）：{exc}", file=sys.stderr)
     try:
@@ -2054,6 +2084,19 @@ class IngestReq(BaseModel):
     folder: str | None = None
 
 
+def _safe_ingest_dir(value: str | None, cfg: dict) -> str:
+    """校验导入目录（代码审查 P1-12）。
+
+    规则只有一份，在 `ingest.resolve_source_dir`——**服务端与助手工具共用同一条**，
+    免得两处各写一份慢慢分叉（接口收紧了、助手那条路还敞着，等于没修）。
+    这里只负责把 `ValueError` 翻译成 HTTP 状态码。
+    """
+    try:
+        return ingest_mod.resolve_source_dir(value, cfg)
+    except ValueError as exc:
+        raise HTTPException(status_code=400 if ".." in (value or "") else 403, detail=str(exc))
+
+
 @app.post("/api/ingest")
 def api_ingest(req: IngestReq | None = Body(default=None),
                x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
@@ -2077,8 +2120,7 @@ def api_ingest(req: IngestReq | None = Body(default=None),
     cfg = mb.load_config()
     if req.source == "folder":
         # 文件夹上传：只分析、不归岗（job_id=None = 待 HR 指定）
-        folder = req.folder or cfg.get("folder_dir") or RESUME_DIR
-        folder = mb.resolve_dir(folder)
+        folder = _safe_ingest_dir(req.folder, cfg)
         # v1.24.20：目录不存在时**建出来并说清楚**，不要静默扫0。
         # 原样跑下去会返回 scanned:0，界面上只是一句"新增 0"——
         # HR 根本不知道是自己放错位置了，还是程序没找到。
@@ -2229,8 +2271,20 @@ def _file_session(header_token: str | None, query_token: str | None) -> dict:
     预览/下载走的是浏览器原生导航（`<a href>`、`window.open`、新标签页），
     没法带自定义请求头——登录模式下如果只认 `X-TP-Token`，这几个入口会直接 401。
     所以**仅文件类只读接口**接受 `?token=` 兜底；其余接口仍只认请求头。
+
+    `?token=` 的代价是令牌会落进浏览器历史、`Referer` 头与代理日志。彻底改法是
+    一次性签名（`文件名 + 过期时间 + HMAC`）；在改成签名之前，先用响应头把两处
+    最容易漏的地方堵上（代码审查 P1-17）：
+    · `Referrer-Policy: no-referrer`——跳转/内联资源不再把带令牌的 URL 带出去；
+    · `Cache-Control: no-store`——不进磁盘缓存，换机器/公用机不留痕。
     """
     return _session(header_token or query_token, None)
+
+
+#: 文件类响应的兜底安全头（配合 `_file_session` 的说明一起看）
+_FILE_SAFE_HEADERS = {"Referrer-Policy": "no-referrer",
+                      "Cache-Control": "private, no-store",
+                      "Pragma": "no-cache"}
 
 
 @app.get("/api/documents/{did}/file")
@@ -2272,7 +2326,8 @@ def api_document_file(did: int, inline: int = 0, token: str | None = None,
     disposition = "inline" if inline else "attachment"
     return FileResponse(real, filename=name,
                         content_disposition_type=disposition,
-                        media_type=d.get("mime") or _mime_of(name))
+                        media_type=d.get("mime") or _mime_of(name),
+                        headers=_FILE_SAFE_HEADERS)
 
 
 # ---------------------------------------------------------------- 来源文件与打包下载
@@ -2376,7 +2431,8 @@ def api_source_file(name: str, inline: int = 0, token: str | None = None,
         conn.close()
     return FileResponse(real, filename=base,
                         content_disposition_type="inline" if inline else "attachment",
-                        media_type=_mime_of(base))
+                        media_type=_mime_of(base),
+                        headers=_FILE_SAFE_HEADERS)
 
 
 class BundleReq(BaseModel):
@@ -3157,11 +3213,16 @@ def api_domains_import(req: DomainImportReq,
     run = req.dry_run if req.apply is None else (not req.apply)
     conn = db.connect(DB_PATH)
     try:
-        if run:
-            r = domains_mod.preview_import(req.pack)
-            return {"ok": True, "dry_run": True, "result": r,
-                    "note": "这是预演，没有改动任何文件。确认无误后用 dry_run=false 落地。"}
-        r = domains_mod.import_pack(conn, req.pack, operator=s["username"])
+        # 包名不合法（绝对路径 / 越界 / 不存在）是**调用方的输入问题**，不是服务端故障：
+        # 走 400 说清楚，别让它变成 500 再把内部路径回显出去。
+        try:
+            if run:
+                r = domains_mod.preview_import(req.pack)
+                return {"ok": True, "dry_run": True, "result": r,
+                        "note": "这是预演，没有改动任何文件。确认无误后用 dry_run=false 落地。"}
+            r = domains_mod.import_pack(conn, req.pack, operator=s["username"])
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         return {"ok": True, "dry_run": False, "result": r,
                 "note": "已导入并刷新库内技能分类。已有投递要按新口径重算，"
                         "请在对应岗位上点「重新分析」（会先给差异预览）。"}
@@ -3962,9 +4023,13 @@ def api_proactive_scan(stuck_days: int = 7,
 
     巡检**只建提案不执行**——产出的每一条都要 HR 点确认才生效。
     同一件事 7 天内不会重复提（去重窗口），避免把提案列表变成噪音。
+
+    权限用 `propose` 而不是 `read`（代码审查 P1-18）：它虽然不直接改业务数据，
+    但会往 `proposals` 表**落库**（持久化副作用），按只读授权与「写操作需写权限」
+    的口径不一致。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "read")
+    require(s, "propose")
     conn = db.connect(DB_PATH)
     try:
         r = proactive_mod.scan_and_propose(conn, stuck_days=int(stuck_days))
