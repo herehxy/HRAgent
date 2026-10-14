@@ -43,7 +43,7 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             return {"ok": True, "status": "已拒绝", "proposal_id": proposal_id}
 
         tool = p["tool"]
-        args = p.get("args") or {}
+        args = db.open_sensitive_args(p.get("args") or {})
         result: dict = {"ok": True, "proposal_id": proposal_id, "tool": tool}
 
         if tool == "set_stage":

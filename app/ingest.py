@@ -837,9 +837,9 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
     if upd:
         with lk:                                # 写段持锁（v1.24.8）
             db.update_candidate(conn, candidate_id, **upd)
-        steps.append("更新字段：" + "、".join(f"{k}" for k in upd))
+        steps.append("更新字段：" + "、".join(db.AUDIT_FIELD_LABEL.get(k, k) for k in upd))
     if kept_hr:
-        steps.append("保留人工更正：" + "、".join(kept_hr))
+        steps.append("保留人工更正：" + "、".join(db.AUDIT_FIELD_LABEL.get(k, k) for k in kept_hr))
 
     # ---- ⑤ 重挂技能（新抽取到技能才重建，避免模型挂了把旧技能清空）----
     sk = cand.get("skill_detail") or []
@@ -887,10 +887,13 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
     steps.append("重算系统自动分析")
 
     with lk:                                    # 审计也是写，v1.24.8
+        def _fmt_value(v):
+            return '（空）' if v in (None, '') else v
         db.add_audit(conn, "candidate", str(candidate_id), "reanalyze_full",
-                     "；".join(f"{k}={'（空）' if v[0] in (None, '') else v[0]}"
+                     "；".join(f"{db.AUDIT_FIELD_LABEL.get(k, k)}={_fmt_value(v[0])}"
                                for k, v in changes.items()) or "（字段无变化）",
-                     "；".join(f"{k}={v[1]}" for k, v in changes.items()) or "（字段无变化）",
+                     "；".join(f"{db.AUDIT_FIELD_LABEL.get(k, k)}={_fmt_value(v[1])}"
+                               for k, v in changes.items()) or "（字段无变化）",
                      "hr", "hr")
     return {"ok": True, "steps": steps, "changes": changes, "kept_hr": kept_hr,
             "extract_mode": cand.get("extract_mode"),
@@ -1038,7 +1041,7 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
                 # 文件名归岗（与邮件「标题归岗」同一口径）：
                 # 文件名里出现某个在招岗位名 → 归到该岗位，并按该岗位的 JD 评分。
                 # 为什么要这样：HR 的实际做法就是把投递岗位写进简历文件名
-                # （「王雪莹-科学研究-校招-简历.pdf」），文件名本身就是投递意向的表达，
+                # （「张三-科学研究-校招-简历.pdf」），文件名本身就是投递意向的表达，
                 # 不认它，全员都会落到"待指定"、再按默认尺子算出一个错的分。
                 # 文件名里没有岗位名时仍为 None（待 HR 指定），不硬凑。
                 fj_id, fj_jd = db.match_job_by_subject(conn, base)

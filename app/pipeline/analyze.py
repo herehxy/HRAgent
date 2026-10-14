@@ -12,6 +12,7 @@ import sys
 
 from ..agent import llm
 from . import normalize as nz
+from . import sanitize
 from .tier import edu_gate, guess_major_family, lock_tier
 
 _FIT_SYSTEM = (
@@ -117,6 +118,15 @@ def _cand_brief(cand: dict) -> str:
                     honors_txt += f"\n{label}:{'、'.join(names[:8])}"
     except Exception:
         honors_txt = ""
+    # ⚠️ raw_text 是**未脱敏**的简历原文，进任何模型前必须 scrub——
+    # 民族/婚姻/生育/身份证号/住址等受保护属性不能原样发给模型
+    # （sanitize 模块的红线：进入模型前即屏蔽）。extract 那条路已经 scrub，
+    # 分析这条路此前漏了，属同一红线的第二处缺口。
+    raw = cand.get("raw_text") or ""
+    try:
+        raw = sanitize.scrub(raw)[0][:3000]
+    except Exception:
+        raw = raw[:3000]
     return (
         f"姓名:{cand.get('name')}；学历:{edu}；年限:{years}；"
         f"院校:{cand.get('school')}；专业:{major}"
@@ -128,7 +138,7 @@ def _cand_brief(cand: dict) -> str:
         + honors_txt
         + f"\n系统规则评分:{cand.get('score')}（建议档 {cand.get('tier_suggested')}，"
         f"命中{cand.get('hits') or []}，缺失{cand.get('miss') or []}）\n"
-        f"简历原文:\n{(cand.get('raw_text') or '')[:3000]}"
+        f"简历原文:\n{raw}"
     )
 
 

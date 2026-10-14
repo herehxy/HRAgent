@@ -145,7 +145,7 @@ _FAKE_PROPOSAL_CLAIM_RE = re.compile(
     r"待\s*(?:确认|HR\s*确认|您\s*确认|你\s*确认)"   # 「待确认提案」「待 HR 确认」
     r"|pending_confirmation"
     # "已为您生成/创建/提交…的待确认提案" —— 中间允许插入任意修饰
-    # （实测模型会写「已为您生成将候选人 苗雨桐（西安电子科技大学）
+    # （实测模型会写「已为您生成将候选人 张三（某大学）
     #   从「新投递」推进到「已联系」的待确认提案」，中间有 30+ 字）
     r"|已\s*(?:为您|为你|经|统一|均)?\s*"
     r"(?:生成|创建|提交|建立|发起|做完|登记|加入|写入|调整|变更|修改|推进)"
@@ -179,7 +179,7 @@ _COMPLETED_ACTION_RE = re.compile(
 
 #: 从模型答复里抠出投递编号。**两种写法都要认**（实测截图里是 `（ID: 1024）`，
 #: 不是 `#1024` —— 只认 `#` 会整条补救静默失效）：
-#:   「候选人：苗雨桐（ID: 1024）」 / 「投递 #1024」 / 「application_id=1024」
+#:   「候选人：张三（ID: 1024）」 / 「投递 #1024」 / 「application_id=1024」
 #:
 #: 只在答复里出现数字 ID 时才启用补救 —— 模型报得出 ID 说明档案它见过。
 #: 只给名字的**不猜**：重名候选人在真实库里是常事，猜错就是替 HR 做了错决定。
@@ -208,7 +208,7 @@ def _looks_like_fake_proposal(answer: str, trace: list[dict]) -> bool:
     - **6 版仍漏**：真实案例里"纯征询豁免"是**全文任意位置**匹配
       `建议|是否|可否|要不要`，模型只要在**变更理由**里塞一个"建议"就绕过了：
 
-          已为您生成将候选人 苗雨桐 从「新投递」推进到「已联系」的待确认提案。
+          已为您生成将候选人 张三 从「新投递」推进到「已联系」的待确认提案。
           变更理由：HR 初步沟通，意向明确，**建议**进入已联系阶段。
 
       → **豁免分支必须按位置收紧**：征询语气只在句首/问号结尾才算。
@@ -390,7 +390,7 @@ def _recover_missed_action(answer: str, user_message: str, ctx, trace: list[dict
 
     # ---- 3) 确认这个投递确实存在，且当前阶段与模型说的相符 ----
     # ⚠️ **模型报的 ID 可能是 candidate_id 而不是 application_id**
-    # （截图里写「候选人：苗雨桐（ID: 1024）」，语义上更像人ID）。
+    # （截图里写「候选人：张三（ID: 1024）」，语义上更像人ID）。
     # 两者数值常常不同（真实库里更是完全不同），
     # 所以先按 application_id 试，查不到再回退按 candidate_id 找该人的投递。
     # **回退时若该人多条投递，一律放弃** —— 替 HR 挑一条就是替他做决定。
@@ -1146,7 +1146,8 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
             # v1.25：除了工具名与参数，还要存下**卡片所需的信息**——
             # 提案 id（供历史回放重建提案卡）与邮件草稿全文（重建草稿卡）。
             # 不存这两样，切页面/刷新后卡片就找不回来了（用户反馈"卡片消失"）。
-            "tool_calls": [{"tool": t["tool"], "args": t["args"],
+            "tool_calls": [{"tool": t["tool"],
+                            "args": db._mask_sensitive_args(t.get("args") or {}),
                             "tool_label": t.get("tool_label"),
                             "recovered": bool(t.get("recovered")),
                             **({"proposal_id": _pid} if (_pid := _proposal_id_of(t)) else {}),

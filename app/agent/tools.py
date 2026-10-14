@@ -38,9 +38,11 @@ WRITE_TOOLS = {"set_stage", "set_tier", "add_tag", "merge_candidates", "add_note
                "save_model_config", "update_candidate_fields", "reanalyze_candidate",
                "reanalyze_batch", "route_pending", "archive_by_year",
                "restore_source_files", "remove_source_files", "rebuild_brief",
-               "run_proactive_scan", "clear_chat_history"}
+               "clear_chat_history"}
 # ingest_resumes / export_resumes **不在** WRITE_TOOLS：它们是直接执行的
 # （取数据、给下载指引），标成"写·需确认"会让界面与实际行为不一致。
+# run_proactive_scan 也**不在** WRITE_TOOLS：它只建提案、不改业务数据，
+# 标 write=True 却直接执行会让界面/审计口径与实际行为分叉。
 
 # 明确拒绝的工具名（不提供实现，但出现在提示里会被拦下并告知用户）
 DISABLED_TOOLS = {"send_email", "send_message", "export_external", "delete_candidate",
@@ -942,7 +944,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 for r in rows]})
 
         if name == "explain_grade":
-            cid = int(args["candidate_id"])
+            cid, cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if cerr:
+                return _err(cerr["error"], cerr.get("hint"))
             c = db.get_candidate(conn, cid)
             if not c:
                 return _err(f"未找到候选人 #{cid}")
@@ -1623,14 +1627,13 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             cid, cerr = _resolve_cid(conn, args.get("candidate_id"))
             if cerr:
                 return _err(cerr["error"], cerr.get("hint"))
-            from .. import regrade as _rg2
-            r = _rg2.suggest_job_for_application(conn, cid, ctx.operator, ctx.role)
-            if not r.get("ok"):
-                return _err(r.get("error") or "判断失败",
-                            hint="确认模型可用、且这个人确实还没归岗")
-            return _ok({"candidate_id": cid, "suggested_job": r.get("title"),
-                        "reason": r.get("reason"), "note": r.get("note"),
-                        "next": "确认后用 assign_job 归岗（会再提案，等 HR 点头）"})
+            # 建议岗位会写 suggested_job_id（影响档案页展示），是写操作 → 走提案。
+            # 之前这里直接调 suggest_job_for_application 落库、却留在 WRITE_TOOLS 里，
+            # 于是 apply_proposal 那条分支永远不触发、写操作绕过了 HR 确认。
+            # 改成提案：HR 点头后由 apply_proposal 真正计算并落库。
+            return _propose(conn, ctx, "suggest_job", {"candidate_id": cid},
+                            f"为 #{cid} 的待指定投递判断一条建议岗位（模型判断，约 6-8 秒）",
+                            risk="低")
 
         if name == "mark_review":
             cid, cerr = _resolve_cid(conn, args.get("candidate_id"))

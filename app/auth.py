@@ -69,14 +69,19 @@ def authenticate(conn, username: str, password: str) -> dict | None:
 
 
 def resolve(conn, token: str | None) -> dict:
-    """解析会话。无 token 时返回匿名（最小权限，等价于只读）。"""
+    """解析会话。无 token / token 失效时返回匿名（**零权限**）。
+
+    匿名不是"只读 HR"，而是**没有任何权限**——否则 `require()` 只按 role
+    判断时，不带令牌就能拿到 HR 的全部权限，登录模式形同虚设。
+    匿名 session 由 `server.require()` 在入口统一拒绝（401）。
+    """
     if not token:
-        return {"username": "anonymous", "role": "hr", "display_name": "未登录",
-                "permissions": permissions("hr"), "anonymous": True}
+        return {"username": "anonymous", "role": "guest", "display_name": "未登录",
+                "permissions": [], "anonymous": True}
     s = db.get_session(conn, token)
     if not s:
-        return {"username": "anonymous", "role": "hr", "display_name": "未登录",
-                "permissions": permissions("hr"), "anonymous": True, "expired": True}
+        return {"username": "anonymous", "role": "guest", "display_name": "未登录",
+                "permissions": [], "anonymous": True, "expired": True}
     return {"username": s["username"], "role": s["role"], "display_name": s["username"],
             "permissions": permissions(s["role"]), "anonymous": False}
 

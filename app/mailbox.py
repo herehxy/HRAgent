@@ -435,7 +435,12 @@ def fetch_imap(cfg: dict, cursor: str | None = None, limit: int = 200) -> tuple[
         if typ != "OK":
             return [], cursor or ""
         uids = [u for u in (data[0] or b"").split() if u]
-        uids = uids[-limit:]
+        # ⚠️ 必须取**最旧**的一批（uids[:limit]），不能取最新的（uids[-limit:]）。
+        # UID 升序返回，首次接入存量邮箱时 cursor 为空 → start=1 → 返回全部；
+        # 若只保留最新 limit 封、又把游标推到最大 UID，最旧的一批简历就
+        # **永久漏收**（下次 start = max+1 直接空结果）。取最旧 + 游标停在
+        # 最后成功处理的那封，才保证多轮拉取不丢件。
+        uids = uids[:limit]
         mails: list[dict] = []
         newest = cursor or ""
         for uid in uids:

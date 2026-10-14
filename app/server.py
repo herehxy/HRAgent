@@ -126,6 +126,54 @@ def _abs_stored(rel: str) -> str:
 app = FastAPI(title="企业人才库智能体", version="1.7.0")
 
 
+# ---- 本机来源校验（防 DNS rebinding / 本地 CSRF）----
+# 服务只监听 127.0.0.1，本机内网工具。恶意网页可把自己的域名解析到 127.0.0.1
+# （DNS rebinding）或从任意页面发跨站表单（本地 CSRF）打到本机接口。
+# 对「会改变状态」的请求校验 Host / Origin / Referer，非本机来源一律 403。
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
+def _is_local_host(host: str | None) -> bool:
+    if not host:
+        return False
+    # 去掉端口
+    h = host.split(":", 1)[0].lower() if not host.startswith("[") else host.lower()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    else:
+        h = host.rsplit(":", 1)[0].lower()
+    return h in _LOCAL_HOSTS
+
+
+@app.middleware("http")
+async def _guard_local_origin(request: Request, call_next):
+    """状态变更请求（非 GET/HEAD/OPTIONS）必须来自本机。
+
+    只拦破坏性方法：GET 是只读接口（且走 require() 鉴权），跨站 <img>/<script>
+    只能发 GET，拦 POST/PUT/DELETE/PATCH 即挡住 CSRF 的写路径。
+
+    - DNS rebinding：浏览器把 evil.com 解析到 127.0.0.1 后，请求带 `Host: evil.com`，
+      据此拒绝（Host 缺失时不拦——真实浏览器必带 Host，缺失只发生在测试/畸形请求）。
+    - 本地 CSRF：跨站表单 POST 会带 `Origin: https://evil.com`，据此拒绝。
+    """
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        host = request.headers.get("host") or ""
+        # Host 存在且非本机 → 拒绝（DNS rebinding）
+        if host and not _is_local_host(host):
+            return Response(status_code=403, content="Forbidden: 仅接受本机请求")
+        # 若带了 Origin/Referer，其主机也必须是本机（跨站表单会带外部 Origin）
+        origin = request.headers.get("origin")
+        if origin:
+            try:
+                from urllib.parse import urlparse
+                ohost = urlparse(origin).hostname or ""
+                if not _is_local_host(ohost):
+                    return Response(status_code=403, content="Forbidden: 跨站来源被拒绝")
+            except Exception:
+                return Response(status_code=403, content="Forbidden: 非法来源")
+    return await call_next(request)
+
+
 # ---- 后台任务进度（v1.24.9）：导入/分析这类耗时操作，前端轮询这里拿实时进度 ----
 # 进程内内存表：{task_id: {"title","total","done","failed","status","message"}}
 # status: running | done | error。分析线程每完成一人就更新 done/failed，
@@ -235,13 +283,18 @@ def _session(x_tp_token: str | None, x_tp_role: str | None) -> dict:
             s = auth.resolve(conn, None)
             s.update({"role": "hr", "username": "hr",
                       "display_name": auth.ROLES["hr"]["label"],
-                      "permissions": auth.permissions("hr"), "mode": "local"})
+                      "permissions": auth.permissions("hr"), "mode": "local",
+                      "anonymous": False})
         return s
     finally:
         conn.close()
 
 
 def require(session: dict, perm: str) -> None:
+    # 匿名（无 token / token 失效）没有权限，登录模式下必须挡在入口——
+    # 否则 resolve() 若回退成 hr 全权限，不带令牌就能删库/导出。
+    if session.get("anonymous"):
+        raise HTTPException(status_code=401, detail="未登录或会话已失效")
     if not auth.can(session["role"], perm):
         raise HTTPException(status_code=403, detail=f"当前角色（{session['role']}）无 {perm} 权限")
 
@@ -4365,7 +4418,8 @@ def api_mail_send(req: MailSendReq,
     conn = db.connect(DB_PATH)
     try:
         db.add_audit(conn, "mail", str(req.candidate_id or ""), "send",
-                     "", f"发送邮件给 {req.to}｜主题：{req.subject}"
+                     "ok" if r.get("ok") else "fail",
+                     f"发送邮件给 {req.to}｜主题：{req.subject}"
                          f"｜模板：{req.template_name or '（无）'}｜{'成功' if r.get('ok') else '失败'}",
                      s["username"], s["role"])
         if r.get("ok") and req.application_id:

@@ -94,20 +94,20 @@ def _edu_span(text: str) -> tuple[int, int] | None:
 
 
 def _sanity_years(text: str, years) -> tuple[int | None, str]:
-    """工作年限合理性质检。返回（可用值, 说明）。
+    """工作年限口径。返回（可用值, 说明）。
 
     为什么需要：模型会把**出生年份当工作年限**。实测：校招简历写着
     「出生年份：1999」「2026年6月毕业」，模型算出 years=27（2026-1999）——
-    一个"27 年经验的应届硕士"。规则通道不会犯这个错，所以只质检模型值。
+    一个"27 年经验的应届硕士"。
 
     **应届生口径（HR 明确要求）**：毕业时间在**当年或次年**的都算应届生，
     工作年限按 **0 年**记，不是 1 年也不是 2 年 —— 应届生的实习/项目
     不构成"工作年限"，记成 1-2 年会让分级与统计失真。
     简历自称「校招 / 应届 / 应届生」同样按应届处理。
 
-    其它情形：年限不可能超过「年龄 − 16 岁开始工作」。
-    超限**丢弃该值**并记录原因（不静默改数字）——猜一个"看起来合理"的年限
-    比留空更危险，档位会跟着错。
+    当前是**校招场景**：凡校招简历一律按应届归 0，不推断工作年限
+    （判档本就不看年限，tier.py 不引用 years_exp；界面也不展示）。
+    故 `years` 参数仅保留签名、不再参与计算，避免误读成"还会做上限质检"。
     """
     cur = datetime.now().year
     fresh_grad = False
@@ -127,24 +127,9 @@ def _sanity_years(text: str, years) -> tuple[int | None, str]:
     # 校招口径：**一律按应届处理，不推断工作年限**（HR 明确要求）。
     # 判档本来就不看年限（tier.py 不引用 years_exp），这里归 0 不影响档位；
     # 界面上也不展示年限（见 ui.expBadge / CSV 表头）。
+    # 因此 `years` 参数（模型抽取的年限值）在当前口径下不再参与质检——
+    # 无论模型算出多少，都按应届归 0，此分支之后没有可执行的代码。
     return 0, "校招口径：不推断工作年限，统一按应届（0 年）处理"
-    if years is None:
-        return None, ""
-    try:
-        y = int(years)
-    except (TypeError, ValueError):
-        return None, ""
-    if y < 0:
-        return None, "年限为负数"
-    cap: int | None = None
-    m = re.search(r"出生年份[:：]?\s*(\d{4})|(\d{4})\s*年出生", text)
-    if m:
-        birth = int(m.group(1) or m.group(2))
-        if 1940 <= birth <= cur:
-            cap = max(0, cur - birth - 16)
-    if cap is not None and y > cap:
-        return None, f"年限 {y} 年不合理（按出生年份上限约 {cap} 年），已丢弃"
-    return y, ""
 
 
 def _find_years(text: str) -> int | None:
@@ -207,7 +192,7 @@ def _fix_name_from_filename(out: dict, filename: str | None) -> None:
 
 
 def _name_is_email_local(name: str | None, contact: dict | None) -> bool:
-    """姓名其实是从邮箱地址里抠出来的（实测：`hexiaoyu` ← hexiaoyu@qq.com）。
+    """姓名其实是从邮箱地址里抠出来的（实测：`zhangsan` ← zhangsan@example.com）。
 
     为什么没被挡住：简历里本来就写了那个邮箱，**"原文里能找到这个字符串"**
     所以证据校验反而放行了它。证据校验只管"有没有出处"，
@@ -399,9 +384,7 @@ _LLM_SYSTEM = (
     "skills(数组，每项 {name:技能名, evidence:该技能在原文中出现的**原样片段**}),\n"
     "certificates(字符串数组),\n"
     "honors(数组，每项 {category:奖学金/荣誉/论文/专利, name:简短名称, "
-    "   3.2) 每条的 evidence 必须是**包含日期与完整表述的整句/整行原文**（例：2022.10 获国家奖学金一等），不要只给关键词；\n"
-    "honors(数组，每项 {category:奖学金/荣誉/论文/专利, name:简短名称, "
-    "   3.2) 每条的 evidence 必须是**包含日期与完整表述的整句/整行原文**（例：2022.10 获国家奖学金一等），不要只给关键词；\n"
+    "evidence:该条在原文中出现的**原样片段**}),\n"
     "contact{phone,email},\n"
     "confidence(0-1，抽取可信度)。\n"
     "field_evidence(对象)：基本信息每个字段对应的**原文原样片段**，"
@@ -522,66 +505,19 @@ def merge_honors(llm_items, rule_items) -> list[dict]:
     return out
 
 
-
-def verify_honors_against_text(items, text: str) -> list[dict]:
-    """**逐条验原文**：证据片段必须逐字出现在简历里，否则丢掉。
-
-    和 `verify_profile_against_text` 同一个道理：模型说"他获过国家奖学金"很容易，
-    但简历里根本没写就是**编的**，档案里出现 HR 无从核对的东西比没有更糟。
-    顺带做规范化比对（去掉空白/标点差异），避免因为排版空格被判假。
-    """
-    t_norm = _norm_for_search(text or "")
-    out: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for it in items or []:
-        if not isinstance(it, dict):
-            continue
-        cat = (it.get("category") or "").strip()
-        name = (it.get("name") or "").strip()
-        ev = (it.get("evidence") or "").strip()
-        if cat not in ("奖学金", "荣誉", "论文", "专利") or not name or not ev:
-            continue
-        if _norm_for_search(ev) not in t_norm:
-            continue                     # 证据不在原文里 → 丢弃（不猜、不放行）
-        key = (cat, _norm_for_search(ev)[:40])
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append({"kind": cat, "name": name, "evidence": ev,
-                    "from": "模型（已核对原文）"})
-    return out
-
-
-def merge_honors(llm_items, rule_items) -> list[dict]:
-    """合并模型抽取与规则抽取：模型优先（同一条不重复），规则兜底。
-
-    为什么两路都要：模型抽得全但可能漏掉格式很规整的（规则擅长）；
-    规则稳但认不出自由表述。两路合并后覆盖面最大，且都有原文兜底。
-    """
-    out: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for src in (llm_items or [], rule_items or []):
-        for it in src or []:
-            ev = (it.get("evidence") or "").strip()
-            key = (it.get("kind") or "", _norm_for_search(ev)[:40])
-            if not ev or key in seen:
-                continue
-            seen.add(key)
-            out.append(it)
-    # 排序：奖学金 → 荣誉 → 论文 → 专利，同类保持原顺序（原文出现顺序）
-    order = {"奖学金": 0, "荣誉": 1, "论文": 2, "专利": 3}
-    out.sort(key=lambda x: order.get(x.get("kind"), 9))
-    return out
-
-
 def extract_llm(text: str, jd: dict, model: str, base_url: str, api_key: str) -> dict:
+    # 简历原文不设上限会撑爆上下文窗口：附件上限 20MB，解析出的文本远超模型
+    # 可接收长度 → 超时或非 JSON → 被 except 静默降级为规则通道（用户只看到
+    # "抽取方式变成 heuristic"，不知发生了啥）。截断到 8000 字符足够抽取字段，
+    # 与 analyze._cand_brief 的 3000 上限同思路（抽取需要更多原文，故放宽）。
+    _text = (text or "")[:8000]
     payload = {
         "model": model,
         "temperature": 0,
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": _LLM_SYSTEM},
-            {"role": "user", "content": f"【岗位】{jd.get('role', '')}\n【简历原文】\n{text}"},
+            {"role": "user", "content": f"【岗位】{jd.get('role', '')}\n【简历原文】\n{_text}"},
         ],
     }
     # v1.23.2：**必须走同一套 provider 适配**。

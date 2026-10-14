@@ -269,18 +269,25 @@ def build_index(db_path: str, cfg: dict | None = None, force: bool = False,
         # 必须在"无pending 提前 return"**之前**做：换模型后画像文本没变，
         # 增量路径会skipped 全部并直接返回，清理放在写库那段就永远执行不到。
         # 只清真模型，保留哈希行（_load_vectors 本来就优先选非兜底模型）。
+        #
+        # ⚠️ 关键：**只有确确实实切换到另一个真模型时才清理旧模型行**。
+        # `effective_model()` 在 embedding 服务不可达 / 未启用时返回 local-hash-v1；
+        # 若拿它当删除基准，服务抖一下就会把所有真实模型的向量全部 DELETE，
+        # 且 `if not pending: return` 也不会重建 → 整库语义检索静默退化。
+        # 所以：服务不可达（live == 哈希）时**跳过清理**，延后到下次可达。
         stale = 0
         live = effective_model(cfg)          # 本次真正会用的模型（不可达时为哈希）
-        cur = conn.execute(
-            "SELECT DISTINCT model FROM embeddings WHERE owner_type='candidate'").fetchall()
-        for r in cur:
-            if r["model"] in (live, _HASH_MODEL):
-                continue
-            stale += conn.execute(
-                "DELETE FROM embeddings WHERE owner_type='candidate' AND model=?",
-                (r["model"],)).rowcount
-        if stale:
-            conn.commit()
+        if live != _HASH_MODEL:
+            cur = conn.execute(
+                "SELECT DISTINCT model FROM embeddings WHERE owner_type='candidate'").fetchall()
+            for r in cur:
+                if r["model"] in (live, _HASH_MODEL):
+                    continue
+                stale += conn.execute(
+                    "DELETE FROM embeddings WHERE owner_type='candidate' AND model=?",
+                    (r["model"],)).rowcount
+            if stale:
+                conn.commit()
 
         if not pending:
             return {"indexed": 0, "skipped": skipped, "total": len(ids),

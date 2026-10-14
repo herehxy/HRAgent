@@ -611,6 +611,11 @@ let PIPE_OPEN = false;
 function poolPageReset(){ POOL_PAGE = 1; }
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+// 属性安全转义（v1.25.8）：esc() 只转义 & < > "，不含单引号。当把外部数据
+// （文件名/模板名/岗位名）塞进用**单引号包裹**的 onclick 参数里时，
+// 一个 ' 就能闭合字符串 → 按钮失效（SyntaxError）甚至注入（DOM XSS）。
+// 凡单引号包裹的 onclick 参数一律改用 escA()。
+function escA(s){return esc(s).replace(/'/g,'&#39;');}
 /* 轻量 Markdown 渲染（v1.24.9）：智能助手回复是 Markdown，直接当纯文本会
    裸奔出 ** / # / - / ` 等符号。先把原文转义（防 XSS），再转换常见标记。
    支持：代码块、行内代码、加粗、#~#### 标题、-/* 无序列表、1. 有序列表、链接、换行。 */
@@ -630,7 +635,7 @@ function md(src){
   // 3) 行内代码
   s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
   // 4) 加粗
-  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
   // 5) 标题（行首 #）
   s = s.replace(/^######[ \t]+(.+)$/gm, '<h4>$1</h4>');
   s = s.replace(/^#####[ \t]+(.+)$/gm, '<h4>$1</h4>');
@@ -642,7 +647,7 @@ function md(src){
   //    v1.24.15 修：原来只认 https?://，而模型很爱写站内锚点（[投递管道](#pool)），
   //    这些会原样露出 markdown 符号。这里放开到任意协议与相对路径。
   //    安全：href 里的引号已在第 1 步被转义，javascript: 再由下面的白名单挡掉。
-  s = s.replace(/\[([^\]]+)\]\(([^)\\s]+)\)/g, (m, txt, url) => {
+  s = s.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, (m, txt, url) => {
     const u = String(url);
     if (!/^(https?:\\/\\/|mailto:|\\/|#|\\.)/i.test(u)) return m;  // 未知协议当纯文本
     return '<a href="' + u + '" target="_blank" rel="noopener">' + txt + '</a>';
@@ -675,11 +680,11 @@ function md(src){
   //
   // 放在行组装这一步做：表格是**连续多行**的结构，
   // 在此之前已单独处理掉代码块/行内代码/加粗/链接，行内不会被污染。
-  const isSepRow = t => /^\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?$/.test(t);
-  const splitRow = t => t.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+  const isSepRow = t => /^\\|?[ \t]*:?-{2,}:?[ \t]*(\\|[ \t]*:?-{2,}:?[ \t]*)*\\|?$/.test(t);
+  const splitRow = t => t.replace(/^\\||\\|$/g, '').split('|').map(c => c.trim());
   // 单元格里的 <br> 是模型故意换行（"命中: 材料成型,<br>缺失: 无"），
   // esc() 已经把原文里的尖括号转义过，这里要还原成真换行。
-  const cell = c => c.replace(/&lt;br\s*\/?&gt;/gi, '<br>');
+  const cell = c => c.replace(/&lt;br\\s*\\/?&gt;/gi, '<br>');
   for (let i = 0; i < lines.length; i++){
     const t = lines[i].trim();
     // 表头：含竖线，且下一行是分隔行
@@ -713,11 +718,11 @@ function md(src){
       liBuf.push('<li>' + t.replace(/^[-*+][ \t]+/, '') + '</li>');
       continue;
     }
-    if (/^\d+\.[ \t]+/.test(t)){
+    if (/^\\d+\\.[ \t]+/.test(t)){
       flushPara();
       if (liBuf.length && liTag !== 'ol') flushLi();
       liTag = 'ol';
-      liBuf.push('<li>' + t.replace(/^\d+\.[ \t]+/, '') + '</li>');
+      liBuf.push('<li>' + t.replace(/^\\d+\\.[ \t]+/, '') + '</li>');
       continue;
     }
     if (/^<\\/?(ul|ol|pre|h[1-4])\\b/.test(t)){ flushLi(); flushPara(); out.push(t); continue; }
@@ -773,7 +778,7 @@ function toast(msg, kind){
   // 走 textContent 之外的路径前先escape，杜绝注入。
   const escd = String(msg == null ? '' : msg)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
+    .replace(/\\*\\*(.+?)\\*\\*/g, '<b>$1</b>').replace(/\\n/g, '<br>');
   // 结构：文案区 + 独立关闭按钮。按钮自带 stopPropagation，
   // 这样"点提示内部不关闭"和"× 能关闭"两条规则不会互相打架。
   const box = document.createElement('div');
@@ -980,7 +985,7 @@ function contactLine(x){
     + (p ? `<a href="tel:${esc(p)}" title="点击拨号">${esc(p)}</a>` : '')
     + (p && m ? ' · ' : '')
     + (m ? `<a href="mailto:${esc(m)}" title="点击发邮件">${esc(m)}</a>` : '')
-    + `<button class="mini" onclick="copyText('${esc(joined)}')">复制</button></span>`;
+    + `<button class="mini" onclick="copyText('${escA(joined)}')">复制</button></span>`;
 }
 
 async function boot(){
@@ -1687,7 +1692,7 @@ function cardHtml(x){
         title="完整重新分析：重新解析原件 → 模型重抽字段 → 重建技能 → 重新归岗 → 重判建议档 → 重算分析。约 10 秒。不动 HR 已定的档位/阶段/岗位。">重新分析</button>
       <button onclick="interview(${x.id})">面试提纲</button>
       ${sug ? `<span class="vdiv"></span>
-      <button class="btn-primary" onclick="assignJob(${x.id},${sug.job_id},'${esc(sug.title)}')">采纳建议岗位</button>
+      <button class="btn-primary" onclick="assignJob(${x.id},${sug.job_id},'${escA(sug.title)}')">采纳建议岗位</button>
       <button onclick="assignJobPick(${x.id})">换个岗位</button>`
       : (job ? '' : `<span class="vdiv"></span>
       ${x.job_suggestion_missing ? `<button id="sugjob-${x.id}" onclick="suggestJob(${x.id})">判断建议岗位</button>` : ''}
@@ -1801,7 +1806,6 @@ async function showDetail(cid){
             <b style="color:var(--warn)">缺：${mf.map(esc).join('、')}</b>
             <span class="small">${tips.length?('——'+esc(tips.join('；'))):''}</span></div>`;
       })()}
-      <div class="k">学历核验</div><div>${eduBadge(d)}${expBadge(d) ? (' · ' + expBadge(d)) : ''}</div>
       ${(()=>{
         // v1.17.1：紧跟院校/专业——荣誉、奖学金、论文、专利是**基础画像**的一部分，
         // 放在档案最底部等于藏起来。展示的是**简历原文那一行**（逐字来自原文，可核对）。
@@ -1821,7 +1825,7 @@ async function showDetail(cid){
         if(!p && !m) return '<span class="small">未识别到联系方式（简历里可能确实没写）</span>';
         return `<span class="contact">${p?`<a href="tel:${esc(p)}">${esc(p)}</a>`:''}
           ${p&&m?' · ':''}${m?`<a href="mailto:${esc(m)}">${esc(m)}</a>`:''}</span>
-          <button class="mini" onclick="copyText('${esc((p||'')+(p&&m?' / ':'')+(m||''))}')">复制</button>`;
+          <button class="mini" onclick="copyText('${escA((p||'')+(p&&m?' / ':'')+(m||''))}')">复制</button>`;
       })()}</div>
       <div class="k">信息复核</div><div>
         ${(()=>{
@@ -2413,13 +2417,13 @@ function pipeBoardHtml(p){
       </div>`).join('') || '<div class="it">—</div>'
       + (_more>0
           ? `<div class="it pipe-more">还有 ${_more} 人 ·
-              <a href="javascript:void(0)" onclick="pipeExpand('${esc(s)}')"
+              <a href="javascript:void(0)" onclick="pipeExpand('${escA(s)}')"
                  title="就在这一列里把剩下的也显示出来">在本列展开</a> ·
-              <a href="javascript:void(0)" onclick="goStageFilter('${esc(s)}')"
+              <a href="javascript:void(0)" onclick="goStageFilter('${escA(s)}')"
                  title="跳到人才库，只看「${esc(s)}」阶段的人">去人才库筛选</a></div>`
           : (_all.length>PIPE_PER_COL && _expandAll
               ? `<div class="it pipe-more">已展开全部 ${_all.length} 人 ·
-                   <a href="javascript:void(0)" onclick="pipeExpand('${esc(s)}')">收起</a></div>`
+                   <a href="javascript:void(0)" onclick="pipeExpand('${escA(s)}')">收起</a></div>`
               : ''));
     return `<div class="pcol"><div class="h"><span>${esc(s)}</span>
       <span style="color:${v.overdue?'var(--bad)':'var(--ink-3)'}">${v.count}${v.overdue?(' / 超期'+v.overdue):''}</span></div>
@@ -3322,9 +3326,9 @@ async function renderImportCfgInto(boxId){
       <td>${x.indexed?'<span class="ok-txt">已入库</span>'+(x.candidate?('（'+esc(x.candidate)+'）'):'')
                     :'<span class="warn-txt">尚未入库</span>'}</td>
       <td class="nw">
-        <button onclick="openSourceFile('${esc(x.name)}',1)">在线预览</button>
-        <button onclick="downloadSourceFile('${esc(x.name)}')">下载</button>
-        <button class="btn-danger" onclick="removeSourceFiles(['${esc(x.name)}'])">删除</button>
+        <button onclick="openSourceFile('${escA(x.name)}',1)">在线预览</button>
+        <button onclick="downloadSourceFile('${escA(x.name)}')">下载</button>
+        <button class="btn-danger" onclick="removeSourceFiles(['${escA(x.name)}'])">删除</button>
       </td></tr>`).join('');
   box.innerHTML = `
   <div class="panel">
@@ -3394,7 +3398,7 @@ async function showRecycle(){
     <td>${esc(x.name)}</td><td class="nw">${fmtSize(x.size)}</td>
     <td class="nw">${esc(x.removed_at)}</td>
     <td class="nw">${x.conflict?'<span class="warn-txt">来源目录已有同名文件</span>':'—'}</td>
-    <td class="nw"><button onclick="restoreFiles(['${esc(x.name)}'])">恢复到来源目录</button></td></tr>`).join('');
+    <td class="nw"><button onclick="restoreFiles(['${escA(x.name)}'])">恢复到来源目录</button></td></tr>`).join('');
   document.getElementById('mBody').innerHTML = `
     <div class="note">${esc(r.note||'')}</div>
     <div class="spacer"></div>
@@ -4211,7 +4215,7 @@ async function renderTplMgrInto(boxId){
         <td>${t.id}</td><td>${esc(t.name)}</td><td>${esc(t.scene||'')}</td>
         <td class="small">${esc((t.subject||'').slice(0,40))}</td>
         <td><button onclick="editTpl(${t.id})">编辑</button>
-            <button class="btn-danger" onclick="delTpl(${t.id},'${esc(t.name)}')">删除</button></td>
+            <button class="btn-danger" onclick="delTpl(${t.id},'${escA(t.name)}')">删除</button></td>
         </tr>`).join('') || '<tr><td colspan="5">还没有模板</td></tr>'}</tbody></table>
     <div class="bar" style="margin-top:10px">
       <button onclick="newTpl()">新建模板</button>
@@ -4933,7 +4937,7 @@ async function _tplFormReady(t){
     const vars = (MAIL_VARS.builtin || []).concat(MAIL_VARS.runtime || []);
     chips.innerHTML = vars.map(v =>
       `<button class="mini" title="${esc(v.desc||'')}"
-        onclick="insertVar('tplEditor','${esc(v.key)}')">${esc(v.key)}</button>`).join('')
+        onclick="insertVar('tplEditor','${escA(v.key)}')">${esc(v.key)}</button>`).join('')
       || '<span class="small">（变量清单未加载）</span>';
   }
   const ed = document.getElementById('tplEditor');
@@ -5183,15 +5187,15 @@ function _dictRows(key, label, items){
   if (!cur.length) return '<div class="small" style="color:var(--ink-3)">（还没有内容，用下面的框添加）</div>';
   return `<div class="dict-list">${cur.map((x,i)=>`
     <div class="dict-row"><span>${esc(x)}</span>
-      <b onclick="dictDel('${esc(key)}',${i})" title="点 × 从字典里去掉">×</b></div>`).join('')}</div>`;
+      <b onclick="dictDel('${escA(key)}',${i})" title="点 × 从字典里去掉">×</b></div>`).join('')}</div>`;
 }
 function _dictList(key, label, items, ph){
   return `<div class="k" style="vertical-align:top">${esc(label)}</div><div>
       ${_dictRows(key, label, items)}
       <div class="dict-add">
         <input id="new_${esc(key)}" placeholder="${esc(ph||'输入新的一项，回车添加')}"
-               onkeydown="if(event.key==='Enter'){dictAdd('${esc(key)}');}">
-        <button class="mini" onclick="dictAdd('${esc(key)}')">添加</button>
+               onkeydown="if(event.key==='Enter'){dictAdd('${escA(key)}');}">
+        <button class="mini" onclick="dictAdd('${escA(key)}')">添加</button>
       </div>
     </div>`;
 }

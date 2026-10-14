@@ -68,9 +68,16 @@ def render(text: str, ctx: dict) -> dict:
     返回 {text, missing, used}：
       - `missing`：模板里用到但本次没取到值的变量 → 界面要高亮提醒
       - `used`：本次真正替换成功的变量
+
+    ⚠️ 变量值若会被当作 HTML 输出（模板本身已是 HTML），必须转义——
+    候选人姓名/院校等来自简历解析（外部可控），`<img onerror>` 这类值
+    一旦原样拼进 body_html 再被前端 innerHTML 渲染就是存储型 XSS。
+    纯文本模板不转义（交给 to_html 统一处理，避免 double-escape）。
     """
+    import html as _html
     missing: list[str] = []
     used: list[str] = []
+    _is_html = looks_like_html(text or "")
 
     def sub(m):
         key = m.group(1).strip()
@@ -81,7 +88,8 @@ def render(text: str, ctx: dict) -> dict:
             return f"【待填：{key}】"
         if key not in used:
             used.append(key)
-        return str(val)
+        s = str(val)
+        return _html.escape(s, quote=False) if _is_html else s
 
     # 顺序很重要：先删掉不满足的条件块，再替换 {} 变量——
     # 否则被删掉的块里的变量还会被算成"待填"。

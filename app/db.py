@@ -1058,9 +1058,23 @@ def find_by_bidx(conn: sqlite3.Connection, phone_bidx: str | None,
     return list(hits.values())
 
 
+def _assert_valid_columns(conn: sqlite3.Connection, table: str, fields: dict) -> None:
+    """校验 update_* 的键名都在真实列里，杜绝把键名拼进 SQL 列位置造成注入。
+
+    值走参数化（?），但**列名无法参数化**，是用 f-string 拼的。若一个提案
+    写入路径把非白名单键塞进 fields（如 `{'name, pii_level=(SELECT 1)': 2}`），
+    就会被原样拼进 SQL。这里对照 PRAGMA table_info 做白名单校验。
+    """
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    bad = [k for k in fields if k not in cols]
+    if bad:
+        raise ValueError(f"非法字段名（不在 {table} 列中）：{bad}")
+
+
 def update_candidate(conn: sqlite3.Connection, cid: int, **fields) -> None:
     if not fields:
         return
+    _assert_valid_columns(conn, "candidates", fields)
     fields["updated_at"] = now()
     sets = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(f"UPDATE candidates SET {sets} WHERE id = ?", (*fields.values(), cid))
@@ -1823,6 +1837,7 @@ def purge_due_candidates(conn: sqlite3.Connection, days: int | None = None,
                     files.append(p)
         conn.execute("DELETE FROM candidate_skills WHERE candidate_id = ?", (cid,))
         conn.execute("DELETE FROM candidate_tags WHERE candidate_id = ?", (cid,))
+        conn.execute("DELETE FROM candidate_insights WHERE candidate_id = ?", (cid,))
         conn.execute("DELETE FROM embeddings WHERE owner_type = 'candidate' AND owner_id = ?",
                      (cid,))
         conn.execute("DELETE FROM documents WHERE candidate_id = ?", (cid,))
@@ -1923,6 +1938,7 @@ def insert_document(conn: sqlite3.Connection, rec: dict) -> int:
 def update_document(conn: sqlite3.Connection, did: int, **fields) -> None:
     if not fields:
         return
+    _assert_valid_columns(conn, "documents", fields)
     sets = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(f"UPDATE documents SET {sets} WHERE id = ?", (*fields.values(), did))
     conn.commit()
@@ -2373,16 +2389,16 @@ def candidate_audit(conn: sqlite3.Connection, cid: int, limit: int = 50) -> list
 def candidate_email_state(conn: sqlite3.Connection, cid: int) -> dict:
     """这位候选人**发过邮件没有**，以及最近一次的时间与主题。
 
-    为什么要单独查：审计表里的 `after` 是一句人写的摘要
-    （`发送邮件给 X｜主题：Y｜模板：Z｜成功`），要拿"发过没有"就得解析它。
-    直接把结论算好给前端，避免前端去正则抠字符串
-    —— 本项目吃过"靠匹配文案字符串做判断"的亏（改一次文案就静默失效）。
-    判定口径：`entity='mail'` + `action='send'` + `after` 含「成功」。
+    判定口径（v1.25.8 起）：`entity='mail'` + `action='send'` + `before='ok'`。
+    `before` 是结构化结果码（ok/fail），发信路径里显式写入，不再靠人写的
+    `after` 摘要里的「成功」子串——本项目吃过"靠匹配文案字符串做判断"的亏
+    （改一次文案就静默失效）。老数据没有 before 标记，回退到 `after` 含「成功」。
     """
     rows = conn.execute(
-        "SELECT ts, COALESCE(after,'') AS a FROM audit_log "
+        "SELECT ts, COALESCE(after,'') AS a, COALESCE(before,'') AS b FROM audit_log "
         "WHERE entity='mail' AND action='send' AND entity_id=? "
-        "AND instr(COALESCE(after,''),'成功') > 0 ORDER BY id DESC LIMIT 20",
+        "AND (before='ok' OR instr(COALESCE(after,''),'成功') > 0) "
+        "ORDER BY id DESC LIMIT 20",
         (str(cid),)).fetchall()
     if not rows:
         return {"sent": False, "count": 0, "last_at": "", "last_subject": ""}
@@ -2408,6 +2424,12 @@ def create_proposal(conn: sqlite3.Connection, session_id: str, tool: str, args: 
     `dedup_key`：主动提案的去重键（如 `stage_stuck:app#12`），配合
     `recent_proposal_exists()` 防止同一件事天天提醒、把 HR 烦到忽略整个列表。
     """
+    # 敏感值（SMTP 授权码 / 模型 API Key / 候选人电话邮箱）**不能明文落库**：
+    # proposals.args 用 json.dumps 原样存、decide_proposal 又不清 args，
+    # 明文会永久留存并随库备份流动。这里用 AES-GCM 加密后落库，
+    # apply_proposal 执行时再解密（见 actions 里对应的 decrypt 处）。
+    # 注意：db 层不 import crypto（避免环），走延迟导入。
+    args = _seal_sensitive_args(args)
     cur = conn.execute(
         """INSERT INTO proposals (session_id, tool, args, summary, risk, status,
                                   source, dedup_key, created_at)
@@ -2417,6 +2439,59 @@ def create_proposal(conn: sqlite3.Connection, session_id: str, tool: str, args: 
     )
     conn.commit()
     return cur.lastrowid
+
+
+#: 提案 args 里需要加密落库的敏感键（见 _seal_sensitive_args）。
+#: 命中的键值会被 AES-GCM 加密为 `enc:<ciphertext>` 形式，apply_proposal 再解密。
+_SENSITIVE_ARG_KEYS = {"password", "pass", "api_key", "apikey", "secret",
+                       "token", "auth_code", "phone_enc", "email_enc"}
+
+
+def _seal_sensitive_args(args: dict) -> dict:
+    """递归加密提案 args 里的敏感值，避免明文落库。返回新 dict，不改入参。
+
+    直接用 crypto.encrypt 的 enc:/plain: 约定——有主密钥时是 AES-GCM 密文，
+    降级（无密钥）时是 plain: 前缀的明文标记，与 phone_enc/email_enc 同口径。
+    """
+    from . import crypto
+    out: dict = {}
+    for k, v in (args or {}).items():
+        key = str(k).lower()
+        if key in _SENSITIVE_ARG_KEYS and isinstance(v, str) and v \
+                and not v.startswith(("enc:", "plain:")):
+            out[k] = crypto.encrypt(v) or ""
+        elif isinstance(v, dict):
+            out[k] = _seal_sensitive_args(v)
+        else:
+            out[k] = v
+    return out
+
+
+def open_sensitive_args(args: dict) -> dict:
+    """解密 _seal_sensitive_args 落库后的 args（apply_proposal 用）。幂等。"""
+    from . import crypto
+    out: dict = {}
+    for k, v in (args or {}).items():
+        if isinstance(v, str) and v.startswith(("enc:", "plain:")) and len(v) > 6:
+            out[k] = crypto.decrypt(v) or v[6:]
+        elif isinstance(v, dict):
+            out[k] = open_sensitive_args(v)
+        else:
+            out[k] = v
+    return out
+
+
+def _mask_sensitive_args(args: dict) -> dict:
+    """把敏感键（含已加密的 enc:...）掩码为「已设置」，供前端展示。"""
+    out: dict = {}
+    for k, v in (args or {}).items():
+        if str(k).lower() in _SENSITIVE_ARG_KEYS and v not in (None, ""):
+            out[k] = "（已设置）"
+        elif isinstance(v, dict):
+            out[k] = _mask_sensitive_args(v)
+        else:
+            out[k] = v
+    return out
 
 
 def recent_proposal_exists(conn: sqlite3.Connection, dedup_key: str, days: int = 7) -> bool:
@@ -2458,6 +2533,14 @@ def list_proposals(conn: sqlite3.Connection, status: str | None = None, limit: i
         # 不另建一份映射 —— 否则"三处说法不一致"的老问题会再来一遍）。
         d["tool_label"] = TOOL_LABEL.get(d.get("tool") or "",
                                          audit_label("proposal", d.get("tool") or ""))
+        # 敏感值已加密落库（enc:...），下发给前端前统一掩码，
+        # 既不出密文也不出明文，只提示「已设置」。
+        if isinstance(d.get("args"), str):
+            try:
+                _a = json.loads(d["args"])
+                d["args"] = json.dumps(_mask_sensitive_args(_a), ensure_ascii=False)
+            except Exception:
+                pass
         out.append(d)
     return out
 
@@ -2773,6 +2856,7 @@ def record_email(conn: sqlite3.Connection, rec: dict) -> int:
 def update_email(conn: sqlite3.Connection, message_id: str, **fields) -> None:
     if not fields:
         return
+    _assert_valid_columns(conn, "email_messages", fields)
     sets = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(f"UPDATE email_messages SET {sets} WHERE message_id = ?", (*fields.values(), message_id))
     conn.commit()
@@ -2938,6 +3022,13 @@ def proposal_changes(conn: sqlite3.Connection, proposal: dict) -> list[dict]:
             a = None
     if not isinstance(a, dict):
         return []
+    # 敏感值落库前被加密（create_proposal → _seal_sensitive_args），展示前先解密，
+    # 否则「改后」栏会把 enc:... 密文显示出来。解密失败（密钥已变）时退回掩码。
+    try:
+        a = open_sensitive_args(a)
+    except Exception:
+        a = {k: ("（已设置）" if str(k).lower() in _SENSITIVE_ARG_KEYS else v)
+             for k, v in a.items()}
     out: list[dict] = []
 
     def _q(sql, params):
