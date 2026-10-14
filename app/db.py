@@ -3463,6 +3463,10 @@ def pool_stats(conn: sqlite3.Connection) -> dict:
     HR 归档完一整批人，页面上的"候选人数 / 投递数 / 各档位"纹丝不动，
     看起来像归档没生效——和"管道里还挂着归档的人"是同一类问题。
     需要"一共收过多少"的台账数字用 `*_total`（附件、邮件本来就是台账，不随归档增减）。
+
+    `stages` 的口径（v1.26.0）：每人取最新一条投递；stage 为空、或出现不在 `STAGES`
+    里的历史值（旧数据/手工改过），**一律归「新投递」**。前端只渲染 `STAGES` 那 7 个键，
+    不归并的话这些人会在比例环里凭空消失，导致环总数 ≠ 候选人数。
     """
     _ARCH = "COALESCE(c.archived_at, '') = ''"
     # 人数也直接数（不再把全库装配成对象）
@@ -3486,11 +3490,8 @@ def pool_stats(conn: sqlite3.Connection) -> dict:
     stages = {s: 0 for s in STAGES}
     # v1.25.10：环的统计口径 = 人才库里的**所有人**，不看"怎么来的"。
     # 原来 INNER JOIN applications 只数"有投递记录"的人，没投递记录的人凭空消失，
-    # 导致环总数 ≠ 候选人数。改 LEFT JOIN：没投递 / stage 为空的都归「新投递」，
-    # 保证环总数 == people（候选人数）。
-    #
-    # 再加一层归并（旧数据/手工改过的 stage 值不在 STAGES 里，前端只渲染那 7 个键
-    # → 这些人会在环里凭空消失，表现为"比例显示不全"）：非标准值一律并入「新投递」。
+    # 导致环总数 ≠ 候选人数。改 LEFT JOIN：没投递 / stage 为空的都归「新投递」。
+    # 非标准 stage 值同样归并（口径见本函数 docstring）。
     for r in conn.execute(
             f"""SELECT COALESCE(NULLIF(a.stage, ''), '新投递') AS s, COUNT(*) AS n
                 FROM candidates c LEFT JOIN applications a
