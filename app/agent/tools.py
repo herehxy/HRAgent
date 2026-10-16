@@ -22,7 +22,7 @@ import json
 import re
 from dataclasses import dataclass, field
 
-from .. import db
+from .. import db, stages as stages_mod, tiers as tiers_mod
 from .. import search as search_mod
 from ..pipeline import normalize as nz
 from ..pipeline.analyze import analyze_fit, draft_interview
@@ -60,7 +60,8 @@ READ_TOOLS = {"search_candidates", "get_candidate", "pool_stats", "search_by_ski
 COMPUTE_TOOLS = {"analyze_fit", "compare_candidates", "draft_interview_questions",
                  "draft_email", "preview_mail"}
 
-STAGES = ["新投递", "已联系", "初面", "复面", "待offer", "已入职", "已结束"]
+#: v1.29：从配置取，不再手抄（原来这里和 agent/proactive.py 各一份，容易只改一边）
+STAGES = stages_mod.all_stages()
 
 _EDU_ORDER = {"大专": 1, "专科": 1, "本科": 2, "学士": 2, "研究生": 3, "硕士": 3, "博士": 4}
 
@@ -87,10 +88,15 @@ def _spec(name: str, desc: str, props: dict | None = None, required: list[str] |
 TOOL_SPECS = [
     # ------------------------------ 读 ------------------------------
     _spec("search_candidates",
-          "按条件筛选候选人（档位/学历/年限/关键词/院校层次/阶段）。返回真实库内数据，找不到就返回空，不要编造。"
+          "按条件筛选候选人（档位/学历/年限/关键词/院校层次/阶段/**归岗岗位**）。返回真实库内数据，找不到就返回空，不要编造。"
           "**keyword 是字面匹配**：院校请用全称（库里存的是『西安电子科技大学』，"
-          "传『西电』会返回空——遇到简称先展开成全称再搜）。",
-          {"tier": {"type": "string", "description": "A/B/C/D/REVIEW/UNCONFIRMED/ALL"},
+          "传『西电』会返回空——遇到简称先展开成全称再搜）。"
+          "**问『某岗位有哪些候选人』用 job 参数**：它按**归岗关系**筛（只返回已归到该岗位下的人），"
+          "不是技能匹配——不要用 skill/keyword 拼一个『岗位人选』出来。",
+          {"tier": {"type": "string", "description": tiers_mod.enum_str("/") + "/REVIEW/UNCONFIRMED/ALL"},
+           "job": {"type": "string",
+                   "description": "岗位名称（如『科学研究』）。按**归岗关系**筛选：只返回归到该岗位下的人。"
+                                  "岗位名以 list_jobs 的返回为准。"},
            "keyword": {"type": "string", "description": "姓名、院校、专业关键词（院校用全称）"},
            "min_years": {"type": "integer", "description": "最低工作年限"},
            "education": {"type": "string", "description": "最低学历：大专/本科/硕士/博士"},
@@ -386,7 +392,10 @@ TOOL_SPECS = [
           "⚠️ 这只是清对话，**不会动任何候选人数据**。"),
 
     _spec("set_stage",
-          "【需 HR 确认】把某条投递推进到新阶段（新投递/已联系/初面/复面/待offer/已入职/已结束）。"
+          # 阶段枚举由配置拼——写死的话改流程后模型还在推「初面」这种不存在的阶段
+          "【需 HR 确认】把某条投递推进到新阶段（" + "/".join(STAGES) + "）。"
+          "**结论标签**（已面试→不录用；已发放offer→已签约/拒签）用 `outcome` 传，"
+          "其余阶段不要传。"
           "本工具只生成待确认提案，不会直接改库。"
           "目标可以给 **application_id（投递编号）**，"
           "也可以只给 **candidate_id（姓名或编号）** —— 后者会自动找他的投递，"
@@ -395,14 +404,18 @@ TOOL_SPECS = [
           {"application_id": {"type": "integer", "description": "投递编号（二选一）"},
            "candidate_id": {"type": "string",
                             "description": "候选人 id 或姓名（二选一）"},
-           "stage": {"type": "string"},
+           "stage": {"type": "string", "description": "目标阶段，取值见本工具说明"},
+           # v1.29：结论标签。只在「离开的阶段」允许它时才认（见 stages.outcome_allowed_from）：
+           # 已面试→不录用；已发放offer→已签约/拒签。不给就是"不改结论"。
+           "outcome": {"type": "string",
+                       "description": "结论标签（仅部分阶段可用）：不录用 / 已签约 / 拒签"},
            "reason": {"type": "string", "description": "变更理由"}},
           ["stage"]),
     _spec("set_tier",
           "【需 HR 确认】调整某条投递的档位。本工具只生成待确认提案，不会直接改库。"
-          "注意：学历低于岗位门槛的投递，系统已直接判 D，"
+          f"注意：学历低于岗位门槛的投递，系统已直接判 {tiers_mod.hard_shortfall_tier()}，"
           "不要为它提出上调档位的提案——学历是硬门槛，模型判断不能越过。",
-          {"application_id": {"type": "integer"}, "tier": {"type": "string", "description": "A/B/C/D"},
+          {"application_id": {"type": "integer"}, "tier": {"type": "string", "description": tiers_mod.enum_str("/")},
            "note": {"type": "string"}}, ["application_id", "tier"]),
     _spec("add_tag",
           "【需 HR 确认】为候选人添加能力/类型标签。只生成待确认提案。",
@@ -436,6 +449,11 @@ def _brief(c: dict) -> dict:
         "tier_suggested": c.get("tier_suggested"), "tier_final": c.get("tier_final"),
         "tier": c.get("tier_effective"), "score": c.get("score"),
         "stage": c.get("stage"), "confirmed": (c.get("app_status") or "") == "已确认",
+        # v1.29.8（业务方 2026-10-16 截图）：把**归岗岗位**带进每条结果里。
+        # 之前不带 → 模型把"技能匹配的人"当成"某岗位的人"（有人明明归岗到
+        # 工艺技术，却被列进科学研究名单，还编了"缓存问题"来解释）。数据打底，
+        # 模型就不用猜"这个人属于哪个岗位"。
+        "job_title": c.get("job_title") or "",
         "need_review": bool(c.get("needs_review")),
         "hit": c.get("hits") or [], "miss": c.get("miss") or [],
         "skills": (c.get("skills") or [])[:10],
@@ -510,6 +528,34 @@ def _resolve_cid(conn, value, what: str = "候选人") -> tuple[int | None, dict
                       "candidates": [{"id": r["id"], "name": r["name"]} for r in rows]}
     return None, {"error": f"库里没有叫「{v}」的候选人",
                   "hint": "先用 search_candidates 按姓名/技能搜一下；确实没有就让用户先导入简历"}
+
+
+def _resolve_job_id(conn, key: str) -> tuple[int | None, str | None]:
+    """把岗位名解析成 job_id（v1.29.8，给 search_candidates 的 job 参数用）。
+
+    **只认唯一命中**——猜错岗位会把"岗位归属"答成另一个岗位，比说
+    "没找到这个岗位"严重得多（有人被技能匹配塞进别的岗位名单，就是这类错）。
+    顺序：全称精确（允许带/不带「岗位/职位」后缀）→ 唯一包含匹配；
+    多命中或零命中都返回错误，并把当前岗位名列表一并给出（免得模型自己编名字）。
+    """
+    key = re.sub(r"(岗位|职位)$", "", (key or "").strip()).strip()
+    if not key:
+        return None, None
+    jobs = db.list_jobs(conn, include_inactive=True)
+    hits = [j for j in jobs if (j.get("title") or "").strip() == key]
+    if not hits:
+        hits = [j for j in jobs
+                if key in (j.get("title") or "") or (j.get("title") or "") in key]
+    if len(hits) == 1:
+        return int(hits[0]["id"]), None
+    if len(hits) > 1:
+        act = [j for j in hits if j.get("active", 1)]
+        if len(act) == 1:
+            return int(act[0]["id"]), None
+        names = "、".join((j.get("title") or "") for j in hits)
+        return None, f"岗位名「{key}」对上了多个岗位（{names}），请用完整岗位名再试"
+    titles = "、".join((j.get("title") or "") for j in jobs if j.get("active", 1))
+    return None, f"没有名为「{key}」的岗位。当前岗位：" + (titles or "（暂无在招岗位）")
 
 
 def _find_template(conn, key: str) -> dict | None:
@@ -794,12 +840,21 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             skill_terms = None
             if raw_skill:
                 skill_terms = sorted(set(nz.resolve_query_terms([raw_skill])) | {raw_skill})
+            # v1.29.8：「岗位」筛选按**归岗关系**（applications.job_id），
+            # 不是技能/关键词字面匹配——HR 说"某岗位的人"指的是归岗，不是"技能像"。
+            # 显式传的 job 优先；没传时沿用会话上下文里的岗位（ctx.job_id）。
+            job_key = (args.get("job") or "").strip()
+            job_id = ctx.job_id
+            if job_key:
+                job_id, _jerr = _resolve_job_id(conn, job_key)
+                if _jerr:
+                    return _err(_jerr)
             items = db.list_candidates(
                 conn, tier=args.get("tier"), keyword=args.get("keyword"),
                 skill=skill_terms, min_years=args.get("min_years"),
                 education=args.get("education"), stage=args.get("stage"),
                 univ=args.get("univ"),
-                job_id=ctx.job_id,
+                job_id=job_id,
                 # 归档的人不在人才库里，助手也就不该把他们列出来（与界面同一口径）
                 archived=False)
             limit = int(args.get("limit") or 20)
@@ -997,7 +1052,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             # 规则已经产不出 A/B/C，拿现算值当答案会让所有学历达标的人显示成"待分析"。
             _stored = _db_app.get("tier_final") or _db_app.get("tier_suggested")
             _rule = g["tier_suggested"]                     # 现算：None 或 D
-            if _stored == "D" or _rule == "D":
+            if _stored == tiers_mod.hard_shortfall_tier() or _rule == tiers_mod.hard_shortfall_tier():
                 _src = "学历门槛（规则判定，可复现）"
             elif _stored:
                 _src = "模型分析（自动分析给出的建议档）"
@@ -1564,19 +1619,26 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             _conn_jd = _jd_tiers()
             if src == "folder":
                 folder = (args.get("folder") or "").strip()
+                # 没给路径就用**系统配置里的「导入文件夹」**——
+                # 界面上「导入简历」就是这么做的（server 端同口径）。
+                # 原来这里直接报错要求 HR 手打路径，而路径本来就配好了、
+                # 界面上也有，让 HR 再抄一遍纯属多余。
+                import os as _os
+                _mbcfg = _read_json_or(_repo_config_path("mailbox.json"), {}) or {}
                 if not folder:
-                    # 没给路径就用**系统配置里的「导入文件夹」**——
-                    # 界面上「导入简历」就是这么做的（server 端同口径）。
-                    # 原来这里直接报错要求 HR 手打路径，而路径本来就配好了、
-                    # 界面上也有，让 HR 再抄一遍纯属多余。
-                    import os as _os
-                    _mbcfg = _read_json_or(_repo_config_path("mailbox.json"), {}) or {}
                     folder = _mbcfg.get("folder_dir") or _os.path.join(_data_dir(), "resumes")
-                    if not _os.path.isdir(folder):
-                        try:
-                            _os.makedirs(folder, exist_ok=True)
-                        except OSError as exc:
-                            return _err(f"导入目录不存在也建不出来：{folder}（{exc}）")
+                else:
+                    # 给了路径也要**收口在允许的来源目录内**（与 /api/ingest 同一条规则）：
+                    # 这里的 folder 来自模型参数，不校验就是一条任意目录读取路径。
+                    try:
+                        folder = _ing.resolve_source_dir(folder, _mbcfg)
+                    except ValueError as exc:
+                        return _err(str(exc))
+                if not _os.path.isdir(folder):
+                    try:
+                        _os.makedirs(folder, exist_ok=True)
+                    except OSError as exc:
+                        return _err(f"导入目录不存在也建不出来：{folder}（{exc}）")
                 rep = _ing.ingest_dir(folder, _conn_jd[0], _conn_jd[1], ctx.db_path,
                                       job_id=None, use_llm=False)
             else:
@@ -1801,15 +1863,28 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             stage = (args.get("stage") or "").strip()
             if stage not in STAGES:
                 return _err(f"阶段取值非法：{stage}；只能是 {'/'.join(STAGES)}")
+            # v1.29：结论标签。**在这一层就校验**（与 db.set_application_stage 同一口径）——
+            # 让模型在"提案阶段"就知道打错了，而不是等 HR 点了确认才 500。
+            outcome = (args.get("outcome") or "").strip() or None
+            if outcome and not stages_mod.outcome_allowed_from(app.get("stage"), stage, outcome):
+                _ok_oc = stages_mod.outcomes_of(app.get("stage"))
+                return _err(
+                    f"「{app.get('stage')} → {stage}」这一步不能打结论「{outcome}」"
+                    + (f"；可选 {'/'.join(_ok_oc)}" if _ok_oc else "；这一步没有结论标签"))
             cand = db.get_candidate(conn, app["candidate_id"]) or {}
-            # 已在目标阶段就不必再提一遍（否则卡片上会出现"初面 → 初面"）
-            if (app.get("stage") or "") == stage:
-                return _ok({"note": f"{cand.get('name') or '这位候选人'} 已经在「{stage}」阶段，"
-                                    "不需要再推进。", "no_change": True})
-            return _propose(conn, ctx, "set_stage",
-                            {"application_id": int(aid), "stage": stage},
+            # 已在目标阶段**且结论也没变**才不必再提一遍
+            # （否则卡片上会出现"初面 → 初面"，但"已发放offer + 已签约"是有效变更）
+            if (app.get("stage") or "") == stage and (app.get("outcome") or None) == outcome:
+                return _ok({"note": f"{cand.get('name') or '这位候选人'} 已经在「{stage}」阶段"
+                                    + (f"（{outcome}）" if outcome else "")
+                                    + "，不需要再推进。", "no_change": True})
+            _args = {"application_id": int(aid), "stage": stage}
+            if outcome:
+                _args["outcome"] = outcome
+            return _propose(conn, ctx, "set_stage", _args,
                             f"把 {cand.get('name') or '#' + str(app['candidate_id'])} 的投递 "
                             f"#{aid} 从「{app.get('stage')}」推进到「{stage}」"
+                            + (f"，结论「{outcome}」" if outcome else "")
                             + (f"（理由：{args['reason']}）" if args.get("reason") else ""))
 
         if name == "set_tier":
@@ -1818,8 +1893,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             if not app:
                 return _err(f"未找到投递 #{aid}")
             tier = (args.get("tier") or "").strip().upper()
-            if tier not in ("A", "B", "C", "D"):
-                return _err("档位只能是 A/B/C/D")
+            if tier not in tiers_mod.all_tiers():
+                return _err(f"档位只能是 {tiers_mod.enum_str()}")
             cand = db.get_candidate(conn, app["candidate_id"]) or {}
             cur = app.get("tier_final") or app.get("tier_suggested")
             return _propose(conn, ctx, "set_tier",

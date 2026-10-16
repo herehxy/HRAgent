@@ -27,7 +27,7 @@
                         `/api/jobs/{jid}/regrade`（JD 改后按新尺子重算已有投递）
                         `/api/jobs/{jid}/activate|deactivate`（停用，不物理删除）邮箱配置                 `/api/mailbox/config`（GET/POST）`/api/mailbox/presets`
                         `/api/mailbox/test` `/api/mailbox/preview`
-设置                     `/api/settings`（GET/POST；含性别筛选开关，默认关闭）
+设置                     `/api/settings`（GET/POST；入库即分析开关、超期天数等）
 检索                     `/api/search/skills` `/api/search/semantic` `/api/search/similar` `/api/search/index` `/api/search/status`
 智能体                   `/api/agent/chat` `/api/agent/tools` `/api/agent/runs` `/api/agent/status`
                         `/api/candidates/{cid}/analyze|interview|explain`
@@ -38,9 +38,9 @@
 注意：检索三条路径的返回值会经 `_with_contact()` 处理后下发——
 联系方式解密只在这一层做（与人才库列表同一口径），密文/盲索引/身份键不下发。
 
-**性别**：`/api/candidates` 支持 `gender=男|女|未标注`，但**只有设置项
-`gender_filter_enabled` 打开时才真正生效**；开关关闭时请求被忽略并如实回话
-（`gender_filter.applied=false`）。性别永不进入 `tier.grade()`，不参与任何评分/分级。
+**性别**：`/api/candidates` 支持 `gender=男|女|未标注`，按**普通筛选条件**处理
+（v1.29.4，业务方 2026-10-16 定调：性别不做脱敏、不设"红线"开关）。
+性别永远只来自简历**明写**的标签行（绝不推断），也不进入 `tier.grade()`，不参与评分/分级。
 """
 from __future__ import annotations
 
@@ -70,6 +70,16 @@ from . import actions, auth, db, feedback as feedback_mod
 from . import ingest as ingest_mod, mailbox as mb, regrade, search
 from . import mail_send as mail_send_mod
 from . import mail_template as mail_template_mod
+from . import univ as univ_mod
+# v1.29：阶段/结论的唯一真源。服务端要下发阶段配置给前端（看板与下拉都从这里来），
+# 并对阶段流转做校验，所以是顶层导入。
+from . import stages as stages_mod
+# v1.29：档位（字母/标签/硬门槛档）的唯一真源 —— 文案与校验都从这里取，
+# 不再写死 "A/B/C/D"（三档后写死的 D 会把提示语说错）
+from . import tiers as tiers_mod
+# v1.29：导出（xlsx/CSV）与简历命名
+from . import export as export_mod
+from . import xlsx as xlsx_mod
 from .agent import brief as brief_mod
 from .agent import llm
 from .agent import proactive as proactive_mod
@@ -79,6 +89,7 @@ from .pipeline import domains as domains_mod
 from .pipeline import majors as mj
 from .pipeline import normalize as nz
 from .pipeline import parse as parse_mod
+from .pipeline import extract as extract_mod
 from .pipeline import freshness
 from .pipeline import sanitize
 from .pipeline import tier as tier_mod
@@ -124,7 +135,7 @@ def _abs_stored(rel: str) -> str:
         return os.path.join(DATA_DIR, rel[5:].replace("/", os.sep))
     return os.path.join(BASE, rel)
 
-app = FastAPI(title="企业人才库智能体", version="1.7.0")
+app = FastAPI(title="NIN人才库智能助手", version="1.7.0")
 
 
 # ---- 本机来源校验（防 DNS rebinding / 本地 CSRF）----
@@ -233,11 +244,52 @@ def api_task_progress(task_id: str,
         return {"ok": False, "task_id": task_id, "error": "任务不存在或已过期"}
     total = p.get("total") or 0
     done = p.get("done") or 0
-    percent = int(done / total * 100) if total else 100
-    return {"ok": True, "task_id": task_id, "title": p.get("title"),
-            "total": total, "done": done, "failed": p.get("failed") or 0,
-            "status": p.get("status"), "message": p.get("message"),
-            "percent": max(0, min(100, percent))}
+    # v1.29.4：0 总数不再一律 100%（收取任务"统计数量"阶段会短暂 total=0，
+    # 显示满格会让人以为已经收完了）；只有已完成的任务才给 100。
+    percent = int(done / total * 100) if total else (100 if p.get("status") == "done" else 0)
+    out = {"ok": True, "task_id": task_id, "title": p.get("title"),
+           "total": total, "done": done, "failed": p.get("failed") or 0,
+           "status": p.get("status"), "message": p.get("message"),
+           "percent": max(0, min(100, percent))}
+    # v1.29.4：收取任务把**完整报表**与停止标记挂在进度里带回
+    # （最后一次轮询就能拿全，前端不需要再来一次结果请求）。
+    for _k in ("report", "stopped"):
+        if _k in p:
+            out[_k] = p[_k]
+    return out
+
+
+@app.post("/api/tasks/{task_id}/stop")
+def api_task_stop(task_id: str,
+                  x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """请求停止一个**可停止**的后台任务（收取/导入）。
+
+    协作式停止：执行方在"每处理完一份文件/一封邮件"的边界检查，
+    读完当前这份才停 —— 不会把半份砍断，游标停在最后成功处理的那条
+    （下次从那里继续，不重复、不丢件）。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "ingest")
+    ok = bool(ingest_mod.request_stop(task_id))
+    return {"ok": ok,
+            "message": ("已请求停止：读完当前文件后停下" if ok
+                        else "该任务不可停止（可能已结束，或不是收取任务）")}
+
+
+@app.get("/api/tasks/active")
+def api_tasks_active(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                     x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """当前还在跑的**收取/导入/分析**后台任务（v1.29.10）。
+
+    业务方反馈：进度弹窗被误关后，页面上就再没有"停止"入口了。前端点导入
+    按钮前先问一句：有在跑的就重新挂上进度窗口（优先给**可停止**的那个），
+    没有才开新任务——同时也防了"刷新页面后重复开任务抢游标"。
+    """
+    _session(x_tp_token, x_tp_role)
+    items = ingest_mod.list_running() if hasattr(ingest_mod, "list_running") else []
+    return {"ok": bool(items), "task": (items[0] if items else None),
+            "count": len(items)}
 
 
 def _load(path: str) -> dict:
@@ -251,10 +303,10 @@ def _jd_tiers() -> tuple[dict, dict]:
 
 # ---------------------------------------------------------------- 设置项
 
-# 性别筛选开关。**产品默认关闭**：招聘不得限定性别（《就业促进法》第 27 条、
-# 《妇女权益保障法》第 43 条），所以它必须是一个"HR 主动打开、且打开留痕"的开关，
-# 而不是默认就能用的筛选条件。性别本身**永远不进入 `tier.grade()`**。
-GENDER_FILTER_KEY = "gender_filter_enabled"
+# v1.29.4（业务方 2026-10-16）：性别**按正常字段处理** —— 原「合规开关」
+# `gender_filter_enabled` 已随本批移除（连同设置项与前端抑制逻辑）。
+# 不可动摇的两条仍在：性别只来自简历**明写**的标签行（绝不推断）、
+# 永远不进入 `tier.grade()` 评分。
 
 # 「入库即分析」开关（v1.13.4）。**产品默认开**：进门就有判断是这个工具的卖点；
 # 但它每次都会调模型（一次 2-8 秒 + 额度），所以必须给 HR 一个显式开关，
@@ -264,8 +316,7 @@ AUTO_INSIGHT_KEY = "auto_insight_on_ingest"
 
 
 def _settings(conn) -> dict:
-    return {"gender_filter_enabled": bool(db.get_setting(conn, GENDER_FILTER_KEY, False)),
-            "auto_insight_on_ingest": bool(db.get_setting(conn, AUTO_INSIGHT_KEY, True)),
+    return {"auto_insight_on_ingest": bool(db.get_setting(conn, AUTO_INSIGHT_KEY, True)),
             "pipeline_overdue_days": int(db.get_setting(conn, "pipeline_overdue_days", 15) or 15)}
 
 
@@ -658,6 +709,10 @@ def api_interview_dict_save(req: dict = Body(...),
                 continue
             rows.append({"dept": dept, "name": name, "phone": phone})
         cur["contacts"] = rows
+    # v1.29 缺口A：会议号（单值）。写邮件页选「线上面试」时自动带出（ui.py 的 `mv_会议号`）。
+    # 允许保存空串——清空是 HR 的正当操作，不做"非空才生效"。
+    if isinstance(req.get("meeting_no"), str):
+        cur["meeting_no"] = req["meeting_no"].strip()
     tmp = INTERVIEW_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(cur, fh, ensure_ascii=False, indent=2)
@@ -668,7 +723,12 @@ def api_interview_dict_save(req: dict = Body(...),
 @app.get("/api/candidates")
 def api_candidates(tier: str | None = None, kw: str | None = None,
                    stage: str | None = None, education: str | None = None,
-                   univ: str | None = None,
+                   univ: str | None = None, strong: str | None = None,
+                   cet: str | None = None,
+                   # v1.29：新增筛选维度（全部下沉到 db.list_candidates）
+                   overseas: str | None = None, bachelor: str | None = None,
+                   date_from: str | None = None, date_to: str | None = None,
+                   interview_unit: str | None = None,
                    min_years: int | None = None, gender: str | None = None,
                    archived: str | None = None,
                    page: int = 0, page_size: int = 0,
@@ -676,9 +736,8 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                    x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     """人才库列表。
 
-    性别筛选是**受开关约束**的：设置项 `gender_filter_enabled` 关闭时，
-    即使传了 `gender` 也按"未筛选"处理，并在响应里说明为什么——
-    静默忽略与静默生效一样危险，后者会让 HR 误以为筛出来的就是全部。
+    性别筛选是**普通筛选条件**（v1.29.4，业务方 2026-10-16 定调：性别不做脱敏、
+    不设"红线"开关）。性别只来自简历**明写**的标签行（绝不推断），也不参与评分。
 
     最低学历（v1.7.3）：`education=硕士` 即"硕士及以上"，尺子是 `db.EDU_RANK`
     （博士>硕士>本科>大专）。学历"无法判定"的人不命中任何具体层次——
@@ -688,7 +747,7 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
     所以选"211"时 985 也算；识别用 `config/universities.json` 名单
     （精确匹配全名/别名 + 校区后缀归一，独立学院不会误标），
     匹配结果同时以 `uni_tier` 字段随每条下发（卡片标签用）。
-    学历与院校都是**岗位相关硬条件**，与性别筛选不同，不需要开关约束。
+    学历与院校与性别一样，都是普通筛选条件。
 
     归档（v1.4）：默认只回未归档；`?archived=1` 只回已归档（「归档」页用）。
     归档是软隐藏不是删除，档案/投递/附件原样保留。
@@ -704,14 +763,35 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
     require(s, "read")
     conn = db.connect(DB_PATH)
     try:
-        cfg = _settings(conn)
-        allowed = bool(cfg.get("gender_filter_enabled"))
-        want = (gender or "").strip() if allowed else ""
+        # v1.29.4：性别筛选按普通条件处理（不再有"受开关约束"这一层）。
+        want = (gender or "").strip()
         want_archived = (archived or "").strip() in ("1", "true", "yes")
         want_edu = (education or "").strip() or None
         want_univ = (univ or "").strip()
+        # v1.27：特定院校（strong）与英语四六级（cet）**下沉到 db.list_candidates**。
+        # 这里只负责 facets 统计与展示，不再自己过滤一遍 ——
+        # 两处各筛一次必然漂移（v1.23.4 把 univ 下沉过一次，同一个道理）。
+        # `strong` 逗号分隔 = 并集（"看下这几所学校的人"）；
+        # `cet` 逗号分隔 = 并集，"未提供"是特殊值（简历里没写）。
+        # ⚠️ **univ 也必须一起传下去**：下沉时只把 strong/cet 加进 db、
+        # 却忘了把原有的 univ 一起传，筛选会**静默失效**（返回全库）——
+        # 症状是"985 筛选"看起来没报错、人数却等于全库。实测就是被回归套件逮到的。
+        want_strong = [s for s in (strong or "").split(",") if s.strip()]
+        want_cet = (cet or "").strip()
+        _cet_parts = [c for c in want_cet.split(",") if c.strip()]
         items = db.list_candidates(conn, tier=tier, keyword=kw, stage=stage,
                                    min_years=min_years,
+                                   univ=want_univ or None,
+                                   strong=want_strong or None,
+                                   cet=want_cet or None,
+                                   # v1.29：五个新维度一并下沉。**在 db 层筛**是硬要求 ——
+                                   # 智能助手的 search_candidates 与导出共用同一个函数，
+                                   # 只在 server 层筛会出现"界面上能筛、助手查不到"。
+                                   overseas=(overseas or "").strip() or None,
+                                   bachelor=(bachelor or "").strip() or None,
+                                   date_from=(date_from or "").strip() or None,
+                                   date_to=(date_to or "").strip() or None,
+                                   interview_unit=(interview_unit or "").strip() or None,
                                    # 分页请求时先**轻量**取（不装配技能明细）：
                                    # 1000 人时全装配是 59ms，而一屏只要 20 条。
                                    # 筛选与 facets 都不依赖技能字段，切片后再装配即可。
@@ -727,15 +807,62 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                                  if db.EDU_RANK.get(i.get("edu_level") or "", 0) == 0)
             items = [i for i in items
                      if db.EDU_RANK.get(i.get("edu_level") or "", 0) >= rank]
-        # 院校层次 facets：在自身筛选生效前统计（与性别 facets 同一套口径），
-        # 这样下拉里写的人数不会因当前选项而缩水，对得上"共 N 人"。
+        # 院校层次 facets：只统计、**不过滤**（过滤已下沉到 db）。
+        # v1.27：`uni_tier` 现在有三档（985/211/强势），facets 必须**按值比对**
+        # 而不是靠"是不是985/211" —— 否则"强势"会被当成"非985非211"
+        # 混进 211 的兜底里，筛 211 时凭空多出一批国科大的人。
         _c985 = sum(1 for i in items if i.get("uni_tier") == "985")
         _c211 = sum(1 for i in items if i.get("uni_tier") == "211")
-        uni_facets = {"985": _c985, "211": _c985 + _c211}
-        if want_univ in ("985", "211"):
-            items = [i for i in items
-                     if i.get("uni_tier") == "985"
-                     or (want_univ == "211" and i.get("uni_tier") == "211")]
+        uni_facets = {"985": _c985, "211": _c985 + _c211,
+                      # v1.29：并入「特殊」（原 strong 名单）与「未识别」
+                      "特殊": sum(1 for i in items if i.get("uni_tier") == "强势"),
+                      "未识别": sum(1 for i in items if not (i.get("school") or "").strip())}
+        # v1.29：海外院校（**独立维度**）。facets 用三态而不是布尔：
+        # 「未识别」（学校没读到）必须单列 —— 它要人工补录，与"不是海外"相反处理。
+        overseas_facets = {
+            "海外": sum(1 for i in items if i.get("overseas") is True),
+            "非海外": sum(1 for i in items if i.get("overseas") is False),
+            "未识别": sum(1 for i in items if i.get("overseas") is None),
+        }
+        # v1.29：第一学历层次 facets。「未识别」单列（同上理由）
+        bachelor_facets = {
+            "985": sum(1 for i in items if i.get("bachelor_tier") == "985"),
+            "211": sum(1 for i in items if i.get("bachelor_tier") == "211"),
+            "特殊": sum(1 for i in items if i.get("bachelor_tier") == "强势"),
+            "未识别": sum(1 for i in items
+                          if not (i.get("first_degree_school") or "").strip()),
+        }
+        # v1.29：面试部门（面试单位）facets。取库里**实际用过的**值（并字典补齐见前端），
+        # 数字与列表同源 —— 下拉里写 3 人、点进去只有 2 人是最典型的"数字对不上"。
+        # v1.29.11：单位支持**多选**（「分析测试中心、稀土研究院」）——按**拆开的
+        # 单个单位**计数，否则下拉会出现"甲、乙"整串、拆开筛又对不上人。
+        _unit_counts: dict[str, int] = {}
+        for i in items:
+            for _u in re.split(r"[、,，]+", str(i.get("interview_unit") or "")):
+                _u = _u.strip()
+                if _u:
+                    _unit_counts[_u] = _unit_counts.get(_u, 0) + 1
+        interview_unit_facets = dict(
+            sorted(_unit_counts.items(), key=lambda kv: (-kv[1], kv[0])))
+        # v1.29：互斥提示。`univ=985/211/特殊` 与 `overseas=海外` 是**两个维度且互斥**
+        # （境外高校既不是 985 也不是 211）→ 同时勾必然 0 人。
+        # 静默返回空列表会让 HR 以为系统坏了，所以明确说出来。
+        _conflict = []
+        if want_univ in ("985", "211", "特殊") and (overseas or "").strip() in ("1", "海外"):
+            _conflict.append("「国内院校层次」与「海外院校」互斥：境外高校不在 985/211/特殊名单里，"
+                             "同时勾选不会有结果。")
+        # v1.27：英语四六级 facets，同样只统计。
+        # ⚠️ 统计口径 = **除四六级外的其他条件都命中**的那批人（下拉里写的人数
+        # 不会因为当前勾了哪一档而缩水，与 gender/uni_facets 一致）。
+        # 这里 items 已经过了 strong/cet 过滤，所以 facets 会受当前选项影响 ——
+        # 与 `uni_facets` 受 univ 影响的既有行为一致，不另立口径。
+        cet_facets: dict | None = None
+        if _cet_parts:
+            cet_facets = {}
+            for _lv in extract_mod.CET_FILTER_LEVELS:
+                cet_facets[_lv] = sum(1 for i in items if i.get("cet_level") == _lv)
+            cet_facets["未提供"] = sum(1 for i in items if not (i.get("cet_level") or ""))
+            cet_facets["无"] = sum(1 for i in items if i.get("cet_level") == "无")
         # 分布统计与结果过滤共用 `db.gender_matches` 一个口径：
         # 否则会出现"点了男，列表 3 个人，下拉里写着 4"这种对不上的情况。
         facets = {g: sum(1 for i in items if db.gender_matches(i.get("gender"), g))
@@ -802,7 +929,8 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
             i["edu_check"] = _edu_check(i, jobs_map)
             # 招聘对象身份：有工作经历看年限，没有就看毕业时间（应届/往届未就业）
             i["exp_display"] = freshness.exp_label(
-                i.get("years_exp"), bool(i.get("years_exp")), i.get("grad_date"))
+                i.get("years_exp"), bool(i.get("years_exp")), i.get("grad_date"),
+                in_school=bool(i.get("in_school")))
             i["tier_detail"] = _tier_detail_of(i, _jdm, _cats)
         presented = auth.present_list(items)
         out = {"count": len(presented), "items": presented,
@@ -812,21 +940,37 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                                   "pending": db.count_needing_insight(conn)},
                "my_permissions": s["permissions"],
                "archived_view": want_archived,
-               "gender_facets": facets if allowed else None,
+               "gender_facets": facets,
                "uni_facets": uni_facets,
+               # v1.27：英语四六级 facets + 强势院校名单。
+               # 两者都随列表一起下发，界面不必再发第二个请求就能画出筛选下拉 ——
+               # 筛选控件与它的人数来自**同一次查询**，不会对不上。
+               "cet_facets": cet_facets,
+               "strong_schools": univ_mod.strong_schools(),
+               # v1.29：新维度的 facets（数字与列表同源，别让下拉与结果对不上）
+               "overseas_facets": overseas_facets,
+               "bachelor_facets": bachelor_facets,
+               "interview_unit_facets": interview_unit_facets,
+               "overseas_schools": univ_mod.overseas_schools(),
+               # 互斥/异常提示：静默返回空列表会被当成"系统坏了"
+               "conflicts": _conflict,
+               # 生效中的筛选回显（前端只读这一份，不用自己再推一遍）
+               "filters": {
+                   "univ": want_univ or "", "overseas": (overseas or "").strip(),
+                   "bachelor": (bachelor or "").strip(), "cet": want_cet,
+                   "date_from": (date_from or "").strip(), "date_to": (date_to or "").strip(),
+                   "interview_unit": (interview_unit or "").strip(),
+                   "strong": (strong or "").strip(), "stage": (stage or "").strip(),
+                   "education": want_edu or "",
+               },
                "edu_filter": {"min": want_edu, "applied": bool(want_edu),
                               "hidden_unknown": hidden_unknown},
                "paging": paging,
                "gender_filter": {
-                   "enabled": allowed,
                    "requested": (gender or "").strip() or None,
                    "applied": bool(want),
-                   "why": None if allowed else
-                          "性别筛选开关处于关闭状态（合规默认），本次按未筛选处理；"
-                          "如需使用请到「系统说明」打开并留痕。",
+                   "note": "性别仅来自简历明写标签，不参与评分与分级。",
                }}
-        if allowed:
-            out["gender_filter"]["note"] = "性别仅来自简历明写标签，不参与评分与分级。"
         return out
     finally:
         conn.close()
@@ -1066,7 +1210,8 @@ def api_candidate_reanalyze(cid: int, full: bool = True, req: dict | None = None
                      s["username"], s["role"])
         return {"ok": True, "job": job_meta, "insight": db.get_insight(conn, cid, app_id),
                 "note": "分析已更新。模型建议档位已同步到建议档（HR 未确认的）"
-                        f"{_tier_note}；学历不达标的直接判 D、不采用模型建议；"
+                        f"{_tier_note}；学历不达标的直接判 {tiers_mod.hard_shortfall_tier()}"
+                        "、不采用模型建议；"
                         "阶段与岗位不受影响。"}
     finally:
         conn.close()
@@ -1202,6 +1347,28 @@ def api_candidate_rename(cid: int, req: dict,
         if g and g not in ("男", "女"):
             raise HTTPException(status_code=422, detail="性别只能填：男 / 女（清空表示未填）")
         fields["gender"] = g or None
+    # v1.29：英语四六级随「保存更正」一起提交（原来是一个独立的接口+按钮，
+    # 改了不点那个按钮就白改）。收的是**归一后的档位名**，只接受白名单取值，
+    # 空串 = 清空（筛选时算"未提供"，与"简历明写没通过"的 '无' 严格区分）。
+    if "cet" in req:
+        lv = str(req.get("cet") or "").strip()
+        if lv and lv not in extract_mod.CET_FILTER_LEVELS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"英语四六级只能是：{'、'.join(extract_mod.CET_FILTER_LEVELS)}"
+                       "（清空表示未识别）")
+        # ⚠️ 存"档位名"而不是原文：`cet_level(档位名)` 能原样归一回来（已判据覆盖），
+        # 所以档案显示与人才库筛选永远一致 —— 这正是原来要两个控件同步的原因，
+        # 现在只留一个控件也不会分叉。
+        fields["cet"] = lv or None
+    # v1.29：第一学历（本科）院校。**HR 人工更正**的入口 ——
+    # 校招简历常只写最高学历院校，「本科985/211」这个筛选需要本科那所，
+    # 抽不到时由 HR 在这里补录（不补就落「未识别」）。
+    # ⚠️ 不在这里做"院校名校验"：名单是枚举式的，名单外的一律算未识别，
+    # 那属于配置口径问题，不该在这里拦着 HR 不让填。
+    if "first_degree_school" in req:
+        fields["first_degree_school"] = (
+            str(req.get("first_degree_school") or "").strip()[:60] or None)
     if "phone" in req:
         phone = str(req.get("phone") or "").strip()
         if phone and not re.fullmatch(r"[\d\s\-+()]{7,20}", phone):
@@ -1234,12 +1401,19 @@ def api_candidate_rename(cid: int, req: dict,
         d = db.candidate_detail(conn, cid)
         if not d:
             raise HTTPException(status_code=404, detail="未找到该候选人")
+        # ⚠️ 新增可编辑字段时，`label` 与 `old_map` **必须同时加**（v1.29 加 cet 时踩到）：
+        # 只加进 fields 而漏了 label，`changed` 会算成空 → 值其实**已经存进库**，
+        # 接口却回一句「字段没有变化。」—— 界面告诉 HR "什么都没改"，实际改了。
+        # 这是会静默说谎的一类 bug，比报 500 更难发现。
         label = {"name": "姓名", "edu_level": "学历", "school": "学校", "major": "专业",
-                 "gender": "性别",
+                 "gender": "性别", "cet": "英语四六级",
+                 "first_degree_school": "第一学历（本科）院校",
                  "phone_enc": "电话", "email_enc": "邮箱"}
         old_map = {"name": d.get("name") or "", "edu_level": d.get("edu_level") or "",
                    "school": d.get("school") or "", "major": d.get("major") or "",
                    "gender": d.get("gender") or "",
+                   "cet": d.get("cet") or "",
+                   "first_degree_school": d.get("first_degree_school") or "",
                    "phone_enc": decrypt(d.get("phone_enc")) or "",
                    "email_enc": decrypt(d.get("email_enc")) or ""}
         # ⚠️ v1.24.21 修（KeyError: 'phone_bidx' —— 保存必报 500 的根因）：
@@ -1311,14 +1485,16 @@ def api_candidate_note(cid: int, req: dict,
 def _end_open_applications(conn, cid: int, s: dict) -> int:
     """把某候选人**进行中**的投递置为「已结束」（归档联动用），返回改动条数。
 
-    终态不动：`已入职` 是有价值的历史事实，不能因为归档就被改写成"已结束"；
-    `已结束` 本来就是终点，无需重复写。
+    终态不动：已在终点的不再重复写。终态集合从配置取（v1.29）——
+    原来这里写死 `("已入职", "已结束")`，去掉「已入职」后不同步改的话，
+    历史遗留的「已入职」会被当成"进行中"，每次归档都被重写成"已结束"。
     """
     n = 0
+    _terminal = set(stages_mod.terminal_stages())
     rows = conn.execute("SELECT id, stage FROM applications WHERE candidate_id = ?",
                         (int(cid),)).fetchall()
     for a in rows:
-        if (a["stage"] or "") in ("已入职", "已结束"):
+        if (a["stage"] or "") in _terminal:
             continue
         db.set_application_stage(conn, a["id"], "已结束", s["username"], s["role"])
         n += 1
@@ -1984,6 +2160,10 @@ class ReviewReq(BaseModel):
 
 class StageReq(BaseModel):
     stage: str
+    #: v1.29：结论标签（可选）。只在「离开的阶段」允许它时才认：
+    #: 已面试→不录用；已发放offer→已签约/拒签。不给 = 不改结论。
+    #: 想**清空**结论传空串 ""（与"不改"区分开）。
+    outcome: str | None = None
 
 
 class NoteReq(BaseModel):
@@ -1996,7 +2176,8 @@ def api_set_tier(aid: int, req: TierReq, x_tp_token: str | None = Header(default
     s = _session(x_tp_token, x_tp_role)
     require(s, "confirm")
     if req.tier not in ("A", "B", "C", "D"):
-        raise HTTPException(status_code=400, detail="档位只能是 A/B/C/D")
+        raise HTTPException(status_code=400,
+                            detail="档位只能是 " + tiers_mod.enum_str(" / "))
     conn = db.connect(DB_PATH)
     try:
         r = db.set_application_tier(conn, aid, req.tier, req.note, s["username"], s["role"])
@@ -2040,18 +2221,338 @@ def api_set_stage(aid: int, req: StageReq, x_tp_token: str | None = Header(defau
         raise HTTPException(status_code=400, detail=f"阶段只能是 {'/'.join(db.STAGES)}")
     conn = db.connect(DB_PATH)
     try:
-        r = db.set_application_stage(conn, aid, req.stage, s["username"], s["role"])
+        # v1.29：结论标签一起落库；自动归档由 db.set_application_stage **统一负责**
+        # （它会先确认该人所有投递都已到终点）。原来这里还写了一份"看到已结束就归档"的
+        # 无条件版本 —— 那人若同时在两个岗位流程里，结束一个就把整档收起来是错的。
+        try:
+            r = db.set_application_stage(conn, aid, req.stage, req.outcome,
+                                         s["username"], s["role"])
+        except ValueError as exc:
+            # 非法阶段/非法结论：如实回 400 并说清可用取值，别让它变成 500
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not r:
             raise HTTPException(status_code=404, detail="未找到该投递")
-        # 流程结束即归档：走到终点的人不该继续占着人才库列表。
-        # 「已入职」也归——他是历史战绩，同样不需要天天出现在待处理列表里。
-        archived = False
-        if req.stage in ("已结束", "已入职") and r.get("candidate_id"):
-            db.set_candidate_archived(conn, r["candidate_id"], True, s["username"], s["role"])
-            archived = True
+        archived = bool(r.pop("_auto_archived", False))
         return {**r, "auto_archived": archived,
                 "note": ("阶段已更新，并已自动归档该候选人"
-                         "（可在「归档」页随时取消归档）。" if archived else "")}
+                         "（他的投递都走完了；可在「归档」页随时取消归档）。"
+                         if archived else "")}
+    finally:
+        conn.close()
+
+
+def _export_filters(overseas, bachelor, date_from, date_to,
+                    interview_unit, cet, univ, stage, education, kw) -> dict:
+    """把导出接口的筛选参数收成 `list_candidates` 的 kwargs —— **一处转换**。
+
+    为什么不让导出接口自己拼：界面上能筛、导出不能筛是这类需求最常见的漏。
+    转换放一处，导出与界面永远同一口径。
+    """
+    _f: dict = {}
+    if kw:
+        _f["keyword"] = kw
+    if education:
+        _f["education"] = education
+    if univ:
+        _f["univ"] = univ
+    if cet:
+        _f["cet"] = cet
+    if overseas:
+        _f["overseas"] = overseas
+    if bachelor:
+        _f["bachelor"] = bachelor
+    if date_from:
+        _f["date_from"] = date_from
+    if date_to:
+        _f["date_to"] = date_to
+    if interview_unit:
+        _f["interview_unit"] = interview_unit
+    if stage:
+        _f["stage"] = stage
+    return _f
+
+
+def _export_response(headers: list[str], rows: list[list], text_cols: set[int],
+                     meta: str, scope: str, n: int, fmt: str, stamp: str):
+    """导出响应：xlsx（默认）或 csv。**同时把导出动作写审计。**"""
+    if (fmt or "xlsx").lower() == "csv":
+        data = xlsx_mod.csv_bytes(rows, headers)
+        media = "text/csv; charset=utf-8"
+        ext = "csv"
+    else:
+        data = xlsx_mod.write_sheet(rows, headers, text_cols=text_cols,
+                                    meta=meta, sheet_title=scope[:31])
+        media = ("application/vnd.openxmlformats-officedocument"
+                 ".spreadsheetml.sheet")
+        ext = "xlsx"
+    conn = db.connect(DB_PATH)
+    try:
+        db.add_audit(conn, "export", scope, "export", f"{n} 条",
+                     f"导出「{scope}」{n} 条｜{meta}",
+                     _export_operator[0], _export_operator[1])
+    finally:
+        conn.close()
+    name = urllib.parse.quote(f"{scope}-{stamp}.{ext}")
+    return Response(
+        content=data, media_type=media,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{name}",
+                 "X-Export-Rows": str(n)})
+
+
+#: 导出接口的操作用户（`_export_response` 里写审计要用；由路由设置）
+_export_operator = ["HR", "hr"]
+
+
+@app.get("/api/export/roster")
+def api_export_roster(scope: str = "候选人名单",
+                       fmt: str = "xlsx", format: str | None = None,
+                       overseas: str | None = None, bachelor: str | None = None,
+                       date_from: str | None = None, date_to: str | None = None,
+                       interview_unit: str | None = None, cet: str | None = None,
+                       univ: str | None = None, stage: str | None = None,
+                       education: str | None = None, kw: str | None = None,
+                       x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
+    """导出候选人名单 —— **唯一的导出入口**（业务方 2026-10-15 定调）。
+
+    三条口径钉死：
+      · **一份名单一套列**：固定 13 列，不随阶段增减；没走到那个阶段的字段给 `—`。
+      · **含归档**：自动归档之后那些人从人才库看不见了，而这恰恰是「是否录用」
+        列里最该出现的一批（不录用 / 拒签）。漏了他们，这张表只剩好消息。
+      · **跟界面同一套筛选**（`poolQuery` 同一个真源），所以不会出现
+        "界面上筛了 8 人、导出给了全库"。
+
+    每次点击**实时查库**（不缓存、不做快照），永远是最新数据；导出动作写审计
+    （13 列含电话明文、是要外发的，这是受控动作）。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    _export_operator[0], _export_operator[1] = s["username"], s["role"]
+    conn = db.connect(DB_PATH)
+    try:
+        headers, rows, tcols, n = export_mod.build_roster(
+            conn, operator=s["username"], role=s["role"], include_archived=True,
+            **_export_filters(overseas, bachelor, date_from, date_to,
+                              interview_unit, cet, univ, stage, education, kw))
+    finally:
+        conn.close()
+    meta = xlsx_mod.meta_line(scope, "（含已归档；未加其它筛选）", n)
+    # `fmt` 与 `format` 两个名字都收：HR/脚本两种写法都会用，
+    # 而"传了 format=csv 却拿到 xlsx"是那种**看起来成功**的错。
+    return _export_response(headers, rows, tcols, meta, scope, n, format or fmt,
+                            datetime.now().strftime("%Y%m%d-%H%M"))
+
+
+@app.post("/api/bundle/initial-pass")
+def api_bundle_initial_pass(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                            x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
+    """把**初筛通过**人员的简历打包下载，文件名按 `匹配岗位-学历-学校-最高学历专业-姓名-性别`。
+
+    ⚠️ 只改**包内名**，不动归档原件的文件名（原件是审计凭据，见 `app/naming.py` 的规则 2）。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        zname, pairs = export_mod.bundle_name(conn, {}, operator=s["username"],
+                                              role=s["role"], scope="初筛通过",
+                                              n=0)
+        db.add_audit(conn, "bundle", "initial-pass", "bundle_download", "",
+                     f"下载初筛通过简历 {len(pairs)} 份",
+                     s["username"], s["role"])
+    finally:
+        conn.close()
+    if not pairs:
+        raise HTTPException(status_code=404,
+                            detail="当前筛选下没有可打包的简历（只有已入库并留了原件的候选人）")
+    return _zip_response(pairs, zname)
+
+
+@app.post("/api/applications/{aid}/interview-info")
+def api_interview_info(aid: int, req: dict,
+                       x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """登记 / 更正**面试与录用信息**（人工维护入口）。
+
+    分工（v1.29）：
+      · **人工**：面试单位、面试日期/时段/方式（发信时会自动回写，HR 也可手工改）、
+        签约时间、入职最后期限、入职情况。
+      · **自动**：录用函发送时间（发信成功那一刻写入，不给手工入口 ——
+        它是后面所有时限的起算点，HR 常记错）。
+
+    校验只挡"明显不合法"（日期格式、入职情况的取值），
+    不在这里做名单/口径判断 —— 那是配置（universities.json / interview.json）的事。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    conn = db.connect(DB_PATH)
+    try:
+        if not db.get_application(conn, aid):
+            raise HTTPException(status_code=404, detail="未找到该投递")
+        patch: dict = {}
+        advanced = False        # v1.29.3：本次是否顺带推进了阶段（待面试 → 已面试）
+
+        def _date(key: str) -> None:
+            if key in req:
+                v = str(req.get(key) or "").strip()[:10]
+                if v and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+                    raise HTTPException(status_code=422, detail=f"{key} 格式应为 YYYY-MM-DD")
+                patch[key] = v or None
+
+        def _text(key: str, maxlen: int) -> None:
+            if key in req:
+                patch[key] = (str(req.get(key) or "").strip()[:maxlen] or None)
+
+        _text("interview_unit", 40)        # 面试单位（=面试部门）
+        _text("interview_slot", 24)        # 面试时段原文
+        _text("interview_mode", 16)        # 面试方式（现场 / 线上）
+        _text("signed_at", 32)             # 签约时间
+        _date("interview_date")            # 面试日期 YYYY-MM-DD
+        _date("onboard_deadline")           # 入职最后期限（**人工维护**）
+        # v1.29.2：面试结论（拟录用 / 不录用）。
+        # ⚠️ **只写标签、不流转**（业务方 2026-10-16 裁定）：打「不录用」不再
+        # 自动进「已结束」并归档 —— 归档是不可逆的隐藏动作，而结论可能还要改。
+        if "outcome" in req:
+            v = str(req.get("outcome") or "").strip()
+            # 取值范围 = 配置里**「已面试」这一档**允许的标签，不写死字面量
+            _ok = stages_mod.outcomes_of("已面试")
+            if v and v not in _ok:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"面试结论只能是：{'、'.join(_ok) or '（未配置）'}（清空表示未判）")
+            # v1.29.3（业务方 2026-10-16）：**在「待面试」打结论标签 → 自动进「已面试」**。
+            # 「待面试」意味着人已经面过、只是结论还没录，所以打标签的同时就该走到
+            # 「已面试」这一档；**其它阶段不动**（在「已面试」打标签只改标签，
+            # 要不要推进到已发放offer 是另一步，由 HR 单独决定）。
+            # ⚠️ 放**服务端**而不是前端：助手提案、脚本调接口也应该同一套行为 ——
+            # 流转规则写在界面里，就等于只有界面那条路算数。
+            _cur_stage = stages_mod.normalize_stage(
+                (db.get_application(conn, aid) or {}).get("stage"))
+            if v and _cur_stage == "待面试":
+                db.set_application_stage(conn, aid, "已面试", outcome=v,
+                                         operator=s["username"], role=s["role"],
+                                         skip_auto_archive=True)
+                advanced = True          # outcome 由 set_application_stage 写，不重复
+            else:
+                patch["outcome"] = v or None
+        # v1.29.2：录用函发送时间。发录用函时**系统自动写**；这里允许人事手填
+        # （比如函是纸质/由别人代发的）。手填前端会弹一次确认。
+        if "offer_sent_at" in req:
+            v = str(req.get("offer_sent_at") or "").strip()[:19]
+            if v and not re.fullmatch(r"\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?", v):
+                raise HTTPException(status_code=422,
+                                    detail="录用函发送时间格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH:MM")
+            patch["offer_sent_at"] = v.replace("T", " ") or None
+        if "onboard_status" in req:
+            v = str(req.get("onboard_status") or "").strip()
+            if v and v not in ONBOARD_STATUS:
+                raise HTTPException(status_code=422,
+                                    detail=f"入职情况只能是：{'、'.join(ONBOARD_STATUS)}")
+            patch["onboard_status"] = v or None
+        # 只带日期没带时段时，把时段起始时间补进 interview_date
+        #（导出列要显示到分钟；HR 事后只改日期的也走这条）
+        if ("interview_date" in patch and patch.get("interview_date")
+                and not patch.get("interview_slot") and "interview_slot" not in patch):
+            cur = db.get_application(conn, aid) or {}
+            _full = cur.get("interview_date") or ""
+            _t = _SLOT_START_RE.match(str(cur.get("interview_slot") or "").strip())
+            patch["interview_date"] = (f"{patch['interview_date']} "
+                                       f"{int(_t.group(1)):02d}:{int(_t.group(2)):02d}"
+                                       ) if _t else patch["interview_date"]
+        if not patch:
+            # ⚠️ 这里**不能**只看 patch：在「待面试」打结论标签时 outcome 是由
+            # `set_application_stage` 写的（patch 里当然为空），但阶段**确实推进了**。
+            # 只按 patch 判断会回一句"没有要修改的字段" —— 而界面上阶段明明变了，
+            # HR 会以为系统没记（实测踩到）。
+            if advanced:
+                _ap = db.get_application(conn, aid) or {}
+                return {"ok": True, "id": aid, "changed": ["stage", "outcome"],
+                        "advanced": True,
+                        "application": {k: _ap.get(k) for k in ("stage", "outcome")},
+                        "note": "已保存：面试结论 + 阶段已推进到「已面试」。"}
+            return {"ok": True, "id": aid, "changed": [], "advanced": False,
+                    "note": "没有要修改的字段。"}
+        r = db.update_application_fields(conn, aid, operator=s["username"],
+                                         role=s["role"], **patch) or {}
+        # v1.29.4（业务方）：人事处**填完面试基本信息**（面试单位已登记）而阶段
+        # 还在「待面试」之前时 → 自动推进到「待面试」，回话带 `advanced_to`，
+        # 前端弹提醒。判定用**保存后的实际状态**（不看 patch）：单位可能这次填的、
+        # 也可能早先登记过。与「打结论自动进已面试」同一纪律 —— 联动写**服务端**，
+        # 助手/脚本走同一套行为，不只在界面那条路生效。
+        _ap_now = db.get_application(conn, aid) or {}
+        _stage_now = stages_mod.normalize_stage(_ap_now.get("stage"))
+        _order = stages_mod.all_stages()
+        _promoted = False
+        if (_ap_now.get("interview_unit") or "").strip():
+            if (_stage_now in _order and "待面试" in _order
+                    and _order.index(_stage_now) < _order.index("待面试")):
+                _promoted = True
+        if _promoted:
+            db.set_application_stage(conn, aid, "待面试", operator=s["username"],
+                                     role=s["role"], skip_auto_archive=True)
+        _changed = sorted(patch) + (["stage", "outcome"] if advanced else [])
+        if _promoted:
+            _changed = sorted(set(_changed) | {"stage"})
+        if advanced:
+            _note = "已保存：面试结论 + 阶段已推进到「已面试」。"
+        else:
+            _note = ("已保存：" + "、".join(
+                         db.APPLICATION_FIELD_LABEL.get(k, k) for k in sorted(patch))
+                     if patch else "已清除面试结论")
+            _note += ("。阶段已自动推进到「待面试」（面试单位已登记，已写审计）。"
+                      if _promoted else "（改前改后都记在操作审计里）。")
+        return {"ok": True, "id": aid,
+                "changed": _changed,
+                "advanced": advanced,
+                "advanced_to": "待面试" if _promoted else None,
+                "application": {k: r.get(k) for k in patch},
+                "note": _note}
+    finally:
+        conn.close()
+
+
+@app.post("/api/candidates/{cid}/cet")
+def api_candidate_cet(cid: int, req: dict,
+                      x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                      x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """人工更正英语四六级（v1.27）。
+
+    接受 `level`（归一档位，如 '六级'）或 `raw`（简历原文表述）。给 `level` 时
+    **同时把 raw 写成档位名** —— 库里只有一列 `cet`，存原文；两个字段分开存
+    会出现"档案显示六级、筛选按原文判成没写"这种对不上。
+    两者都空 = 清空（回到"未提供"）。
+
+    写审计：`AUDIT_FIELD_LABEL["cet"]` 会把它显示成「英语四六级」。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    req = req or {}
+    level = str(req.get("level") or "").strip()
+    raw = str(req.get("raw") or "").strip()
+    if level:
+        if level not in set(extract_mod.CET_FILTER_LEVELS):
+            raise HTTPException(status_code=422,
+                                detail=f"四六级只能是：{'、'.join(extract_mod.CET_FILTER_LEVELS)} 之一")
+        value = level            # 档位名本身也是合法的原文表述，归一后还是它
+    else:
+        value = raw
+    conn = db.connect(DB_PATH)
+    try:
+        d = db.candidate_detail(conn, cid)
+        if not d:
+            raise HTTPException(status_code=404, detail="未找到该候选人")
+        old = (d.get("cet") or "").strip()
+        if old == value:
+            return {"ok": True, "id": cid, "changed": [],
+                    "note": "四六级没有变化。"}
+        db.update_candidate(conn, cid, cet=value or None)
+        db.add_audit(conn, "candidate", str(cid), "edit_fields",
+                     f"cet={extract_mod.cet_level(old) or '（空）'}",
+                     f"cet={extract_mod.cet_level(value) or '（空）'}",
+                     s["username"], s["role"])
+        return {"ok": True, "id": cid, "changed": ["cet"],
+                "cet_level": extract_mod.cet_level(value),
+                "note": ("四六级已保存。" if value else "四六级已清空（筛选时算未提供）。")}
     finally:
         conn.close()
 
@@ -2101,62 +2602,99 @@ def _safe_ingest_dir(value: str | None, cfg: dict) -> str:
 def api_ingest(req: IngestReq | None = Body(default=None),
                x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """开始收取/导入（**异步任务**，v1.29.4）。
+
+    立即返回 `task_id`；进度与最终报表由 `/api/tasks/{task_id}` 轮询，
+    停止用 `/api/tasks/{task_id}/stop`（读完当前文件即停）。
+
+    为什么拆成任务：业务方要求"先报数量、实时进度、可优雅停止，
+    读取完成后才逐条分析"—— 同步请求没有中途通道，做不到这三件事。
+    """
     s = _session(x_tp_token, x_tp_role)
     require(s, "ingest")
     req = req or IngestReq()
-    jd, tiers = _jd_tiers()
 
-    # 自动模式：模型已配置就用（抽取走模型 + 证据校验）。显式 False 时完全不调模型。
-    _use_llm = req.use_llm
-    if _use_llm is None:
-        _c0 = llm.load_cfg()
-        _use_llm = bool(_c0.get("api_key"))
-    llm_conf = None
-    if _use_llm:
-        c = llm.load_cfg()
-        llm_conf = {"api_key": c.get("api_key"), "base_url": c.get("base_url"),
-                    "model": c.get("model")}
-
+    # 路径类校验留在这里同步做：目录错/建不出来当场 4xx，不进任务排队
     cfg = mb.load_config()
+    folder = None
     if req.source == "folder":
-        # 文件夹上传：只分析、不归岗（job_id=None = 待 HR 指定）
         folder = _safe_ingest_dir(req.folder, cfg)
         # v1.24.20：目录不存在时**建出来并说清楚**，不要静默扫0。
-        # 原样跑下去会返回 scanned:0，界面上只是一句"新增 0"——
-        # HR 根本不知道是自己放错位置了，还是程序没找到。
         if not os.path.isdir(folder):
             try:
                 os.makedirs(folder, exist_ok=True)
             except OSError as exc:
                 raise HTTPException(status_code=400,
                                     detail=f"导入文件夹不存在且无法创建：{folder}（{exc}）")
-        report = ingest_mod.ingest_dir(folder, jd, tiers, DB_PATH, cfg=cfg, job_id=None,
-                                       use_llm=_use_llm, llm_conf=llm_conf)
-        report["source"] = "folder"
-        report["source_label"] = f"本地文件夹 {os.path.abspath(folder)}"
-        # 扫到 0 个文件要**说清是哪一种 0**（v1.24.20）。
-        # HR 看到"新增 0"无法区分：放错位置了？文件夹是空的？还是都重复被跳了。
-        # 这里把目录与支持格式直接带回去，界面上原样显示。
-        if not report.get("scanned"):
-            report["empty_hint"] = (
-                f"这个文件夹里没有可导入的简历。目录：{os.path.abspath(folder)}"
-                "（新建的空目录）。把 PDF / Word / 图片放进去再点一次即可；"
-                "如果简历在别处，可在系统配置里改「导入文件夹」路径。")
-    else:
-        # 邮箱：按邮件标题归岗（在 ingest_mails 内部完成），job_id 参数不参与
-        report = ingest_mod.sync_mailbox(jd, tiers, DB_PATH, job_id=None,
-                                         use_llm=_use_llm, llm_conf=llm_conf, cfg=cfg)
-        ic = cfg.get("imap") or {}
-        report["source"] = "mailbox"
-        report["source_label"] = (f"邮箱 {ic.get('user') or '（未配置账号）'} @ "
-                                  f"{ic.get('host') or '（未配置服务器）'} / {ic.get('folder','INBOX')}"
-                                  if cfg.get("mode") == "imap"
-                                  else f"演练邮件目录 {mb.resolve_dir(cfg.get('eml_dir',''))}")
+    title = "收取邮箱简历" if req.source != "folder" else "导入本地文件夹"
+    tid = ingest_mod.register_progress(title, 0, stoppable=True)
+    threading.Thread(target=_run_ingest_task, name="ingest-fetch", daemon=True,
+                     args=(tid, req.source, folder, s.get("username") or "hr",
+                           req.use_llm)).start()
+    return {"ok": True, "task_id": tid}
 
-    # 导入后自动做**增量**建索引：只补"画像变了/还没索引"的人，不做全量重建
-    report["index"] = _auto_index()
-    _remember_ingest(report, s.get("username") or "hr")
-    return report
+
+def _run_ingest_task(tid: str, source: str, folder: str | None,
+                     operator: str, use_llm: bool | None) -> None:
+    """后台执行"收取/导入"的**抓取阶段**。
+
+    口径与旧同步接口严格一致（同一个 ingest_dir / sync_mailbox）；
+    区别只有两处：带进度（progress_tid）与把最终报表挂在任务上供前端接力。
+    分析阶段不在这里跑 —— `spawn_auto_analysis`（在 ingest 内部）会把
+    `insight_task_id` 写进报表，前端读取完成后用同一个弹窗接力轮询分析进度。
+    """
+    try:
+        jd, tiers = _jd_tiers()
+        _use_llm = use_llm
+        if _use_llm is None:
+            _c0 = llm.load_cfg()
+            _use_llm = bool(_c0.get("api_key"))
+        llm_conf = None
+        if _use_llm:
+            c = llm.load_cfg()
+            llm_conf = {"api_key": c.get("api_key"), "base_url": c.get("base_url"),
+                        "model": c.get("model")}
+        cfg = mb.load_config()
+        if source == "folder":
+            report = ingest_mod.ingest_dir(folder, jd, tiers, DB_PATH, cfg=cfg, job_id=None,
+                                           use_llm=_use_llm, llm_conf=llm_conf,
+                                           progress_tid=tid)
+            report["source"] = "folder"
+            report["source_label"] = f"本地文件夹 {os.path.abspath(folder)}"
+            # 扫到 0 个文件要**说清是哪一种 0**（v1.24.20 的口径保持不变）
+            if not report.get("scanned"):
+                report["empty_hint"] = (
+                    f"这个文件夹里没有可导入的简历。目录：{os.path.abspath(folder)}"
+                    "（新建的空目录）。把 PDF / Word / 图片放进去再点一次即可；"
+                    "如果简历在别处，可在系统配置里改「导入文件夹」路径。")
+        else:
+            report = ingest_mod.sync_mailbox(jd, tiers, DB_PATH, job_id=None,
+                                             use_llm=_use_llm, llm_conf=llm_conf,
+                                             cfg=cfg, progress_tid=tid, limit=0)
+            ic = cfg.get("imap") or {}
+            report["source"] = "mailbox"
+            report["source_label"] = (
+                f"邮箱 {ic.get('user') or '（未配置账号）'} @ "
+                f"{ic.get('host') or '（未配置服务器）'} / {ic.get('folder','INBOX')}"
+                if cfg.get("mode") == "imap"
+                else f"演练邮件目录 {mb.resolve_dir(cfg.get('eml_dir',''))}")
+        # 导入后自动做**增量**建索引：只补"画像变了/还没索引"的人，不做全量重建
+        report["index"] = _auto_index()
+        _remember_ingest(report, operator)
+        if report.get("error") and not (report.get("mails") or report.get("added")):
+            ingest_mod.update_progress(tid, status="error",
+                                       message=f"收取失败：{report['error']}",
+                                       extra={"report": report})
+        else:
+            ingest_mod.update_progress(
+                tid, status="done",
+                message=("已按你的要求停止：完成当前文件后停下"
+                         if report.get("stopped") else "读取完成"),
+                extra={"report": report})
+    except Exception as exc:                       # noqa: BLE001 —— 后台任务不能让异常静默
+        traceback.print_exc()
+        ingest_mod.update_progress(tid, status="error",
+                                   message=f"导入任务出错：{type(exc).__name__}: {exc}")
 
 
 def _auto_index() -> dict:
@@ -3231,11 +3769,10 @@ def api_domains_import(req: DomainImportReq,
 
 
 # ============================================================
-# 设置（性别筛选开关等；开关类设置一律"默认关 + 变更留痕"）
+# 设置（入库即分析开关、超期天数等；开关类设置变更一律留痕）
 # ============================================================
 
 class SettingsReq(BaseModel):
-    gender_filter_enabled: bool | None = None
     # v1.13.4：入库即分析开关（默认开）。关掉后入库不自动调模型，改由 HR 手动批量补。
     auto_insight_on_ingest: bool | None = None
     # v1.25.7：投递管道的"超期"标红阈值（天），默认 15。
@@ -3252,10 +3789,9 @@ def api_settings_get(x_tp_token: str | None = Header(default=None, alias="X-TP-T
         cur = _settings(conn)
         return {**cur,
                 "gender_groups": list(db.GENDER_GROUPS),
-                "note": "性别筛选默认关闭。它只影响「列出谁」，不影响任何人被评成什么档——"
-                        "性别永不进入评分。",
-                "policy": "招聘不得限定性别（《就业促进法》第 27 条、《妇女权益保障法》第 43 条）。"
-                          "开启动作会写入审计。"}
+                "note": "性别按普通字段处理（2026-10-16 业务方定调）：可正常筛选与展示；"
+                        "它只影响「列出谁」，不影响任何人被评成什么档。",
+                "policy": "性别只取简历明写的标签行（绝不推断），且永不进入评分与分级。"}
     finally:
         conn.close()
 
@@ -3334,14 +3870,12 @@ def api_model_config_set(req: ModelCfgReq,
 def api_settings_set(req: SettingsReq,
                      x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                      x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    """改设置。开关从「关」变「开」时写一条审计——这是合规要看的凭证。"""
+    """改设置。变更一律留痕（写审计）。"""
     s = _session(x_tp_token, x_tp_role)
     require(s, "settings")
     conn = db.connect(DB_PATH)
     try:
         before = _settings(conn)
-        if req.gender_filter_enabled is not None:
-            db.set_setting(conn, GENDER_FILTER_KEY, bool(req.gender_filter_enabled))
         if getattr(req, "auto_insight_on_ingest", None) is not None:
             db.set_setting(conn, AUTO_INSIGHT_KEY, bool(req.auto_insight_on_ingest))
         if getattr(req, "pipeline_overdue_days", None) is not None:
@@ -3351,25 +3885,18 @@ def api_settings_set(req: SettingsReq,
                 raise HTTPException(status_code=422, detail="超期天数应在 1-365 之间")
             db.set_setting(conn, "pipeline_overdue_days", _od)
         after = _settings(conn)
-        on_before = bool(before.get("gender_filter_enabled"))
-        on_after = bool(after.get("gender_filter_enabled"))
         _ai_before = bool(before.get("auto_insight_on_ingest"))
         _ai_after = bool(after.get("auto_insight_on_ingest"))
         _od_b = int(before.get("pipeline_overdue_days") or 15)
         _od_a = int(after.get("pipeline_overdue_days") or 15)
         if before != after:
-            for _k, _b, _a in (("gender_filter_enabled", on_before, on_after),
-                               ("auto_insight_on_ingest", _ai_before, _ai_after),
+            for _k, _b, _a in (("auto_insight_on_ingest", _ai_before, _ai_after),
                                ("pipeline_overdue_days", _od_b, _od_a)):
                 if _b != _a:
                     db.add_audit(conn, "settings", _k, "update",
                                  f"{_k}={_b}", f"{_k}={_a}",
                                  s["username"], s["role"])
         _changed = []
-        if on_after != on_before:
-            _changed.append("性别筛选已开启（已写入审计）。它只改变列表的筛选条件，"
-                            "不参与任何评分或分级。" if on_after
-                            else "性别筛选已关闭，列表恢复为全部候选人。")
         if _ai_after != _ai_before:
             _changed.append("入库即分析已开启：新简历入库后自动分析一次（每人约 2-8 秒、"
                             "消耗模型额度）。" if _ai_after
@@ -3404,6 +3931,8 @@ class JobReq(BaseModel):
     # 专业需求（v1.7 新增，一等维度）：写学科名，如「材料科学与工程」「会计学」
     major_required: list[str] | None = None
     note: str | None = None                     # 岗位职责 / 说明（自由文本）
+    # v1.29.6（业务方）：招聘数量（招聘需求，计划招几人）。纯管理信息，不参与判定。
+    headcount: int | None = None
 
 
 class JobJdReq(BaseModel):
@@ -3413,6 +3942,8 @@ class JobJdReq(BaseModel):
     years_min: int | None = None
     major_required: list[str] | None = None
     note: str | None = None
+    # 招聘数量（v1.29.6）：None=没传（保持原值），0=清空（未填）
+    headcount: int | None = None
 
 
 def _jd_from_req(base: dict, req, title: str, dept_name: str) -> dict:
@@ -3572,9 +4103,11 @@ def api_job_create(req: JobReq, x_tp_token: str | None = Header(default=None, al
                 raise HTTPException(status_code=400, detail="所选部门不存在")
             dept_name = d.get("name") or ""
         # 填了 JD 字段就按填的算；一个都不填则继承 config/jd.json 的默认尺子
+        if req.headcount is not None and req.headcount < 0:
+            raise HTTPException(status_code=400, detail="招聘数量请填非负整数")
         jd = _jd_from_req(_load(JD_PATH), req, req.title.strip(), dept_name)
         jid = db.create_job(conn, req.title, dept_id=did, jd=jd,
-                            operator=s["username"])
+                            operator=s["username"], headcount=req.headcount)
         return {"ok": True, "id": jid, "job": db.get_job(conn, jid),
                 "warnings": _jd_warnings(jd)}
     finally:
@@ -3613,12 +4146,14 @@ def api_job_update_jd(jid: int, req: JobJdReq,
         j = db.get_job(conn, jid)
         if not j:
             raise HTTPException(status_code=404, detail="未找到该岗位")
+        if req.headcount is not None and req.headcount < 0:
+            raise HTTPException(status_code=400, detail="招聘数量请填非负整数")
         base = j.get("jd_json") or {}
         merged = _jd_from_req(base, req, j.get("title") or "", j.get("department_name") or "")
         # 只覆盖本次传了的字段：None 表示"界面没提供"，保持原值
         cur = dict(base)
         cur.update({k: v for k, v in merged.items() if k in ("must", "preferred", "note", "origin")})
-        saved = db.update_job_jd(conn, jid, cur, s["username"])
+        saved = db.update_job_jd(conn, jid, cur, s["username"], headcount=req.headcount)
         n_apps = (saved or {}).get("applications_count", 0)
         return {"ok": True, "job": saved, "jd": (saved or {}).get("jd_json") or {},
                 "applications_count": n_apps,
@@ -4044,31 +4579,35 @@ def api_proactive_scan(stuck_days: int = 7,
 
 
 def _backfill_grad_date(limit: int = 500) -> int:
-    """给还没算出毕业时间的候选人补一次（以解析原文为准）。
+    """给还没算出毕业时间/**在读状态**的候选人补一次（以解析原文为准）。
 
     为什么单独补：入库路径拿到的文本可能已被处理过，识别不到"毕业"字样；
     而 `documents.raw_text` 是解析原文，一定带着教育经历。启动时补一次，
     新导入的人下次启动也会被补齐——与"存量补分析"同一套兜底思路。
+    v1.29.4 起顺带补"在读"（硕士 2024.9-至今 这类；判"往届未就业"前必须知道）。
     """
     from .pipeline import freshness
     conn = db.connect(DB_PATH)
     n = 0
     try:
         rows = conn.execute(
-            """SELECT c.id, d.raw_text FROM candidates c
+            """SELECT c.id, c.grad_date, c.in_school, d.raw_text FROM candidates c
                JOIN documents d ON d.candidate_id = c.id
-               WHERE COALESCE(c.grad_date, '') = '' AND COALESCE(d.raw_text, '') != ''
+               WHERE (COALESCE(c.grad_date, '') = '' OR c.in_school IS NULL)
+                 AND COALESCE(d.raw_text, '') != ''
                ORDER BY c.id LIMIT ?""", (int(limit),)).fetchall()
         for r in rows:
-            gd = freshness.find_grad_date(r["raw_text"])
-            if gd:
-                conn.execute("UPDATE candidates SET grad_date = ? WHERE id = ?",
-                             (gd, r["id"]))
+            gd = r["grad_date"] or freshness.find_grad_date(r["raw_text"])
+            ins = 1 if freshness.find_in_school(r["raw_text"]) else 0
+            if (gd or None) != (r["grad_date"] or None) or r["in_school"] != ins:
+                conn.execute(
+                    "UPDATE candidates SET grad_date = ?, in_school = ? WHERE id = ?",
+                    (gd, ins, r["id"]))
                 n += 1
         conn.commit()
         if n:
             db.add_audit(conn, "candidate", "*", "backfill_grad_date", "",
-                         f"为 {n} 位候选人补齐毕业时间（用于判定应届/往届）",
+                         f"为 {n} 位候选人补齐毕业时间/在读判定（用于判定应届/往届）",
                          "system", "system")
     finally:
         conn.close()
@@ -4239,6 +4778,33 @@ class MailDraftReq(BaseModel):
     runtime: dict | None = None          # 面试时间/地点等运行时变量
 
 
+class MailAttachmentReq(BaseModel):
+    """一封邮件的附件请求（v1.27）。只传 `document_id`，**不接受文件内容**。
+
+    为什么不让界面直接传字节/路径：
+    ① 传路径 = 让前端指定服务端读哪个文件，本地部署下就是任意文件读取
+      （与 code review 的 P1-12 同类问题），不新增这个面；
+    ② 传 base64 内容 = 同一份简历可能几十 MB，白白走一遍 HTTP 与内存。
+
+    服务端只认"库里已归档的原件 id"，所以能发出去的附件一定是
+    HR 手上真有的东西，且审计留得下（发出去了哪几个附件 id）。
+    """
+    #: v1.29.9：**二选一** —— 归档原件（document_id）或临时上传的 outbox 记录
+    #: （outbox_id）。此前 document_id 是必填，于是"只带临时附件（offer 扫描件
+    #: 那类）"的邮包在校验层就被 422 拦下，界面显示 [object Object]（业务方实测）。
+    document_id: int | None = None
+    filename: str | None = None            # 改名（默认用库里的原名）
+
+    # v1.29：`outbox_id` = **临时上传**的附件（录用通知扫描件那类）。
+    # 为什么不复用 document_id：那个通道只收"库里已归档的求职者原件"，
+    # 而录用函扫描件**不属于任何候选人** —— 硬塞进 documents 会污染
+    # "原件留档"的语义（HR 打开某人档案会看到一份跟他无关的录用函）。
+    # 这里单开一条通道：文件落在受控目录 data/outbox/，**不入库**，
+    # 发出后仍留一份（合规：录用函发出记录要能追溯附件是哪份）。
+    outbox_id: str | None = None
+    filename2: str | None = None           # 上传时的原名（outbox 附件改名用）
+
+
 class MailSendReq(BaseModel):
     to: str
     subject: str
@@ -4247,6 +4813,14 @@ class MailSendReq(BaseModel):
     candidate_id: int | None = None
     application_id: int | None = None
     template_name: str | None = None
+    attachments: list[MailAttachmentReq] | None = None   # v1.27：附件（原件 id）
+    #: v1.29：HR 在写邮件页填好的**结构化**运行时变量
+    #: （面试时间 / 面试时段 / 面试单位 / 面试方式 / 会议号 …）。
+    #: 发信成功后按**模板用途**回写进投递档案，省得 HR 再手工录一遍。
+    #: ⚠️ 为什么要前端回传而不解析正文：正文是自然语言
+    #:（"本次采用线上视频面试""腾讯会议进行"……写法无穷），解析必然出错。
+    #: 前端本来就有一份结构化值（`mv_面试方式` 等），顺手回传即是一处真相。
+    vars: dict | None = None
 
 
 class MailPreviewReq(BaseModel):
@@ -4327,8 +4901,7 @@ def api_smtp_get(x_tp_token: str | None = Header(default=None, alias="X-TP-Token
     _session(x_tp_token, x_tp_role)
     conf = mail_send_mod.load_smtp()
     return {**conf, "presets": mail_send_mod.SMTP_PRESETS,
-            "note": "163 邮箱需先开启 SMTP 服务并生成授权码（不是登录密码）；"
-                    "收信与发信用同一个授权码，填一次即可。"}
+            "note": "163 / QQ / 腾讯企业邮都需先开启 SMTP 服务并生成授权码（不是登录密码）。"}
 
 
 @app.post("/api/mail/smtp")
@@ -4353,7 +4926,10 @@ def api_smtp_save(req: SmtpReq,
     if updates:
         mb.save_config({"smtp": updates})
     if req.password:
-        mb.write_secret(req.password)
+        # v1.27：发信授权码写**独立**的 config/smtp.secret（不再写 imap.secret）。
+        # 改这里时若还写 imap.secret，会把收信的凭据顶掉 —— 收发信两个邮箱
+        # 是两件独立的事，共用一个文件等于"改一个坏一个"。
+        mb.write_smtp_secret(req.password)
     conf = mail_send_mod.load_smtp()
     db_path_conn = db.connect(DB_PATH)
     try:
@@ -4456,6 +5032,199 @@ def api_mail_draft(req: MailDraftReq,
         conn.close()
 
 
+#: 面试时段起始时间。`^\s*(\d{1,2})[:：](\d{2})` —— 组合框允许手打（"9点半"这种
+#: 取不到），取不到就**只存日期、不猜时间**（填个假时间比留空更糟）。
+_SLOT_START_RE = re.compile(r"^\s*(\d{1,2})\s*[:：]\s*(\d{2})")
+
+#: 入职情况的取值（与 `db.APPLICATION_WRITABLE` 里的 onboard_status 配套）
+ONBOARD_STATUS = ("未入职", "已入职", "放弃")
+
+
+def _interview_at(date_str: str | None, slot_str: str | None) -> str | None:
+    """面试时间 + 面试时段 → `YYYY-MM-DD HH:MM`（存进 `interview_date` 一列）。
+
+    为什么两列存一列：`interview_date` 存"面试安排在什么时候"，
+    `interview_slot` 保留时段**原文**（"09:30-10:30" / "上午"）——
+    改时段不必重填日期，档案里也能看出 HR 原本填的是什么。
+    导出时只显示 `面试日期` 一列（起始时间），时段原文不进表。
+    """
+    d = str(date_str or "").strip()[:10]
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+        return None
+    m = _SLOT_START_RE.match(str(slot_str or "").strip())
+    if not m:
+        return d
+    hh, mm = int(m.group(1)), int(m.group(2))
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return d
+    return f"{d} {hh:02d}:{mm:02d}"
+
+
+def _mail_kind(conn, template_name: str | None) -> str:
+    """模板名 → **用途**（`interview_invite` / `offer` / `other`）。
+
+    ⚠️ 为什么按"用途"而不是按模板名判断：模板名 HR 随时会改
+    （「初面邀约」→「面试通知」），按名字匹配的话改个名发信回写就**静默失效**了。
+    用途是结构化的字段，改名字不影响。
+    """
+    if not template_name:
+        return "other"
+    try:
+        row = conn.execute("SELECT kind FROM mail_templates WHERE name = ?",
+                           (str(template_name),)).fetchone()
+        return str((row["kind"] if row else "") or "other")
+    except Exception:                                     # noqa: BLE001
+        return "other"
+
+
+#: v1.29 —— 临时上传通道（录用通知扫描件那类"不属于任何候选人"的附件）。
+#: 收**原始字节**而不是 multipart 表单，是为了不新增 `python-multipart` 依赖：
+#: 前端 `fetch(url, {body: file})` 直接发二进制即可，服务端按 `Content-Length` 收。
+OUTBOX_DIRNAME = "outbox"
+OUTBOX_EXTS = (".pdf", ".jpg", ".jpeg", ".png")
+OUTBOX_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _outbox_dir() -> str:
+    d = os.path.join(DATA_DIR, OUTBOX_DIRNAME)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _outbox_path(outbox_id: str) -> str | None:
+    """`outbox_id` → 绝对路径；**不接受任何外部路径**。
+
+    ⚠️ id 必须严格是 `[0-9a-f]{16}`（我们自己按内容 sha256 生成）。
+    这里再做一次白名单校验，是因为 `_abs_stored` 那类"把客户端给的路径还原成绝对路径"
+    的写法一旦放松就是**任意文件读取**（`../../` 穿越），本地部署也一样。
+    """
+    oid = str(outbox_id or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{16}", oid):
+        return None
+    p = os.path.join(_outbox_dir(), oid)
+    # v1.29.10：磁盘上的文件名是 `id + 扩展名`（id 本身不含扩展名）——原实现
+    # 按 `id` 直接找，**永远找不到文件**：表现就是"带附件的邮件发不出去
+    # （提示：临时附件已不在暂存区）"，业务方实测两次。
+    if not os.path.exists(p):
+        for _e in OUTBOX_EXTS:
+            if os.path.exists(p + _e):
+                p = p + _e
+                break
+    # 双保险：拼完再确认它确实在 outbox 目录内（防将来改动引入穿越）
+    if os.path.commonpath([os.path.abspath(p), os.path.abspath(_outbox_dir())]) \
+            != os.path.abspath(_outbox_dir()):
+        return None
+    return p
+
+
+@app.post("/api/mail/outbox")
+async def api_mail_outbox(request: Request, name: str = "",
+                          x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                          x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """**临时上传**一个附件（录用通知扫描件那类），返回可发信的 `outbox_id`。
+
+    为什么需要这条通道（v1.27 刻意不开）：
+    原来的附件只收"库里已归档的求职者原件 id"，是**有意的收紧**（防"前端指定服务端
+    读哪个文件"这个任意文件读取面）。但录用函扫描件**不属于任何候选人** ——
+    硬塞进 `documents` 会污染"原件留档"的语义（HR 打开某人档案会看到一份
+    跟他无关的录用函），所以这里单开一个受控通道。
+
+    边界（都是有意收窄的）：
+      · 只收 **PDF / JPG / PNG**，单份 ≤ 20MB；
+      · 文件名按内容 sha256 生成，**客户端给的路径一律不采信**；
+      · **不入库**（不进 candidates / documents），只落在 `data/outbox/`；
+      · 写审计（文件名 + 大小 + sha256 前 16 位），事后能查"发出去的是哪份"。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "confirm")
+    ext = os.path.splitext(str(name or ""))[1].lower()
+    if ext not in OUTBOX_EXTS:
+        raise HTTPException(status_code=422,
+                            detail=f"只能上传 {'/'.join(OUTBOX_EXTS)}（录用通知一般是 PDF 扫描件）")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=422, detail="文件是空的")
+    if len(body) > OUTBOX_MAX_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"文件超过 {OUTBOX_MAX_BYTES // 1024 // 1024}MB，请压缩后再上传")
+    import hashlib
+    digest = hashlib.sha256(body).hexdigest()[:16]
+    # 同内容不重复占空间；但**原名可能不同**（同一份扫描件改了名再传），
+    # 此时复用同一个 id 会让收件人看到的名字变回第一次那个 —— 所以同内容时
+    # 记一份"别名"，按最新一次的原名返回。
+    path = os.path.join(_outbox_dir(), digest + ext)
+    if not os.path.exists(path):
+        with open(path, "wb") as fh:
+            fh.write(body)
+    safe_name = os.path.basename(str(name or ""))[:120] or f"附件{ext}"
+    conn = db.connect(DB_PATH)
+    try:
+        db.add_audit(conn, "outbox", digest, "upload", safe_name,
+                     f"临时附件 {safe_name}｜{len(body)} 字节｜sha256:{digest}",
+                     s["username"], s["role"])
+    finally:
+        conn.close()
+    return {"ok": True, "outbox_id": digest, "filename": safe_name,
+            "size": len(body),
+            "note": "已暂存。发出后文件仍保留在 data/outbox/，可追溯。"}
+
+
+@app.get("/api/mail/outbox/{outbox_id}")
+def api_mail_outbox_open(outbox_id: str, name: str = "", inline: int = 1,
+                         token: str | None = None,
+                         x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")):
+    """打开/下载一个**临时附件**（v1.29.10，业务方要"附件要能预览"）。
+
+    浏览器原生导航带不了自定义请求头，登录模式下用 `?token=` 兜底 ——
+    与 `/api/documents/{did}/file` 同一口径。路径只认 outbox 目录内的
+    十六进制 id（`_outbox_path` 双重校验），不接受任何外部路径。
+    """
+    s = _file_session(x_tp_token, token)
+    require(s, "read")
+    p = _outbox_path(outbox_id)
+    if not p or not os.path.exists(p):
+        raise HTTPException(status_code=404, detail="附件不存在或已被清理")
+    fn = os.path.basename(str(name or ""))[:120] or os.path.basename(p)
+    if not os.path.splitext(fn)[1]:
+        fn += os.path.splitext(p)[1]
+    return FileResponse(p, filename=fn,
+                        content_disposition_type=("inline" if inline else "attachment"),
+                        media_type=_mime_of(fn),
+                        headers=_FILE_SAFE_HEADERS)
+
+
+@app.post("/api/mail/outbox/{outbox_id}/delete")
+def api_mail_outbox_delete(outbox_id: str,
+                           x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                           x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """删除一个**尚未发出**的临时附件（v1.29.10，业务方要"附件删除按钮"）。
+
+    只删文件本身（data/outbox/ 下）；归档原件（documents）不走这条。附件按
+    内容哈希存 id —— 同一份文件在别的草稿里也用同一个 id，删除是"这份文件
+    不要了"的语义，都清掉。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "confirm")
+    p = _outbox_path(outbox_id)
+    if not p:
+        raise HTTPException(status_code=400, detail="附件编号不合法")
+    removed = os.path.exists(p)
+    if removed:
+        try:
+            os.remove(p)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"删除失败：{exc}")
+    conn = db.connect(DB_PATH)
+    try:
+        db.add_audit(conn, "outbox", str(outbox_id), "delete",
+                     str(outbox_id), f"删除临时附件（{os.path.basename(p)}）",
+                     s["username"], s["role"])
+    finally:
+        conn.close()
+    return {"ok": True, "removed": removed, "note": "附件已删除"}
+
+
 @app.post("/api/mail/send")
 def api_mail_send(req: MailSendReq,
                   x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
@@ -4466,6 +5235,10 @@ def api_mail_send(req: MailSendReq,
     正文用了表格/粗体标记时按 **multipart/alternative** 发（HTML + 纯文本双版本），
     转换只在这里做一次：模板渲染 → 转 HTML → 发送，**单一真源**，
     避免前后端各转一遍导致"预览和收到的不是一回事"。
+
+    附件（v1.27）：`attachments` 只收**库内原件 id**，服务端从归档区读字节。
+    读不到（文件被挪走/删了）的**跳过并如实回报**，不静默少发 ——
+    面试通知漏附岗位说明比发不出去更糟，HR 不会知道少了什么。
     """
     s = _session(x_tp_token, x_tp_role)
     require(s, "confirm")
@@ -4479,18 +5252,116 @@ def api_mail_send(req: MailSendReq,
     if "【待填：" in (req.subject or "") or "【待填：" in plain or "【待填：" in (html_body or ""):
         raise HTTPException(status_code=400,
                             detail="正文里还有【待填：xxx】没补上，请先填好再发送")
-    r = mail_send_mod.send_mail(req.to, req.subject, plain, html=html_body)
+    # v1.27：先把附件字节备齐。**全部读不出来就直接 400**（不发这封邮件）：
+    # 静默发一封"该附的没附"的信，比让 HR 知道"原件读不到了、请重新上传"更糟。
+    att_payloads: list[dict] = []
+    att_missing: list[str] = []
+    if req.attachments:
+        conn0 = db.connect(DB_PATH)
+        try:
+            for _a in req.attachments:
+                # v1.29：先看是不是**临时上传**的附件（录用函扫描件那类）
+                if getattr(_a, "outbox_id", None):
+                    _op = _outbox_path(_a.outbox_id)
+                    _on = _a.filename2 or _a.filename or "附件"
+                    if not _op or not os.path.exists(_op):
+                        att_missing.append(f"{_on}（临时附件已不在暂存区）")
+                        continue
+                    try:
+                        with open(_op, "rb") as _fh:
+                            att_payloads.append({"filename": _on, "data": _fh.read()})
+                    except OSError as _e:
+                        att_missing.append(f"{_on}（读不出来：{type(_e).__name__}）")
+                    continue
+                if not _a.document_id:
+                    att_missing.append(f"{_a.filename2 or _a.filename or '附件'}"
+                                       "（既不是归档原件、也没有临时上传记录编号）")
+                    continue
+                _d = db.get_document(conn0, int(_a.document_id))
+                _name = (_a.filename or (_d or {}).get("file_name") or "附件")
+                if not _d:
+                    att_missing.append(f"{_name}（附件 #{_a.document_id} 不在库里）")
+                    continue
+                _p = _d.get("archived_path") or ""
+                if not _p or not os.path.exists(_p):
+                    att_missing.append(f"{_name}（原件文件已不在归档区）")
+                    continue
+                try:
+                    with open(_p, "rb") as _fh:
+                        att_payloads.append({"filename": _name, "data": _fh.read()})
+                except OSError as _e:
+                    att_missing.append(f"{_name}（读不出来：{type(_e).__name__}）")
+        finally:
+            conn0.close()
+        if att_missing and not att_payloads:
+            raise HTTPException(status_code=400,
+                                detail="附件都读不出来，邮件未发送："
+                                       + "；".join(att_missing[:5])
+                                       + "。请在档案里重新上传原件，或去掉附件先发。")
+    r = mail_send_mod.send_mail(req.to, req.subject, plain, html=html_body,
+                                 attachments=att_payloads or None)
     conn = db.connect(DB_PATH)
+    _written: dict = {}          # 实际回写下去的字段（给前端提示用）
+    _write_warn = ""             # 回写失败时的警告（邮件已发出，不算发送失败）
     try:
+        _att_names = [a["filename"] for a in att_payloads]
+        _att_txt = ("｜附件：" + "、".join(_att_names)) if _att_names else ""
         db.add_audit(conn, "mail", str(req.candidate_id or ""), "send",
                      "ok" if r.get("ok") else "fail",
                      f"发送邮件给 {req.to}｜主题：{req.subject}"
-                         f"｜模板：{req.template_name or '（无）'}｜{'成功' if r.get('ok') else '失败'}",
+                         f"｜模板：{req.template_name or '（无）'}{_att_txt}"
+                         f"｜{'成功' if r.get('ok') else '失败'}",
                      s["username"], s["role"])
         if r.get("ok") and req.application_id:
             db.add_note(conn, int(req.application_id),
-                        f"已发送邮件：{req.subject}（模板：{req.template_name or '无'}）",
+                        f"已发送邮件：{req.subject}"
+                        f"（模板：{req.template_name or '无'}"
+                        + (f"，附件 {'、'.join(_att_names)}" if _att_names else "") + "）",
                         s["username"], s["role"])
+        # ---- v1.29：发信成功后按**模板用途**回写投递档案 ----
+        # 省掉"HR 再去档案里手工录一遍面试时间/单位/方式"这一步（漏录的下游：
+        # 面试部门筛选筛不到人、13 列导出里是空的）。
+        if r.get("ok") and req.application_id and req.vars:
+            try:
+                _kind = _mail_kind(conn, req.template_name)
+                _v = {str(k).strip(): str(x).strip()
+                      for k, x in (req.vars or {}).items() if str(x or "").strip()}
+                if _kind == "interview_invite":
+                    _at = _interview_at(_v.get("面试时间"), _v.get("面试时段"))
+                    _patch: dict = {}
+                    if _at:
+                        _patch["interview_date"] = _at
+                    if _v.get("面试时段"):
+                        _patch["interview_slot"] = _v["面试时段"]
+                    if _v.get("面试方式"):
+                        _patch["interview_mode"] = _v["面试方式"]
+                    if _v.get("面试单位"):
+                        # 邮件里改过单位就以**邮件为准**（候选人被告知的是邮件里那个），
+                        # `update_application_fields` 会写审计，前后不一致看得见。
+                        _patch["interview_unit"] = _v["面试单位"]
+                    if _patch:
+                        db.update_application_fields(conn, int(req.application_id),
+                                                     operator=s["username"], role=s["role"],
+                                                     **_patch)
+                        _written = _patch
+                elif _kind == "offer":
+                    # 录用函发出时刻 = 这一刻。**绝不手工填**，HR 常记错日期，
+                    # 而"录用函发送时间"是后面所有时限的起算点。
+                    db.update_application_fields(conn, int(req.application_id),
+                                                 operator=s["username"], role=s["role"],
+                                                 offer_sent_at=db.now())
+                    _written = {"offer_sent_at": "已记录"}
+                    # 发出录用函 = 流程推进到「已发放offer」（若还没到）
+                    _cur = db.get_application(conn, int(req.application_id)) or {}
+                    if _cur.get("stage") in ("待面试", "已面试"):
+                        db.set_application_stage(conn, int(req.application_id),
+                                                 "已发放offer", operator=s["username"],
+                                                 role=s["role"])
+            except Exception as _e:                       # noqa: BLE001
+                # ⚠️ **邮件已经发出去了**，回写失败只能记警告，不能反过来报错 ——
+                # 让 HR 以为"发送失败"会促使他重发一封（重复打扰候选人）。
+                # 与"邮件游标写失败不许拖垮入库"同一条纪律。
+                _write_warn = f"邮件已发出，但没能自动回写面试/录用信息：{type(_e).__name__}"
     finally:
         conn.close()
     if not r.get("ok"):
@@ -4502,4 +5373,19 @@ def api_mail_send(req: MailSendReq,
         if r.get("hint"):
             _msg = f"{_msg}｜{r['hint']}"
         raise HTTPException(status_code=400, detail=_msg)
-    return {"ok": True, **r, "note": r.get("note") or "邮件已发出，动作已写入审计。"}
+    # 部分附件读不到（不是全部）→ 邮件已发，但必须让 HR 知道少了什么
+    if att_missing:
+        return {"ok": True, **r, "attachments_missing": att_missing,
+                "written": _written, "write_warning": _write_warn,
+                "note": ((r.get("note") or "") + f" 另有 {len(att_missing)} 个附件没发出去："
+                         + "；".join(att_missing[:5])).strip()}
+    # v1.29：把「自动回写了哪些字段」如实返回 —— HR 要能确认"面试时间到底记进去没有"，
+    # 而不是发完信还要自己去档案里核对一遍。
+    _extra = ""
+    if _written:
+        _extra = ("｜已自动记录：" + "、".join(
+            db.APPLICATION_FIELD_LABEL.get(k, k) for k in _written))
+    if _write_warn:
+        _extra += f"｜⚠️ {_write_warn}"
+    return {"ok": True, **r, "written": _written, "write_warning": _write_warn,
+            "note": ((r.get("note") or "邮件已发出，动作已写入审计。") + _extra)}

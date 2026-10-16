@@ -10,7 +10,7 @@ B 邮箱入库与三层去重                         8 封邮件 → 精确的�
 C 不丢件                                    解析失败的简历仍建档、原件留档、标待人工判读
 D 反幻觉                                    模型伪造的技能片段对不上原文 → verified=0 → 不计命中
 E 合规屏蔽                                  民族/婚姻/生育等敏感取值在送模型前被替换
-F 分级                                      A/B/C/D 结果与命中证据逐条核对
+F 分级                                      档位（A/B/C）结果与命中证据逐条核对
 G 建议与决定分离                             系统建议与 HR 确认分列；新版本简历不覆盖已确认档位
 H 幂等                                      重复收取不产生任何新增
 I 检索                                      技能精确召回 + 语义召回排序
@@ -67,6 +67,14 @@ from app.pipeline.tier import grade  # noqa: E402
 
 JD = json.load(open(os.path.join(BASE, "config", "jd.json"), encoding="utf-8"))
 TIERS = json.load(open(os.path.join(BASE, "config", "tiers.json"), encoding="utf-8"))
+
+# v1.29：档位字母**从配置取**，判据里不再写死 "D"
+# —— 写死的话人事处一改档位体系，一大堆断言会全挂，而挂的原因是测试抄了旧字母，
+# 不是功能坏了（这种"测试自己过期"的假警报最消耗信任）。
+from app import tiers as _tiers_mod  # noqa: E402
+
+_HARD_T = _tiers_mod.hard_shortfall_tier()      # 学历不达标时的档位（= 最差档）
+_MID_T = _tiers_mod.mid_tier()                  # 学历未识别时的中性档
 
 
 class Checker:
@@ -262,8 +270,8 @@ def main(verbose: bool = True) -> int:
             c.ok(d["documents"][0]["parse_ok"] is False, "该附件被标记为解析失败")
             # v1.8.9 起 D 只留给「已明确归岗 + 学历明确不足」：这份简历连文本都没有，
             # 学历识别不出来 -> 不替人下结论，落 C 并标待人工判读（仍需人工看原件）。
-            c.ok(broken[0]["tier_effective"] == "C" and broken[0]["needs_review"],
-                 "解析失败的简历仍建档给档位（学历未识别不判 D），并标待人工判读",
+            c.ok(broken[0]["tier_effective"] == _MID_T and broken[0]["needs_review"],
+                 "解析失败的简历仍建档给档位（学历未识别不判最差档），并标待人工判读",
                  f"{broken[0]['tier_effective']} / needs_review={broken[0]['needs_review']}")
             # v1.8.6：解析失败但**文件名带姓名**（王海涛-简历.docx）的简历，
             # 现在能从文件名兜底识别出姓名——身份键按姓名建，不再落成无身份档。
@@ -393,7 +401,7 @@ def main(verbose: bool = True) -> int:
                 c.ok(False, f"{name} 在库中")
                 continue
             x = row[0]
-            c.ok(x["tier_effective"] in (None, "") or x["tier_effective"] == "D",
+            c.ok(x["tier_effective"] in (None, "") or x["tier_effective"] == _HARD_T,
                  f"{name} 档位不由规则打分臆造（v1.12：A/B/C 只由模型给）",
                  f"实际 {x['tier_effective']}")
             for sk in must_hit:
@@ -412,12 +420,29 @@ def main(verbose: bool = True) -> int:
                     {"role": "r", "must": {"skills_required": [], "education_min": "本科",
                                              "years_min": 0}, "preferred": {}},
                     job_confirmed=True)
-        c.ok(_gd["tier_suggested"] == "D",
-             "⑨ 学历不达标 → 直接判 D（唯一硬门槛，规则可复现）",
+        c.ok(_gd["tier_suggested"] == _HARD_T,
+             "⑨ 学历不达标 → 直接判最差档 C（唯一硬门槛，规则可复现）",
              str(_gd["tier_suggested"]))
         c.ok(_gm["tier_suggested"] is None and _gm["score"] is None,
              "⑨b 学历达标 → 不臆造档位（等模型给 A/B/C），也不再算分",
              f"tier={_gm['tier_suggested']} score={_gm['score']}")
+        # ---- v1.29：档位体系本身（配置驱动，字母/文案/最差档都不写死）----
+        c.ok(_tiers_mod.assert_consistent() == [],
+             "档位：内置兜底表与 config/tiers.json 一致（防两份清单分叉）",
+             "不一致的键：" + "、".join(_tiers_mod.assert_consistent()))
+        c.ok(_tiers_mod.all_tiers() == ["A", "B", "C"]
+             and _tiers_mod.labels() == {"A": "推荐面试", "B": "储备", "C": "暂不匹配"},
+             "档位：三档 A 推荐面试 / B 储备 / C 暂不匹配（来自配置而非硬编码）",
+             f"{_tiers_mod.all_tiers()} {_tiers_mod.labels()}")
+        c.ok(_tiers_mod.hard_shortfall_tier() == "C" and _tiers_mod.mid_tier() == "B",
+             "档位：最差档 C（学历不达标）/ 中性档 B（学历未识别）按配置算",
+             f"hard={_tiers_mod.hard_shortfall_tier()} mid={_tiers_mod.mid_tier()}")
+        c.ok(_tiers_mod.enum_str() == "A/B/C" and "D" not in _tiers_mod.enum_str(),
+             "档位：提示词/工具说明里的枚举由配置生成（不会再把废弃的 D 教给模型）",
+             _tiers_mod.enum_str())
+        # 关键反例：**废弃的 D 必须被判为非法**，否则历史脏值会一路混进筛选与统计
+        c.ok(not _tiers_mod.is_valid_tier("D") and _tiers_mod.is_valid_tier("C"),
+             "档位：废弃的 D 不再是合法档位（C 合法）—— 防旧值混进库")
         # 证据准确性
         d = db.candidate_detail(conn, [x for x in db.list_candidates(conn)
                                        if x["name"] == "陈志远"][0]["id"])
@@ -428,23 +453,23 @@ def main(verbose: bool = True) -> int:
              "「材料成型」证据取自工作经历而非专业名",
              ev.get("材料成型", "")[:40])
         unparsed = [x for x in db.list_candidates(conn) if x["needs_review"]]
-        c.ok(unparsed and unparsed[0]["tier_effective"] in ("C", "D"),
+        c.ok(unparsed and unparsed[0]["tier_effective"] in ("B", _HARD_T),
              "解析失败的简历仍给档位、不被排除（档位口径见 C 段的说明）",
              unparsed[0]["tier_effective"] if unparsed else "—")
 
         # v1.8.9 D 档前提：必须「已明确归岗 + 学历明确不足」两条同时成立。
-        # 未归岗时尺子可能是系统猜的"建议岗位"，用猜出来的门槛判 D 不合理。
+        # 未归岗时尺子可能是系统猜的"建议岗位"，用猜出来的门槛判最差档不合理。
         _low = {"name": "测试员", "education": "大专", "years": 5,
                 "skills": [{"name": "钛合金", "evidence": "负责钛合金工艺"}]}
         _g_conf = grade(_low, JD, job_confirmed=True)
         _g_unconf = grade(_low, JD)
-        c.ok(_g_conf["tier_suggested"] == "D",
-             "已明确归岗 + 学历低于岗位要求 -> D", _g_conf["tier_suggested"])
-        c.ok(_g_unconf["tier_suggested"] != "D",
-             "未明确归岗的投递：即便学历低于（建议）岗位门槛也不判 D",
+        c.ok(_g_conf["tier_suggested"] == _HARD_T,
+             "已明确归岗 + 学历低于岗位要求 -> 最差档 C", _g_conf["tier_suggested"])
+        c.ok(_g_unconf["tier_suggested"] != _HARD_T,
+             "未明确归岗的投递：即便学历低于（建议）岗位门槛也不判最差档",
              _g_unconf["tier_suggested"])
         c.ok(any("尚未明确归岗" in r for r in _g_unconf["risks"]),
-             "不判 D 的原因如实写进风险提示", "；".join(_g_unconf["risks"])[:36])
+             "不判最差档的原因如实写进风险提示", "；".join(_g_unconf["risks"])[:36])
         conn.close()
 
         # ============================================================ G
@@ -663,10 +688,11 @@ def main(verbose: bool = True) -> int:
         stage_before = chen["stage"]
         conn.close()
 
-        ans4 = agent_loop.run_agent("把陈志远的投递推进到初面", ctx)
+        # v1.29：阶段名换成新的流程取值（旧值 已联系/初面/复面/待offer/已入职 已废弃）
+        ans4 = agent_loop.run_agent("把陈志远的投递推进到待面试", ctx)
         # 规则路由不覆盖这个意图，故直接调工具验证提案机制
         from app.agent.tools import execute as tool_exec
-        raw = json.loads(tool_exec("set_stage", {"application_id": aid, "stage": "初面",
+        raw = json.loads(tool_exec("set_stage", {"application_id": aid, "stage": "待面试",
                                                  "reason": "简历评估通过"}, ctx))
         c.ok(raw.get("status") == "pending_confirmation",
              "写类工具返回『待确认』而不是『已完成』", json.dumps(raw, ensure_ascii=False)[:80])
@@ -693,8 +719,8 @@ def main(verbose: bool = True) -> int:
         res = actions.apply_proposal(db_path, pid, "approve", "hr", "hr")
         c.ok(res.get("ok") and res.get("status") == "已执行", "HR 确认后提案执行成功")
         conn = db.connect(db_path)
-        c.ok(db.get_application(conn, aid)["stage"] == "初面",
-             "此刻才真正改库：阶段 = 初面")
+        c.ok(db.get_application(conn, aid)["stage"] == "待面试",
+             "此刻才真正改库：阶段 = 待面试")
         tags_before = len(db.candidate_detail(conn, chen["id"])["tags"])
         conn.close()
 
@@ -889,12 +915,14 @@ def main(verbose: bool = True) -> int:
         c.ok("unarchive_on_reapply" in _acts, "归档后重新投递写审计（可追溯为什么又出现了）")
         conn.close()
 
-        # ③ 列表排序口径：D 档沉底，其余按投递时间倒序（不看分数）
+        # ③ 列表排序口径：最差档沉底，其余按投递时间倒序（不看分数）
         odb = os.path.join(work, "order.db")
         conn = db.connect(odb)
         for _nm, _tier, _at, _sc in (("甲", "A", "2026-01-01 09:00:00", 0.9),
-                                     ("乙", "D", "2026-03-01 09:00:00", 0.2),
-                                     ("丙", "C", "2026-02-01 09:00:00", 0.5)):
+                                     ("乙", _HARD_T, "2026-03-01 09:00:00", 0.2),
+                                     # 丙用**非最差档**：三档下 "C" 就是最差档，
+                                     # 与乙撞成同档会让"沉底"这条用例失去区分度
+                                     ("丙", "B", "2026-02-01 09:00:00", 0.5)):
             _c = db.insert_candidate(conn, {"name": _nm, "source": "测试"})
             conn.execute(
                 "INSERT INTO applications (candidate_id, tier_suggested, applied_at, score,"
@@ -903,7 +931,7 @@ def main(verbose: bool = True) -> int:
         conn.commit()
         _order = [x["name"] for x in db.list_candidates(conn) if x["name"] in ("甲", "乙", "丙")]
         c.ok(_order == ["丙", "甲", "乙"],
-             "排序：D 档沉底，其余按投递时间倒序（最新在前，不看分数）", str(_order))
+             "排序：最差档沉底，其余按投递时间倒序（最新在前，不看分数）", str(_order))
         conn.close()
 
         # ============================================================ R2
@@ -1002,11 +1030,19 @@ def main(verbose: bool = True) -> int:
         missing: dict[str, set] = {}
         for root, _dirs, files in os.walk(os.path.join(BASE, "app")):
             for f in files:
-                if not f.endswith(".py") or f == "ui.py":
+                # v1.29：跳过 ui.py（前端 JS 不是 Python 调用）与 `_bak_*.py`
+                # （备份文件不参与运行，扫它们只会制造假警，把真问题淹掉）。
+                if (not f.endswith(".py")) or f == "ui.py" or f.startswith("_bak_"):
                     continue
                 src = open(os.path.join(root, f), encoding="utf-8").read()
                 for alias, have in namespaces.items():
                     for m in _re.finditer(rf"\b{alias}\.([A-Za-z_][A-Za-z0-9_]*)", src):
+                        # v1.29：**跳过文件名**。注释/文档里写「见 db.py」「actions.py 里…」
+                        # 会被这条正则当成一次 `db.py` 调用（属性名是 `py`），于是报
+                        # "调用不存在的函数"。这类误报会让整条判据常年是红的，
+                        # 真出问题时反而没人看——比不检查更糟。
+                        if m.group(1) in ("py", "js", "json", "md", "txt", "html", "css"):
+                            continue
                         if m.group(1) not in have:
                             missing.setdefault(f, set()).add(f"{alias}.{m.group(1)}")
         c.ok(not missing, "所有跨模块函数调用都真实存在（不会等运行到才 500）",
@@ -1351,12 +1387,89 @@ def main(verbose: bool = True) -> int:
                          f"识别到 {len(_ocr_txt)} 字：{_ocr_txt[:24]}")
                 else:
                     c.ok(True, "㉙ OCR 断言跳过（本机无中文字体，无法造测试图）")
+                # ---- v1.19：上传入口（验证 OCR 的最短路径）----
+                # 以前用「导入本地文件夹」必须先去系统配置里手填目录；
+                # 验证一件功能却要先改配置，门槛会把人挡在门外。
+                c.ok("上传简历照片/文件" in _pgjs and "doUpload" in _pgjs,
+                     "㉚ 人才库里有上传简历照片/文件入口（不用改配置就能试 OCR）")
                 c.ok("荣誉 / 论文 / 专利" in _pgjs,
                      "㉗ 完整档案里有荣誉/论文/专利区块")
-                c.ok("pipeExpand" in _pgjs and "goStageFilter" in _pgjs
-                     and "在本列展开" in _pgjs and "去人才库筛选" in _pgjs,
-                     "㉒ 管道超出 15 人时给出可点出口（展开 / 去人才库筛选），不是一句提示")
-                c.ok("&stage=" in _pgjs and "STAGE_F" in _pgjs,
+                c.ok("pipePage" in _pgjs and "pipe-pager" in _pgjs
+                     and "goStageFilter" not in _pgjs
+                     and "上一页" in _pgjs and "下一页" in _pgjs,
+                     "㉒ 管道超出 15 人时可翻页（每页 15 人）；旧版跳转函数已删除")
+                c.ok("jobHeadcount" in _pgjs and "ejHeadcount" in _pgjs,
+                     "㉛ 岗位管理有「招聘数量」字段（新增表单 + 编辑弹窗两处入口）")
+                c.ok("_PIPE_GROUP_STAGE" in _pgjs and "pipe-group-head" in _pgjs,
+                     "㉜ 管道「已发放offer」列按岗位分组展示（组头 + 人数）")
+                c.ok("chat-input-wrap" in _pgjs and "function chatGrow" in _pgjs
+                     and "chat-input-actions" in _pgjs and "清空记录" in _pgjs
+                     and 'onclick="clearChat()"' in _pgjs,
+                     "㉝ 助手输入框：3 行起步 + 自动增高；发送与「清空记录」在框内右下角（清空在右）")
+                c.ok("_resolve_job_id" in open(
+                    os.path.join(BASE, "app", "agent", "tools.py"),
+                    encoding="utf-8").read(),
+                     "㉞ 助手有「岗位名→job_id」解析器（search_candidates 的 job 参数按归岗筛）")
+                # ⚠️ v2.0.0 删掉原来那半句 `"loadMailAtts" not in _pgjs`：
+                # 该标识符**从未以函数形式存在过**，它只活在 ui.py 的说明性注释里
+                # （"…勾选已随之移除"那段），所以那半句验证不了任何功能，红灯纯粹
+                # 由注释文字引起。判据只能选**真会出现在代码里**的写法，
+                # 不能靠"某个名字不出现"来证明功能 —— 那是恒真/恒假的废判据。
+                c.ok("function errText" in _pgjs
+                     and "document_id: int | None = None" in open(
+                         os.path.join(BASE, "app", "server.py"), encoding="utf-8").read(),
+                     "㉟ 临时附件可发送（document_id 可空）；422 错误翻译成人话")
+                _svsrc = open(os.path.join(BASE, "app", "server.py"),
+                              encoding="utf-8").read()
+                c.ok("outboxOpen" in _pgjs and "outboxDel" in _pgjs
+                     and "def api_mail_outbox_open" in _svsrc
+                     and "def api_mail_outbox_delete" in _svsrc,
+                     "㊱ 临时附件有「预览 / 删除」（前端入口 + 服务端端点）")
+                c.ok("ingestReopen" in _pgjs and "ingestAttach" in _pgjs
+                     and "/api/tasks/active" in _pgjs and "def api_tasks_active" in _svsrc,
+                     "㊲ 导入弹窗被误关后，点导入按钮能重新弹出进行中的流程（含停止）")
+                c.ok("chatRestoreBtn" in _pgjs and "累计运行" not in _pgjs
+                     and "写操作只生成" not in _pgjs,
+                     "㊳ 助手页：恢复对话在右上角；工具/禁用统计与说明句已删除")
+                c.ok("multi_ivunit" in _pgjs and "ivunit:'ivUnit'" in _pgjs,
+                     "㊵ 档案「面试与录用信息」的面试单位支持多选（隐藏域沿用 ivUnit，保存链路不动）")
+
+                # ---- ㊴ 临时附件**真回环**（v2.0.0）----
+                # ㉟/㊱ 都只是"字符串在不在源码里"的静态检查，**结构上抓不到**
+                # "上传落盘名（digest+扩展名）与发信读取名（裸 digest）不一致"这类
+                # 缺陷 —— v1.29.9 实测漏网：带临时附件的邮件一律报
+                # 「临时附件已不在暂存区」，HR 重复上传 5 次都不通。
+                # 所以这里必须真跑一遍：上传 → 拿 id → 从发信链路读回来 → 比对字节。
+                # 上传落在**临时目录**（临时改 DATA_DIR，跑完还原），不污染真实 outbox。
+                import urllib.parse as _up
+                _obytes = (b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n"
+                           b"trailer<</Root 1 0 R>>\n%%EOF\n")
+                _oname = "自检-附件回环.pdf"
+                _odir_save, srv.DATA_DIR = srv.DATA_DIR, os.path.join(work, "data")
+                try:
+                    _ocode, _obody = _asgi(srv.app, "POST",
+                                           "/api/mail/outbox?name=" + _up.quote(_oname),
+                                           {}, _obytes)
+                    _oid = (json.loads(_obody) or {}).get("outbox_id") if _obody else None
+                    c.ok(_ocode == 200 and _oid,
+                         "㊴a 临时附件上传返回 outbox_id",
+                         f"HTTP {_ocode} {_obody[:50]}")
+                    _op = srv._outbox_path(_oid) if _oid else None
+                    _ook = bool(_op) and os.path.isfile(_op) \
+                        and open(_op, "rb").read() == _obytes
+                    c.ok(_ook,
+                         "㊴b 上传的附件能被发信链路原样读回（名字对得上、字节一致）",
+                         os.path.basename(_op) if _op else "解析不到文件")
+                finally:
+                    srv.DATA_DIR = _odir_save
+                # v1.27：判据不再写死 `"&stage="` —— 那依赖"阶段参数必须手写成
+                # `'&stage=' + ...` 这一种拼接方式；筛选条件收进 `poolQuery()` 后
+                # 是数组元素由 `join('&')` 拼的，源码里就没有这个字面量了，
+                # 于是功能好好的也会被判失败。
+                # 改成验**功能本身**：查询串里带 stage 参数，且工具栏真有一个
+                # 绑定 `STAGE_F` 的下拉（比原来只验一个子串更硬）。
+                c.ok("stage=" in _pgjs and "STAGE_F=this.value" in _pgjs
+                     and "'stage=' + encodeURIComponent(STAGE_F)" in _pgjs,
                      "㉓ 人才库真的有阶段筛选入口（否则看全部仍是死路）")
                 c.ok("isw.enabled" in _pgjs and "isw.on" not in _pgjs,
                      "⑮a 开关的字段名前后端一致（isw.enabled）",
@@ -1542,8 +1655,8 @@ def main(verbose: bool = True) -> int:
             conn.close()
             c.ok(_app_row["job_id"] == sug["job_id"],
                  "采纳后投递已归到建议岗位", f"job_id={_app_row['job_id']}")
-            c.ok(_app_row["tier_suggested"] in (None, "D"),
-                 "归岗后档位按新口径写入（学历不达标→D；学历达标→留空待模型分析）",
+            c.ok(_app_row["tier_suggested"] in (None, _HARD_T),
+                 "归岗后档位按新口径写入（学历不达标→最差档；学历达标→留空待模型分析）",
                  str(_app_row["tier_suggested"]))
             c.ok(_n_audit == 1, "采纳归岗写入审计（岗位未指定 → 归到 X）")
 
@@ -1680,7 +1793,7 @@ def main(verbose: bool = True) -> int:
             c.ok(_row2 is not None and _row2["suggested_job_id"] is not None,
                  "模型给出岗位后落库建议岗位（老数据也能补齐）",
                  f"suggested_job_id={_row2['suggested_job_id'] if _row2 else None}")
-            c.ok(_row2 is not None and _row2["tier_suggested"] in (None, "D"),
+            c.ok(_row2 is not None and _row2["tier_suggested"] in (None, _HARD_T),
                  "归位的档位按新口径写入（学历门槛 / 待模型分析）",
                  f"{_row2['tier_suggested'] if _row2 else None}（在招岗位 {len(_open2)} 个）")
 
@@ -1758,19 +1871,506 @@ def main(verbose: bool = True) -> int:
                                                       "name": "阶段时间"})
             _aid_sc = db.insert_application(_conn_sc, {"candidate_id": _cid_sc, "job_id": None,
                                                        "channel": "测试", "applied_at": db.now(),
-                                                       "stage": "新投递"})
+                                                       "stage": "全部简历"})
             _conn_sc.commit()
             _conn_sc.close()
             _asgi(srv.app, "POST", f"/api/applications/{_aid_sc}/stage", hr,
-                  json.dumps({"stage": "初面"}).encode())
+                  json.dumps({"stage": "待面试"}).encode())
             _conn_sc2 = db.connect(db_path)
             _row_sc = _conn_sc2.execute(
                 "SELECT stage, stage_changed_at FROM applications WHERE id=?",
                 (_aid_sc,)).fetchone()
             _conn_sc2.close()
-            c.ok(_row_sc["stage"] == "初面" and _row_sc["stage_changed_at"],
+            c.ok(_row_sc["stage"] == "待面试" and _row_sc["stage_changed_at"],
                  "⑯d 改阶段会记 stage_changed_at（停滞待办靠它，否则刚推进的人被当成停滞）",
                  f"stage={_row_sc['stage']} stage_changed_at={_row_sc['stage_changed_at']}")
+
+            # ================================================ 阶段模型（v1.29）
+            # 用**独立临时库**，不碰上面那批断言依赖的数据（后面的组还要数人数/投递数）
+            from app import stages as _sg
+            _sd = os.path.join(work, "stages_v129.db")
+            _sc = db.connect(_sd)
+
+            # ① 兜底表与 config/stages.json 必须一致 —— 防"同一个清单散在两处"悄悄分叉
+            c.ok(_sg.assert_consistent() == [],
+                 "阶段：内置兜底表与 config/stages.json 一致（防两份清单分叉）",
+                 "不一致的键：" + "、".join(_sg.assert_consistent()))
+            # v1.29.2：5 档（去掉了独立的「待发offer」）+ 1 个终态
+            c.ok(len(_sg.all_stages()) == 6 and len(_sg.pipeline_stages()) == 5
+                 and _sg.terminal_stages() == ["已结束"],
+                 "阶段：6 个阶段 / 5 个在招列 / 1 个终态（来自配置而非硬编码）",
+                 f"{_sg.all_stages()}")
+            c.ok(_sg.normalize_stage("已联系") == _sg.DEFAULT_STAGE
+                 and _sg.normalize_stage("投递") == _sg.DEFAULT_STAGE,
+                 "阶段：认不出的历史值归并到「全部简历」（否则这些人从看板与比例环里消失）")
+            c.ok("已发放offer" in _sg.stage_regex() and "初面" not in _sg.stage_regex(),
+                 "阶段：助手白名单正则由配置生成（新阶段在、废弃阶段不在）",
+                 _sg.stage_regex()[:40])
+
+            # ② 结论必须属于"离开的那个环节"：已面试→不录用 合法；已面试+已签约 非法
+            c.ok(_sg.outcome_allowed_from("已面试", "已结束", "不录用")
+                 and _sg.outcome_allowed_from("已发放offer", "已结束", "拒签")
+                 and _sg.outcome_allowed_from("已发放offer", "已发放offer", "已签约"),
+                 "结论：三条真实流转允许（不录用 / 拒签 / 已签约）")
+            c.ok(not _sg.outcome_allowed_from("已面试", "已面试", "已签约")
+                 and not _sg.outcome_allowed_from("全部简历", "已结束", "不录用"),
+                 "结论：不存在的组合被拒（已面试+已签约、全部简历+不录用）")
+            c.ok(_sg.verdict("已面试", "拟录用") == "拟录用"
+                 and _sg.verdict("已面试", "不录用") == "不录用"
+                 and _sg.verdict("已发放offer", "已签约") == "拟录用"
+                 and _sg.verdict("已发放offer", None) == "拟录用"
+                 and _sg.verdict("已面试", None) == "",
+                 "「是否录用」由 (阶段,结论) 推导；拟录用现在是**标签**（v1.29.2）")
+            # ⚠️ 拒签必须算**不录用**：发了录用函、对方拒签 → 结果就是没录用。
+            # 原来只映射「不录用」，拒签的人那列是**空的** —— 而"他拒了"恰恰是
+            # 最该被 HR 看到的一条，留空等于"还不知道"，性质完全不同。
+            c.ok(_sg.verdict("已结束", "拒签") == "不录用",
+                 "「是否录用」：拒签算**不录用**（不是留空）")
+            # ⚠️ v1.29.2（业务方 2026-10-16 定调）：「拟录用」**只是标签**，
+            #    打上后**留在「已面试」**，不自动进「已发放offer」——
+            #    还要 HR 再走一步「发出录用函」。所以配置里它是**自环**。
+            _lc = db.connect(os.path.join(work, "v129_label.db"))
+            _ml = _lc.cursor()
+            _ml.execute("INSERT INTO candidates (identity_key,name,created_at,updated_at) "
+                        "VALUES (?,?,?,?)", ("v129l:乙", "乙", db.now(), db.now()))
+            _lc.commit()
+            _laid = db.insert_application(_lc, {"candidate_id": _ml.lastrowid, "channel": "测试"})
+            for _s in ("初筛通过", "待面试", "已面试"):
+                if _s == "待面试":
+                    db.update_application_fields(_lc, _laid, interview_unit="稀土研究院")
+                db.set_application_stage(_lc, _laid, _s)
+            db.set_application_stage(_lc, _laid, "已面试", outcome="拟录用")
+            _ap = db.get_application(_lc, _laid)
+            c.ok(_ap["stage"] == "已面试" and _ap["outcome"] == "拟录用",
+                 "「拟录用」是**标签**：打上后仍在「已面试」，**不自动进已发放offer**",
+                 f"stage={_ap['stage']} outcome={_ap['outcome']}")
+            c.ok(_sg.verdict(_ap["stage"], _ap["outcome"]) == "拟录用",
+                 "打了「拟录用」标签 → 导出表「是否录用」列显示**拟录用**（同步）")
+            db.set_application_stage(_lc, _laid, "已发放offer")
+            c.ok(db.get_application(_lc, _laid)["stage"] == "已发放offer"
+                 and db.get_application(_lc, _laid)["outcome"] == "拟录用",
+                 "再走「发出录用函」才进已发放offer（标签随之带过去）")
+            _lc.close()
+
+            def _mk(_conn, _nm):
+                _r = _conn.execute(
+                    "INSERT INTO candidates (identity_key,name,created_at,updated_at) "
+                    "VALUES (?,?,?,?)", (f"stg:{_nm}", _nm, db.now(), db.now()))
+                _conn.commit()
+                return _r.lastrowid
+
+            # v1.29：进「待面试」前必须先登记面试单位（业务方裁定）。
+            # 下面两处推进都要过这一关，所以**统一走这个 helper** ——
+            # 第一版是在其中一处现补字段、另一处忘了，结果自检直接被约束卡住，
+            # 反而证明约束是真的生效了（判据自己也得符合真实流程）。
+            def _to_interview(aid):
+                for _st in ("初筛通过", "待面试", "已面试"):
+                    if _st == "待面试":
+                        db.update_application_fields(_sc, aid,
+                                                     interview_unit="稀土研究院")
+                    db.set_application_stage(_sc, aid, _st)
+
+            _c1 = _mk(_sc, "阶段甲")
+            _a1 = db.insert_application(_sc, {"candidate_id": _c1, "channel": "测试"})
+            _to_interview(_a1)
+            _ap1 = db.get_application(_sc, _a1)
+            c.ok(bool(_ap1["interviewed_at"]), "进「已面试」会写 interviewed_at（导出圈人靠它）")
+            db.set_application_stage(_sc, _a1, "已结束", "不录用")
+            c.ok(db.get_candidate(_sc, _c1)["archived_at"],
+                 "全部投递走完 → 自动归档（把既有死代码 count_pending_applications 接上）")
+
+            # ③ 还有进行中投递时**不许**归档（一个人可能同时投两个岗位）
+            _c2 = _mk(_sc, "阶段乙")
+            _b1 = db.insert_application(_sc, {"candidate_id": _c2, "channel": "测试"})
+            _b2 = db.insert_application(_sc, {"candidate_id": _c2, "channel": "测试"})
+            _to_interview(_b1)
+            db.set_application_stage(_sc, _b1, "已结束", "不录用")
+            c.ok(not db.get_candidate(_sc, _c2)["archived_at"]
+                 and db.count_pending_applications(_sc, _c2) == 1,
+                 "还有 1 条进行中投递 → 不归档（\"必须全部到终点\"）",
+                 f"进行中 {db.count_pending_applications(_sc, _c2)} 条")
+            c.ok(_sc.execute("SELECT COUNT(*) n FROM audit_log WHERE action='archive'")
+                 .fetchone()["n"] == 1,
+                 "自动归档不递归（归档↔结束 未形成环）")
+
+            # ④ 非法阶段/结论必须报错，而不是静默写进去
+            _bad_stage = _bad_out = False
+            try:
+                db.set_application_stage(_sc, _b2, "初面")
+            except ValueError:
+                _bad_stage = True
+            try:
+                db.set_application_stage(_sc, _b2, "已面试", "已签约")
+            except ValueError:
+                _bad_out = True
+            c.ok(_bad_stage and _bad_out,
+                 "非法阶段/非法结论被拒绝（不会静默写进库）")
+
+            # ⑤ 写入覆盖度：`_ADD['applications']` 的每一列必须要么在 insert 列清单、
+            #    要么在 APPLICATION_WRITABLE 白名单里。两者皆无 = "加了列但没有任何
+            #    代码路径能写它"，或者更糟：调用方传了却被静默丢弃（cet/grad_date 各栽过一次）。
+            import re as _re2                      # 本文件顶部没有 import re（按块局部导入）
+            _src_db = open(os.path.join(BASE, "app", "db.py"), encoding="utf-8").read()
+            _add_blk = _src_db[_src_db.index('"applications": {'):]
+            _add_blk = _add_blk[:_add_blk.index("\n        },")]
+            _add_cols = set(_re2.findall(r'^\s*"([a-z_]+)":\s*"', _add_blk, _re2.M))
+            _ins_blk = _src_db[_src_db.index("INSERT INTO applications"):]
+            _ins_blk = _ins_blk[:_ins_blk.index("VALUES")]
+            _ins_cols = set(_re2.findall(r"[a-z_]+", _ins_blk))
+            # 例外：这几个**老列**由别处的直接 SQL 写，不走 insert/白名单 ——
+            # 显式列出来，而不是把判据放宽到"扫到名字就算过"（那样等于没检查）。
+            #   suggested_job_id / suggested_job_reason → regrade.suggest_job_for_application 的 UPDATE
+            #   merged_from_candidate → merge_candidates / split 的 UPDATE
+            #   stage_changed_at → set_application_stage 自己的 UPDATE
+            #   honors_json → ingest 里 db.update_candidate(honors_json=...)
+            # 加新列时如果落到这个例外里，说明它"没有正规写入路径"，应该先想清楚再写。
+            _LEGACY_DIRECT = {"suggested_job_id", "suggested_job_reason",
+                              "merged_from_candidate", "stage_changed_at", "honors_json"}
+            _uncovered = sorted(_add_cols - _ins_cols - set(db.APPLICATION_WRITABLE)
+                                - _LEGACY_DIRECT)
+            c.ok(not _uncovered,
+                 "applications 新增列都有写入路径（insert 清单 / APPLICATION_WRITABLE / 已知直接 SQL）",
+                 f"没有写入路径的列：{_uncovered}")
+            _sc.close()
+
+            # ---- v1.29：面试/录用/导出这一批的判据 ----
+            from app import export as _ex
+            from app import naming as _nm
+            from app import univ as _uv
+            from app import xlsx as _xl
+            from app.server import _interview_at
+            from app.pipeline.extract import _find_first_degree_school as _fds
+            from app.pipeline.extract import _edu_history_heuristic as _xeh
+            from app.pipeline.extract import _edu_history_from_llm as _xeh_llm
+
+            # ① 第一学历：**绝不退回 school**。这是本批最要紧的一条 ——
+            #    拿最高学历院校顶替，"本科双非、硕士985"的人就会被筛进「本科985」。
+            _t_ma = "2019.09-2023.06  西安建筑科技大学  材料成型及控制工程  本科\n" \
+                    "2023.09-2026.06  西安交通大学  材料科学与工程      硕士"
+            _t_only_master = "学历：硕士  毕业院校：西安交通大学  专业：材料科学与工程"
+            c.ok(_fds(_t_ma) == "西安建筑科技大学" and _fds(_t_only_master) is None,
+                 "第一学历：认得出本科段；只有最高学历时**留空**（不拿 school 顶替）",
+                 f"分段={_fds(_t_ma)!r} 仅硕士={_fds(_t_only_master)!r}")
+
+            # ② 海外维度：三态 + **撞名反例**（实测踩到：名单里的「东北大学（日本）」
+            #    剥掉括号后缀会把我国 985 东北大学误判成境外校）
+            c.ok(_uv.is_overseas("香港中文大学") is True
+                 and _uv.is_overseas("兰州大学") is False
+                 and _uv.is_overseas("") is None,
+                 "海外维度三态：海外 / 非海外 / 未识别（未识别与「非海外」严格分开）")
+            c.ok(_uv.is_overseas("东北大学") is False
+                 and _uv.is_overseas("日本东北大学") is True,
+                 "海外维度不做括号剥离（否则国内 985 东北大学会被误判为境外）")
+
+            # ③ 筛选「只命中」判据（用只命中、不用"包含"——包含在全库下必然通过）
+            _fc = db.connect(os.path.join(work, "v129_filter.db"))
+            _mkp = _fc.cursor()
+
+            def _person(nm2, edu, school, fdg="", unit=None):
+                _mkp.execute("INSERT INTO candidates (identity_key,name,gender,edu_level,"
+                             "school,first_degree_school,created_at,updated_at) "
+                             "VALUES (?,?,?,?,?,?,?,?)",
+                             (f"v129:{nm2}", nm2, "男", edu, school, fdg or None,
+                              db.now(), db.now()))
+                cid2 = _mkp.lastrowid
+                aid2 = db.insert_application(_fc, {"candidate_id": cid2, "channel": "测试"})
+                if unit:
+                    db.update_application_fields(_fc, aid2, interview_unit=unit)
+                return aid2
+
+            _person("甲985本硕", "硕士", "兰州大学", "兰州大学", "稀土研究院")
+            _person("乙双非本", "硕士", "西安交通大学", "西安建筑科技大学", "数字化中心")
+            _person("丙未识别", "本科", "沈阳工业大学", "", None)
+            _fc.commit()
+            _pick = lambda **kw: sorted(x["name"] for x in db.list_candidates(_fc, **kw))
+            c.ok(_pick(bachelor="985") == ["甲985本硕"]
+                 and _pick(bachelor="未识别") == ["丙未识别"],
+                 "第一学历筛选只命中该档（985 与未识别互不串）",
+                 f"985→{_pick(bachelor='985')} 未识别→{_pick(bachelor='未识别')}")
+            c.ok(_pick(interview_unit="稀土研究院") == ["甲985本硕"]
+                 and _pick(interview_unit="稀土研究院,数字化中心") == ["乙双非本", "甲985本硕"],
+                 "面试部门筛选：单选只命中 1 人，多选为并集",
+                 f"单选={_pick(interview_unit='稀土研究院')} 并集={_pick(interview_unit='稀土研究院,数字化中心')}")
+            c.ok(_pick(univ="211") == ["乙双非本", "甲985本硕"],
+                 "院校层次 211 含 985（口径与界面提示一致）", str(_pick(univ="211")))
+            _fc.close()
+
+            # ④ 导出：13 列**列序**、缺值 `—`、**含归档档**
+            _ec = db.connect(os.path.join(work, "v129_export.db"))
+            _mk2 = _ec.cursor()
+
+            def _person2(nm2, edu, school, *, steps=(), unit=None, idate=None, slot=None,
+                         mode=None, offer=None, archived=False):
+                _mk2.execute("INSERT INTO candidates (identity_key,name,gender,edu_level,"
+                             "school,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                             (f"v129x:{nm2}", nm2, "女", edu, school, db.now(), db.now()))
+                cid2 = _mk2.lastrowid
+                aid2 = db.insert_application(_ec, {"candidate_id": cid2, "channel": "测试"})
+                patch = {}
+                if unit:   patch["interview_unit"] = unit
+                if idate:  patch["interview_date"] = idate
+                if slot:   patch["interview_slot"] = slot
+                if mode:   patch["interview_mode"] = mode
+                if offer:  patch["offer_sent_at"] = offer
+                if patch:  db.update_application_fields(_ec, aid2, **patch)
+                # 按**真实流转**逐步推进。结论标签必须属于"离开的那个环节"，
+                # 所以不能一步跳到终态（会被 set_application_stage 正确拒绝）——
+                # 这一点本身就是判据：下面三种走法都能走通，说明流转约束没写错。
+                for st_, oc_ in steps:
+                    db.set_application_stage(_ec, aid2, st_, outcome=oc_,
+                                             skip_auto_archive=True)
+                if archived:
+                    db.set_candidate_archived(_ec, cid2, True, skip_auto_archive=True)
+                return aid2
+
+            _INTERVIEW = [("初筛通过", None), ("待面试", None), ("已面试", None)]
+            # 已结束（不录用）+ 已归档 —— 这类人**必须**出现在导出里
+            _person2("甲不录用", "硕士", "东北大学",
+                     steps=_INTERVIEW + [("已结束", "不录用")],
+                     unit="稀土研究院", idate="2026-10-09 09:30", slot="09:30-10:30",
+                     mode="现场面试", archived=True)
+            # 只到过「已面试」、后来又往前推了 —— 按当前阶段取会**丢掉**这个人。
+            # 注意"已签约"是**停在已发放offer 时**才打的，不能在跨阶段时带上。
+            _person2("乙拟录用", "硕士", "兰州大学",
+                     steps=_INTERVIEW + [("已面试", "拟录用"), ("已发放offer", None),
+                                         ("已发放offer", "已签约")],
+                     unit="分析测试中心", idate="2026-10-13 14:30", slot="14:30-15:30",
+                     mode="线上面试", offer="2026-10-14 09:00:00")
+            # 从没面试过 —— 必须**不**出现在这张表里
+            _person2("丙未面试", "本科", "沈阳工业大学", steps=[("初筛通过", None)],
+                     unit="数字化中心")
+            _ec.commit()
+            _h, _rows, _tcols, _n = _ex.build_roster(_ec)
+            _names = [r[3] for r in _rows]
+            c.ok(_h == _ex.ROSTER_COLS and len(_h) == 13,
+                 "导出：**唯一一份名单**、固定 13 列、列序与人事处指定一致", str(_h))
+            # 排序 = 阶段顺序倒序（最晚阶段在前）→ 再按投递时间/编号。
+            # 甲已结束(rank6) > 乙已发放offer(rank5) > 丙初筛通过(rank1)
+            c.ok(_names == ["甲不录用", "乙拟录用", "丙未面试"],
+                 "导出：**所有阶段的人都在**（含已归档、含还在初筛的），按阶段倒序",
+                 str(_names))
+            _row_g = dict(zip(_h, _rows[_names.index("丙未面试")]))
+            c.ok(_row_g["面试日期"] == "—" and _row_g["是否录用"] == "—"
+                 and _row_g["录用函发送时间"] == "—" and _row_g["入职情况"] == "—",
+                 "导出：没走到那个阶段的字段填 `—`（不空着、不编造）",
+                 f"丙={_row_g}")
+            c.ok(_row_g["面试单位"] == "数字化中心",
+                 "导出：面试单位在**初筛登记时**就该有值（不必等到面试）")
+            _row_a = dict(zip(_h, _rows[_names.index("甲不录用")]))
+            c.ok(_row_a["是否录用"] == "不录用" and _row_a["面试单位"] == "稀土研究院"
+                 and _row_a["入职情况"] == "—",
+                 "导出：归档的不录用者也完整在表内（最该出现的一批）")
+            c.ok(all(r[1] != "" and r[8] != "" and r[12] != "" for r in _rows),
+                 "导出：缺值一律 `—`（不留空单元格）",
+                 f"电话列={[r[7] for r in _rows]}")
+            c.ok(7 in _tcols, "导出：电话列是**文本格式**（否则 Excel 显示成 1.38E+10）")
+            c.ok([r[8] for r in _rows] == ["不录用", "拟录用", "—"],
+                 "导出：「是否录用」由 (阶段,结论) 推导，没判的给 `—`",
+                 str([r[8] for r in _rows]))
+            c.ok(len(_xl.write_sheet(_rows, _h, text_cols=_tcols, meta="测试")) > 2000,
+                 "xlsx 能生成（表头加粗/冻结/列宽/文本格式不报错）")
+            _csv_b = _xl.csv_bytes(_rows, _h)
+            # 阈值按**这份样本的真实字节数**给（几百字节级），不要拍一个
+            # 大数字 —— 那样判据会因为"数据变少"而失败，与功能无关。
+            c.ok(len(_csv_b) > 100 and _csv_b.startswith(b"\xef\xbb\xbf"),
+                 "csv 同口径且带 BOM（没 BOM Excel 会按本地编码猜、中文乱码）")
+            _ec.close()
+
+            # ⑤ 命名模板：六段齐全、缺值 `—` 不省略、非法字符清洗、性别按普通字段
+            _r0 = {"job_title": "工艺技术", "edu_level": "硕士", "school": "西安电子科技大学",
+                   "major": "材料科学与工程", "name": "陈志远", "gender": "男"}
+            _n0 = _nm.resume_filename(_r0, ".pdf")
+            _n1 = _nm.resume_filename({**_r0, "job_title": None}, ".pdf")
+            c.ok(_n0 == "工艺技术-硕士-西安电子科技大学-材料科学与工程-陈志远-男.pdf"
+                 and _n1.startswith("—-硕士-"),
+                 "命名模板六段齐全，缺值写 `—` 且**不省略段位**", f"{_n0} / {_n1}")
+            c.ok("/" not in _nm.resume_filename(
+                    {**_r0, "school": "西/安\\大学", "major": "材料:科学"}, ".pdf"),
+                 "命名模板清洗非法字符（路径分隔符会让 zip 里的条目被当成目录）")
+            c.ok(_nm.resume_filename({**_r0, "gender": None}, ".pdf").endswith("陈志远-—.pdf"),
+                 "命名模板：性别没写时与其它缺值同规则输出 `—`（v1.29.4 起无特殊降级）")
+
+            # ⑧ v1.29.2：完整学历院校经历（本科/硕士/博士各一段）
+            #    业务方要求"分析结果里完整体现本科/硕士/博士各是什么学校"。
+            _eh_text = ("2013.09-2017.06  西安建筑科技大学  材料成型及控制工程  本科\n"
+                        "2017.09-2020.06  东北大学          材料科学与工程      硕士\n"
+                        "2020.09-2024.06  北京航空航天大学  材料物理          博士\n")
+            _eh = _xeh(_eh_text)
+            c.ok([h["degree"] for h in _eh] == ["本科", "硕士", "博士"],
+                 "学历院校经历：三段（本科/硕士/博士）都在", str([h["degree"] for h in _eh]))
+            # 四种"脏数据"各来一条，逐条验证被丢掉：
+            #   编造校名（原文没有哈佛）／非法层次（「研究生」不在白名单）／
+            #   缺字段（没有 degree）／重复段（东北大学已出现过）
+            _eh_bad = _xeh_llm([{"degree": "本科", "school": "西安建筑科技大学"},
+                                {"degree": "本科", "school": "哈佛大学"},
+                                {"degree": "研究生", "school": "东北大学"},
+                                {"school": "北京航空航天大学"},
+                                {"degree": "博士", "school": "东北大学"}],
+                               _eh_text)
+            c.ok([h["school"] for h in _eh_bad] == ["西安建筑科技大学", "东北大学"],
+                 "学历院校经历：编造校名/非法层次/缺字段/重复段**四种脏数据都被丢掉**",
+                 str([h["school"] for h in _eh_bad]))
+            _ehc = db.connect(os.path.join(work, "v129_edu.db"))
+            _cid_eh = db.insert_candidate(_ehc, {
+                "identity_key": "v129e:甲", "name": "甲", "edu_level": "博士",
+                "school": "北京航空航天大学", "first_degree_school": "西安建筑科技大学",
+                "edu_history": json.dumps(_eh, ensure_ascii=False)})
+            _got = (db.candidate_detail(_ehc, _cid_eh) or {}).get("edu_history") or []
+            c.ok(len(_got) == 3 and [h["degree"] for h in _got] == ["本科", "硕士", "博士"],
+                 "学历院校经历：入库能完整读回（含 JSON 列）", str(len(_got)))
+            c.ok([h.get("tier") for h in _got] == [None, "985", "985"],
+                 "学历院校经历：**逐段**挂院校层次（本科双非 + 硕士985 看得出来）",
+                 str([h.get("tier") for h in _got]))
+            _ehc.close()
+
+            # ⑪ v1.29.3：面试结论的**阶段联动**（业务方 2026-10-16）
+            #     · 当前是「待面试」→ 选拟录用/不录用 **自动推进到「已面试」**
+            #     · 其它阶段 → **只打标签，不动阶段**
+            _vc = db.connect(os.path.join(work, "v129_verdict.db"))
+            _mv = _vc.cursor()
+            _nv = [0]
+
+            def _mkv(stage):
+                _nv[0] += 1
+                _mv.execute("INSERT INTO candidates (identity_key,name,created_at,updated_at) "
+                            "VALUES (?,?,?,?)", (f"v129v:{_nv[0]}", "甲", db.now(), db.now()))
+                _vc.commit()
+                aid2 = db.insert_application(_vc, {"candidate_id": _mv.lastrowid, "channel": "测试"})
+                db.set_application_stage(_vc, aid2, "初筛通过")
+                db.update_application_fields(_vc, aid2, interview_unit="稀土研究院")
+                if stage != "初筛通过":
+                    db.set_application_stage(_vc, aid2, stage)
+                return aid2
+
+            # ① 待面试 + 拟录用 → 进已面试，且不归档
+            # ① 待面试 → 打标签 + 进已面试（接口层就是这个组合）
+            _va = _mkv("待面试")
+            db.set_application_stage(_vc, _va, "已面试", outcome="拟录用")
+            _ap1 = db.get_application(_vc, _va)
+            _cd1 = db.get_candidate(_vc, _mv.lastrowid)
+            c.ok(_ap1["stage"] == "已面试" and _ap1["outcome"] == "拟录用",
+                 "阶段联动：待面试打拟录用 → 进「已面试」并带上标签",
+                 f"stage={_ap1['stage']} outcome={_ap1['outcome']}")
+            c.ok(not (_cd1.get("archived_at") or ""),
+                 "阶段联动：进「已面试」**不归档**（只有「已结束」才归档）")
+            c.ok(bool(_ap1.get("interviewed_at")),
+                 "阶段联动：进「已面试」会写 interviewed_at（导出圈人靠它）")
+            # ② 已面试 + 改标签 → 阶段不动
+            _vb = _mkv("已面试")
+            db.update_application_fields(_vc, _vb, outcome="拟录用")
+            c.ok(db.get_application(_vc, _vb)["stage"] == "已面试",
+                 "阶段联动：已面试打标签**不动阶段**（推进到已发放offer 由 HR 另走一步）")
+            _vc.close()
+
+            # ⑩ 归档只有两个入口（业务方 2026-10-16 明确）：
+            #     ① 阶段推进到「已结束」 ② HR 点「归档」。
+            #     **其它任何操作都不归档** —— 归档会把人从人才库移走（不可逆的隐藏动作），
+            #     而"信息填全了""标签打好了"这类中间状态远没到该收起来的时候。
+            _ac = db.connect(os.path.join(work, "v129_arch.db"))
+            _mc3 = _ac.cursor()
+
+            _seq3 = [0]
+
+            def _mkp3():
+                # identity_key 有 UNIQUE 约束 —— 用递增序号，别用 id()/len() 之类
+                # 在两次调用里算出同一个值的写法（第一次就这么写错了，报 UNIQUE 失败）。
+                _seq3[0] += 1
+                _mc3.execute("INSERT INTO candidates (identity_key,name,created_at,updated_at) "
+                             "VALUES (?,?,?,?)", (f"v129a:甲{_seq3[0]}", "甲",
+                                                  db.now(), db.now()))
+                _ac.commit()
+                return db.insert_application(_ac, {"candidate_id": _mc3.lastrowid, "channel": "测试"})
+
+            _pa = _mkp3()
+            # 走完面试 → 已面试（拟录用只是打标签，不归档）
+            db.set_application_stage(_ac, _pa, "初筛通过")
+            db.update_application_fields(_ac, _pa, interview_unit="稀土研究院")
+            db.set_application_stage(_ac, _pa, "待面试")
+            db.set_application_stage(_ac, _pa, "已面试")
+            db.update_application_fields(_ac, _pa, outcome="拟录用")
+            c.ok(not (db.get_candidate(_ac, _mc3.lastrowid).get("archived_at") or ""),
+                 "归档规则：打结论标签（拟录用）**不归档**")
+            c.ok(db.get_application(_ac, _pa)["stage"] == "已面试",
+                 "归档规则：打标签**不动阶段**（仍是已面试）")
+            # 改面试信息 / 改其它字段也不归档
+            db.update_application_fields(_ac, _pa, interview_date="2026-10-20 09:30")
+            c.ok(not (db.get_candidate(_ac, _mc3.lastrowid).get("archived_at") or ""),
+                 "归档规则：改面试信息**不归档**")
+            # 推进到「已结束」才归档（且全部投递都到终点）
+            db.set_application_stage(_ac, _pa, "已结束", outcome="不录用")
+            c.ok(bool(db.get_candidate(_ac, _mc3.lastrowid).get("archived_at")),
+                 "归档规则：推进到「已结束」**才**归档")
+            # 手动归档是第二个入口（查询要用连接对象 `_ac.execute`，不是 `db.execute`）
+            _pb = _mkp3()
+            _pbc = _ac.execute("SELECT candidate_id FROM applications WHERE id=?",
+                               (_pb,)).fetchone()[0]
+            db.set_candidate_archived(_ac, _pbc, True, operator="HR", role="hr")
+            c.ok(bool(db.get_candidate(_ac, _pbc).get("archived_at")),
+                 "归档规则：手动「归档」也归档（第二个入口）")
+            _ac.close()
+
+            # ⑨ 档案接口必须把面试/录用字段提到**顶层**
+            #    （档案弹层读的是 d.*；之前只在最新那条投递里，
+            #     输入框永远是空的 —— HR 看到"这一步必填"却看不到已登记的单位）
+            _dc = db.connect(os.path.join(work, "v129_detail.db"))
+            _mc2 = _dc.cursor()
+            _mc2.execute("INSERT INTO candidates (identity_key,name,created_at,updated_at) "
+                         "VALUES (?,?,?,?)", ("v129d:甲", "甲", db.now(), db.now()))
+            _dc.commit()
+            _daid = db.insert_application(_dc, {"candidate_id": _mc2.lastrowid, "channel": "测试"})
+            db.update_application_fields(_dc, _daid, interview_unit="稀土研究院",
+                                         interview_slot="09:30-10:30", interview_mode="现场面试",
+                                         interview_date="2026-10-20 09:30")
+            _det = db.candidate_detail(_dc, _mc2.lastrowid) or {}
+            c.ok(_det.get("interview_unit") == "稀土研究院"
+                 and _det.get("interview_slot") == "09:30-10:30"
+                 and _det.get("interview_mode") == "现场面试"
+                 and str(_det.get("interview_date") or "").startswith("2026-10-20"),
+                 "档案接口：面试单位/时段/方式/日期在**顶层**（弹层读的就是顶层）",
+                 f"单位={_det.get('interview_unit')!r} 时段={_det.get('interview_slot')!r}")
+            _dc.close()
+
+            # ⑥ 面试时间解析：时段取不到就只存日期（**不猜时间**）
+            c.ok(_interview_at("2026-10-20", "09:30-10:30") == "2026-10-20 09:30"
+                 and _interview_at("2026-10-20", "9：30-10:30") == "2026-10-20 09:30"
+                 and _interview_at("2026-10-20", "上午") == "2026-10-20"
+                 and _interview_at("瞎写", "09:30") is None,
+                 "面试时间解析：时段取不到只存日期、日期不合法则不回写")
+
+            # ⑦ 面试单位：**进入「待面试」之前**必填（业务方 2026-10-15 裁定）。
+            #    校验放在 db 层，所以卡片下拉 / 管道下拉 / 助手提案三条路径都拦得住。
+            # ⚠️ DEFAULT_STAGE 必须与配置一致且**在阶段表里**。
+            #   这里原来硬编码 "新投递"，配置改成「全部简历」后两边对不上 ——
+            #   界面正常（normalize 兜底），但主动提案规则永远匹配不上、静默产出 0 条。
+            c.ok(_sg.DEFAULT_STAGE == _sg.default_stage()
+                 and _sg.DEFAULT_STAGE in _sg.all_stages(),
+                 "初始阶段从配置读、且必须在阶段表里（防又写死一个字面量）",
+                 f"DEFAULT_STAGE={_sg.DEFAULT_STAGE!r} 阶段表={_sg.all_stages()}")
+            c.ok(_sg.required_fields("初筛通过", "待面试") == ["interview_unit"]
+                 and _sg.required_fields("全部简历", "初筛通过") == [],
+                 "面试单位必填挂在「初筛通过→待面试」这一步（不是最初那步）")
+            _rc = db.connect(os.path.join(work, "v129_require.db"))
+            _mc = _rc.cursor()
+            _mc.execute("INSERT INTO candidates (identity_key,name,created_at,updated_at) "
+                        "VALUES (?,?,?,?)", ("v129r:甲", "甲", db.now(), db.now()))
+            _rc.commit()
+            _paid = db.insert_application(_rc, {"candidate_id": _mc.lastrowid, "channel": "测试"})
+            db.set_application_stage(_rc, _paid, "初筛通过")
+            _blocked = False
+            try:
+                db.set_application_stage(_rc, _paid, "待面试")
+            except ValueError as _e:
+                _blocked = "面试单位" in str(_e)
+            c.ok(_blocked, "没登记面试单位时**推不到待面试**（且报错说清去哪填）")
+            db.update_application_fields(_rc, _paid, interview_unit="稀土研究院")
+            db.set_application_stage(_rc, _paid, "待面试")
+            c.ok(db.get_application(_rc, _paid)["stage"] == "待面试",
+                 "登记之后就能推进（校验不误伤）")
+            c.ok(_sg.is_interview_started("待面试") and _sg.is_interview_started("已面试")
+                 and not _sg.is_interview_started("初筛通过")
+                 and not _sg.is_interview_started("全部简历"),
+                 "面试单位标签只在**进入面试流程后**显示（初筛阶段挂个空的只是噪音）")
+            _rc.close()
 
             # ---- v1.13.6 回归：applied_at 显式传 None 要退回时间戳 ----
             _conn_ap = db.connect(db_path)
@@ -1902,7 +2502,7 @@ def main(verbose: bool = True) -> int:
             for _cid_x in (_cid_p1, _cid_p2):
                 db.insert_application(_c, {"candidate_id": _cid_x, "channel": "测试",
                                            "applied_at": db.now(), "score": 0.2,
-                                           "tier_suggested": "D"})
+                                           "tier_suggested": _HARD_T})
             _c.execute("UPDATE candidates SET archived_at = ? WHERE id = ?",
                        ("2026-01-01 09:00:00", _cid_p2))     # 充当"去年归档、已过期"的旧档案
             _c.commit()
@@ -2331,7 +2931,7 @@ def main(verbose: bool = True) -> int:
                                                "name": nm, "years_exp": 3})
                 aid = db.insert_application(_c, {"candidate_id": cid, "job_id": _jc,
                                                  "channel": "文件夹", "applied_at": db.now(),
-                                                 "score": 0.05, "tier_suggested": "D"})
+                                                 "score": 0.05, "tier_suggested": _HARD_T})
                 did = db.insert_document(_c, {"file_hash": f"regradehash{nm}", "candidate_id": cid,
                                               "application_id": aid, "file_name": f"{nm}.txt",
                                               "archived_path": "", "mime": "text/plain",
@@ -2374,8 +2974,8 @@ def main(verbose: bool = True) -> int:
                      for k in apps_before),
                  "预演不修改任何投递的分数与档位（看完再决定）")
             item_a = [x for x in rg["items"] if x.get("name") == "重算甲"][0]
-            c.ok(item_a["changed"] is True and item_a["old_tier"] == "D",
-                 "预演确实算出了差异（学历达标后不再由规则定档：原 D → 待模型分析）",
+            c.ok(item_a["changed"] is True and item_a["old_tier"] == _HARD_T,
+                 "预演确实算出了差异（学历达标后不再由规则定档：原最差档 → 待模型分析）",
                  f"{item_a['old_tier']}→{item_a['new_tier']}（来源 {item_a.get('tier_source')}）")
             item_k = [x for x in rg["items"] if x.get("name") == "重算丙"][0]
             c.ok(item_k["kept"] is True and "已确认" in (item_k.get("note") or ""),
@@ -2658,46 +3258,39 @@ def main(verbose: bool = True) -> int:
                  "换性别不改变评分与档位（性别不参与 grade()）",
                  f"男={g_m['score']} 女={g_f['score']} 无={g_n['score']}")
 
-            # 开关默认关闭 → 传了 gender 也不生效，并且要如实说明
+            # v1.29.4（业务方裁定"性别正常处理"）：性别是无开关的普通筛选条件
             _, st0_body = _asgi(srv.app, "GET", "/api/settings", {})
             st0 = json.loads(st0_body)
-            c.ok(st0.get("gender_filter_enabled") is False,
-                 "性别筛选开关出厂默认关闭",
-                 f"gender_filter_enabled={st0.get('gender_filter_enabled')}")
+            c.ok("gender_filter_enabled" not in st0,
+                 "性别筛选开关已随「正常处理」移除（设置里不再有这一项）",
+                 f"keys={sorted(k for k in st0 if k.startswith('gender'))}")
             _, b0_body = _asgi(srv.app, "GET", "/api/candidates", {})
             _, b1_body = _asgi(srv.app, "GET",
                                "/api/candidates?gender=%E5%A5%B3", {})
             b0, b1 = json.loads(b0_body), json.loads(b1_body)
-            c.ok(b1["count"] == b0["count"] and b1["gender_filter"]["applied"] is False
-                 and "关闭状态" in (b1["gender_filter"]["why"] or ""),
-                 "开关关闭时性别参数被忽略，并如实说明原因（不静默生效）",
-                 f"count {b0['count']}={b1['count']}；why={str(b1['gender_filter']['why'])[:22]}")
-            c.ok(b1.get("gender_facets") is None,
-                 "开关关闭时不返回性别分布（不给「顺手看一眼分布」的口子）")
+            c.ok(b1["gender_filter"]["applied"] is True
+                 and b1["count"] == (b1.get("gender_facets") or {}).get("女", b1["count"])
+                 and all((x.get("gender") or "") == "女" for x in b1["items"]),
+                 "性别筛选**无需任何开关**直接生效（结果里只剩女）",
+                 f"count={b1['count']} / 全部={b0['count']}")
+            c.ok((b1.get("gender_facets") or {}).get("全部") == b0["count"],
+                 "性别分布与全量口径一致（普通筛选项，分布随列表一起下发）",
+                 str(b1.get("gender_facets")))
 
-            # 打开开关：留痕 + 生效，且分布与结果一致
+            # 旧键兼容：外脚本仍可能 POST gender_filter_enabled —— 忽略且不报错
             _, set_on_body = _asgi(srv.app, "POST", "/api/settings", hr,
                                    json.dumps({"gender_filter_enabled": True}).encode())
             set_on = json.loads(set_on_body)
-            c.ok(set_on.get("gender_filter_enabled") is True and set_on.get("changed") is True,
-                 "开关可被打开并回话确认", str(set_on.get("note"))[:34])
-            _c = db.connect(db_path)
-            n_set_audit = _c.execute(
-                "SELECT COUNT(*) AS n FROM audit_log WHERE entity='settings' "
-                "AND action='update'").fetchone()["n"]
-            last_set = _c.execute(
-                "SELECT before, after, operator FROM audit_log WHERE entity='settings' "
-                "ORDER BY id DESC LIMIT 1").fetchone()
-            _c.close()
-            c.ok(n_set_audit >= 1 and last_set and "True" in (last_set["after"] or ""),
-                 "开启性别筛选写入审计（合规要看的凭证）",
-                 f"{n_set_audit} 条；{last_set['before']}→{last_set['after']}")
+            c.ok(set_on.get("ok") is True and "gender_filter_enabled" not in set_on
+                 and set_on.get("changed") is False,
+                 "旧键 gender_filter_enabled 被安全忽略（不报错、无行为、无留痕）",
+                 f"changed={set_on.get('changed')}")
             _, b2_body = _asgi(srv.app, "GET",
                                "/api/candidates?gender=%E5%A5%B3", {})
             b2 = json.loads(b2_body)
             c.ok(b2["gender_filter"]["applied"] is True
                  and all((x.get("gender") or "") == "女" for x in b2["items"]),
-                 "开关打开后性别筛选真正生效（结果里只剩女）",
+                 "性别筛选照常生效（与是否 POST 过旧键无关）",
                  f"count={b2['count']}")
             fac = b2.get("gender_facets") or {}
             c.ok(fac.get("女") == b2["count"] and sum(
@@ -2869,13 +3462,9 @@ def main(verbose: bool = True) -> int:
 
             _, set_off_body = _asgi(srv.app, "POST", "/api/settings", hr,
                                     json.dumps({"gender_filter_enabled": False}).encode())
-            c.ok(json.loads(set_off_body).get("gender_filter_enabled") is False,
-                 "开关可被关回去（列表恢复为全部候选人）")
-            _c = db.connect(db_path)
-            n_off = _c.execute("SELECT COUNT(*) AS n FROM audit_log WHERE entity='settings' "
-                               "AND action='update'").fetchone()["n"]
-            _c.close()
-            c.ok(n_off >= 2, "开与关都留痕（开关状态变化可追溯）", f"{n_off} 条")
+            _off = json.loads(set_off_body)
+            c.ok(_off.get("ok") is True and "gender_filter_enabled" not in _off,
+                 "旧键再 POST 一次仍被安全忽略（迁移期兼容，无副作用）")
 
             # ---- 邮箱配置：模式与账号不匹配时要提醒（"配了没反应"的根因） ----
             _, mx_body = _asgi(srv.app, "POST", "/api/mailbox/config", hr,
@@ -3270,7 +3859,7 @@ def main(verbose: bool = True) -> int:
                 """INSERT INTO applications (candidate_id, channel, applied_at, score,
                                              tier_suggested, stage, status,
                                              created_at, updated_at)
-                   VALUES (?,'邮箱',?,0.92,'A','新投递','待确认',?,?)""",
+                   VALUES (?,'邮箱',?,0.92,'A','全部简历','待确认',?,?)""",
                 (_cid_t, db.now(), db.now(), db.now()))
             _aid_t = _tc.execute("SELECT last_insert_rowid()").fetchone()[0]
             _tc.commit()
@@ -3326,7 +3915,7 @@ def main(verbose: bool = True) -> int:
 
             _row_a = _tc.execute("SELECT tier_final, status, stage FROM applications WHERE id=?",
                                  (_aid_t,)).fetchone()
-            c.ok(_row_a["tier_final"] is None and _row_a["stage"] == "新投递",
+            c.ok(_row_a["tier_final"] is None and _row_a["stage"] == "全部简历",
                  "⑥ **提案不自动执行**：档位与阶段原封不动，等 HR 确认",
                  f"tier_final={_row_a['tier_final']} stage={_row_a['stage']}")
 
@@ -3349,7 +3938,7 @@ def main(verbose: bool = True) -> int:
             _ap = actions.apply_proposal(_t_db, _pid_t, "approve", "hr", "hr")
             _row_b = _tc.execute("SELECT stage FROM applications WHERE id=?",
                                  (_aid_t,)).fetchone()
-            c.ok(_ap.get("ok") and _row_b["stage"] != "新投递",
+            c.ok(_ap.get("ok") and _row_b["stage"] != "全部简历",
                  "⑨ HR 确认后提案才落库生效（自动化 ≠ 自动决定）",
                  f"确认后 stage={_row_b['stage']}")
 
@@ -3426,7 +4015,7 @@ def main(verbose: bool = True) -> int:
             from app import feedback as _fb
             _uc = db.connect(os.path.join(work, "u_fb.db"))
             # 12 条已确认：6 一致 + 4 系统偏高 + 2 系统偏低
-            _cases = [("A", "A"), ("A", "A"), ("B", "B"), ("B", "B"), ("C", "C"), ("D", "D"),
+            _cases = [("A", "A"), ("A", "A"), ("B", "B"), ("B", "B"), ("C", "C"), ("C", "C"),
                       ("A", "B"), ("A", "B"), ("A", "B"), ("A", "B"), ("B", "A"), ("B", "A")]
             for _i, (_s, _f) in enumerate(_cases):
                 _uc.execute(
@@ -3454,7 +4043,9 @@ def main(verbose: bool = True) -> int:
             c.ok(_rep["same"] == 6 and _rep["high"] == 4 and _rep["low"] == 2,
                  "② 一致/偏高/偏低 计数正确",
                  f"一致 {_rep['same']} 偏高 {_rep['high']} 偏低 {_rep['low']}")
-            c.ok(sum(_rep["matrix"][t][t] for t in "ABCD") == _rep["same"],
+            # 遍历配置里的档位，不写死 "ABCD"（v1.29 档位并成三档后，
+            # `"D"` 不在矩阵里 → KeyError 直接把整个 U 组打成"自检异常"）
+            c.ok(sum(_rep["matrix"][t][t] for t in _tiers_mod.all_tiers()) == _rep["same"],
                  "③ 偏差矩阵对角线之和 = 一致数")
             _con = _fb.decision_report(_uc)
             c.ok(abs(_con["consistency"] - round(100.0 * _rep["same"] / 12, 1)) < 0.01,
@@ -3496,6 +4087,20 @@ def main(verbose: bool = True) -> int:
         try:
             from app import mail_send as _ms
             from app import mail_template as _mt
+            from app import mailbox as _mb
+
+            # v1.29 修：收件箱总数解析。`imaplib.select()` 返回的是 **bytes**，
+            # 原来写成 `str(data[0]).isdigit()` → `str(b'2')` 是 `"b'2'"`，
+            # 判定恒 False → total 永远是 0，界面出现"共 0 封，已列出最近 2 封"
+            # 这种自相矛盾的提示（任何邮箱都会中，与服务商无关）。
+            # 这条判据**不联网**，直接喂两种类型给解析函数 —— 联网才走到的分支
+            # 靠人工测是测不稳的，必须留一条离线判据把它钉住。
+            c.ok(_mb._imap_count([b"2"]) == 2 and _mb._imap_count(["37"]) == 37,
+                 "收件箱总数解析同时吃 bytes 与 str（否则永远显示「共 0 封」）",
+                 f"bytes={_mb._imap_count([b'2'])!r} str={_mb._imap_count(['37'])!r}")
+            c.ok(_mb._imap_count([]) == 0 and _mb._imap_count([b"* 3 EXISTS"]) == 0,
+                 "总数解析异常输入返回 0 而不是抛异常（预览页不许因脏应答 500）",
+                 f"空={_mb._imap_count([])!r} 脏={_mb._imap_count([b'* 3 EXISTS'])!r}")
 
             _ctx = _mt.build_ctx({"name": "陈志远", "edu_level": "硕士", "major": "材料加工工程",
                                   "years_exp": 6}, "工艺技术", "张老师",
@@ -3509,9 +4114,15 @@ def main(verbose: bool = True) -> int:
             c.ok("【待填：面试地点】" not in _r["text"],
                  "③ 已填写的运行时变量正常替换（不当成缺值）")
 
-            # 未配置账号/口令时**不得**发信，且错误信息里不含口令
-            _smtp_before = mb.load_config().get("smtp")
-            _bad = _ms.send_mail("someone@example.com", "t", "b")
+            # 未配置账号/口令时**不得**发信，且错误信息里不含口令。
+            # ⚠️ 必须**显式**喂一份"未配置"的 cfg，不能靠"本机恰好没配邮箱"这件事：
+            #    `send_mail`/`check_smtp` 的 cfg 传 None 时会去读真实的
+            #    `config/mailbox.json`。于是开发机一旦把企业邮箱配好（正常工作！），
+            #    这两条判据就反过来失败 —— 判据会随环境漂移，报的是假警。
+            #    （原来这里只把 `mb.load_config().get("smtp")` 读进 `_smtp_before` 却没用，
+            #      说明当时就意识到环境耦合，只是没解决。）
+            _NO_SMTP = {"smtp": {}, "imap": {}}
+            _bad = _ms.send_mail("someone@example.com", "t", "b", cfg=_NO_SMTP)
             # 未配置时有两条拦截路径（先查账号、再查授权码），两条都属于"如实说明原因"，
             # 断言不该把具体措辞写死——盯的是"必须被拒且给出可读原因"这个行为。
             c.ok(_bad.get("ok") is False and bool(_bad.get("error")),
@@ -3520,7 +4131,7 @@ def main(verbose: bool = True) -> int:
 
             # 「检查发信配置」走 check_smtp：检查配置不需要收件人——
             # 曾经走 send_mail(dry_run) 被收件人校验挡住，永远误报"收件人邮箱为空"。
-            _chk = _ms.check_smtp()
+            _chk = _ms.check_smtp(cfg=_NO_SMTP)
             c.ok(_chk.get("ok") is False and bool(_chk.get("error"))
                  and "收件人" not in (_chk.get("error") or ""),
                  "④b 检查发信配置不依赖收件人：未配置时报配置问题（不再误报收件人为空）",
@@ -3718,6 +4329,23 @@ def main(verbose: bool = True) -> int:
                  _fr.exp_label(1, True, f"{_y}-06")["label"])
             c.ok(_fr.exp_label(None, False, None)["kind"] == "unknown",
                  "⑥ 信息都没有时不猜：如实标「毕业时间未识别」")
+            # v1.29.4（业务方 2026-10-16）：「硕士 2024.9-至今」这类**在读生**——
+            # 不能被本科毕业年份判成"往届未就业"（真实案例：张思瑞）
+            c.ok(_fr.find_in_school("2024.9-至今\n四川大学(985)\n化学工程与技术\n工学硕士（保研）")
+                 is True,
+                 "⑦a 在读识别：时间段独立成行、学位在后几行（真实简历排版）")
+            c.ok(_fr.find_in_school("教育经历\n2024.09-至今 四川大学 硕士") is True,
+                 "⑦b 在读识别：时间段与学位同行")
+            c.ok(_fr.find_in_school("工作经历\n2021.03-至今 华润公司 软件工程师") is False,
+                 "⑦c 反例：工作行的「至今」不算在读")
+            c.ok(_fr.find_in_school("2020.09-2024.06 天津工业大学 本科") is False,
+                 "⑦d 反例：只写了已结束的教育段 → 不在读")
+            c.ok(_fr.find_in_school("2024.9-2027.6 北京航空航天大学 硕士") is True,
+                 "⑦e 在读识别：结束年份在未来（2027.6）同样是在读")
+            _e_in = _fr.exp_label(0, False, f"{_y-2}-06", in_school=True)
+            c.ok(_e_in["kind"] == "fresh" and "在读" in _e_in["label"],
+                 "⑦f 在读 + 两年前的本科毕业时间 → 应届（在读），不再判往届未就业",
+                 _e_in["label"])
         except Exception as _e:                    # noqa: BLE001
             c.ok(False, f"招聘对象身份自检异常：{type(_e).__name__}: {_e}")
 
@@ -3763,6 +4391,20 @@ def main(verbose: bool = True) -> int:
                  and _m6["fields"].get("direction") == "数字化工程师",
                  "⑧d 无性别的标题：姓名取『学校之后最后一个』，专业不串位",
                  f"姓名={_m6['fields'].get('name')} 专业={_m6['fields'].get('major')}")
+            # v1.29.5（业务方 2026-10-16 真实案例）：「朱鸿睿－男」里的**全角连字符**
+            # 旧分隔符不认 → 整条错位（专业→方向、姓名→专业）。钉死全角/变体横线。
+            _f7 = _sm.parse("科学研究-博士-四川大学-材料学-朱鸿睿－男")["fields"]
+            c.ok(_f7.get("name") == "朱鸿睿" and _f7.get("gender") == "男"
+                 and _f7.get("major") == "材料学" and _f7.get("direction") == "科学研究",
+                 "⑧e 全角「－」也当分隔符（真实案例：错位把姓名解析成了专业）",
+                 f"name={_f7.get('name')} gender={_f7.get('gender')} major={_f7.get('major')}")
+            # 姓名证据升级：只出现在「专业/院校」上下文里的"姓名"，不覆盖正文结果
+            _c8, _u8 = _sm.apply_to_candidate(
+                {"name": "朱鸿睿"}, {"fields": {"name": "材料学"}},
+                raw_text="四川大学（985）材料学专业 全日制学术性博士\n朱鸿睿\n")
+            c.ok(_c8.get("name") == "朱鸿睿",
+                 "⑧f 标题猜出的姓名只在专业/院校上下文里出现 → 不采信（结合正文）",
+                 f"name={_c8.get('name')}")
 
             _m4 = _sm.parse("转发的简历 麻烦看一下")
             c.ok(not _m4["fields"], "⑨ 认不出来的标题不给任何字段（不猜）", str(_m4["fields"]))

@@ -1,6 +1,11 @@
-"""分级层（尺子）：把投递归入 A/B/C/D 四档——**不淘汰、不丢弃**。
+"""分级层（尺子）：把投递归档——**不淘汰、不丢弃**。
 
-与"筛选器"的根本差别：硬性条件不足只降档为 D（暂不匹配当前岗位，转人才库待召回），
+档位字母与文案来自 `config/tiers.json`（唯一真源，见 `app/tiers.py`）：
+v1.29 起是 **A 推荐面试 / B 储备 / C 暂不匹配** 三档（原 A优先面试 +B建议面试 并入 A，
+原 D暂不匹配 改由 C 承担）。**代码里不写字面量** —— 写死的话人事处一改档位体系，
+提示词、工具校验、界面徽章会各漏一处，症状还不一样。
+
+与"筛选器"的根本差别：硬性条件不足只降档为**最差档**（暂不匹配，转人才库待召回），
 简历与投递记录始终留在库中；解析异常另打 "待人工判读" 标记，不参与排序。
 
 反幻觉约束：只有 `verified=1` 的技能才参与命中计算（见 `pipeline.normalize`），
@@ -18,23 +23,40 @@ from __future__ import annotations
 
 from . import majors as mj
 from . import normalize as nz
+from .. import tiers as tiers_mod
 
 EDU_RANK = {"大专": 1, "专科": 1, "本科": 2, "学士": 2, "研究生": 3, "硕士": 3, "博士": 4}
+
+
+def _edu_of(cand: dict) -> str:
+    """取候选人学历，**两个字段名都要认**（v2.0.1 修）。
+
+    ⚠️ 这是一个"字段名不一致导致学历门槛静默失效"的真 bug：
+    `extract()` 产出的键是 `education`，而 `db.candidate_detail()` 给的是 `edu_level`
+    —— `edu_gate` 只读 `education`，于是**凡是从库里取档案走进来的路径**
+    （`analyze_one` → `auto_insight`，即"入库即分析"）拿到的都是空值，
+    `c_rank=0` → `unknown=True` → **学历门槛从未生效**，学历不达标的人也能被模型给 A/B。
+    而入库/重新分析那条路（cand 来自 extract）读得到 `education`，门槛照常生效
+    —— 同一个候选人两条路结论不同，根子就在这。
+    `_cand_brief()` 早就写成 `cand.get("education") or cand.get("edu_level")`，
+    说明两个键并存是已知事实，只有这里漏了。
+    """
+    return str(cand.get("education") or cand.get("edu_level") or "").strip()
 
 
 def edu_gate(cand: dict, jd: dict) -> dict:
     """**学历门槛的唯一权威判定**（v1.24.15）。
 
     为什么要有这个函数，而不是让各处自己算一遍 `EDU_RANK`：
-    「学历不够就是 D」这条硬规则过去散落在判档、模型写档、写库守卫三处，
-    而其中两处算错了——`grade()` 在未归岗时返回 C（不是 D），
+    「学历不够就是最差档」这条硬规则过去散落在判档、模型写档、写库守卫三处，
+    而其中两处算错了——`grade()` 在未归岗时返回中间档（不是最差档），
     于是「模型可以合法地把学历不够的人改成 A 档」。
     现在只有一个出口算这条规则，其余地方一律调它，避免再各算各的。
 
     返回::
 
-        {"failed": bool,     # 学历明确不达标 → 必须 D
-         "unknown": bool,    # 学历没抽到 → 不能判 D，交给人工
+        {"failed": bool,     # 学历明确不达标 → 必须判 hard_shortfall_tier（配置项）
+         "unknown": bool,    # 学历没抽到 → 不能判最差档，交给人工
          "c_rank": int, "m_rank": int,
          "edu": str, "edu_min": str}
 
@@ -46,11 +68,11 @@ def edu_gate(cand: dict, jd: dict) -> dict:
     """
     must = (jd or {}).get("must") or {}
     if not (jd or {}).get("must") and not (jd or {}).get("preferred"):
-        # 没有对应岗位：门槛无从谈起，不判 D（也不需要 unknown 标记）
+        # 没有对应岗位：门槛无从谈起，不判最差档（也不需要 unknown 标记）
         return {"failed": False, "unknown": True, "c_rank": 0, "m_rank": 0,
-                "edu": (cand.get("education") or "").strip() or "学历未识别",
+                "edu": (_edu_of(cand) or "").strip() or "学历未识别",
                 "edu_min": ""}
-    edu = (cand.get("education") or "").strip()
+    edu = (_edu_of(cand) or "").strip()
     c_rank = EDU_RANK.get(edu, 0)
     m_rank = EDU_RANK.get(must.get("education_min") or "本科", 2)
     return {
@@ -74,17 +96,45 @@ def lock_tier(rule_tier: str | None, model_tier: str | None,
     `rule_tier` 取自 applications 行的历史值（不是本次判档结果），
     于是库内存 C 时模型就能改成 A。这里改成从 `gate` 现算，不再依赖历史值。
 
-    三条规则：
-      1. 学历明确不达标 → 一律 D，**不给模型任何选择权**（含模型给 D 时的对齐）；
-      2. 学历未识别 → 不判 D（信息缺失 ≠ 条件不达标），采信模型；
-      3. 学历达标 → 模型说了算；模型没给则用规则值。
+    三条规则（第 2、3 条 v2.0.1 收紧）：
+      1. 学历明确不达标 → 一律最差档，**不给模型任何选择权**（含模型给该档时的对齐）；
+      2. 学历未识别 → 信息缺失 ≠ 条件不达标 → 不得给最差档，最低取中性档；
+      3. 学历达标 → 采信模型，但**不接受最差档**；模型给了就下调一档
+         （配置顺序上比最差档好一档，A/B/C 三档时即 B「储备」）。
+
+    **底线（v2.0.1，业务方定，不可逾越）**：最差档是**学历不达标专用**的否定结论。
+    业务方原话："硕士投递工艺技术是达标的，除非学历不够是不能判定为 C" ——
+    学历达标的人，技能再弱，最低也只能是「储备」，**模型也不允许把他判成最差档**。
+    （第 2 条原来写的是"采信模型"，与本文档自述的"不判最差档"不符，顺手补齐。）
+    模型没给档位时用规则值，同样受 2、3 两条约束。
     """
+    _tiers = tiers_mod.all_tiers()
+    _hard = tiers_mod.hard_shortfall_tier()          # 配置项，原来这里写死 "D"
+    # 「最差档的上一档」：学历达标/未识别时，模型若给最差档就下调到这里
+    _i = _tiers.index(_hard) if _hard in _tiers else max(len(_tiers) - 1, 0)
+    _above_hard = _tiers[_i - 1] if _i > 0 else _hard
+
+    # ① 学历明确不达标 —— 唯一的硬门槛，模型没有任何选择权
     if gate is not None and gate.get("failed"):
-        return "D", (f"学历门槛（{gate.get('edu')}低于岗位要求 {gate.get('edu_min')}，"
-                     f"由系统直接判 D）")
-    if model_tier in ("A", "B", "C", "D"):
+        return _hard, (f"学历门槛（{gate.get('edu')}低于岗位要求 {gate.get('edu_min')}，"
+                       f"由系统直接判 {_hard}）")
+
+    # ②③ 学历达标 / 未识别 —— 都不允许给出「最差档」这个否定结论
+    _unknown = bool(gate is not None and gate.get("unknown"))
+    _floor = tiers_mod.mid_tier() if _unknown else _above_hard
+    _who = "学历未识别" if _unknown else "学历已达标"
+
+    if model_tier in _tiers:
+        if tiers_mod.rank(model_tier) > tiers_mod.rank(_floor):
+            return _floor, (f"{_who}，模型建议的 {model_tier} 触到档位底线 → "
+                            f"下调为 {_floor}（{tiers_mod.label(_floor)}）")
         return model_tier, "模型"
-    return rule_tier, "学历门槛" if rule_tier == "D" else "规则"
+    if rule_tier in _tiers:
+        if tiers_mod.rank(rule_tier) > tiers_mod.rank(_floor):
+            return _floor, (f"{_who}，规则档 {rule_tier} 触到档位底线 → "
+                            f"下调为 {_floor}（{tiers_mod.label(_floor)}）")
+        return rule_tier, "学历门槛" if rule_tier == _hard else "规则"
+    return rule_tier, "规则"
 
 
 def _evidence_map(cand: dict) -> dict[str, str]:
@@ -116,12 +166,12 @@ def grade(cand: dict, jd: dict, job_confirmed: bool = False) -> dict:
     A/B/C 阈值分档——那些是"系统假装很精确"的产物。实际上 HR 看的是
     模型的分析文字和业务方向，不是小数点后三位的分数。
     本函数只做两件事：
-      1. 学历门槛检查（唯一能判 D 的条件）；
+      1. 学历门槛检查（唯一能判最差档的条件）；
       2. 技能命中/缺失（给模型和展示用）。
     其余全部交给模型。模型不可用时调用方给 C（中性默认）。
 
-    `job_confirmed`（v1.24.15 起只影响**提示文案**，不再影响是否判 D）：
-    这把尺子是否来自已明确归岗的投递。未归岗而判 D 时，risks 里会写明
+    `job_confirmed`（v1.24.15 起只影响**提示文案**，不再影响是否判最差档）：
+    这把尺子是否来自已明确归岗的投递。未归岗而判最差档时，risks 里会写明
     "按系统建议岗位的学历门槛判定"，让 HR 知道结论的依据不是已确认的岗位。
     """
     must = jd.get("must", {})
@@ -135,7 +185,14 @@ def grade(cand: dict, jd: dict, job_confirmed: bool = False) -> dict:
     c_rank = gate["c_rank"]
 
     # —— 技能命中/缺失（给模型和展示用，不计分）——
-    skills = set(_skill_names(cand.get("skills")))
+    # v2.0.1：命中只认**已核验**技能（简历原文有出处）。未核验项是"岗位 JD 的词汇"
+    # 被补进技能表的结果，算成命中会造出假命中（实测"分析化学的人命中真空熔铸"），
+    # 而这一行命中/缺失会进给模型的提示词，直接左右档位结论。
+    skills = set(_skill_names(cand.get("skills"), verified_only=True))
+    # ⚠️ 但「技能有没有抽到」是另一回事，必须用**未过滤**的名字：
+    # 抽到了却没证据 ≠ 信息缺失，后者是要 HR 去补字段的（missing_fields 会写进审计
+    # 并在界面提示"缺：技能"）。两个口径混用会让"技能全未核验"的人被误标成缺技能。
+    _all_skill_names = set(_skill_names(cand.get("skills")))
     ev = _evidence_map(cand)
     req, bonus_pool = resolve_requirements(jd)
     hit = [s for s in req if s in skills]
@@ -154,22 +211,25 @@ def grade(cand: dict, jd: dict, job_confirmed: bool = False) -> dict:
                              or cand.get("education_major"), major_required)
     major_check["via"] = cand.get("major_via") or "规则"
 
-    # —— 分档：D 只看学历，其余一律 C（等模型给建议）——
-    # v1.24.15：判 D **不再要求 job_confirmed**。
-    # 过去"未归岗就不判 D"是为了避免用猜出来的建议岗位判死人，
-    # 但代价是——学历不够的人在未归岗时被判成 C，而 C 是模型可以合法改写的档，
-    # 于是"学历不够直接判 D"这条规则事实上只在已归岗时才成立。
-    # 现在由 `edu_gate` 兜底：没有对应岗位（jd 为空）时不判 D，
-    # 有岗位（无论归岗还是系统建议）且学历明确不达标 → 一律 D。
+    # —— 分档：最差档只看学历，其余留给模型给建议 ——
+    # v1.24.15：判最差档 **不再要求 job_confirmed**。
+    # 过去"未归岗就不判"是为了避免用猜出来的建议岗位判死人，
+    # 但代价是——学历不够的人在未归岗时落到了**中间档**，而中间档是模型可以合法改写的档，
+    # 于是"学历不够直接判最差档"这条规则事实上只在已归岗时才成立。
+    # 现在由 `edu_gate` 兜底：没有对应岗位（jd 为空）时不判最差档，
+    # 有岗位（无论归岗还是系统建议）且学历明确不达标 → 一律判 `hard_shortfall_tier`（配置项）。
+    # v1.29：档位字母/最差档/中性档全部来自 config/tiers.json，代码不写字面量。
     tier = None
     if gate["failed"]:
-        tier = "D"
+        tier = tiers_mod.hard_shortfall_tier()
         reasons.append(f"学历{gate['edu']}低于岗位要求（{gate['edu_min']}）")
         risks.append("学历不达本岗位门槛，本岗位暂不匹配；建议保留入池，供其他岗位召回")
         if not job_confirmed:
             risks.append(f"该投递尚未明确归岗，此处按系统建议岗位「{_job_hint(jd)}」的学历门槛判定")
     elif gate["unknown"]:
-        tier = "C"
+        # 学历未识别：只给一个**中性档**并提示人工核对。不能判最差档 ——
+        # 那是"否定结论"，而信息缺失只是"没读到"，把人判死是凭空造结论。
+        tier = tiers_mod.mid_tier()
         risks.append("学历未识别，请人工核对")
 
     if hit:
@@ -188,12 +248,12 @@ def grade(cand: dict, jd: dict, job_confirmed: bool = False) -> dict:
         missing_fields.append("姓名")
     if years is None:
         missing_fields.append("年限")
-    if not skills:
+    if not _all_skill_names:
         missing_fields.append("技能")
     needs_review = bool(missing_fields)
 
     return {
-        "tier_suggested": tier,           # "D" 或 None（等模型给建议）
+        "tier_suggested": tier,           # 最差档（学历门槛）/ 中性档（学历未识别）/ None（等模型给建议）
         "score": None,                    # v1.12 移除加权打分：没有分数就是没有，不填 0 冒充
         "reasons": reasons,
         "risks": risks,
@@ -219,7 +279,7 @@ def grade(cand: dict, jd: dict, job_confirmed: bool = False) -> dict:
 # 专业大类匹配（v1.6 → v1.7 开放词表改造）
 # ============================================================
 # 为什么要有这一层：关键词级的命中/缺失只能回答"哪几项技能对上了"，
-# **回答不了"这个人的专业方向对不对口"**。实战里 D 档最常见的真实原因是
+# **回答不了"这个人的专业方向对不对口"**。实战里最差档最常见的真实原因是
 # "大类错配"——候选人是干软件的，岗位要的是工艺，于是必需技能一项都对不上，
 # 看上去像"这人条件差"，其实是"方向不同"。把大类层单独算出来，
 # 解释就从"缺 3 项技能"升级为"专业方向不对口"，HR 一眼能看懂。
@@ -253,13 +313,20 @@ def guess_major_family(major: str | None) -> str:
     return mj.category_of(major)
 
 
-def _skill_names(items) -> list[str]:
+def _skill_names(items, verified_only: bool = False) -> list[str]:
     """技能项取名字：调用方可能给技能名字符串，也可能给完整技能字典
     （`candidate_detail` 的 skills 带 evidence/verified/category）。
 
     两种都要认——只处理字符串时，传字典进来会在 `cat_of.get(...)` 处直接抛
     `TypeError: unhashable type: 'dict'`（自检「S续」用完整档案调 major_match 时抓到）。
     生产路径恰好都传了字符串，所以这个坑一直没暴露，但接口本身不该只认一种入参。
+
+    `verified_only=True`（v2.0.1）= **只取简历原文有出处的技能**，命中判定专用。
+    为什么必须分出来：未核验项算"命中"会造出**假命中** —— 实测出现过
+    "分析化学背景的人命中 真空熔铸/热处理/材料成型"，这三项在简历里根本找不到
+    出处（只是岗位 JD 的词汇被补进了技能表），却被算成命中、还写进给模型的提示词，
+    把分析结论往错的方向带（业务方报的"工艺技术被判 C"就是这条链上的）。
+    字符串入参没有核验信息（老接口形态），此时保持原行为、不误伤。
     """
     out: list[str] = []
     for s in items or []:
@@ -267,8 +334,11 @@ def _skill_names(items) -> list[str]:
             out.append(s)
         elif isinstance(s, dict):
             n = s.get("name") or s.get("canonical_name")
-            if n:
-                out.append(str(n))
+            if not n:
+                continue
+            if verified_only and not s.get("verified"):
+                continue
+            out.append(str(n))
     return out
 
 

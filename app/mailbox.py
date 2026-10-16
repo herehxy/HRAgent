@@ -42,7 +42,11 @@ DEFAULT_CONFIG = {
     "eml_dir": "data/mail_in",
     "folder_dir": "data/resumes",        # 手工导入简历的本地文件夹（界面上要看得见）
     "archive_dir": "data/archive",
-    "attachment_ext": [".pdf", ".docx", ".doc", ".txt", ".md"],
+    # v1.27：默认白名单补上图片格式 —— 作品集、成绩单、证书扫描件大量是
+    # jpg/png。**不加就会被 extract_attachments 直接丢弃**，等于"收不到"。
+    # 它们按 kind='other' 归档，不进人才库（见 classify_attachment）。
+    "attachment_ext": [".pdf", ".docx", ".doc", ".txt", ".md",
+                       ".jpg", ".jpeg", ".png", ".xlsx", ".xls"],
     "max_attachment_mb": 20,
     "imap": {
         "host": "",
@@ -97,11 +101,17 @@ def resolve_dir(value: str) -> str:
 # ---------------------------------------------------------------- 配置读写（供界面）
 
 _SECRET_DEFAULT_PATH = os.path.join(BASE, "config", "imap.secret")
+# v1.27：发信口令**独立文件**（config/smtp.secret）。
+# 为什么必须分开：原来收发信共用 imap.secret，于是"收信 A 邮箱、发信 B 邮箱"
+# 这种配置根本配不出来 —— 换发信账号就要把收信账号的授权码顶掉，
+# 而同一个服务商下两者授权码往往还不是同一个（企业邮可分开授权）。
+# 关键：**老配置不迁移**（见 read_smtp_secret 的回退），避免升级即失效。
+_SMTP_SECRET_DEFAULT_PATH = os.path.join(BASE, "config", "smtp.secret")
 
 # UI 可编辑、且允许写回 mailbox.json 的顶层键（白名单，避免误写入口径）
 _EDITABLE_KEYS = {"mode", "eml_dir", "folder_dir", "archive_dir", "attachment_ext",
                   "max_attachment_mb", "imap", "dedup",
-                  # v1.8.3 发信：SMTP 服务器配置（口令仍走 imap.secret，不在这里）
+                  # v1.8.3 发信：SMTP 服务器配置（口令走各自的 .secret 文件，不在这里）
                   "smtp"}
 
 
@@ -133,7 +143,7 @@ def save_config(updates: dict, path: str | None = None) -> dict:
 
 
 def read_secret(path: str | None = None) -> str | None:
-    """读取 IMAP 口令（config/imap.secret，0600）。不存在返回 None。"""
+    """读取**收信**（IMAP）口令（config/imap.secret，0600）。不存在返回 None。"""
     full = path or _SECRET_DEFAULT_PATH
     if os.path.exists(full):
         with open(full, encoding="utf-8") as fh:
@@ -143,8 +153,46 @@ def read_secret(path: str | None = None) -> str | None:
 
 
 def write_secret(password: str, path: str | None = None) -> None:
-    """写入 IMAP 口令到密钥文件，权限收紧为 0600（仅本用户可读）。"""
+    """写入**收信**（IMAP）口令到密钥文件，权限收紧为 0600（仅本用户可读）。"""
     full = path or _SECRET_DEFAULT_PATH
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "w", encoding="utf-8") as fh:
+        fh.write((password or "").strip())
+    try:
+        os.chmod(full, 0o600)
+    except OSError:
+        pass  # 某些挂载不支持 chmod，不强求
+
+
+def read_smtp_secret(path: str | None = None) -> str | None:
+    """读取**发信**（SMTP）口令（config/smtp.secret，0600）。
+
+    回退规则（v1.27）：`smtp.secret` 不存在时**回退读 imap.secret**。
+    为什么回退而不是直接判无：v1.26 及之前收发信共用一个口令文件，
+    升级后若一律判"没口令"，**已经能正常发信的部署会立刻发不出去**。
+    一旦 HR 在界面上单独保存了发信授权码，就落到 smtp.secret，两边彻底分开。
+
+    ⚠️ 回退时传的必须是**同一个目录**下的 imap.secret：
+    传了 `path` 就不能用无参 `read_secret()`（那会跳到 BASE 下，
+    测试里用临时目录时会读到"不存在"→ 回退静默失效，正是本次实测抓到的那条）。
+    """
+    full = path or _SMTP_SECRET_DEFAULT_PATH
+    if os.path.exists(full):
+        with open(full, encoding="utf-8") as fh:
+            v = fh.read().strip()
+            if v:
+                return v
+    return read_secret(_imap_secret_beside(full))
+
+
+def _imap_secret_beside(smtp_path: str) -> str:
+    """与 `smtp_path` 同目录的 imap.secret 路径。"""
+    return os.path.join(os.path.dirname(smtp_path), "imap.secret")
+
+
+def write_smtp_secret(password: str, path: str | None = None) -> None:
+    """写入**发信**（SMTP）口令到独立密钥文件（config/smtp.secret，0600）。"""
+    full = path or _SMTP_SECRET_DEFAULT_PATH
     os.makedirs(os.path.dirname(full), exist_ok=True)
     with open(full, "w", encoding="utf-8") as fh:
         fh.write((password or "").strip())
@@ -185,6 +233,28 @@ def test_imap(host: str, port: int, ssl_on: bool, user: str, password: str,
             pass
 
 
+def _imap_count(data) -> int:
+    """把 `IMAP4.select()` 的应答解析成邮件总数（解析不出来返回 0）。
+
+    ⚠️ **必须同时吃 bytes 和 str**。`imaplib` 返回的是 **bytes**
+    （`select()` → `[b'2']`），而原来写的是 `str(data[0]).isdigit()`
+    —— `str(b'2')` 是 `"b'2'"`，`.isdigit()` **恒为 False**，
+    于是 total 永远算成 0。症状是企业微信邮箱/腾讯企业邮上都显示
+    「连接成功：INBOX 共 **0** 封，已列出最近 2 封」——**自相矛盾**，
+    HR 会以为收件箱是空的、进而怀疑整个配置没生效。
+    这个错误与邮箱服务商无关，任何 IMAP 服务器都会中；因为只在连真实
+    邮箱时才走到，自检套件（不联网）没有覆盖到，所以一直没被发现。
+
+    抽成独立纯函数是为了能被**离线判据**直接调用（见 tests/selftest.py 的邮件组）。
+    """
+    if not data:
+        return 0
+    v = data[0]
+    if isinstance(v, (bytes, bytearray)):
+        v = v.decode("ascii", "ignore")
+    return int(v) if str(v).strip().isdigit() else 0
+
+
 def preview_imap(host: str, port: int, ssl_on: bool, user: str, password: str,
                  folder: str = "INBOX", limit: int = 10, timeout: int = 20,
                  exts: tuple[str, ...] = (".pdf", ".docx", ".doc", ".txt", ".md")) -> dict:
@@ -212,7 +282,7 @@ def preview_imap(host: str, port: int, ssl_on: bool, user: str, password: str,
         typ, data = conn.select(folder or "INBOX", readonly=True)
         if typ != "OK":
             return {"ok": False, "error": f"登录成功但无法打开文件夹「{folder or 'INBOX'}」"}
-        total = int(data[0]) if data and str(data[0]).isdigit() else 0
+        total = _imap_count(data)
         typ, box = conn.search(None, "ALL")
         ids = (box[0].split() if typ == "OK" and box and box[0] else [])
         recent = ids[-int(limit):] if ids else []
@@ -312,8 +382,48 @@ def _dt(value: str | None) -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+# ---------------------------------------------------------------- 附件分类（v1.27）
+#
+# 问题：求职邮件除简历外常带作品集、成绩单、证书扫描件、身份证/学位证照片。
+# 过去**所有**白名单附件都走完整入库链路，于是这些文件解析不出姓名电话，
+# 会各自被当成一个"解析失败的新人"塞进人才库 —— 一封多附件邮件能凭空多出几个人。
+#
+# 判定必须**保守**（宁可漏判成简历，也不要把真简历当附件丢掉）：
+#   命中任一"是简历"的强特征 → resume（进完整链路）
+#   命中任一"确定不是简历"的强特征 → other（只归档）
+#   都不命中 → **看这封邮件有几个附件**：只有一个 → 当简历（保住"单附件裸投"这种
+#   最常见的情况）；有多个 → 仍当简历，因为把真简历误判成附件等于丢件，
+#   多出来的人可以在人才库里看到并归档，代价远小于丢简历。
+_RESUME_HINTS = ("简历", "resume", "cv", "求职信", "自荐信", "应聘")
+_OTHER_HINTS = ("作品", "作品集", "成绩单", "学位证", "毕业证", "身份证", "学位证书",
+                "毕业证书", "获奖", "证书", "证明", "推荐信", "职称", "论文",
+                "专利", "附件材料", "支撑材料", "个人陈述", "transcript", "portfolio")
+
+
+def classify_attachment(filename: str, total: int = 1) -> str:
+    """判断一个附件是简历还是其他材料。返回 'resume' / 'other'。
+
+    `total` = 这封邮件的附件总数（判定多附件时的兜底口径，见上方说明）。
+    纯规则、**不调模型**：这决定的是"要不要给人建档"，误判代价不对称，
+    模型的不确定性在这里没有优势。规则也便于 HR 理解为什么某个附件被单列出来。
+    """
+    name = (filename or "").lower()
+    if any(h in name for h in _OTHER_HINTS):
+        return "other"
+    if any(h in name for h in _RESUME_HINTS):
+        return "resume"
+    # 无扩展名/未知类型（如 `1`、`image`）：不猜，当附件
+    if not name.rsplit(".", 1)[-1] in ("pdf", "doc", "docx", "txt", "md", "rtf"):
+        return "other"
+    return "resume"
+
+
 def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:
-    """抽取白名单内的附件。返回 [{filename, mime, data}]。"""
+    """抽取白名单内的附件。返回 [{filename, mime, data, kind}]。
+
+    v1.27：每条带 `kind`（resume / other），由 `classify_attachment` 判定。
+    上层 `ingest.ingest_mails` 据此分流：resume 走完整入库，other 只归档。
+    """
     exts = tuple(e.lower() for e in cfg.get("attachment_ext", []))
     limit = int(cfg.get("max_attachment_mb", 20)) * 1024 * 1024
     out: list[dict] = []
@@ -345,6 +455,10 @@ def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:
             "mime": part.get_content_type(),
             "data": data,
         })
+    # 先抽完再定kind：`classify_attachment` 需要知道本封邮件共有几个附件
+    _total = len(out)
+    for _a in out:
+        _a["kind"] = classify_attachment(_a["filename"], _total)
     return out
 
 
@@ -406,11 +520,20 @@ def _imap_password(imap_cfg: dict) -> str | None:
     return None
 
 
-def fetch_imap(cfg: dict, cursor: str | None = None, limit: int = 200) -> tuple[list[dict], str]:
-    """IMAP 只读增量拉取。返回（邮件列表，新游标）。
+def iter_imap(cfg: dict, cursor: str | None = None, limit: int = 200):
+    """IMAP 只读增量拉取（**生成器版**，v1.29.4）。
 
-    只读保证：`select(readonly=True)` 使服务端不会因本次会话置位 \\Seen；
-    取正文用 `BODY.PEEK[]`（不带 PEEK 的 BODY[] 会隐式置已读）。
+    为什么拆成生成器：收取进度要"先报总数、再实时报每一封"（业务方要求），
+    并且要支持"读完当前这封就停"。原 `fetch_imap` 一次性循环完才返回，
+    中途既报不了进度、也没法停。连接持有在生成器生命周期内，
+    调用方停止迭代 / close 时 finally 里正常 logout。
+
+    产出：
+      ("total", N)   —— 先给总数（随后开始逐封下载）
+      ("mail", dict) —— 每封解析好的邮件（含 uid / mailbox）
+
+    只读保证与 `fetch_imap` 完全一致：`select(readonly=True)` 使服务端不会因
+    本次会话置位 \\Seen；取正文用 `BODY.PEEK[]`（不带 PEEK 的 BODY[] 会隐式置已读）。
     """
     ic = cfg.get("imap", {})
     if not ic.get("host"):
@@ -433,16 +556,16 @@ def fetch_imap(cfg: dict, cursor: str | None = None, limit: int = 200) -> tuple[
         start = (int(cursor) + 1) if (cursor or "").isdigit() else 1
         typ, data = conn.uid("search", None, f"UID {start}:*")
         if typ != "OK":
-            return [], cursor or ""
+            yield ("total", 0)
+            return
         uids = [u for u in (data[0] or b"").split() if u]
         # ⚠️ 必须取**最旧**的一批（uids[:limit]），不能取最新的（uids[-limit:]）。
         # UID 升序返回，首次接入存量邮箱时 cursor 为空 → start=1 → 返回全部；
         # 若只保留最新 limit 封、又把游标推到最大 UID，最旧的一批简历就
         # **永久漏收**（下次 start = max+1 直接空结果）。取最旧 + 游标停在
         # 最后成功处理的那封，才保证多轮拉取不丢件。
-        uids = uids[:limit]
-        mails: list[dict] = []
-        newest = cursor or ""
+        uids = uids if int(limit) <= 0 else uids[:int(limit)]   # v1.29.4：limit<=0 = 不限量（"一次收完"用）
+        yield ("total", len(uids))
         for uid in uids:
             uid_str = uid.decode()
             typ, payload = conn.uid("fetch", uid, "(BODY.PEEK[])")
@@ -451,14 +574,27 @@ def fetch_imap(cfg: dict, cursor: str | None = None, limit: int = 200) -> tuple[
             mail = parse_eml_bytes(payload[0][1], cfg, fallback_id=f"imap:{folder}:{uid_str}")
             mail["uid"] = uid_str
             mail["mailbox"] = folder
-            mails.append(mail)
-            newest = uid_str
-        return mails, newest
+            yield ("mail", mail)
     finally:
         try:
             conn.logout()
         except Exception:
             pass
+
+
+def fetch_imap(cfg: dict, cursor: str | None = None, limit: int = 200) -> tuple[list[dict], str]:
+    """IMAP 只读增量拉取（一次性版）。返回（邮件列表，新游标）。
+
+    现在只是 `iter_imap` 的薄封装 —— 拉取逻辑**只有一份**，
+    "生成器版"与"一次性版"不可能分叉（游标口径随之自动一致）。
+    """
+    mails: list[dict] = []
+    newest = cursor or ""
+    for kind, item in iter_imap(cfg, cursor, limit):
+        if kind == "mail":
+            mails.append(item)
+            newest = item.get("uid") or newest
+    return mails, newest
 
 
 # ---------------------------------------------------------------- 统一入口

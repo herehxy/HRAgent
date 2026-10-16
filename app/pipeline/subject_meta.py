@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 
 #: 段间分隔符：+ - _ / ｜ 空格 顿号 等（投递方写法不统一，全部当分隔符）
-_SEP = re.compile(r"[+\-—_/\\|｜·•,，、;；:：\s\u3000]+")
+_SEP = re.compile(r"[+\-—–―－﹣_/\\|｜·、，,;；:：\s\u3000]+")
 
 #: 主题/文件名前后的修饰：`【应聘】`、`(简历)`、`应聘-`、`简历_` 等
 _DECOR = re.compile(r"[（(【\[][^）)】\]]{0,12}[）)】\]]")
@@ -189,6 +189,34 @@ def parse(text: str) -> dict:
 #: 让标题去改它们等于绕过了"反幻觉"那道闸。
 _OVERRIDABLE = ("name", "education", "school", "major", "gender")
 
+#: "教育/专业上下文"词表：标题猜出的姓名如果在原文里**只**出现在这类行里，
+# 就不足以作证（实测坑：错位解析出的「材料学」恰好在"…材料学专业…"行里，
+# 旧的"只要出现过就行"校验全数放行，候选人名字变成了专业名）。
+_EDU_CTX_WORDS = ("专业", "学院", "大学", "学校", "学位", "研究方向", "课程",
+                  "毕业", "就读", "学历")
+
+
+def _name_evidence(raw_text: str, name: str) -> str:
+    """标题/文件名里猜出的姓名，在原文里的证据等级：'ok' | 'absent' | 'edu_only'。
+
+    · ok     ：有任意一处"中性出现"（独立成行 / 姓名：XX / 正常叙述）→ 可采信；
+    · absent  ：原文里压根找不到；
+    · edu_only：找得到，但每一处都坐在"专业/院校/学位"这类教育上下文里
+                （大概率是错位解析把专业/方向/学校当成了姓名）。
+    原文为空（图片型/未解析）时返回 ok —— 维持旧行为，不因此拒绝。
+    """
+    if not raw_text:
+        return "ok"
+    seen = False
+    for ln in str(raw_text).splitlines():
+        if name not in ln:
+            continue
+        seen = True
+        if not any(w in ln for w in _EDU_CTX_WORDS):
+            return "ok"
+    return "edu_only" if seen else "absent"
+
+
 
 def apply_to_candidate(cand: dict, meta: dict, raw_text: str = "") -> tuple[dict, list[str]]:
     """把主题/文件名解析到的字段写进抽取结果，返回 `(cand, 实际采用的字段名)`。
@@ -211,11 +239,27 @@ def apply_to_candidate(cand: dict, meta: dict, raw_text: str = "") -> tuple[dict
         if not v:
             continue
         old = cand.get(k)
-        if old and str(old) != str(v):
-            if k == "name" and raw_text and str(v) not in raw_text:
-                conflicts.append(f"姓名（标题/文件名写「{v}」，但简历原文里没有，"
-                                 f"保留原文抽出的「{old}」）")
+        if k == "name":
+            # 姓名与其它字段不一样：它是"按位置猜"出来的，必须过证据关。
+            # v1.29.5（业务方 2026-10-16）：证据标准从"出现过就行"升级为
+            # "要像在说人"——只出现在专业/院校上下文里的名字（错位产物）不采信。
+            ev = _name_evidence(raw_text, str(v))
+            if ev == "edu_only" or (ev == "absent" and old and str(old) != str(v)):
+                if old and str(old) != str(v):
+                    conflicts.append(
+                        f"姓名（标题/文件名写「{v}」，但简历原文里找不到、或只出现在"
+                        f"专业/院校上下文里，保留正文抽出的「{old}」）")
+                else:
+                    conflicts.append(
+                        f"姓名（标题/文件名写「{v}」，原文里只在专业/院校上下文出现，"
+                        "未采用，请人工确认）")
                 continue
+            if old and str(old) != str(v):
+                conflicts.append(f"姓名（正文抽取为「{old}」，以标题为准）")
+            cand[k] = v
+            used.append(label[k])
+            continue
+        if old and str(old) != str(v):
             conflicts.append(f"{label[k]}（正文抽取为「{old}」，以标题为准）")
         cand[k] = v
         used.append(label[k])

@@ -20,10 +20,13 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
+# v1.29：档位字母/顺序的唯一真源（原来在本文件里又抄了一份 A/B/C/D）
+from . import tiers as tiers_mod
+
 #: 档位高低（越大越好）。偏差 = 建议档位序 - 实际档位序：
 #: 正数=系统给高了（偏高），负数=系统给低了（偏低）
-TIER_ORDER = {"A": 4, "B": 3, "C": 2, "D": 1}
-TIERS = ["A", "B", "C", "D"]
+TIER_ORDER = {t: len(tiers_mod.all_tiers()) - i for i, t in enumerate(tiers_mod.all_tiers())}
+TIERS = tiers_mod.all_tiers()
 
 #: 少于这么多条有效反馈就只报"样本不足"
 MIN_SAMPLE = 10

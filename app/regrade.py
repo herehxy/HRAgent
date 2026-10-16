@@ -73,7 +73,7 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
     """把 `job_id` 下所有投递按当前 JD 重算系统建议。返回逐人差异报告。
 
     v1.12 口径：档位不再由规则打分决定，所以重算 = **学历门槛重判 + 重新问一次模型**。
-    学历不达标直接判 D（不问模型）；达标才调模型给 A/B/C。
+    学历不达标直接判最差档（当前配置为 C，不问模型）；达标才调模型给 A/B/C。
     `apply=False` 为预演：完整算一遍差异，但**不写任何业务数据**，
     只留一条 `regrade_preview` 审计（"谁在何时看了这次重算的结果"本身值得留痕）。
     """
@@ -110,11 +110,11 @@ def regrade_job(conn: sqlite3.Connection, job_id: int, jd: dict, tiers: dict,
         if _mj.get("major_canonical"):
             cand["major_canonical"] = _mj["major_canonical"]
             cand["major_via"] = _mj.get("major_via") or "规则"
-        # 按某个具体岗位重算它下面的投递：岗位明确 -> 允许按学历判 D
+        # 按某个具体岗位重算它下面的投递：岗位明确 -> 学历门槛照常判（最差档）
         g = grade(cand, jd, job_confirmed=True)
-        # **档位重算（v1.12）**：规则只给学历门槛结论（不达标=D），
+        # **档位重算（v1.12）**：规则只给学历门槛结论（不达标判最差档），
         # 达标时再问一次模型——HR 改的是 JD/尺子，档位本就该跟着新要求重新判断。
-        # 学历不达标就不问了：结论已定（D），省一次调用也避免模型把硬门槛"说上去"。
+        # 学历不达标就不问了：结论已定（最差档），省一次调用也避免模型把硬门槛"说上去"。
         tier_src = "学历门槛"
         _gate = tier_mod.edu_gate(cand, jd)
         if use_llm and not _gate.get("failed"):
@@ -318,7 +318,8 @@ def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
                     (f"模型未判断出对应岗位（在招 {len(jobs)} 个），保持待指定" if use_llm
                      else f"模型未启用，未做归岗判断（在招 {len(jobs)} 个），保持待指定"))
             db.add_audit(conn, "application", str(r["id"]), "route_suggest",
-                         f"建议岗位 {r['suggested_job_id']} / {r['tier_suggested']}",
+                         f"建议岗位 {r['suggested_job_id'] or '—'} / "
+                         f"{r['tier_suggested'] if r['tier_suggested'] is not None else '—'}",
                          _why, operator, role)
     if apply:
         conn.commit()
@@ -424,7 +425,7 @@ def assign_job(conn: sqlite3.Connection, application_id: int, job_id: int,
         note = "简历原文不可用（解析失败），已归岗但未重算，请查看原件或重新导入"
         after = f"归到 {jrow['title']}（未重算：原文不可用）"
     else:
-        # 归岗后重算：岗位是 HR 明确指定的 -> 允许按学历判 D
+        # 归岗后重算：岗位是 HR 明确指定的 -> 学历门槛照常判
         g = grade(cand, jd, job_confirmed=True)
         # 技能清单要跟这次重算一起写库：命中用的是"本体词表 + 该岗位 JD 词表"抽出来的技能，
         # 不刷新就会出现「命中里写着 Java / Spring Boot，技能栏里却没有 Java」的
@@ -451,8 +452,9 @@ def assign_job(conn: sqlite3.Connection, application_id: int, job_id: int,
              json.dumps(g["preferred_hit"], ensure_ascii=False),
              json.dumps(g["breakdown"], ensure_ascii=False),
              db.now(), application_id))
-        after = (f"归到 {jrow['title']}，按岗位 JD 重算建议为 "
-                 f"{g['tier_suggested']}（{g['score']}）")
+        tier_text = g['tier_suggested'] if g.get('tier_suggested') is not None else '—'
+        score_text = g['score'] if g.get('score') is not None else '—'
+        after = f"归到 {jrow['title']}，按岗位 JD 重算建议为 {tier_text}（{score_text}）"
     conn.commit()
     # 审计要能分清"归岗"与"改岗位"：改岗位属于**人工纠正**，不是首次归位
     _action = "reassign_job" if old_title else "assign_job"

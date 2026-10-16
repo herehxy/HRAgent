@@ -22,11 +22,15 @@ from functools import lru_cache
 
 #: 应用根目录（打包后是 exe 同级的 _internal：PyInstaller 会把 app/ 放进去）
 from .paths import BASE as _BASE       # 根目录唯一来源（认 TP_HOME）
+# v1.29：阶段/结论的唯一真源。render_page 把它注入前端，页面里不再有第二份阶段表。
+# 只依赖 paths，不反向依赖 ui，无环。
+from . import stages as stages_mod
+from . import tiers as tiers_mod
 
 _PAGE = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="tp-build" content="__UI_BUILD__">
-<title>企业人才库智能体</title>
+<title>NIN人才库智能助手</title>
 <style>
   /* Hallmark · macrostructure: dense-tool · 单强调色（墨绿）· 纸墨中性 · 分隔线优先于卡片堆叠
      Hallmark · pre-emit critique: P4 H4 E4 S4 R4 V4
@@ -73,7 +77,7 @@ _PAGE = """<!DOCTYPE html>
        描边对底色的对比度定在 **1.15~1.30**：低于 1.1 边界发糊等于没画，
        高于 1.4 描边会跳到文字前面抢视线。 */
     --ok:#1f7a3d; --warn:#a85b00; --bad:#c93a2e;
-    --ok-soft:#e8f5eb; --warn-soft:#fff3e0; --bad-soft:#ffefee;
+    --ok-soft:#e8f5eb; --ok-hi:#dceee2; --warn-soft:#fff3e0; --bad-soft:#ffefee;
     --ok-line:#b8dfc4; --warn-line:#f5d5a8; --bad-line:#f5cfcb;
     /* 档位色：与状态色分开一套，因为表达的**不是**状态。
        B 档原来直接借用 --accent（主蓝），现在主蓝对白只有 4.28，
@@ -203,6 +207,13 @@ _PAGE = """<!DOCTYPE html>
      现在深蓝字 #1d5fd6 对浅蓝底 5.25，比实心方案更清楚，且不用引入第二个蓝。 */
   .btn-primary{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink)}
   .btn-primary:hover{background:var(--accent-hi);border-color:var(--accent-ink);color:var(--accent-ink)}
+  /* v1.29.4（业务方）：导入/导出组按钮**加大**一档——这组是每日常用动作，
+     原来和旁边小按钮同大小、不好点也不显眼。只加尺寸，不动配色（唯一强调色原则不变）。 */
+  .btn-lg{padding:9px 18px;font-size:14.5px}
+  /* v1.29.4（业务方 11:40）：下载/导出用**浅绿**按钮（浅底深字，复用 --ok 系）——
+     与导入组的浅蓝按钮区分动作类别：蓝=收进来，绿=发出去/导出去。 */
+  .btn-green{background:var(--ok-soft);border-color:var(--ok-line);color:var(--ok)}
+  .btn-green:hover{background:var(--ok-hi);border-color:var(--ok);color:var(--ok)}
   .btn-ok{background:var(--ok);border-color:var(--ok);color:var(--surface)}
   .btn-ok:hover{background:var(--ok);border-color:var(--ok);color:var(--surface)}
   .btn-danger{background:var(--surface);border-color:var(--line-2);color:var(--bad)}
@@ -229,7 +240,7 @@ _PAGE = """<!DOCTYPE html>
      问题不在难看，而在**没有重点**——HR 进门最该先看的是「待 HR 确认」和「A 档人数」，
      可它们和「简历附件数」一样大，眼睛不知道从哪看起。
      现在分两层：**待办层（需要你动手的）用大号数字**，
-     **库存层（背景信息）缩小并弱化**，A/B/C/D 四档收成一条比例条。
+     **库存层（背景信息）缩小并弱化**，各档分布收成一条比例条。
      这不是装饰，是把"该看哪里"写进视觉层级里。 */
   .grid-stats{margin:18px 0 4px}
   /* 统计区（v1.25.6 二次重排）：上下两行用**同一套 4 列网格**——
@@ -255,7 +266,7 @@ _PAGE = """<!DOCTYPE html>
   .stat .k{color:var(--ink-3);font-size:13px}
   .stat .v{font-size:26px;font-weight:600;margin-top:2px;
     font-variant-numeric:tabular-nums}
-  /* 库存层里 A/B/C/D 是档位分布，用四段细条比四个数字更快读出比例 */
+  /* 库存层里 档位分布用比例细条比四个数字更快读出比例 */
   .tierbar{display:flex;height:4px;width:100%;gap:1px;margin-top:10px;border-radius:2px;overflow:hidden}
   .tierbar i{display:block;height:100%}
   .tierbar.is-empty{background:var(--line-2)}
@@ -314,6 +325,17 @@ _PAGE = """<!DOCTYPE html>
   .pipe-day.is-over{color:var(--bad);font-weight:600}
   .pipe-sel{flex:none;padding:1px 2px;font-size:11px;border-radius:3px;max-width:5.5em}
   .pipe-more{font-size:11px;color:var(--ink-3);padding-top:4px}
+  /* 分组小标题（v1.29.6）：「已发放offer」列按岗位分组时的组头 */
+  .pipe-group-head{font-size:11px;font-weight:600;color:var(--ink-2);background:var(--surface-2);
+    border-radius:3px;padding:1px 6px;margin-top:6px;border-bottom:0}
+  /* 翻页条（v1.29.7）：居中一行 ‹ p/N ›；按钮是小方框，够点又不抢视线 */
+  .pipe-pager{display:flex;justify-content:center;align-items:center;gap:10px;padding:6px 0 2px}
+  .pipe-pager a{font-size:13px;line-height:1;padding:3px 9px;border:1px solid var(--line);
+    border-radius:4px;color:var(--accent-ink);text-decoration:none;cursor:pointer}
+  .pipe-pager a:hover{border-color:var(--accent);background:var(--accent-soft)}
+  .pipe-pager .off{font-size:13px;line-height:1;padding:3px 9px;border:1px solid var(--surface-2);
+    border-radius:4px;color:var(--ink-3)}
+  .pipe-pager .pg{font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
   /* 归档年份卡片（v1.20）：比数字输入框友好，也不会出现负数/乱值 */
   .arch-cards{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
   .arch-card{border:1px solid var(--line);border-radius:var(--r-ctl);padding:6px 12px;
@@ -373,6 +395,17 @@ _PAGE = """<!DOCTYPE html>
   .pipe-day.is-over{color:var(--bad);font-weight:600}
   .pipe-sel{flex:none;padding:1px 2px;font-size:11px;border-radius:3px;max-width:5.5em}
   .pipe-more{font-size:11px;color:var(--ink-3);padding-top:4px}
+  /* 分组小标题（v1.29.6）：「已发放offer」列按岗位分组时的组头 */
+  .pipe-group-head{font-size:11px;font-weight:600;color:var(--ink-2);background:var(--surface-2);
+    border-radius:3px;padding:1px 6px;margin-top:6px;border-bottom:0}
+  /* 翻页条（v1.29.7）：居中一行 ‹ p/N ›；按钮是小方框，够点又不抢视线 */
+  .pipe-pager{display:flex;justify-content:center;align-items:center;gap:10px;padding:6px 0 2px}
+  .pipe-pager a{font-size:13px;line-height:1;padding:3px 9px;border:1px solid var(--line);
+    border-radius:4px;color:var(--accent-ink);text-decoration:none;cursor:pointer}
+  .pipe-pager a:hover{border-color:var(--accent);background:var(--accent-soft)}
+  .pipe-pager .off{font-size:13px;line-height:1;padding:3px 9px;border:1px solid var(--surface-2);
+    border-radius:4px;color:var(--ink-3)}
+  .pipe-pager .pg{font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
   .row1{display:flex;align-items:center;gap:14px;line-height:1.5}
   /* 头像：中性灰，不参与档位编码。
      原来头像底色= 档位色，和左侧色条、右上徽章**同时**表达同一件事，
@@ -478,6 +511,12 @@ _PAGE = """<!DOCTYPE html>
   .chatlog{margin-top:12px;overflow:auto;display:flex;flex-direction:column;gap:9px;
     flex:1;min-height:0}
   .chat-foot{margin-top:10px;flex:0 0 auto}
+  /* v1.29.8（业务方）：助手输入区——默认 3 行、随输入自动增高（240px 封顶）；
+     v1.29.9：发送 +「清空记录」都在框内右下角（清空记录在发送右边） */
+  .chat-input-wrap{flex:1;position:relative;display:flex}
+  .chat-input-wrap textarea{flex:1;width:100%;min-height:114px;max-height:240px;resize:none;
+    line-height:1.5;padding:8px 12px 42px 12px}
+  .chat-input-actions{position:absolute;right:8px;bottom:8px;display:flex;gap:8px;align-items:center}
   .msg{font-size:15px;line-height:1.75;padding:10px 13px;border-radius:var(--r-card);white-space:pre-wrap}
   .msg.user{background:var(--accent-soft);align-self:flex-end;max-width:78%}
   .msg.assistant{background:var(--surface-2);max-width:94%}
@@ -510,6 +549,8 @@ _PAGE = """<!DOCTYPE html>
   .tracebox > summary{cursor:pointer;color:var(--ink-3);user-select:none;padding:2px 0}
   .tracebox > summary:hover{color:var(--ink-2)}
   .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+  /* v1.29.2：结论标签刻意比阶段显眼（业务方要求）——加粗 + 略大 + 实心浅底 */
+  .verdict-tag{font-weight:700;font-size:12.5px;padding:2px 10px;border:1.5px solid;border-radius:4px;letter-spacing:.03em}
   .pcol{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);padding:12px 14px}
   .pcol .h{display:flex;justify-content:space-between;font-size:14px;color:var(--ink-2);font-weight:600}
   .pcol .it{font-size:13px;color:var(--ink-3);margin-top:6px;border-top:1px dashed var(--surface-2);padding-top:6px}
@@ -549,7 +590,7 @@ _PAGE = """<!DOCTYPE html>
 <body>
 <div class="layout">
   <aside class="side">
-    <div class="brand">__BRAND_LOGO__<span>企业人才库智能体</span></div>
+    <div class="brand">__BRAND_LOGO__<span>NIN人才库智能助手</span></div>
     <nav class="nav" id="tabs"></nav>
     <div class="sidefoot" id="sideUser"></div>
   </aside>
@@ -578,10 +619,35 @@ const AUTH_ENABLED = __AUTH_ENABLED__;
 // 前端版本戳（与 <meta name="tp-build">、/api/meta 的 ui_build 同源）：
 // 验收脚本用它确认"页面里跑的就是服务端当前这版"，防止静默地验了缓存里的旧代码。
 const UI_BUILD = '__UI_BUILD__';
-const TIER_LABELS = {A:'优先面试',B:'建议面试',C:'储备',D:'暂不匹配当前岗位'};
+/* v1.29：档位字母与中文名同样**由服务端注入**（真源 config/tiers.json，见 app/tiers.py）。
+   原来这里抄了一份 {A:'优先面试',B:'建议面试',C:'储备',D:'暂不匹配当前岗位'} ——
+   人事处把 4 档并成 3 档后，这份没改的话徽章会显示空白（字母在、文案查不到），
+   而接口数据一切正常，最难排查的正是这种"只错在展示层"的分叉。
+   配色不进配置（那是观感不是业务），按字母给三档，认不出的走中性灰兜底。 */
+var TIER_CFG = (typeof __TIERS_JSON__ === 'undefined')
+  ? {order:[], labels:{}, hard_shortfall_tier:''}
+  : __TIERS_JSON__;
+const TIER_LABELS = TIER_CFG.labels || {};
+const TIER_ORDER = TIER_CFG.order || [];
 const TIER_COLOR = {A:['var(--ok)','var(--ok-soft)'],B:['var(--tier-b)','var(--tier-b-soft)'],
-                    C:['var(--warn)','var(--warn-soft)'],D:['var(--ink-3)','var(--surface-2)']};
-const STAGES = ['新投递','已联系','初面','复面','待offer','已入职','已结束'];
+                    C:['var(--ink-3)','var(--surface-2)']};
+const TIER_NEUTRAL = ['var(--ink-3)','var(--surface-2)'];
+function tierColor(t){ return TIER_COLOR[t] || TIER_NEUTRAL; }
+// 认不出的档位字母一律按**最差档**处理（配置顺序的最后一个），与后端"最差档才沉底"的口径一致
+function tierFallback(){ return TIER_ORDER.length ? TIER_ORDER[TIER_ORDER.length - 1] : 'C'; }
+/* v1.29：阶段与结论标签 **由服务端注入**（真源是 config/stages.json，经 app/stages.py 读出，
+   注入点在页面生成时做文本替换，见本文件末尾的 render_page）。
+   ⚠️ 这段注释里**故意不写那个占位符原文** —— 注入是 `str.replace` 全量替换，
+   注释里出现一次就会被一起替换成一大坨 JSON：既撑大页面，又因为值里万一带
+   `*` + `/` 会把注释提前截断（整页 JS 挂掉）。所以描述它就行，别抄它。
+   这里**绝不手抄第二份阶段表** —— 手抄的话人事处一改流程，前端还认老阶段名：
+   看板少一列、筛选下拉缺一项、点进去推不动，而且不会报错。
+   `typeof` 那层兜底只为"万一注入没发生"时不白屏 —— 那种情况下阶段表是空的，
+   而不是拿一份旧表顶上（旧表比空表更危险：看着正常，实际全是错的）。 */
+var STAGE_CFG = (typeof __STAGES_JSON__ === 'undefined')
+  ? {order:[], pipeline:[], terminal:[], colors:{}, actions:{}, outcomes:{}, default_stage:'新投递'}
+  : __STAGES_JSON__;
+const STAGES = STAGE_CFG.order;
 
 let META = null;
 // 归档页当前列表（批量彻底删除时按id 取姓名做确认文案）
@@ -597,16 +663,28 @@ let VIEW = 'pool', TAB = 'ALL', KW = '', CHAT = [], ITEMS = [], CUR = null, LAST
 // 刻意不做成开关——「能不能投」看的是身份，不是一个年限数字；
 // 留一个可切换的开关反而会让人以为「打开年限分析更准」。
 const CAMPUS_MODE = true;
-// 性别筛选：**默认不筛**（空串）。开关在设置里默认关闭，关着时后端也会忽略这个参数。
+// 性别筛选（v1.29.4 业务方 2026-10-16：按普通字段处理，无开关、常显）。默认不筛（空串）。
 let GENDER = '';
 // 初筛下拉（v1.7.3）：最低学历（≥门槛）与院校层次（985/211）。
-// 都是岗位相关的硬条件，与性别筛选不同，不需要开关约束。
+// 与性别一样，都是普通筛选条件。
 let EDU_MIN = '', UNIV = '';
+// v1.27：英语四六级（数组，多选）与特定院校（数组，多选）。
+// ⚠️ 这两个变量**必须声明在这里**，不能挪到 `renderPool` 附近的 `let` 区 ——
+// 上面 `refresh()`（第 400 多行）会读它们，声明写在读取者之后就触发
+// let/const 的暂时性死区，首次执行直接 ReferenceError → **整页白屏**
+// （这个坑本项目踩过 4 次，变量命名与声明位置都要当心）。
+let CET_F = [], STRONG_F = [];
+// v1.29：新增筛选维度（同样**必须声明在这里** —— 见上面关于 TDZ 的说明）
+//   OVERSEAS_F  海外院校（数组多选：海外 / 非海外 / 未识别）
+//   BACHELOR_F  第一学历层次（985 / 211 / 特殊 / 未识别）
+//   DATE_FROM / DATE_TO  投递时间段（含当天）
+//   UNIT_F      面试部门（面试单位，数组多选 = 并集）
+let OVERSEAS_F = [], BACHELOR_F = [], UNIT_F = [], DATE_FROM = '', DATE_TO = '';
 let STAGE_F = '';          // v1.16.1：阶段筛选（管道"看全部"跳过来时用）
-const PIPE_ALL = {};      // 管道里手动展开的列：{阶段名: true}
+const PIPE_PAGE = {};     // 管道每列的页码（v1.29.5：阶段名 → 第几页，1 起；每页 15 人，翻页替代"整列展开"）
 // 人才库分页（v1.7.1）：每页 20 人。切档位 / 搜索 / 清空都会把页码拨回第 1 页——
 // 否则"在第 3 页改了搜索词"会落在一个不存在的页上（后端会兜底夹到末页，但那不是用户想要的）。
-// 导出 CSV 不分页：另发一次不带 page 参数的请求拿全量，见 exportCsv。
+// 导出不分页：另发一次不带 page 参数的请求拿全量，见 exportRoster。
 let POOL_PAGE = 1;const POOL_SIZE = 20;
 // 投递管道看板折叠态（v1.7.5）：默认收起只看一行人数，展开才是完整看板；
 // 记在全局变量上，翻页 / 搜索 / 改档位等 refresh 重渲染后不丢。
@@ -853,11 +931,19 @@ function progressModal(taskId, opts){
   if (!taskId){ resultModal({title: o.title||'处理中', body:o.body||'', kind:'info'}); return; }
   if (__progressTimer){ clearInterval(__progressTimer); __progressTimer = null; }
   setModalTitle(o.title || '处理中…');
+  /* v1.29.4：两个新选项（收取/导入任务用）——
+     stoppable：显示"优雅停止"按钮（读完当前文件才停，不砍半份）；
+     chain：完成时不弹结果框，交给 onDone 接力下一阶段（如分析进度）——
+           同一个弹窗原地切换，不关不弹、不闪。 */
   document.getElementById('mBody').innerHTML =
     `<div>
        <div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">${esc(o.desc || '正在处理，请稍候')}</div>
        <div class="progtrack"><div class="progfill" id="progFill" style="width:0%"></div></div>
        <div class="progmeta" id="progMeta">准备中…</div>
+       ${o.stoppable ? `<div class="bar" style="margin-top:14px;justify-content:flex-end">
+         <button id="progStopBtn" onclick="progressStop('${escA(taskId)}')"
+                 title="读完正在处理的这一份就停下；已处理的全部保留，下次从停下的地方继续">停止（读完当前文件后停下）</button>
+       </div>` : ''}
      </div>`;
   document.getElementById('modal').classList.add('on');
   const fill = document.getElementById('progFill');
@@ -868,15 +954,24 @@ function progressModal(taskId, opts){
       if (r.__http_error || !r.ok){ return; }
       const pct = r.percent || 0;
       if (fill) fill.style.width = pct + '%';
-      const line = `已完成 ${r.done || 0} / ${r.total || 0}` +
-                   (r.failed ? `，失败 ${r.failed}` : '');
+      // 统计数量阶段 total 还是 0：不显示"已完成 0 / 0"，只说在干什么。
+      const line = r.total
+        ? (`已完成 ${r.done || 0} / ${r.total}` + (r.failed ? `，失败 ${r.failed}` : ''))
+        : '';
       if (meta){
         meta.textContent = r.status === 'done'
           ? (r.message || line)
-          : (r.message ? (line + ' · ' + r.message) : line);
+          : (r.message ? (line ? (line + ' · ' + r.message) : r.message)
+                       : (line || '正在统计数量…'));
       }
       if (r.status === 'done' || r.status === 'error'){
         clearInterval(__progressTimer); __progressTimer = null;
+        const stopBtn = document.getElementById('progStopBtn');
+        if (stopBtn) stopBtn.disabled = true;
+        if (o.chain){                       // 接力模式：不弹结果框，交给调用方
+          if (o.onDone) o.onDone(r);
+          return;
+        }
         const okAll = !(r.failed);
         const title = r.status === 'error' ? '处理中断' : (okAll ? '全部完成' : '有失败');
         const kind = r.status === 'error' ? 'danger' : (okAll ? 'ok' : 'warn');
@@ -893,6 +988,18 @@ function progressModal(taskId, opts){
   };
   tick();
   __progressTimer = setInterval(tick, 1200);
+}
+async function progressStop(taskId){
+  // v1.29.4：请求停止当前收取/导入任务（服务端在"读完当前文件"的边界停下）
+  const btn = document.getElementById('progStopBtn');
+  const r = await api('/api/tasks/' + taskId + '/stop', {method:'POST'});
+  if (r.__http_error || !r.ok){
+    if (btn) btn.disabled = false;
+    toast((r && (r.detail || r.message)) || '停止请求失败','warn');
+    return;
+  }
+  if (btn){ btn.disabled = true; btn.textContent = '正在停止…（读完当前文件）'; }
+  toast('已请求停止：读完当前文件后停下','ok');
 }
 
 /* v1.25：复制草稿的**主题 + 正文**（v1.25 修）。
@@ -1044,10 +1151,10 @@ function readHash(){
    `let` 有暂时性死区——如果声明写在 doIngest 附近，
    refresh 首次执行时读它会直接抛 ReferenceError，页面当场白屏。 */
 let __ingesting = null;
-/* 导入弹窗秒表的 interval 句柄。同样必须提前声明：
-   ingestStartModal() 定义在 ingestStopTick() 调用点之前，
-   但赋值/读取散布在三个函数里，放一起最不容易踩死区。 */
-let __ingestTick = null;
+/* v1.29.10（业务方）：进行中任务的**记忆** —— {taskId, label, source, phase, rep}。
+   弹窗被误关后，点导入按钮用它在原阶段重开进度窗口（含"停止"）——
+   否则关掉弹窗就再没有停下来的入口了。 */
+let __ingestTask = null;
 
 async function refresh(){
   // v1.24.20：聊天页要把页面滚动收进 .chatlog，否则底部多出一截空白。
@@ -1085,13 +1192,14 @@ function renderStats(s){
   if (!s || s.__http_error) return;
   const t = s.tiers || {};
   const n = v => (v == null ? 0 : v);
-  const sum = n(t.A) + n(t.B) + n(t.C) + n(t.D);
+  // v1.29：档位合计按配置算（原来写死 t.A+t.B+t.C+t.D，档位一并就漏算/多算）
+  const sum = TIER_ORDER.reduce((a,k)=>a+n(t[k]), 0);
 
   // 待办层：数字大、颜色语义明确；**每张卡都可点**（v1.25.6，HR 要求）——
   // 与右侧环同一套"数字即入口"的心智：点一下直接到该去的地方。
   const acts = [
-    card('A 档 · 优先面试', t.A, 'var(--ok)', n(t.A) > 0,
-         '点击 → 在人才库筛出 A 档', "TAB='A';STAGE_F='';poolPageReset();go('pool')"),
+    card(TIER_ORDER[0] + ' 档 · ' + (TIER_LABELS[TIER_ORDER[0]]||''), t[TIER_ORDER[0]], 'var(--ok)', n(t[TIER_ORDER[0]]) > 0,
+         '点击 → 在人才库筛出该档', "TAB='" + TIER_ORDER[0] + "';STAGE_F='';poolPageReset();go('pool')"),
     card('待你确认', s.pending, 'var(--bad)', n(s.pending) > 0,
          '点击 → 筛出未复核的人', "TAB='UNCONFIRMED';STAGE_F='';poolPageReset();go('pool')"),
     card('待确认提案', s.proposals_pending, 'var(--bad)', n(s.proposals_pending) > 0,
@@ -1112,13 +1220,11 @@ function renderStats(s){
          '最近 7 天新导入的简历份数（按简历接收日期统计）');
 
   // 投递进度环（v1.25.6，用户要求"展示人才库每个人进度"）——统计区右侧环形比例图：
-  //   · 每段 = 一个投递阶段（新投递 → 已联系 → 初面 → 复面 → 待offer → 已入职 → 已结束）；
+  //   · 每段 = 一个投递阶段（顺序与配色都来自 config/stages.json，见 STAGE_CFG）；
   //   · 悬停看人数；点击一段（或图例一行）**穿透到人才库并按该阶段筛选**；
   //   · 点击时重置档位筛选（TAB='ALL'），避免"两个筛选叠加后人数变少"的困惑。
-  const STAGE_COLOR = {
-    '新投递': '#3370ff', '已联系': '#0ea5a5', '初面': '#f0b429', '复面': '#ef7c3a',
-    '待offer': '#9254de', '已入职': '#12b76a', '已结束': '#a7b0bf',
-  };
+  // v1.29：配色改成从服务端注入取，不再手写一份色表（改了阶段还要记得改这里）。
+  const STAGE_COLOR = STAGE_CFG.colors || {};
   const stageRing = (() => {
     const st = s.stages || {};
     const n = k => st[k] || 0;
@@ -1127,7 +1233,7 @@ function renderStats(s){
     // 保证环总数 == 候选人数。后端也做了同样归并，这里是第二道防线。
     let _extra = 0;
     for (const k in st){ if (!STAGES.includes(k)) _extra += (st[k] || 0); }
-    const segs = STAGES.map(k => [k, n(k) + (k === '新投递' ? _extra : 0),
+    const segs = STAGES.map(k => [k, n(k) + (k === STAGE_CFG.default_stage ? _extra : 0),
                                   STAGE_COLOR[k] || '#a7b0bf']);
     const total = segs.reduce((a, x) => a + x[1], 0);
     if (!total) {
@@ -1279,7 +1385,9 @@ function expBadge(x){
   // v1.25.6（HR 反馈）：默认**连"应届"也不展示**——招聘默认都是校招，
   // 每个人挂一枚绿色"应届"没有任何信息量。只有"往届未就业"这种
   // 值得提醒的例外才标出来，其余一律返回空（调用方按空串处理分隔符）。
-  if (e && e.kind === 'past_idle') return expBadgeReal(e);
+  // v1.29.4（业务方 2026-10-16）：**在读**要显出来 ——「在读 · 应届」与"已毕业的应届"
+  // 不是一回事（影响可投批次/入职时间），值得一枚绿标；其余应届仍不显示。
+  if (e && (e.kind === 'past_idle' || (e.kind === 'fresh' && e.in_school))) return expBadgeReal(e);
   return '';
 }
 function expBadgeReal(e){
@@ -1347,7 +1455,11 @@ function tierSourceLine(x){
   const t = x.tier_detail;
   if (!t) return '';
   const mj = t.major || {};
-  const src = (t.tier === 'D') ? '学历门槛（规则判定，可复现）'
+  // v1.29.5：硬门槛档位字母**从配置读**（原来写死 'D' —— 三档后 D 已不存在，
+  // 学历门槛判出来的档位会被错标成"模型分析判断"）
+  const _hard = TIER_CFG.hard_shortfall_tier || '';
+  const _hardLab = (_hard && TIER_LABELS[_hard]) ? (_hard + '（' + TIER_LABELS[_hard] + '）') : _hard;
+  const src = (t.tier && t.tier === _hard) ? '学历门槛（规则判定，可复现）'
             : (t.tier ? '模型分析判断' : '待分析（模型尚未给出结论）');
   const hits = (t.hit || []).map(esc).join('、') || '—';
   const miss = (t.miss || []).map(esc).join('、') || '—';
@@ -1355,7 +1467,7 @@ function tierSourceLine(x){
     <summary class="small" style="cursor:pointer;color:var(--accent-ink)">
       档位来源：${esc(src)} · 建议 ${esc(t.tier || '待分析')}</summary>
     <div class="small" style="margin-top:4px;line-height:1.75">
-      档位不再由分数计算：<b>学历不达标直接判 D</b>，其余档位由模型读简历后判断。<br>
+      档位不再由分数计算：<b>学历不达标直接判 ${_hardLab}</b>，其余档位由模型读简历后判断。<br>
       命中技能：${hits}<br>
       缺失技能：${miss}
       ${(t.miss_custom||[]).length?`<br>岗位自定义要求（本体未收录、按文字比对）未命中：${esc((t.miss_custom||[]).join('、'))}`:''}
@@ -1427,29 +1539,59 @@ async function reanalyze(cid, full){
   toast(r.note || '已完成完整重新分析', 'ok');
 }
 
+/* v1.27：人才库筛选条件的 query 串 —— **单一真源**。
+   为什么必须收成一处：导出 CSV 要"与当前列表同筛选"（试用反馈的硬要求），
+   原先是手抄第二份 `?tier=&kw=&gender=&education=&univ=`，
+   每加一个筛选条件就要记得改两处 —— 漏一处的症状是"界面筛了、导出没筛"，
+   而导出是拿去用的（发部门/贴汇报），这种不一致很难被发现。
+   现在两端都调 `poolQuery({page:false})`，新增条件只改这一个函数。 */
+function poolQuery(opt){
+  opt = opt || {};
+  const q = ['tier=' + encodeURIComponent(TAB)
+            , 'kw=' + encodeURIComponent(KW)
+            , 'gender=' + encodeURIComponent(GENDER)
+            , 'education=' + encodeURIComponent(EDU_MIN)
+            , 'univ=' + encodeURIComponent(UNIV)
+            , 'stage=' + encodeURIComponent(STAGE_F)
+            // v1.27：数组型筛选用逗号拼（后端 split(',') 后按"任一命中"处理）
+            , 'cet=' + encodeURIComponent(CET_F.join(','))
+            // ⚠️ `strong` 这个参数 v1.29 起**界面上不再暴露**（"特殊院校"已并入 `univ=特殊`，
+            //   两个入口筛的是同一批人）。参数与变量都保留给智能助手用 ——
+            //   接口能筛、界面不重复给，是"一个真源、多个消费方"而不是"两套清单"。
+            , 'strong=' + encodeURIComponent(STRONG_F.join(','))
+            // v1.29：五个新维度。**全部在这里拼一次** —— 导出与列表共用同一函数，
+            // 漏一处就会出现"界面筛了、导出没筛"。
+            , 'overseas=' + encodeURIComponent(OVERSEAS_F.join(','))
+            , 'bachelor=' + encodeURIComponent(BACHELOR_F.join(','))
+            , 'interview_unit=' + encodeURIComponent(UNIT_F.join(','))
+            , 'date_from=' + encodeURIComponent(DATE_FROM)
+            , 'date_to=' + encodeURIComponent(DATE_TO)];
+  if (opt.page !== false){
+    q.push('page=' + POOL_PAGE, 'page_size=' + POOL_SIZE);
+  }
+  return q.join('&');
+}
+
 async function viewPool(){
   // 管道条与人选列表各取一份：/api/pipeline 提供各阶段人数与明细（嵌入本页顶部），
   // /api/candidates 提供当前筛选 + 分页的候选人卡片，两者互不影响。
   const [c, p] = await Promise.all([
-    api('/api/candidates?tier=' + encodeURIComponent(TAB)
-      + '&kw=' + encodeURIComponent(KW) + '&gender=' + encodeURIComponent(GENDER)
-      + '&education=' + encodeURIComponent(EDU_MIN)
-      + '&univ=' + encodeURIComponent(UNIV)
-      + '&stage=' + encodeURIComponent(STAGE_F)
-      + '&page=' + POOL_PAGE + '&page_size=' + POOL_SIZE),
+    api('/api/candidates?' + poolQuery()),
     api('/api/pipeline')
   ]);
   ITEMS = c.items || [];
   const pg = c.paging || null;              // 后端算好的页码/总数（页大小不影响统计口径）
-  const gf = c.gender_filter || {}, gfOn = !!gf.enabled;
+  // v1.29.4（业务方 2026-10-16）：性别筛选常显（不再有"合规开关"这层抑制）。
   const isw = c.insight_switch || {enabled: true, pending: 0};   // v1.13.4 入库即分析开关
   const host = document.getElementById('view');
   const n = {ALL:(pg?pg.total:(c.items||[]).length), REVIEW:0, UNCONFIRMED:0};
-  const tabs = [['ALL','全部'],['A','A 优先面试'],['B','B 建议面试'],['C','C 储备'],
-                ['D','D 暂不匹配'],['REVIEW','信息缺失（缺字段）'],['UNCONFIRMED','未复核']];
-  // 性别筛选只在开关打开时出现：开关关着还摆一个筛选项，等于诱导所有人按性别筛。
+  // v1.29：档位页签由配置生成（原来写死 A/B/C/D 四个 + 中文名，档位一并就多出一个空页签）
+  const tabs = [['ALL','全部']]
+    .concat(TIER_ORDER.map(k=>[k, k + ' ' + (TIER_LABELS[k]||'')]))
+    .concat([['REVIEW','信息缺失（缺字段）'],['UNCONFIRMED','未复核']]);
+  // v1.29.4（业务方）：性别筛选常显，按普通筛选项处理（不再有合规开关）。
   const facets = c.gender_facets || {};
-  const gsel = !gfOn ? '' : `<span class="small" style="margin-left:6px">性别</span>
+  const gsel = `<span class="small" style="margin-left:6px">性别</span>
     <select onchange="GENDER=this.value;poolPageReset();refresh()">
       <option value="">不限</option>
       ${['男','女','未标注'].map(g=>`<option value="${g}" ${GENDER===g?'selected':''}>${g}（${facets[g]==null?0:facets[g]}）</option>`).join('')}
@@ -1470,14 +1612,73 @@ async function viewPool(){
       <option value="">不限</option>
       ${STAGES.map(k=>`<option value="${k}" ${STAGE_F===k?'selected':''}>${k}</option>`).join('')}
     </select>`;
-  const uniSel = `<span class="small" style="margin-left:6px">院校</span>
-    <select onchange="UNIV=this.value;poolPageReset();refresh()">
+  // v1.29：国内院校层次加两档 ——「特殊」（原 strong 名单：非 985/211 的强校）与
+  // 「未识别」（简历里没读到学校）。**未识别必须单列**：它要人工补录，
+  // 与"不是 985"处理方式相反，混在一起 HR 会理解反。
+  // v1.29：院校层次**最高学历** + **第一学历(本科)** 是两个维度，两个都要能筛
+  //（业务方 2026-10-16：不只关注第一学历，也关注最高学历的学校水平）。
+  const uniSel = `<span class="small" style="margin-left:6px">最高学历院校</span>
+    <select onchange="UNIV=this.value;poolPageReset();refresh()"
+      title="按最高学历院校判层次（985 / 211 / 特殊 / 未识别）。境外高校不在此列，用右边「海外」筛">
       <option value="">不限</option>
       <option value="985" ${UNIV==='985'?'selected':''}>985（${uniF['985']==null?0:uniF['985']}）</option>
       <option value="211" ${UNIV==='211'?'selected':''}>211（${uniF['211']==null?0:uniF['211']}，含 985）</option>
+      <option value="特殊" ${UNIV==='特殊'?'selected':''}>特殊院校（${uniF['特殊']==null?0:uniF['特殊']}）</option>
+      <option value="未识别" ${UNIV==='未识别'?'selected':''}>未识别（${uniF['未识别']==null?0:uniF['未识别']}）</option>
     </select>`;
-  const gtip = (!gfOn && gf.requested)
-    ? `<div class="warn" style="margin-top:8px">性别筛选未生效：${esc(gf.why||'')}</div>` : '';
+  // v1.29：海外院校 —— **与「院校」是两个独立维度**。
+  // 为什么不能并进去：境外高校既不是 985 也不是 211，塞进同一个下拉会被读成
+  // "院校层次的一个档位"；而且两个维度互斥，同选必然 0 人（后端会回 conflicts 提示）。
+  const ovF = c.overseas_facets || {};
+  const overseasSel = `<span class="small" style="margin-left:6px">海外</span>
+    <select multiple size="1" style="width:auto;min-width:118px"
+      title="境外院校：国外高校 + 中国香港/澳门/台湾地区高校；名单外算「非海外」"
+      onchange="OVERSEAS_F=[...this.selectedOptions].map(o=>o.value);poolPageReset();refresh()">
+      ${['海外','非海外','未识别'].map(v=>
+        `<option value="${v}" ${OVERSEAS_F.includes(v)?'selected':''}>${v}（${ovF[v]==null?0:ovF[v]}）</option>`).join('')}
+    </select>`;
+  // v1.29：第一学历（本科）层次。⚠️ 判的是**本科那所**，不是最高学历那所 ——
+  // 拿 school 顶替会把"本科双非、硕士985"的人筛进「本科985」。
+  const bF = c.bachelor_facets || {};
+  const bachelorSel = `<span class="small" style="margin-left:6px">第一学历(本科)</span>
+    <select multiple size="1" style="width:auto;min-width:138px"
+      title="按**本科**就读院校判层次（与左边「最高学历院校」是两个维度，两个都要能筛）。「未识别」= 简历没写本科是哪所，可在档案里补录"
+      onchange="BACHELOR_F=[...this.selectedOptions].map(o=>o.value);poolPageReset();refresh()">
+      ${['985','211','特殊','未识别'].map(v=>
+        `<option value="${v}" ${BACHELOR_F.includes(v)?'selected':''}>${v==='特殊'?'特殊':(v==='985'?'本科985':(v==='211'?'本科211':'未识别'))}（${bF[v]==null?0:bF[v]}）</option>`).join('')}
+    </select>`;
+  // v1.29：面试部门（面试单位）。数字来自库内**实际用过**的值，与列表同源。
+  const uF = c.interview_unit_facets || {};
+  const _unitNames = Object.keys(uF);
+  const unitSel = _unitNames.length ? `<span class="small" style="margin-left:6px">面试部门</span>
+    <select multiple size="1" style="width:auto;min-width:150px" title="可按住 Ctrl 多选；待面试阶段按部门分流"
+      onchange="UNIT_F=[...this.selectedOptions].map(o=>o.value);poolPageReset();refresh()">
+      ${_unitNames.map(v=>`<option value="${esc(v)}" ${UNIT_F.includes(v)?'selected':''}>${esc(v)}（${uF[v]}）</option>`).join('')}
+    </select>` : '';
+  // v1.29：投递时间段（**含当天**，后端上界取次日）
+  const dateSel = `<span class="small" style="margin-left:6px">投递时间</span>
+    <input type="date" value="${esc(DATE_FROM)}" style="width:140px"
+      onchange="DATE_FROM=this.value;poolPageReset();refresh()">
+    <span class="small">→</span>
+    <input type="date" value="${esc(DATE_TO)}" style="width:140px"
+      onchange="DATE_TO=this.value;poolPageReset();refresh()">`;
+  // v1.29：「只看六级」快捷按钮已删除（业务方 2026-10-16：完全没必要）。
+  // 四六级本来就是多选下拉，再加一个只筛"六级"的按钮等于**两个入口筛同一个集合**，
+  // 而且它会绕过"未提供"那档 —— HR 看到"只剩 8 人"却不知道另外的人是什么情况。
+  // v1.27：英语四六级。**多选**（HR 常问"六级或专业四级的人"），选中项以数组存，
+  // 提交时逗号拼接。`未提供` 单列一项 —— "简历里没写"与"明写未通过"含义相反，
+  // 不能合成一个"无"（那会让 HR 把没写的人当成没有证书）。
+  const cetF = c.cet_facets || null;
+  const _cetLevels = ['六级','四级','专业八级','专业四级','考研英语'];
+  const cetSel = `<span class="small" style="margin-left:6px">四六级</span>
+    <select multiple size="1" style="width:auto;min-width:120px" title="可按住 Ctrl 多选"
+      onchange="CET_F=[...this.selectedOptions].map(o=>o.value);poolPageReset();refresh()">
+      ${_cetLevels.map(v=>`<option value="${v}" ${CET_F.includes(v)?'selected':''}>${v}（${(cetF||{})[v]==null?0:cetF[v]}）</option>`).join('')}
+      <option value="未提供" ${CET_F.includes('未提供')?'selected':''}>未提供（${(cetF||{})['未提供']==null?0:cetF['未提供']}）</option>
+    </select>`;
+  // v1.29：原「特定院校」下拉**已撤掉** —— 它的名单就是 `univ=特殊` 那一档，
+  // 两个入口筛的是同一批人，HR 会困惑"这两个有什么区别"。
+  // `STRONG_F` 变量与 `strong=` 参数都保留（智能助手仍可按校名精确筛）。
   // 学历"无法判定"的人被门槛挡下时必须说出来，不能让人静默消失
   const ef = c.edu_filter || {};
   const eduWarn = (ef.applied && ef.hidden_unknown > 0)
@@ -1487,24 +1688,40 @@ async function viewPool(){
     <!-- v1.25.6：工具栏重排——找（搜索/筛选）、收（导入）、析（分析）三簇左对齐连续排列，
          竖线分隔，不再用 flexbetween 把两组拉到两端（中宽度下会形成大片空隙、显散） -->
     <div class="bar" style="flex-wrap:wrap;row-gap:8px">
-        <input id="kwBox" placeholder="搜索姓名 / 院校 / 专业 / 技能"
-               style="width:280px" value="${esc(KW)}"
-               onkeydown="if(event.key==='Enter'){doSearch()}">
-        <button class="btn-primary" onclick="doSearch()">搜索</button>
-        <button onclick="KW='';GENDER='';EDU_MIN='';UNIV='';poolPageReset();refresh()">清空</button>
-        ${gsel}${eduSel}${uniSel}${stageSel}
-        <!-- v1.25.6：**强制换行**——导入组固定从第二行开始（HR 要求"收取邮箱简历
-             应该在第二行"），不再看窗口宽度随机挤到第一行末尾。
-             flex-basis:100% 的空元素在 flex-wrap 容器里起 line-break 作用。 -->
+        <!-- v1.29.2（业务方）：搜索框**单独占一行并放大**（它是最高频的操作，
+             挤在筛选堆里既点不准也看不清）；学历/院校/性别/面试部门等从第二行开始。
+             flex-basis:100% 在 flex-wrap 容器里起换行作用（下面那行本来就这么用的）。 -->
         <span style="flex-basis:100%;height:0"></span>
-        <button id="btnIngestMailbox" onclick="doIngest('mailbox')">收取邮箱简历</button>
-        <button id="btnIngestFolder" onclick="doIngest('folder')">导入本地文件夹</button>
-        <button onclick="document.getElementById('upFile').click()"
+        <!-- v1.29.2（业务方）：搜索框**底色加深**。它是最高频的操作，
+             却和下面那排筛选长得一样、扫一眼找不到；加深底色 + 保持描边即可，
+             不改尺寸（尺寸上一轮刚放大过）。 -->
+        <!-- 业务方（10-16）：搜索按钮**挪到所有框左边**（整排最左），并**稍微加长**
+             （约三个字的长度、保持原内边距）。按钮留在输入框右边时，与左对齐的
+             筛选堆脱节、扫视动线断开。 -->
+        <button class="btn-primary" style="font-size:15px;padding:8px 20px;min-width:86px"
+                onclick="doSearch()">搜索</button>
+        <input id="kwBox" placeholder="搜索姓名 / 院校 / 专业 / 技能"
+               style="flex:1;min-width:420px;font-size:15px;padding:8px 10px;
+                      background:#eef1f5;border-color:var(--line-2);font-weight:500"
+               value="${esc(KW)}"
+               onkeydown="if(event.key==='Enter'){doSearch()}">
+        <span style="flex-basis:100%;height:0"></span>
+        <!-- v1.29.4（业务方 2026-10-16）：导入 / 导出 / 分析这组按钮**前置**到搜索行正下方、
+             并整体**加大一档** —— 收简历是每天最先做的动作，此前埋在筛选条件后面、
+             与普通小按钮同大小，既不显眼也不好点。 -->
+        <button id="btnIngestMailbox" class="btn-primary btn-lg" onclick="doIngest('mailbox')">收取邮箱简历</button>
+        <button id="btnIngestFolder" class="btn-primary btn-lg" onclick="doIngest('folder')">导入本地文件夹</button>
+        <button class="btn-primary btn-lg" onclick="document.getElementById('upFile').click()"
                 title="手机拍的纸质简历照片、扫描件，直接选文件上传入库（不用先改配置目录）">上传简历照片/文件</button>
         <input id="upFile" type="file" multiple hidden
                accept=".jpg,.jpeg,.png,.bmp,.webp,.pdf,.docx,.doc,.txt"
                onchange="doUpload(this.files)">
-        <button onclick="exportCsv()">导出 CSV</button>
+        <!-- v1.29：唯一的导出入口（业务方定调「无论什么时候导出都是一个按钮」）。
+             固定 13 列、含已归档、没走到那个阶段的字段留空标记；跟当前筛选一致。 -->
+        <button class="btn-green btn-lg" onclick="exportRoster()"
+          title="导出候选人名单（固定 13 列，含已归档；未进行到的阶段字段为「—」）。只出 Excel：CSV 在 Excel 里打开会把手机号变成 1.38E+10">导出名单</button>
+        <button class="btn-green btn-lg" onclick="downloadBundle()"
+                title="把当前筛选下初筛通过人员的简历打包下载，文件名按「匹配岗位-学历-学校-最高学历专业-姓名-性别」">下载初筛简历</button>
         <span class="vdiv"></span>
         <span class="small">入库即分析</span>
         <label class="small" style="display:flex;align-items:center;gap:4px;cursor:pointer"
@@ -1514,14 +1731,18 @@ async function viewPool(){
         </label>
         <!-- v1.25.6：没有待分析的人时**隐藏**（不用一个灰色禁用按钮占版面，界面更干净；
              JS 端 analyzePendingBatch 已做 !btn 防御，隐藏不影响引用） -->
-        <button id="btnAnalyzePending" data-pending="${isw.pending}"
+        <button id="btnAnalyzePending" class="btn-lg" data-pending="${isw.pending}"
                 onclick="analyzePendingBatch()" ${isw.pending?'':'disabled style="display:none"'}>
           ${isw.pending ? ('分析待分析的人（'+isw.pending+'）') : ''}
         </button>
-        <button id="btnReanalyzeBatch" onclick="reanalyzeBatch()"
+        <button id="btnReanalyzeBatch" class="btn-lg" onclick="reanalyzeBatch()"
                 title="把「抽取方式=规则通道」的档案按当前配置完整重跑一遍：重读原件 → 模型重抽字段 → 重建技能 → 重新归岗 → 重判建议档。HR 已定的档位/阶段/岗位不动，人工更正过的字段保留。">
           批量按模型重跑
         </button>
+        <span style="flex-basis:100%;height:0"></span>
+        <button onclick="KW='';GENDER='';EDU_MIN='';UNIV='';CET_F=[];STRONG_F=[];OVERSEAS_F=[];BACHELOR_F=[];UNIT_F=[];DATE_FROM='';DATE_TO='';poolPageReset();refresh()">清空</button>
+        ${gsel}${eduSel}${uniSel}${overseasSel}${bachelorSel}${cetSel}${unitSel}
+        ${(c.conflicts||[]).length ? `<div class="warn" style="flex-basis:100%;margin-top:4px">${c.conflicts.map(esc).join('<br>')}</div>` : ''}
     </div>
     <div class="bar" style="margin-top:8px">
       ${(()=>{
@@ -1542,12 +1763,16 @@ async function viewPool(){
           <span class="arch-suffix">年以前</span>
           <button id="btnArchByYear" class="btn-primary" onclick="archiveByYear()">
             归档 ${y} 年以前的投递</button>
+          <!-- v1.29.2（业务方指定的位置）：投递时间与阶段放在**归档这一组下面**。
+               这两条是"看某个人"的筛选条件，和"批量归档"这类批量操作挤在同一行会显乱。
+               ⚠️ dateSel / stageSel 在整页**只在这里引用一次** ——
+               引两次会在归档行后面多出一份重复控件（实测踩过）。 -->
+          <span class="arch-div"></span>
         </div>`;
       })()}
 
 
     </div>
-    ${gtip}
     ${eduWarn}
   </div>
   ${pipeBoardHtml(p)}
@@ -1555,6 +1780,13 @@ async function viewPool(){
        再在这里筛列表——而不是挤在工具栏面板里） -->
   <div class="tabs" style="margin:10px 0 12px">
     ${tabs.map(([k,l])=>`<div class="tab ${TAB===k?'on':''}" onclick="TAB='${k}';poolPageReset();refresh()">${l}${k==='ALL'?(' '+n.ALL):''}</div>`).join('')}
+    <!-- v1.29.2（业务方指定的位置）：阶段筛选放在**「未复核」之后** ——
+         它和这些页签是同一类东西（"把人筛出来"），之前塞在"批量归档"那一行里
+         混在批量操作中间，位置不对。 -->
+    ${stageSel}
+    <!-- v1.29.2（业务方）：投递时间紧跟在阶段后面 —— 两者都是"筛到某一时刻/某一步的人"，
+         放在同一行读起来是连续的；投递时间是日期区间，用两个原生日期框。 -->
+    ${dateSel}
   </div>
   ${ITEMS.length ? ITEMS.map(cardHtml).join('') : '<div class="card">没有符合条件的候选人。到「导入与来源」收一次简历试试。</div>'}
   ${pgBar(pg)}`;
@@ -1590,10 +1822,24 @@ function jumpPoolPage(){
 }
 // 院校层次标签（v1.7.3）：来自 config/universities.json 名单匹配，只展示、不参与档位判定；
 // 985/211 筛选用同一个字段（uni_tier），标签与筛选口径天然一致。
+// v1.27：第三档「强势」是**并列标签**（既非 985 也非 211 的强校），配色另给 ——
+// 沿用 985 的金色会被当成 211，HR 就理解错了它的含义。
 function uniTag(t){
   if (!t) return '';
+  if (t === '强势') return `<span class="chip" style="color:var(--accent-ink);background:var(--accent-soft)"
+    title="既非 985 也非 211、但学科实力公认强校（名单见 config/universities.json 的 strong 段），仅展示标签，不参与档位判定">强势</span>`;
   return `<span class="chip" style="color:var(--warn);background:var(--warn-soft)"
     title="按教育部 985/211 名单匹配院校名（含常见简称与校区后缀），仅展示标签，不参与档位判定">${esc(t)}</span>`;
+}
+// 英语四六级标签（v1.27）：展示**归一后的档位**（六级/专业四级…），
+// 不是简历原文 —— 原文可能是「全国英语等级考试六级」，卡片上放太长。
+// hover 给出原文，HR 想确认时能看到简历上到底写的什么。
+function cetTag(x){
+  const lv = (x.cet_level || '').trim();
+  const raw = (x.cet || '').trim();
+  if (!lv || lv === '无') return '';
+  return `<span class="chip" style="color:var(--ink-2);background:var(--surface-2)"
+    title="${raw ? '简历原文：' + esc(raw) : '英语等级'}，仅展示，不参与档位判定">${esc(lv)}</span>`;
 }
 // 备注行（v1.25.7）：有备注才显示——一行截断、悬停看全文；在完整档案里可修改。
 function noteLine(x){
@@ -1612,8 +1858,8 @@ function eduSchoolTag(x){
     + `${uni ? (' <b>' + esc(uni) + '</b>') : ''}</span>`;
 }
 function cardHtml(x){
-  const t = x.tier_effective || 'D';
-  const [fg,bg] = TIER_COLOR[t] || TIER_COLOR.D;
+  const t = x.tier_effective || tierFallback();
+  const [fg,bg] = tierColor(t);
   const job = x.job_title || null;
   const sug = x.job_suggestion || null;
   // 建议岗位（v1.5）：入库时就把**每个在招岗位**的 JD 试算了一遍，取最匹配的那个，
@@ -1665,18 +1911,29 @@ function cardHtml(x){
             ? `<span class="chip" style="color:var(--warn);background:var(--warn-soft)" title="简历读出来了，但这些字段没抽到：${esc(_miss.join('、'))}，可手动更正">缺：${esc(_miss.join('、'))}</span>`
             : '<span class="chip" style="color:var(--warn);background:var(--warn-soft)" title="这条投递有字段没抽到；打开完整档案会列出具体缺什么（姓名/年限/技能），并提供更正入口">信息缺失 · 点开档案核对</span>')
         : '');
-  const stage = x.stage || '新投递';
-  const tiers = ['A','B','C','D'].map(k=>`<option value="${k}" ${k===t?'selected':''}>${k} · ${TIER_LABELS[k]}</option>`).join('');
+  const stage = x.stage || STAGE_CFG.default_stage || '全部简历';
+  // v1.29.2：**结论与阶段拆成两个标签，且结论更显眼**。
+  // 为什么拆：阶段是"走到哪了"，结论是"这一步判下来是什么"——
+  // HR 扫人才库时真正要找的是"谁拟录用了、谁被拒了"，那是结论。
+  // 合成一个「已面试 · 拟录用」的话，两个信息都退化成同级的一行小字。
+  const _sc = (STAGE_CFG.colors || {})[stage] || 'var(--ink-3)';
+  const stageTag = `<span class="chip" style="color:${_sc};background:transparent;border:1px solid ${_sc}"
+    title="当前流程阶段">${esc(stage)}</span>`;
+  const verdictTag = verdictBadge(x.outcome, x.stage);
+  // 档位选项由服务端注入的顺序生成（原来写死 ['A','B','C','D']）
+  const tiers = TIER_ORDER.map(k=>`<option value="${k}" ${k===t?'selected':''}>${k} · ${TIER_LABELS[k]}</option>`).join('');
   const stages = STAGES.map(k=>`<option value="${k}" ${k===stage?'selected':''}>${k}</option>`).join('');
   const contact = contactLine(x);
   const scoreTip = (!job && sug)
-    ? ` title="档位按「建议岗位 · ${esc(sug.title)}」的 JD 判断：学历不达标判 D，其余由模型给出"` : '';
+    ? ` title="档位按「建议岗位 · ${esc(sug.title)}」的 JD 判断：学历不达标判 ${TIER_CFG.hard_shortfall_tier||''}，其余由模型给出"` : '';
   return `<div class="card" style="border-left-color:${fg}">
     <div class="row1">
       <input type="checkbox" class="pickChk" value="${x.id}" style="margin-right:10px">
       <div class="avatar">${esc((x.name||'?').slice(0,1))}</div>
       <div style="flex:1;min-width:0">
-        <div class="nm">${esc(x.name||'未识别')} ${eduSchoolTag(x)} ${rev} ${genderTag} ${jobTag}</div>
+        <!-- v1.29：四六级标签紧跟学校之后（原来排在性别后面）——
+             学历/学校/四六级同属「学历背景」，放一起 HR 扫一眼就到位。 -->
+        <div class="nm">${esc(x.name||'未识别')} ${verdictTag} ${eduSchoolTag(x)} ${cetTag(x)} ${stageTag} ${interviewUnitTag(x)} ${rev} ${genderTag} ${jobTag}</div>
         ${expBadge(x) ? `<div class="meta" style="margin-top:2px">${expBadge(x)}</div>` : ''}
         <div class="meta" style="margin-top:2px"><b>联系方式</b>：${contact}</div>
         ${noteLine(x)}
@@ -1728,12 +1985,51 @@ async function setStage(aid, stage){
   // 阶段走到终点时后端会自动归档，提示要如实说明，否则 HR 会发现人「不见了」却不知为何
   toast(r.note || ('阶段已推进到「'+stage+'」'), r.auto_archived ? 'warn' : 'ok'); refresh();
 }
+/* v1.29：档案「面试信息」区的三个下拉（单位/时段/方式）。
+   数据来自面试字典；字典是**懒加载**的（只有进「写邮件」页才拉），
+   所以这里先给一个不依赖字典的渲染（空 → 就是普通输入框，仍可手打），
+   字典到位后再补上 —— 不用为了下拉把整页重渲染一次。 */
+function _dictList2(arr){
+  return (arr||[]).map(x=>`<option value="${esc(x)}"></option>`).join('');
+}
+let _ivDictAsked = false;
+async function ensureInterviewDict(){
+  // v1.29.4（业务方）：单位/时段/方式的下拉来自面试字典。字典拉过一次就够，
+  // 但档案弹层每次重渲染都会**新建 datalist 元素** —— 已有字典时也要重新填充，
+  // 否则第二次打开档案时下拉是空的（元素是新的，旧内容跟着旧 DOM 扔掉了）。
+  const _fill = () => {
+    const _put = (id, arr) => { const el=document.getElementById(id); if (el) el.innerHTML=_dictList2(arr); };
+    _put('dlIvUnit', IDICT.units);
+    _put('dlIvSlot', IDICT.slots);
+    _put('dlIvMode', IDICT.modes);
+  };
+  if (IDICT && IDICT.units){
+    // ⚠️ 调用点在弹层 DOM 搭好**之前**（showDetail 里紧跟数据请求）——
+    // 同步填会填到上一版的 datalist 上，新的 elems 随后才建、是空的（实测抓到）。
+    // 放到宏任务里，等本次渲染落地再填。
+    setTimeout(_fill, 0);
+    return;
+  }
+  if (_ivDictAsked) return;
+  _ivDictAsked = true;
+  try{
+    const r = await api('/api/interview-dict');
+    // GET 返回的是**裸字典**（只有 POST 带 {ok,dict} 包装）——两种形状都认，
+    // 别再出现"拿 r.dict 当真理、结果下拉框全空"的错位（v1.29 实测抓到）。
+    IDICT = (r && (r.dict || r)) || {};
+    window.IDICT = IDICT;
+    _fill();
+  }catch(e){ /* 拉不到就当纯文本输入，不影响登记 */ }
+}
+
 async function showDetail(cid){
   const d = await api('/api/candidates/'+cid);
+
+  ensureInterviewDict();      // v1.29：面试信息区的单位/时段/方式下拉（懒加载，不阻塞弹层）
   if (d.__http_error){ toast(d.detail||'读取失败','danger'); return; }
   setModalTitle((d.name||'未识别') + ' · 完整档案',
-    `<button class="btn-primary" onclick="saveFields(${d.id})"
-      title="更正范围：姓名 / 学历 / 学校 / 专业 / 性别 / 电话 / 邮箱（技能与年限须以简历原文为准，不在这里改）">保存更正</button>`);
+    `<button class="btn-primary" onclick="saveAll(${d.id}, ${d.application_id||0})"
+      title="**一键保存这张档案里改过的全部内容**：基本信息、面试与录用信息、备注。没改过的字段不会提交，也不会多留审计。技能与年限须以简历原文为准，不在这里改">保存更正</button>`);
   const skills = (d.skills||[]).map(s=>`<span class="chip" style="color:${s.verified?'var(--accent)':'var(--ink-3)'};
       background:${s.verified?'var(--accent-soft)':'var(--surface-2)'}">${esc(s.name)}${s.verified?'':'(未核验)'}</span>`).join('');
   const evs = (d.skills||[]).filter(s=>s.evidence).slice(0,10).map(s=>
@@ -1749,20 +2045,35 @@ async function showDetail(cid){
         <button class="mini" onclick="markReview(${a.id},${(a.status_display==='待确认')?'false':'true'})"
           title="${(a.status_display==='待确认')?'表示这个人的信息已核对完毕（不改档位）':'已复核，点此撤销复核'}">${(a.status_display==='待确认')?'复核':'撤销复核'}</button>
       </td></tr>`).join('');
-  const docs = (d.documents||[]).map(x=>{
+  // 附件行渲染（简历附件与"其他附件"共用一个函数，v1.27）。
+  // `kind` 决定几件事：结果列的文案、"其他附件"要不要显示解析列。
+  const _docRow = (x, isResume)=>{
       const okFile = !!x.archived_path;
       const acts = okFile
         ? `<button onclick="openDoc(${x.id},1)">在线打开</button>
            <button class="btn-primary" onclick="openDoc(${x.id},0)">下载原件</button>`
         : '<span class="small bad-txt" title="该附件的原件文件没有归档，无法打开或下载；可重新导入简历以补上留档">原件未留档</span>';
+      // `parse_ok` 有三态：1 已解析 / 0 解析失败 / NULL **未解析**（其他附件）。
+      // ⚠️ 不能写成 `x.parse_ok ? ... : ...`：NULL 与 0 都会落到 else，
+      // 非简历附件就被显示成「简历读不出」——那是在说一份作品集"简历读不出"。
+      const result = isResume
+        ? (x.parse_ok === 0
+            ? '<span class="warn-txt" title="原文未能解析，需人工查看附件原件">简历读不出</span>'
+            : '<span class="ok-txt">已解析</span>')
+        : '<span class="small">未解析（按材料保存）</span>';
       return `<tr><td>${esc(x.file_name)}<div class="small">${esc(x.mime||'')} ·
          ${x.size?Math.round(x.size/1024)+' KB':''}</div></td>
-      <td>${esc(x.parse_engine||'—')}<div class="small">${x.text_len?x.text_len+' 字':''}</div></td>
-      <td>${x.parse_ok?'<span class="ok-txt">已解析</span>':'<span class="warn-txt" title="原文未能解析，需人工查看附件原件">简历读不出</span>'}</td>
+      ${isResume ? `<td>${esc(x.parse_engine||'—')}<div class="small">${x.text_len?x.text_len+' 字':''}</div></td>` : ''}
+      <td>${result}</td>
       <td>${esc((x.received_at||'').slice(0,16))}</td>
       <td class="small">${esc(x.archived_path||'—')}</td>
       <td class="bar">${acts}</td></tr>`;
-    }).join('');
+    };
+  // v1.27：简历附件与**其他附件**分开两张表。
+  // 分组在服务端做（`db.candidate_detail` 的 resume_documents/other_documents），
+  // 这里只渲染 —— 前端 filter 的话 `docs[0]` 取原文会取到作品集，简历原文变空。
+  const resumeDocs = (d.resume_documents||d.documents||[]).map(x=>_docRow(x, true)).join('');
+  const otherDocs = (d.other_documents||[]).map(x=>_docRow(x, false)).join('');
   const dup = (d.duplicates||[]).length ? `<div class="warn" style="margin:8px 0">
       系统提示以下档案疑似重复（**未自动合并**，需 HR 判断）：
       ${(d.duplicates||[]).map(x=>`#${x.id} ${esc(x.name)}（${esc(x.reason)}）`).join('；')}
@@ -1771,33 +2082,140 @@ async function showDetail(cid){
     <div class="kv">
       <div class="k">基本信息</div>
       <div style="background:var(--surface-2);border-radius:8px;padding:10px 12px">
+        <!-- v1.29.2（业务方 2026-10-16）：基本信息**合并成两行**，去掉「第一学历」输入框
+             （本科院校改在下面「教育经历」里补录），并把**四六级与性别换了位置**。
+             为什么换：学历背景（学历/学校/专业）读完接联系方式与四六级更顺，
+             性别夹在中间会把这条阅读线打断。 -->
         <div class="bar" style="flex-wrap:wrap;gap:8px">
-          <input id="edName" value="${esc(d.name||'')}" style="width:110px" placeholder="姓名">
-          <select id="edEdu" style="width:110px">
+          <input id="edName" value="${esc(d.name||'')}" style="width:104px" placeholder="姓名">
+          <select id="edEdu" style="width:104px">
             ${['', '大专', '本科', '硕士', '博士'].map(v =>
               `<option value="${v}" ${(d.edu_level||'')===v?'selected':''}>${v||'（学历未识别）'}</option>`).join('')}
           </select>
-          <input id="edSchool" value="${esc(d.school||'')}" style="width:160px" placeholder="学校">
-          <input id="edMajor" value="${esc(d.major||'')}" style="width:160px" placeholder="专业">
-          <select id="edGender" style="width:104px" title="简历没写就由你补填（已提取的会自动选中）；不参与档位判定">
-            ${['', '男', '女'].map(v =>
-              `<option value="${v}" ${((d.gender||'').trim())===v?'selected':''}>${v||'性别未填'}</option>`).join('')}
-          </select>
+          <input id="edSchool" value="${esc(d.school||'')}" style="width:168px" placeholder="学校">
+          <input id="edMajor" value="${esc(d.major||'')}" style="width:172px" placeholder="专业">
         </div>
+        <!-- 第二行：**四六级 + 性别放在电话那行的开头**（业务方 2026-10-16），
+             性别只两个字、下拉不需要 110px 那么宽（业务方："性别明显可以窄一点"）。 -->
         <div class="bar" style="flex-wrap:wrap;gap:8px;margin-top:8px">
-          <input id="edPhone" value="${esc(contactValue(d.phone)||'')}" style="width:160px" placeholder="电话">
-          <input id="edEmail" value="${esc(contactValue(d.email)||'')}" style="width:220px" placeholder="邮箱">
+          <select id="edCetLv" style="width:136px" title="英语四六级（人才库按它筛选）">
+            ${['', '六级', '四级', '专业八级', '专业四级', '考研英语'].map(v =>
+              `<option value="${v}" ${(d.cet_level||'')===v?'selected':''}>${v||'四六级未识别'}</option>`).join('')}
+          </select>
+          <select id="edGender" style="width:82px" title="简历没写就由你补填（已提取的会自动选中）；不参与档位判定">
+            ${['', '男', '女'].map(v =>
+              `<option value="${v}" ${((d.gender||'').trim())===v?'selected':''}>${v||'未填'}</option>`).join('')}
+          </select>
+          <input id="edPhone" value="${esc(contactValue(d.phone)||'')}" style="width:152px" placeholder="电话">
+          <input id="edEmail" value="${esc(contactValue(d.email)||'')}" style="width:212px" placeholder="邮箱">
         </div>
       </div>
+    <!-- v1.29.2（业务方 2026-10-16 定稿）：放在**基本信息下面、备注上方**。
+         它是这条投递的流程信息（面试单位/时段/方式 + 录用与入职），
+         不是"这个人是谁"的一部分，但又是 HR 每次都要看的 —— 所以紧跟基本信息。
+         同一个人投两个岗位时单位与时段各不相同，所以**绑定当前这条投递**（application_id）。 -->
+    <div class="k">面试与录用信息<span class="small" style="font-weight:400;margin-left:6px">（当前这条投递）</span></div>
+    <div style="background:var(--surface-2);border-radius:8px;padding:10px 12px">
+      <div class="bar" style="flex-wrap:wrap;gap:8px">
+        <!-- v1.29.4（业务方）：单位/时段/方式都是**组合框** —— 下拉选项来自
+             系统配置的面试字典（ensureInterviewDict 填下面三个 datalist），
+             同时允许直接手输；填好面试单位保存后会自动推进到「待面试」。 -->
+        <!-- v1.29.11（业务方）：面试单位**多选** —— 同一场面试可能并列几个单位。
+             值随隐藏的 #ivUnit 参与「保存更正」的差异比对（FORM_FIELDS 不用改），
+             存库用顿号连接（如「分析测试中心、稀土研究院」），筛选按边界匹配。 -->
+        <div class="multi" id="multi_ivunit" style="min-width:230px"></div>
+        <datalist id="dlIvUnit"></datalist>
+        <input id="ivDate" type="date" style="width:146px" value="${esc((d.interview_date||'').slice(0,10))}"
+               title="面试日期。发面试邀请时按邮件里选的日期自动写入">
+        <input id="ivSlot" list="dlIvSlot" style="width:132px" placeholder="面试时段"
+               value="${esc(d.interview_slot||'')}" title="如 09:30-10:30（选项来自面试字典，也可手输）">
+        <datalist id="dlIvSlot"></datalist>
+        <input id="ivMode" list="dlIvMode" style="width:110px" placeholder="面试方式"
+               value="${esc(d.interview_mode||'')}" title="现场面试 / 线上面试（选项来自面试字典，也可手输）">
+        <datalist id="dlIvMode"></datalist>
+                ${(_ivUnitNeeded(d) && !(d.interview_unit||'').trim())
+          ? `<span class="small" style="color:var(--warn)">必填 —— 填好面试单位并保存后，会自动推进到「待面试」</span>` : ''}
+      </div>
+      <!-- 录用相关**从第二行开始**：结论选项卡 → 录用函发出时间 → 签约 → 入职 -->
+      <div class="bar" style="flex-wrap:wrap;gap:8px;margin-top:8px;align-items:center">
+        <span class="small">面试结论</span>
+        ${_verdictPick(d)}
+        <span class="vdiv"></span>
+        <span class="small">录用函发出</span>
+        <!-- v1.29.2（业务方）：录用函发出时间做成**可编辑的时间框** ——
+             发录用函时系统自动回写；纸质/代发的也可以人事手填。
+             ⚠️ 手填必须先确认一次：这个时间是后面所有时限的起算点，
+             填错会让整条入职时间线都错位，而"填错了"当下看不出来。 -->
+        <input id="obOffer" type="datetime-local" style="width:186px"
+               value="${d.offer_sent_at ? esc(String(d.offer_sent_at).slice(0,16).replace(' ','T')) : ''}"
+               onchange="onOfferSentManual(this.value, this)"
+               title="发录用函时自动回写；若是纸质或他人代发，可在此手填（会先让你确认一次）">
+        <span class="small">签约</span>
+        <input id="obSigned" style="width:118px" placeholder="2026-10-13"
+               value="${esc(d.signed_at||'')}">
+        <span class="small">入职期限</span>
+        <input id="obDeadline" type="date" style="width:142px"
+               value="${esc((d.onboard_deadline||'').slice(0,10))}">
+        <select id="obStatus" style="width:112px">
+          ${['','未入职','已入职','放弃'].map(v=>
+            `<option value="${v}" ${(d.onboard_status||'')===v?'selected':''}>${v||'入职情况未填'}</option>`).join('')}
+        </select>
+              </div>
+    </div>
       <div class="k">备注</div>
       <div>
         <textarea id="edNote" rows="2" maxlength="500"
           placeholder="给这个人的工作备注：沟通印象、内推关系、谈薪情况……"
           style="width:100%;box-sizing:border-box;font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;resize:vertical">${esc(d.note||'')}</textarea>
-        <div class="bar" style="margin-top:6px">
-          <button onclick="saveNote(${d.id})">保存备注</button>
-        </div>
+
       </div>
+      <!-- v1.29：面试信息 + 入职信息。**人工登记入口**（发面试邀请/录用函时也会自动回写，
+           见 MailSendReq.vars）。面试单位是「待面试按部门分流」那个筛选的数据来源，
+           录错部门 = 面试当天通知错人，所以给成组合框（可下拉、也可手打）。 -->
+      <!-- v1.29.2：完整学历院校经历。业务方要求「本科什么学校、硕士什么学校、
+             博士什么学校」在分析结果里完整体现 —— 光有 school + first_degree_school
+             两个字段会把中间的研究生段丢掉，而 HR 判断学校水平恰恰是顺着学历一路看下去。
+             ⚠️ 这个注释里**不要写反引号**：_PAGE 是 Python 三引号字符串，
+             反引号会提前截断外层的 JS 模板字符串（已因此白屏 4 次）。 -->
+      <!-- v1.29.2：第一学历的**补录入口放这里**（业务方要求基本信息里不要这个框）。
+           理由：本科院校天然属于"教育经历"，而筛选「本科985/211」判的正是这一所；
+           放在基本信息里会和「学校」（最高学历）挤在一起、极易填错。 -->
+      ${(()=>{
+        /* v1.29.4（业务方）：教育经历改为**一条完整时间线**——
+           第一项「第一学历：」（可补录，本科院校），下面接模型逐段总结的
+           本科 / 硕士 / 博士对应院校；层次（985/211）服务端算好、蓝色展示。
+           ⚠️ 模型没给到最高学历那一段时用 school+edu_level 合成补齐 ——
+           否则不少档案这里会"只剩第一学历"（业务方点名的样子）。
+           注释里**不要写反引号**（_PAGE 是三引号字符串，会被提前截断）。 */
+        const segs = (d.edu_history||[]).map(h=>({...h}));
+        if (d.school && d.edu_level &&
+            !segs.some(h=>h.degree===d.edu_level && h.school===d.school))
+          segs.push({degree:d.edu_level, school:d.school, major:"", tier:d.uni_tier||null});
+        const ord = {本科:0, 硕士:1, 博士:2};
+        segs.sort((a,b)=>((ord[a.degree]==null?9:ord[a.degree]) -
+                          (ord[b.degree]==null?9:ord[b.degree])));
+        const badge = t => t?(` <span style="color:${t==='强势'?'var(--ok)':'var(--accent-ink)'};`
+          + `border:1px solid ${t==='强势'?'var(--ok)':'var(--accent-line)'};`
+          + `background:var(--accent-soft);border-radius:4px;padding:0 4px;`
+          + `font-size:12px;font-weight:600">${esc(t)}</span>`):'';
+        const rows = segs.map(h=>
+          `<div style="margin:2px 0 2px 2px">`
+          + `<span style="color:var(--ink-2)">${esc(h.degree||'学历')}：</span>`
+          + `<span style="color:var(--accent-ink);font-weight:500">${esc(h.school||'')}</span>`
+          + (h.major?`<span style="color:var(--ink-3);font-size:12px">（${esc(h.major)}）</span>`:'')
+          + badge(h.tier) + `</div>`).join('');
+        return `<div class="k">教育经历</div>
+      <div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px">
+          <span style="color:var(--ink-2)">第一学历：</span>
+          <input id="edFD" style="width:220px" placeholder="本科院校"
+                 value="${esc(d.first_degree_school||'')}"
+                 title="简历没写本科是哪所时在这里补；筛选「本科985/211」按这一所判。留空算「未识别」">
+          ${badge(d.bachelor_tier)}
+        </div>
+        ${rows}
+      </div>`;
+      })()}
       ${(()=>{
         /* v1.25.6：信息缺失只在**真的有问题**时出现（说清"缺什么 + 下一步"，
            用户要求：说明缺失的信息是什么，而不是只提示缺失）；
@@ -1869,7 +2287,8 @@ async function showDetail(cid){
         const _piiTxt = (_pii && _pii !== '普通') ? ('密级标记 ' + esc(_pii) + ' · ') : '';
         return `${esc(d.pool_status||'—')} · ${_piiTxt}阶段 ${esc(_a.stage||'新投递')}
           · 投递 ${(d.applications||[]).length} 次${_date?('（最近 '+esc(_date)+'）'):''}
-          · 来源 ${esc(_a.channel||'—')} · 附件 ${(d.documents||[]).length} 份`;
+          · 来源 ${esc(_a.channel||'—')} · 简历附件 ${(d.resume_documents||d.documents||[]).length} 份`
+          + ((d.other_documents||[]).length ? ` + 其他材料 ${d.other_documents.length} 份` : '');
       })()}
         ${(function(){
           /* v1.25：已发过邮件的**打一个显眼标记**。
@@ -1885,16 +2304,37 @@ async function showDetail(cid){
         })()}</div>
     </div>
     ${dup}
-    <div class="spacer"></div><div style="font-weight:600;font-size:15px">技能</div>
+    <!-- v1.29.2（业务方）：技能区**默认折叠**。展开后是几十条芯片的长列表，
+         不折叠会把投递记录与附件全挤到屏外。用原生 details/summary —— 零 JS。 -->
+    <details class="fold"><summary><b>技能</b><span class="small">（已识别 ${(d.skills||[]).length} 条，点开看明细）</span></summary>
     <div style="margin-top:6px">${skills||'<span class="small">未识别到已核验技能</span>'}</div>
     <div style="margin-top:8px">${evs}</div>
+    </details>
+    <!-- 投递记录与「面试与录用信息」**留在折叠区之外** —— 那是 HR 每次都要看的东西，
+         只有技能明细（几十条）是"要看时才展开"的。 -->
     <div class="spacer"></div><div style="font-weight:600;font-size:15px">投递记录</div>
     <table><thead><tr><th>投递</th><th>岗位</th><th>渠道</th><th>投递时间</th><th>档位</th>
       <th>阶段</th><th>状态</th></tr></thead><tbody>${apps||'<tr><td colspan="7">—</td></tr>'}</tbody></table>
     <div id="pickjobD-${d.id}"></div>
-    <div class="spacer"></div><div style="font-weight:600;font-size:15px">简历附件</div>
+    <!-- v1.29.4（业务方）：来源邮件标题展示在**简历附件上方** ——
+         投递邮件主题本身是应聘意向的表达（也参与按标题归岗），
+         归档展示出来，HR 不用翻邮箱就能对上这份简历是谁、怎么投的。 -->
+    ${(d.source_mail && d.source_mail.subject) ? `
+    <div class="spacer"></div>
+    <div style="font-weight:600;font-size:15px">来源邮件</div>
+    <div style="margin-top:4px;color:var(--ink-2)">标题：<b style="color:var(--ink)">${esc(d.source_mail.subject)}</b>
+      <span class="small">${d.source_mail.from?('· '+esc(d.source_mail.from)):''}${d.source_mail.received_at?(' · '+esc(d.source_mail.received_at)):''}</span></div>` : ''}
+<div class="spacer"></div><div style="font-weight:600;font-size:15px">简历附件</div>
     <table><thead><tr><th>文件</th><th>解析</th><th>结果</th><th>接收时间</th><th>归档位置</th><th>操作</th></tr></thead>
-      <tbody>${docs||'<tr><td colspan="6">—</td></tr>'}</tbody></table>
+      <tbody>${resumeDocs||'<tr><td colspan="6">—</td></tr>'}</tbody></table>
+    <!-- v1.27：非简历附件（作品集 / 成绩单 / 证书扫描件…）**单开一行**，
+         排在简历附件下面。它们随邮件一起收下并留档，但不建档、不参与解析。 -->
+    ${(d.other_documents||[]).length ? `
+    <div class="spacer"></div>
+    <div style="font-weight:600;font-size:15px">其他附件
+      <span class="small">（${d.other_documents.length} 份 · 作品集、成绩单、证书等材料，随简历一并收下留档，不建档、不解析）</span></div>
+    <table><thead><tr><th>文件</th><th>结果</th><th>接收时间</th><th>归档位置</th><th>操作</th></tr></thead>
+      <tbody>${otherDocs}</tbody></table>` : ''}
     <div class="spacer"></div><div style="font-weight:600;font-size:15px">操作审计</div>
     <table><thead><tr><th style="width:170px">时间</th><th>做了什么</th><th style="width:90px">操作人</th>
       </tr></thead>
@@ -1913,6 +2353,15 @@ async function showDetail(cid){
         title="重新解析原件 → 模型重抽字段 → 重建技能 → 重新归岗 → 重判建议档 → 重算分析。约 10 秒。">完整重新分析</button>
     </div>
     <div id="out-${d.id}"></div>`;
+  // v1.29.3：**统一保存**的"打开时原值"快照 —— 必须在**正文渲染完之后**取。
+  // 早一步（拿到数据就取）时输入框还不存在，快照全是空串 → 每个字段都判定"改过"，
+  // "没改的不用管"就等于没做（实测踩到：diff 里凭空多出姓名/学历/学校/…）。
+  // v1.29.11：面试单位多选控件 —— 种入现值（顿号/逗号分隔都认）再渲染。
+  // 必须在 _formSnapshot 之前：快照要取到隐藏 #ivUnit 的初始值，否则每次
+  // 打开都会被判成"改过"（假的差异）。分隔符用顿号，和存库口径一致。
+  JD_MULTI.ivunit = String(d.interview_unit||'').split(/[、,，]+/).map(s=>s.trim()).filter(Boolean);
+  multiRender('ivunit', 'dlIvUnit', '选面试单位（可多选）或直接输入', '、');
+  window.CUR_SNAP = _formSnapshot(d);
   document.getElementById('modal').classList.add('on');
 }
 
@@ -1982,48 +2431,101 @@ function closeModal(){
    姓名错会连带污染去重与检索；学校/专业错会让"专业方向判定"跟着错。
    与其让算法硬猜，不如让最了解情况的 HR 一步改对（后端写审计，改前改后留痕）。
    技能与年限**不在这里改**——那两项必须来自简历原文并通过证据核对。 */
-async function saveFields(cid){
-  const payload = {
-    name: (document.getElementById('edName').value || '').trim(),
-    education: document.getElementById('edEdu').value,
-    school: (document.getElementById('edSchool').value || '').trim(),
-    major: (document.getElementById('edMajor').value || '').trim(),
-    gender: document.getElementById('edGender').value,
-    phone: (document.getElementById('edPhone').value || '').trim(),
-    email: (document.getElementById('edEmail').value || '').trim(),
-  };
-  const r = await api('/api/candidates/'+cid+'/rename',
-                      {method:'POST', body:JSON.stringify(payload)});
-  if (r.__http_error || r.error){
-    toast(r.detail||r.error||'更正失败','danger'); return;
+/* v1.29.3：表单快照 / 差异比对 —— 支撑"右上角一个按钮保存全部改动"。
+   为什么要有快照：统一保存要调三个接口（基本信息 / 面试录用 / 备注），
+   每个接口只认"它自己那几个字段"。若把整张表单都发过去，
+   没改过的字段也会被当作改动提交 —— 多一条审计，还可能被当成"又改了一次"。
+   所以打开弹层时留一份原值，保存时**逐字段比对**，只发真正改了的。 */
+const FORM_FIELDS = [
+  ['基本信息', 'edName', 'name'], ['基本信息', 'edEdu', 'education'],
+  ['基本信息', 'edSchool', 'school'], ['基本信息', 'edMajor', 'major'],
+  ['基本信息', 'edFD', 'first_degree_school'], ['基本信息', 'edGender', 'gender'],
+  ['基本信息', 'edPhone', 'phone'], ['基本信息', 'edEmail', 'email'],
+  ['基本信息', 'edCetLv', 'cet'],
+  ['面试与录用', 'ivUnit', 'interview_unit'], ['面试与录用', 'ivDate', 'interview_date'],
+  ['面试与录用', 'ivSlot', 'interview_slot'], ['面试与录用', 'ivMode', 'interview_mode'],
+  ['面试与录用', 'obOffer', 'offer_sent_at'], ['面试与录用', 'obSigned', 'signed_at'],
+  ['面试与录用', 'obDeadline', 'onboard_deadline'], ['面试与录用', 'obStatus', 'onboard_status'],
+];
+function _formSnapshot(d){
+  const m = {};
+  for (const [, id] of FORM_FIELDS){
+    const el = document.getElementById(id);
+    m[id] = el ? String(el.value == null ? '' : el.value).trim() : '';
   }
-  // v1.24.21：保存成功后**留在弹层原地刷新**，不要关掉。
-  // 用户的诉求：「点了保存更正，明明成功了却报错，页面也不自动刷新」。
-  // 原来的做法是 closeModal() —— 弹层一关，HR 看不到改后的值，也没法接着改下一项；
-  // 而且只要后端返回非 2xx（如审计那步抛 500），这里就直接 return，
-  // 弹层既不关也不刷新，看起来像"点了没反应"。
-  // 现在：重新拉一次详情把弹层内容换成最新的，HR 能当场核对。
-  toast(r.note || '已更正', 'ok');
-  await showDetail(cid);
-  refresh();          // 背后的列表/卡片也同步（改完姓名后列表要跟着变）
+  m.edNote = (document.getElementById('edNote')||{}).value || '';
+  return m;
 }
+/** 返回 {基本信息:{…}, 面试与录用:{…}, 备注:string|null}，只含**真正改动**的字段。 */
+function formDiff(){
+  const snap = window.CUR_SNAP || {};
+  const out = {基本信息: {}, 面试与录用: {}, 备注: null};
+  for (const [grp, id, key] of FORM_FIELDS){
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const now = String(el.value == null ? '' : el.value).trim();
+    if (now !== String(snap[id] == null ? '' : snap[id]).trim()) out[grp][key] = now;
+  }
+  const note = (document.getElementById('edNote')||{}).value || '';
+  if (note !== (snap.edNote || '')) out.备注 = note;
+  return out;
+}
+/* v1.29.3：唯一的保存入口（右上角「保存更正」）。一次保存整张档案里改过的部分：
+   基本信息 + 面试与录用信息 + 备注。**没改的不提交**。
+   分三次请求是因为后端本来就是三个职责不同的接口（档案字段 / 投递流程 / 备注），
+   在这里编排比在后端造一个"什么都管"的接口更不容易出错。 */
+async function saveAll(cid, aid){
+  const diff = formDiff();
+  const nBasic = Object.keys(diff.基本信息).length;
+  const nFlow  = Object.keys(diff.面试与录用).length;
+  const nNote  = diff.备注 === null ? 0 : 1;
+  if (!nBasic && !nFlow && !nNote){ toast('没有改动任何内容', 'warn'); return; }
+  const parts = [];
+  if (nBasic){
+    const r = await api('/api/candidates/'+cid+'/rename',
+                        {method:'POST', body:JSON.stringify(diff.基本信息)});
+    if (r.__http_error || r.error){ toast(r.detail||r.error||'基本信息保存失败','danger'); return; }
+    parts.push('基本信息 ' + (r.changed||[]).length + ' 项');
+  }
+  if (nFlow){
+    if (!aid){ toast('这条投递还没有编号，面试与录用信息没保存（先在下面补录岗位）','warn'); return; }
+    const r = await api('/api/applications/'+aid+'/interview-info',
+                        {method:'POST', body:JSON.stringify(diff.面试与录用)});
+    if (r.__http_error || r.error){ toast(r.detail||r.error||'面试与录用信息保存失败','danger'); return; }
+    parts.push('面试与录用 ' + (r.changed||[]).length + ' 项');
+    // v1.29.4（业务方）：填完面试单位保存后，阶段在「待面试」之前会自动推进 —— 弹提醒
+    if (r.advanced_to){
+      parts.push('阶段已自动推进到「' + r.advanced_to + '」');
+      toast('面试单位已登记 —— 阶段已自动推进到「' + r.advanced_to + '」','ok');
+    }
+  }
+  if (nNote){
+    const r = await api('/api/candidates/'+cid+'/note',
+                        {method:'POST', body:JSON.stringify({note: diff.备注})});
+    if (r.__http_error || r.error){ toast(r.detail||r.error||'备注保存失败','danger'); return; }
+    parts.push('备注');
+  }
+  toast('已保存：' + parts.join(' · '), 'ok');
+  await showDetail(cid);
+  refresh();
+}
+
+
+/* v1.29：英语四六级不再单独保存 —— 它随标题栏的「保存更正」一起提交
+   （`saveFields` 里读 `edCetLv`）。原来的 `edCetSync` / `saveCet` 已删除：
+   前者是为了同步那个已去掉的"原文输入框"，后者是那个已去掉的独立按钮的入口。
+   后端 `POST /api/candidates/{cid}/cet` 接口保留（智能助手仍可用），只是界面不再走它。 */
+
+/* v1.29：保存面试信息 / 入职信息。**一次提交两个区块**——
+   分成两个接口会让 HR 改完一边忘了另一边，界面又是两块独立的地方。
+   只提交"动过的"字段：空值不动，避免把没填的项清成 NULL
+   （"还没登记"与"清空"是两件事，跟 signed_at 的约定一致）。 */
+function _val(id){ return ((document.getElementById(id)||{}).value || '').trim(); }
+
 
 /* v1.25.7：保存人工备注（独立于「保存更正」——备注是长文本、改得频繁）。
    成功后原地刷新弹层 + 列表（卡片上的备注行要跟着变）。 */
-async function saveNote(cid){
-  const el = document.getElementById('edNote');
-  if (!el) return;
-  const r = await api('/api/candidates/'+cid+'/note',
-                      {method:'POST', body:JSON.stringify({note: el.value})});
-  if (r.__http_error || r.error){
-    toast(r.detail||r.error||'保存失败','danger'); return;
-  }
-  toast(r.note || '备注已保存', 'ok');
-  if (r.changed && r.changed.length){
-    await showDetail(cid);   // 原地刷新弹层（能看到最新值）
-    refresh();               // 列表卡片上的备注行同步
-  }
-}
+
 
 /* 页面内确认弹窗：替代浏览器原生 await askConfirm()。
    为什么换掉原生：它的样式、字号、按钮文案都不可控，不同浏览器长得不一样，
@@ -2165,52 +2667,15 @@ async function doUpload(files){
    重复收取不只是"多跑一遍"——会并发抢同一个邮件游标、重复触发入库即分析，
    白白烧模型额度。所以：**一按下去就锁住，跑完（哪怕失败）才解锁**。 */
 
-/* 进行中的"开始"提示。
-   ⚠️ v1.24.20 改：进度条原本是**硬编码的 width:35%**，永远不动 ——
-   HR 的原话是"这个弹窗不会变化，也不会根据导入结果自动退出"。
-   接口实测只要 2 秒就返回，但一条死进度条 + 没有数字，
-   在几十秒级的真实导入里就会被当成"卡住了"。
-
-   现在改成**真在动的等待态**：
-   · 宽度用 CSS 动画做不确定进度循环（不确定总耗时，不能假装有百分比）；
-   · 旁边挂一个秒表，让"还在跑"变成可验证的事实而不是猜；
-   · 超过 20 秒提示可能是在等模型，让 HR 知道没死。 */
-function ingestStartModal(label){
-  setModalTitle(label + '进行中');
-  document.getElementById('mBody').innerHTML =
-    `<div>
-       <div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">
-         正在${label === '邮箱' ? '收取邮箱里的简历' : '读取本地文件夹里的简历'}，请稍候…</div>
-       <div class="progtrack"><div class="progfill progfill--indet"></div></div>
-       <div class="progmeta" id="ingestElapsed">已等待 <span id="ingestSecs">0</span> 秒，请勿重复点击</div>
-       <div class="progmeta" id="ingestSlow" style="display:none;color:var(--warn,#b06a00)">
-         耗时偏长，通常是在等模型分析。若超过 2 分钟仍无结果，可能是模型接口不通。</div>
-     </div>
-     <div class="bar" style="margin-top:18px;justify-content:flex-end">
-       <button class="btn-primary" onclick="closeModal()">关掉（后台继续跑）</button>
-     </div>`;
-  document.getElementById('modal').classList.add('on');
-  // 秒表：证明"还活着"。无论从哪条路出去，收尾都要停掉它。
-  if (__ingestTick){ clearInterval(__ingestTick); __ingestTick = null; }
-  let sec = 0;
-  const secsEl = document.getElementById('ingestSecs');
-  const slowEl = document.getElementById('ingestSlow');
-  __ingestTick = setInterval(() => {
-    sec += 1;
-    if (secsEl) secsEl.textContent = sec;
-    if (slowEl && sec === 20) slowEl.style.display = '';
-  }, 1000);
-}
-function ingestStopTick(){
-  if (__ingestTick){ clearInterval(__ingestTick); __ingestTick = null; }
-}
+/* 旧的"秒表弹窗"（ingestStartModal / ingestStopTick）已删除（v1.29.4）：
+   收取改两阶段任务弹窗（progressModal 的 stoppable / chain，见 doIngest）——
+   实时进度、优雅停止、"读取完成自动接力逐条分析"都在那里；
+   "关掉后台继续跑"由弹窗右上角关闭实现（轮询不中断）。 */
 
 /* 锁/解锁两个导入按钮。改 textContent 而不是 disabled，
    因为要看清"它到底在跑哪个"——disabled 的灰按钮在深色下容易读不出状态。 */
 function setIngestBusy(busy, source){
   __ingesting = busy ? (source || '?') : null;
-  // 解锁即收尾：秒表必须停，否则它会一直跑到下一个导入才被清掉。
-  if (!busy) ingestStopTick();
   const cfg = [
     ['btnIngestMailbox', 'mailbox', '收取邮箱简历'],
     ['btnIngestFolder', 'folder',   '导入本地文件夹'],
@@ -2219,10 +2684,12 @@ function setIngestBusy(busy, source){
     const el = document.getElementById(id);
     if (!el) return;
     if (busy){
-      el.disabled = true;
-      el.textContent = (__ingesting === src) ? (text + '…进行中') : (text + '（等待中）');
-      el.style.opacity = '.6';
-      el.style.cursor = 'not-allowed';
+      // v1.29.10（业务方）：**不禁用按钮** —— 弹窗被误关后，点它就是唯一的
+      // "回到进度窗口（含停止）"的入口；禁用等于把停止入口一起锁死。
+      el.disabled = false;
+      el.textContent = (__ingesting === src) ? (text + '…进行中（点此看进度）') : (text + '（点击查看进度）');
+      el.style.opacity = '.7';
+      el.style.cursor = 'pointer';
     } else {
       el.disabled = false;
       el.textContent = text;
@@ -2232,16 +2699,72 @@ function setIngestBusy(busy, source){
   });
 }
 
-async function doIngest(source){
-  const label = source==='mailbox' ? '邮箱' : '本地文件夹';
-  // 已在跑就直接拒绝：重复收取会并发抢同一个邮件游标、
-  // 重复触发入库即分析（每人都要调一次模型），代价是真金白银。
-  if (__ingesting){
-    toast(`已有一个导入任务在进行中（${__ingesting==='mailbox'?'邮箱收取':'文件夹导入'}），请等它完成`, 'warn');
+/* v1.29.10（业务方）：「导入进行中」的进度窗口可以**被关掉又重开**。
+   - ingestReopen()：本页记得任务号（弹窗被误关）→ 按记忆的阶段重开；
+   - ingestAttach(t)：页面刷新过（本页没记住）→ 把服务端发现的在跑任务挂回来。
+   关窗后台照跑；重开后"停止"按钮回到手上。 */
+function ingestReopen(){
+  const t = __ingestTask;
+  if (!t || !t.taskId) return false;
+  if (t.phase === 'insight'){
+    progressModal(t.taskId, {
+      title: '入库后自动分析',
+      desc: `正在对新增的 ${((t.rep||{}).insight_queued==null?0:(t.rep||{}).insight_queued)} 人做模型分析`,
+      chain: true,
+      onDone: (ar) => ingestFinal(t.label || '导入', t.rep || {}, ar)});
+  } else {
+    progressModal(t.taskId, {
+      title: (t.label || '导入') + '读取中',
+      desc: '正在读取…（读取完成后会自动接力逐条分析）',
+      stoppable: true, chain: true,
+      onDone: (fr) => ingestFetchDone(t.label || '导入', fr)});
+  }
+  return true;
+}
+function ingestAttach(t){
+  // /api/tasks/active 发现的"服务端还在跑"的任务（刷新页面后点导入按钮触发）
+  const isFolder = (t.title || '').includes('文件夹');
+  const label = isFolder ? '本地文件夹' : '邮箱';
+  setIngestBusy(true, isFolder ? 'folder' : 'mailbox');
+  __ingestTask = {taskId: t.task_id, label: label,
+                  source: isFolder ? 'folder' : 'mailbox',
+                  phase: 'fetch', rep: null};
+  if (!t.stoppable){
+    // 不可停止的阶段（模型分析）：只挂进度；完成后刷新并给一句结果
+    progressModal(t.task_id, {
+      title: t.title || '处理中', desc: t.message || '任务正在进行…', chain: true,
+      onDone: (fr) => {
+        setIngestBusy(false); __ingestTask = null; refresh();
+        toast((fr && fr.message) || '处理完成', (fr && fr.failed) ? 'warn' : 'ok');
+      }});
     return;
   }
+  ingestReopen();
+}
+async function doIngest(source){
+  const label = source==='mailbox' ? '邮箱' : '本地文件夹';
+  // 已在跑：**重新弹出进度窗口**，而不是把人挡在门外——弹窗被误关后，
+  // 这是唯一能回到"停止"按钮的路（业务方 2026-10-16 要求）。
+  if (__ingesting){
+    if (__ingestTask && __ingestTask.taskId){
+      toast('任务还在进行中，已重新打开进度窗口','info');
+      ingestReopen();
+    } else {
+      toast(`已有一个导入任务在进行中（${__ingesting==='mailbox'?'邮箱收取':'文件夹导入'}），请等它完成`, 'warn');
+    }
+    return;
+  }
+  // 页面刷新过（本页没记住任务号）：先问服务器有没有在跑的，有就挂回去，
+  // 绝不重复开新任务（重复收取会并发抢同一个邮件游标、重复烧模型额度）。
+  try {
+    const act = await api('/api/tasks/active');
+    if (act && act.ok && act.task){
+      toast('检测到还在进行中的任务，已重新打开进度窗口','info');
+      ingestAttach(act.task);
+      return;
+    }
+  } catch(e){ /* 查询失败按"没有任务"处理，正常开新的 */ }
   setIngestBusy(true, source);
-  ingestStartModal(label);
   let r;
   try{
     r = await api('/api/ingest', {method:'POST', body:JSON.stringify({source:source})});
@@ -2253,82 +2776,239 @@ async function doIngest(source){
   }
   if (r.__http_error || r.error){
     setIngestBusy(false);
-    resultModal({title: label + '导入失败', kind:'danger', body: r.detail||r.error||'导入失败'}); return;
+    resultModal({title: label + '导入失败', kind:'danger', body: errText(r.detail) || r.error || '导入失败'}); return;
   }
-  const num = k => (r[k]==null?0:r[k]);
-  const ix = r.index || {};
-  // 入库结果用居中弹窗报告（成功/失败一眼可见），不再顶部 toast
+  /* v1.29.4（业务方）：收取改**两阶段**——
+     ① 读取：先报总数、实时进度、可"优雅停止"（读完当前文件才停）；
+     ② 读取完成后同一个弹窗**原地切换**为逐条分析进度（不关不弹、不闪）；
+        分析结束后再给一次完整的结果弹窗。
+     这样不会出现"抓一个分析一个"那种提示窗口乱弹。
+     v1.29.10：任务号记进 __ingestTask —— 弹窗被关后可从导入按钮重开。 */
+  __ingestTask = {taskId: r.task_id, label: label, source: source, phase: 'fetch', rep: null};
+  ingestReopen();
+}
+function ingestFetchDone(label, fr){
+  // 读取阶段结束（正常/停止/出错都到这里）：解锁，让 HR 接着排下一批。
+  setIngestBusy(false);
+  const rep = (fr && fr.report) || {};
+  LAST_INGEST = rep;                     // 明细留在「导入与来源」页看
+  refresh();
+  if (fr.status === 'error'){
+    __ingestTask = null;
+    resultModal({title: label + '导入失败', kind:'danger', headline: '任务出错',
+                 body: esc(fr.message || '收取失败')});
+    return;
+  }
+  // 读取完成 → 接力到逐条分析（有排队才切；没有就直接出结果）
+  if (rep.insight_task_id){
+    // v1.29.10：分析阶段也记进 __ingestTask（弹窗若再被关，重开时挂回这一阶段）
+    __ingestTask = {taskId: rep.insight_task_id, label: label,
+                    source: (__ingestTask || {}).source || null,
+                    phase: 'insight', rep: rep};
+    ingestReopen();
+  } else {
+    ingestFinal(label, rep, null);
+  }
+}
+function ingestFinal(label, rep, ar){
+  __ingestTask = null;                   // v1.29.10：流程真正结束才清记忆
+  refresh();                             // 分析完成后再刷一次，让分析结论上屏
+  const num = k => (rep[k]==null?0:rep[k]);
   const summary =
     `新增 ${num('added')}，新版本 ${num('merged_versions')}，` +
     `跳过重复 ${num('skipped_dup')}，无附件 ${num('no_attachment')}，` +
     `解析失败(仍入库) ${num('parse_failed')}，超限跳过 ${num('skipped_oversize')}，` +
     `异常 ${num('failed')}`;
-  const hasProblem = (r.failed || r.skipped_oversize || num('insight_skipped') || r.empty_hint);
+  const hasProblem = (rep.failed || rep.skipped_oversize || num('insight_skipped')
+                      || rep.empty_hint || rep.stopped);
+  const stoppedNote = rep.stopped
+    ? '<br><br><span style="color:var(--warn,#b06a00)">已按你的要求停止（完成当前文件后停下）；'
+      + '已读取的全部保留，下次收取会从停下的地方继续。</span>'
+    : '';
   const warnNote = num('insight_skipped') > 0
     ? `<br><br>有 ${num('insight_skipped')} 人未分析（"入库即分析"当前是关的）——可在上方点「分析待分析的人」批量补上。`
     : '';
-  // v1.24.20：扫到 0 个文件时，必须说清是"文件夹是空的"还是"放错位置了"。
-  // 只报"新增 0"的话，HR 无从判断——这正是刚才那个弹窗让人摸不着头脑的另一半。
-  const emptyNote = r.empty_hint
-    ? `<br><br><span style="color:var(--warn,#b06a00)">${r.empty_hint}</span>`
+  const emptyNote = rep.empty_hint
+    ? `<br><br><span style="color:var(--warn,#b06a00)">${esc(rep.empty_hint)}</span>`
     : '';
-  // 收尾了才解锁：入库即分析还在后台跑，但收取动作本身已经结束，
-  // 允许 HR 排队下一次（避免"等模型分析"期间什么都做不了）。
-  setIngestBusy(false);
-  LAST_INGEST = r;                       // 明细留在「导入与来源」页看
-  await refresh();
-  // 入库后自动分析在后台跑（v1.24.9 接进度窗，v1.24.11 改为**收取结果确认后再开**）
-  // 原因：progressModal 与 resultModal 共用 #modal，同时调用会把「收取完成」覆盖掉，
-  // 用户反馈"没有完成提示"就是因为只看到了后面的进度条。
-  const startInsight = () => {
-    if (!r.insight_task_id) return;
-    progressModal(r.insight_task_id, {
-      title: '入库后自动分析',
-      desc: `正在对新增的 ${num('insight_queued')} 人做模型分析`,
-      onDone: () => refresh()
-    });
-  };
-  const insightNote = r.insight_task_id
-    ? `<br><br>接下来自动对新增的 ${num('insight_queued')} 人做模型分析，
-       点「知道了」后开始跟踪进度。`
+  const analysisNote = ar
+    ? (ar.status === 'error'
+        ? `<br><br><span style="color:var(--warn,#b06a00)">模型分析中断：${esc(ar.message||'未知原因')}；可点「分析待分析的人」重试。</span>`
+        : `<br><br>模型分析：成功 ${ar.done==null?0:ar.done} 人` +
+          (ar.failed ? `，失败 ${ar.failed} 人` : '') + '。')
     : '';
   resultModal({
     title: label + '导入完成',
     kind: hasProblem ? 'warn' : 'ok',
-    headline: hasProblem ? '有需要留意的地方' : (r.empty_hint ? '没有可导入的简历' : '导入成功'),
-    body: `${summary}<br><span style="color:var(--ink-2)">源：${r.source_label||label}</span>` +
-          emptyNote + warnNote + insightNote,
-    afterClose: startInsight
+    headline: rep.stopped ? '已停止（完成当前文件后停下）'
+                          : (rep.empty_hint ? '没有可导入的简历' : '导入成功'),
+    body: `${summary}<br><span style="color:var(--ink-2)">源：${esc(rep.source_label||label)}</span>` +
+          stoppedNote + emptyNote + warnNote + analysisNote,
   });
 }
-async function exportCsv(){
-  // 导出内容按试用反馈定：**个人简介 + 对应岗位**，不掺内部判定口径。
-  // 这份 CSV 是拿去用的（发给用人部门、贴进汇报、做面试排期），
-  // 档位/命中/推荐理由属于系统内部判断，HR 要看在界面里看即可。
-  // v1.7.1 起人才库分页展示——**导出必须拿全量**，不能只导当前页：
-  // 另发一次不带 page 参数的请求（接口默认返回全量，兼容口径保留着），
-  // 筛选条件（档位/关键词/性别）与当前列表保持一致。
-  const full = await api('/api/candidates?tier=' + encodeURIComponent(TAB)
-    + '&kw=' + encodeURIComponent(KW) + '&gender=' + encodeURIComponent(GENDER)
-    + '&education=' + encodeURIComponent(EDU_MIN) + '&univ=' + encodeURIComponent(UNIV));
-  const list = (full && full.items) || ITEMS;
-  const head = ['姓名','性别','学历','院校','专业','专业方向/技能概要','手机','邮箱',
-                '对应岗位','投递渠道','投递时间'];   // 校招口径：不导工作年限
-  const rows = list.map(x=>{
-    const sug = x.job_suggestion || null;
-    const job = x.job_title || (sug ? `建议：${sug.title}` : '待指定');
-    const skills = (x.skills||[]).slice(0,8).join('、');
-    // 年限列在校招模式下不存在，行数据必须同步少一项——否则后面所有列整体错位
-    return [x.name||'', x.gender||'', x.edu_level||'',
-            x.school||'', x.major||'', skills,
-            contactValue(x.phone), contactValue(x.email),
-            job, x.channel||'', (x.applied_at||'').slice(0,10)];
-  });
-  const csv = [head].concat(rows).map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\\n');
-  const blob = new Blob(['\\ufeff'+csv], {type:'text/csv;charset=utf-8'});
+/* v1.29.2：结论标签（拟录用 / 已签约 / 不录用 / 拒签）——**刻意做得比阶段标签显眼**。
+   业务方 2026-10-16 要求「特别显眼」：HR 扫人才库时真正要找的是
+   "谁拟录用了、谁被拒了"，那是结论；阶段只是背景信息。
+   层级：**结论（实心浅底 + 描边 + 加粗）> 阶段（透明底 + 细描边）**。
+   配色遵循本项目约定：浅底深字（深底浅字 HR 看不清），
+   正向用 --ok 系、负向用 --bad 系，与项目既有的成功/失败色一致、不新增一套。 */
+const VERDICT_STYLE = {
+  // 正向=绿、负向=红，直接用项目既有的 --ok / --bad（含 soft 底与 line 描边）——
+  // 不硬编码色值：主题一改就跟着变，也不会在项目里多出第二套绿/红。
+  '拟录用': 'background:var(--ok-soft);color:var(--ok);border-color:var(--ok-line);',
+  '已签约': 'background:var(--ok-soft);color:var(--ok);border-color:var(--ok-line);',
+  '不录用': 'background:var(--bad-soft);color:var(--bad);border-color:var(--bad-line);',
+  '拒签':   'background:var(--bad-soft);color:var(--bad);border-color:var(--bad-line);',
+};
+function verdictBadge(outcome, stage){
+  const oc = String(outcome || '').trim();
+  if (!oc) return '';
+  // ⚠️ **只在该阶段允许打这个标签时才显示**（业务方 2026-10-16）：
+  // 标签是"这一步的结论"，人一旦走出这个阶段（已签约/拒签 → 已结束），
+  // 它就不再代表当前状态了。比如柯语彤「已结束 · 拒签」——
+  // 显示"拒签"会让人以为她还在 offer 环节，而她其实已经归档了。
+  // 可选标签直接读配置（STAGE_CFG.outcomes），不在前端另写一份映射。
+  const allowed = (STAGE_CFG.outcomes || {})[String(stage || '').trim()] || [];
+  if (allowed.indexOf(oc) < 0) return '';
+  const style = VERDICT_STYLE[oc] || 'background:var(--surface-2);color:var(--ink-2);border-color:var(--line);';
+  return `<span class="chip verdict-tag" style="${style}"
+    title="人事处打的结论标签（导出表里的「是否录用」列同款口径）">${esc(oc)}</span>`;
+}
+/* v1.29.2：面试结论的**选项卡**（拟录用 / 不录用），当前标签高亮。
+   为什么用选项卡而不是普通按钮：这两个值是"这一步的结论"，点了就生效、
+   而且要能一眼看出"现在标的是哪个" —— 按钮只能表示"能点什么"，看不出"现在是什么"。
+   点「拟录用」**只打标签、留在「已面试」**（业务方 2026-08-16 裁定：不自动进已发放offer）；
+   点「不录用」进「已结束」并自动归档。流转规则仍走 `stages.json` 的 actions（单一真源）。 */
+/* v1.29.2：面试结论 —— **一个下拉框**，当前值决定它的颜色：
+   拟录用=绿、不录用=红、未判=中性。（业务方 2026-10-16 要求）
+   为什么不做成两个按钮：按钮只能表示"能点什么"，看不出"现在是什么"；
+   下拉框同时给出可选项和当前值，宽度也省一半。
+   ⚠️ 阶段联动（业务方 2026-10-16）：**当前是「待面试」时**，选结论会**自动推进到「已面试」**
+   （人已经面过、只是结论还没录）；**其它阶段不动**（在「已面试」打标签只改标签，
+   要不要推进到已发放offer 由 HR 另走一步）。联动实现在**服务端**，界面与助手同一套。
+   ⚠️ **打标签不会自动归档**：打「不录用」**不再自动进「已结束」并归档** ——
+   归档是不可逆的隐藏动作，而结论（尤其"不录用"）很可能还要改；
+   「已结束/自动归档」只保留给「拒签」那个真正走到终态的动作。 */
+function _verdictPick(d){
+  const cur = (d.outcome || '').trim();
+  const style = cur === '拟录用'
+    ? 'background:var(--ok-soft);color:var(--ok);border-color:var(--ok-line);font-weight:600'
+    : (cur === '不录用'
+        ? 'background:var(--bad-soft);color:var(--bad);border-color:var(--bad-line);font-weight:600'
+        : '');
+  return `<select id="ivOutcome" style="width:112px;${style}"
+      onchange="setInterviewVerdict(${d.application_id||0}, this.value, this)"
+      title="${d.stage==='待面试' ? '在「待面试」选结论会**同时推进到「已面试」**（人已经面过了）' : '面试结论（只打标签、不改变流程阶段；导出表里的「是否录用」按它显示）'}">
+      <option value="" ${cur?'':'selected'}>未判</option>
+      <option value="拟录用" ${cur==='拟录用'?'selected':''}>拟录用</option>
+      <option value="不录用" ${cur==='不录用'?'selected':''}>不录用</option>
+    </select>`;
+}
+/* 设置面试结论：**只写 outcome，不动 stage**。
+   复用 interview-info 接口（白名单里已有 outcome），不另写一套流转。 */
+async function setInterviewVerdict(aid, val, el){
+  if (!aid){ toast('这条投递还没有编号，先在档案里补录岗位','warn'); return; }
+  const prev = el ? el.dataset.prev || '' : '';
+  const r = await api('/api/applications/'+aid+'/interview-info',
+                      {method:'POST', body:JSON.stringify({outcome: val || ''})});
+  if (r.__http_error || r.error){ toast(r.detail || r.error || '设置失败','danger'); return; }
+  toast(r.advanced ? `已标记为「${val}」，并推进到「已面试」`
+                    : (val ? `已标记为「${val}」` : '已清除面试结论'), 'ok');
+  const cid = (window.CUR && CUR.id) || 0;
+  if (cid) await showDetail(cid);
+  refresh();
+}
+/* v1.29.2：**手动**填录用函发出时间前必须确认一次。
+   为什么：发函时系统会自动回写，所以走到这个框的只有"人事手填"——
+   而这个时间是签约期限、入职期限的起算点，填错了当下看不出来，
+   却会让后面一整条入职时间线错位。确认一次的成本远小于那个错误。 */
+async function onOfferSentManual(val, el){
+  if (!val){ return; }                    // 清空不弹（清空本身不是危险动作）
+  const ok = await askConfirm({
+    title: '确认已发送过录用函？',
+    body: `你手动填了录用函发出时间 <b>${esc(val.replace('T',' '))}</b>。<br><br>` +
+          `发录用函时系统会自动回写这个时间，所以能走到这里，说明是<b>纸质签收</b>` +
+          `或<b>由他人代发</b>。<br>请确认确实已发出 —— 这个时间是后面签约与入职期限的起算点，` +
+          `填错会让整条时间线错位。`,
+    okText: '确定，已发出', danger: false});
+  if (!ok){ el.value = ''; return; }      // 取消 → 回到未填，不提交
+  const aid = (window.CUR && CUR.application_id) || 0;
+  if (!aid){ toast('这条投递还没有编号，先在档案里补录岗位','warn'); el.value=''; return; }
+  const r = await api('/api/applications/'+aid+'/interview-info',
+                      {method:'POST', body:JSON.stringify({offer_sent_at: val})});
+  if (r.__http_error || r.error){ toast(r.detail || r.error || '保存失败','danger'); el.value=''; return; }
+  toast('已记录录用函发出时间', 'ok');
+}
+/* v1.29：面试单位标签。**只在进入面试流程之后才显示**（待面试及其后）——
+   初筛通过阶段单位多半还没定，这时候挂一个空的「面试：—」只是噪音。
+   到「待面试」就必须显示：HR 在人才库里按部门分流、认领"我面的人"全靠这一眼。 */
+/* v1.29：这个人**下一步**推进时，哪些字段是必填的。
+   口径读服务端注入的 actions（配置在 config/stages.json），不在前端另写一份
+   「哪个阶段必填面试单位」——那种清单放前端改配置时就漏改了。 */
+function _ivUnitNeeded(d){
+  const acts = (STAGE_CFG.actions || {})[(d.stage || '').trim()] || [];
+  const has = f => (acts.some(a => (a.require || []).includes(f)));
+  return has('interview_unit');
+}
+function interviewUnitTag(x){
+  const u = (x.interview_unit || '').trim();
+  if (!u) return '';
+  const order = STAGE_CFG.order || [];
+  const i = order.indexOf(x.stage || '');
+  const started = order.indexOf('待面试') >= 0 && i >= order.indexOf('待面试');
+  if (!started) return '';
+  return `<span class="chip" style="color:var(--accent-ink);background:var(--accent-soft)"
+    title="面试单位（进入待面试前必须登记；写面试邀请邮件时会自动带出）">面试：${esc(u)}</span>`;
+}
+async function downloadExport(url, label){
+  // v1.29：导出**走服务端**，不再前端拼 CSV。三个理由（都是踩过的坑）：
+  //  ① 前端拼的 CSV 在 Excel 里会把手机号变成 1.38E+10，且无表头格式/列宽；
+  //  ② 前端导出**不留审计** —— 这 13 列含电话明文、是要外发的，
+  //     "导出了但审计里一个字都没有"是合规问题；
+  //  ③ 前端拿不到"归档档"（列表默认不带归档的人），
+  //     而「已面试人员」表恰恰必须包含自动归档的那批（不录用/拒签）。
+  toast('正在导出「'+label+'」，请稍候…','ok');
+  const r = await fetch(url, {headers: hdr()});
+  if (!r.ok){
+    let msg = '导出失败（HTTP ' + r.status + '）';
+    try { const b = await r.json(); msg = b.detail || b.error || msg; } catch(e){}
+    toast(msg,'danger'); return;
+  }
+  const n = r.headers.get('X-Export-Rows') || '';
+  const disp = (r.headers.get('Content-Disposition')||'').match(/filename\\*=UTF-8''([^;]+)/);
+  const name = disp ? decodeURIComponent(disp[1]) : (label + '.xlsx');
+  const blob = await r.blob();
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = '人才简介清单.csv'; a.click();
-  toast(`已导出 CSV（${rows.length} 人，姓名/联系方式/技能概要 + 对应岗位）`,'ok');
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  URL.revokeObjectURL(a.href);
+  toast('已导出「'+label+'」' + (n ? '（'+n+' 人）' : '') + '：'+name, 'ok');
+}
+
+async function downloadBundle(){
+  // 打包下载走 POST（筛选条件在库里、返回 zip 字节），所以不能用上面的 downloadExport
+  toast('正在打包简历，请稍候…','ok');
+  const r = await fetch('/api/bundle/initial-pass', {method:'POST', headers: hdr()});
+  if (!r.ok){
+    let msg = '打包失败（HTTP ' + r.status + '）';
+    try { const b = await r.json(); msg = b.detail || b.error || msg; } catch(e){}
+    toast(msg,'danger'); return;
+  }
+  const disp = (r.headers.get('Content-Disposition')||'').match(/filename\\*=UTF-8''([^;]+)/);
+  const name = disp ? decodeURIComponent(disp[1]) : '初筛通过简历.zip';
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  URL.revokeObjectURL(a.href);
+  toast('已下载：'+name, 'ok');
+}
+
+/** v1.29.2：唯一的导出入口。
+    固定 13 列、**含已归档**、未进行到的阶段字段为 `—`；
+    筛选与列表**完全同一份**（poolQuery 单一真源），不会出现"界面筛 8 人、导出给全库"。
+    v1.29.2（业务方裁定）：**只出 Excel**，格式选择已删 —— CSV 在 Excel 里
+    打开会把手机号显示成 1.38E+10，而这 13 列含电话、是要发给用人单位的。 */
+async function exportRoster(){
+  await downloadExport('/api/export/roster?' + poolQuery({page:false}), '候选人名单');
 }
 
 /* --------------------- 投递管道（嵌入人才库，v1.7.5 折叠 + 完整看板） ---------------------
@@ -2336,29 +3016,38 @@ async function exportCsv(){
    形态按试用反馈定稿（v1.7.5）：**默认折叠成一行**，只看各阶段人数（超期红字）；
    点「展开」出完整看板——在招流程的阶段列全展示、每阶段人员全部列出（后端无截断）、
    行内带**阶段推进下拉**（原页的流程操作不丢），点姓名直接打开该人的完整档案。
-   已入职 / 已结束是终态，不占看板（也不占折叠行），要看去候选人卡片上按阶段看。
+   终态（见 config/stages.json 的 terminal）不占看板（也不占折叠行），要看去候选人卡片上按阶段看。
    数据仍是 /api/pipeline 一份；折叠态记在 PIPE_OPEN，refresh 重渲染后不丢。 */
-const PIPE_PER_COL = 15;   // 每列最多显示多少人（v1.15）：看板是"看积压"，不是"浏览全部"
-const _PIPE_STAGES = STAGES.filter(s=>s!=='已入职' && s!=='已结束');   // 在招流程阶段
+const PIPE_PER_COL = 15;   // 每列**每页**多少人（v1.29.5：超出改为分页翻页，不再整体展开）
+// v1.29.6（业务方 2026-10-16）：「已发放offer」列额外做**按岗位分组**——
+// 已发 offer 后人事要按岗位核 offer、对上招聘数量。阶段名与 config/stages.json
+// 一致，若改阶段名需同步这里。
+const _PIPE_GROUP_STAGE = '已发放offer';
+// v1.29：在招流程阶段 = STAGE_CFG.pipeline（服务端注入），不再 filter 写死的两个终态名。
+const _PIPE_STAGES = (STAGE_CFG.pipeline && STAGE_CFG.pipeline.length)
+  ? STAGE_CFG.pipeline
+  : STAGES.filter(s => !(STAGE_CFG.terminal || []).includes(s));
 function goAllPool(){
   /* v1.25.10：点环中间的总人数 = 回到"所有人"。
      环是**全库口径**（/api/stats 不带任何筛选），所以点它就该把列表也恢复成
      全库未归档的同一批人——否则数字和列表对不上。阶段/页签/搜索词/性别/学历/
-     院校全部清掉，与工具栏「清空」按钮同义，只是额外把 STAGE_F 也清了。 */
+     院校全部清掉，与工具栏「清空」按钮同义，只是额外把 STAGE_F 也清了。
+     v1.27：四六级（CET_F）与特定院校（STRONG_F）同样是筛选，也一并清 ——
+     漏清的后果与漏清 UNIV 完全一样：环显示"全部 100 人"、列表只剩 3 人。 */
   STAGE_F = ''; TAB = 'ALL'; KW = ''; GENDER = ''; EDU_MIN = ''; UNIV = '';
+  CET_F = []; STRONG_F = [];
   const _kb = document.getElementById('kwBox'); if (_kb) _kb.value = '';
   poolPageReset(); go('pool');
 }
-function pipeExpand(stage){
-  PIPE_ALL[stage] = !PIPE_ALL[stage];
+function pipePage(stage, delta){
+  // v1.29.5（业务方）：管道每列**分页**（每页 15 人）——1000+ 简历时
+  // "在本列展开全部"会把整列撑成天文数字长；翻页才是能用的浏览方式。
+  const cur = PIPE_PAGE[stage] || 1;
+  PIPE_PAGE[stage] = Math.max(1, cur + delta);
   refresh();
 }
-function goStageFilter(stage){
-  STAGE_F = stage; TAB = 'ALL'; POOL_PAGE = 0;
-  refresh();
-  toast('已按阶段「' + stage + '」筛选人才库', 'ok');
-}
-
+/* v1.29.7：原「去人才库筛选」跳转已删（业务方：管道翻页处不需要它）。
+   人才库自己的阶段下拉（STAGE_F=this.value）不受影响。 */
 function pipeToggle(){ PIPE_OPEN = !PIPE_OPEN; refresh(); }
 /* v1.25.7：超期阈值设置（用户要求"超期时间这里加一个设置按钮"）——
    只改"停留多少天算超期"的标红口径，存 settings，改完立即生效。 */
@@ -2417,34 +3106,60 @@ function pipeBoardHtml(p){
   const cols = _PIPE_STAGES.map(s=>{
     const v = st[s] || {count:0, items:[], overdue:0};
     // 每条压成**一行**（v1.15）：几百人时每条占 3 行根本没法看。
-    // 姓名 · 岗位 · 天数（超期红） · 行内推进下拉——下拉是常用动作，不能砍。
-    // v1.16.1：超出 15 人时给**两个真出口**——就地展开，或跳人才库按阶段筛。
-    // 原来只有一行灰字提示，而人才库当时并没有阶段筛选器，等于给了个死路。
+    // 只留 姓名 · 岗位 · 结论 · 天数（超期红）。
+    // v1.29.4（业务方 2026-10-16）：**不显示面试单位、不提供行内推进下拉** ——
+    // 列窄人一多什么都显示不全；阶段推进统一走人才库卡片的下拉（写审计的那条路不变）。
+    // v1.29.5（业务方）：超出每页 15 人的部分**分页翻页**（原"在本列展开全部"
+    // 在 1000+ 简历时会撑出难以浏览的长列）。v1.29.7：翻页条精简为 ‹ p/N ›，
+    // 去掉"去人才库筛选"跳转（业务方：排版太乱、不需要）。
     const _all = v.items||[];
-    const _expandAll = !!PIPE_ALL[s];
-    const _shown = _expandAll ? _all : _all.slice(0, PIPE_PER_COL);
-    const _more = _all.length - _shown.length;
-    const rows = _shown.map(i=>`
+    // v1.29.6（业务方 2026-10-16）：「已发放offer」列**按岗位分组**——
+    // 多岗位并招时人事要按岗位核 offer、对上招聘数量。只改该列的显示顺序，
+    // 组内保持原排序；分页仍是整列 15 人/页（组跨页时页首会再标一次岗位头）。
+    const _grouped = (s === _PIPE_GROUP_STAGE);
+    const _src = _grouped
+      ? [..._all].sort((a,b)=>String(a.job_title||'待指定')
+          .localeCompare(String(b.job_title||'待指定'),'zh'))
+      : _all;
+    const _grpTotal = {};
+    if (_grouped) _src.forEach(i=>{const k=String(i.job_title||'待指定');_grpTotal[k]=(_grpTotal[k]||0)+1;});
+    const _per = PIPE_PER_COL;
+    const _pages = Math.max(1, Math.ceil(_src.length / _per));
+    const _p = Math.min(Math.max(1, PIPE_PAGE[s] || 1), _pages);
+    PIPE_PAGE[s] = _p;                 // 夹紧写回：数据变少后不会停在空页
+    const _shown = _src.slice((_p - 1) * _per, _p * _per);
+    let _lastJob = null;               // 分组列用：上一行属于哪个岗位（换组插小标题）
+    // ⚠️ 括号必须包住"空列兜底"这一段 —— `a || b + c` 在 JS 里是 `a || (b + c)`：
+    // 有内容时右侧的分页条会被整体丢弃（实测：分页条一直不渲染）。原"在本列展开"
+    // 的链接也是栽在这个优先级上——业务方只看到过底部说明文字，从没见过出口。
+    const rows = (_shown.map(i=>{
+      let _head = '';
+      if (_grouped){
+        const jt = String(i.job_title||'待指定');
+        if (jt !== _lastJob){
+          _lastJob = jt;
+          _head = `<div class="it pipe-group-head">${esc(jt)} · ${_grpTotal[jt]||0} 人</div>`;
+        }
+      }
+      return _head + `
       <div class="it pipe-it" style="color:var(--ink-2)">
         <span class="pipe-nm" title="点击打开完整档案"
               onclick="showDetail(${i.candidate_id})">${esc(i.candidate_name||'未识别')}</span>
-        ${i.job_title?`<span class="pipe-job">${esc(i.job_title)}</span>`:''}
+        ${(!_grouped && i.job_title)?`<span class="pipe-job">${esc(i.job_title)}</span>`:''}
+        ${verdictBadge(i.outcome, i.stage)}
         <span class="pipe-day${i.days>=_od?' is-over':''}">${i.days}天</span>
-        ${i.application_id?`<select class="pipe-sel" onchange="setStage(${i.application_id},this.value)"
-          title="推进到所选阶段（写入审计）">
-          ${STAGES.map(k=>`<option value="${k}" ${k===s?'selected':''}>${k}</option>`).join('')}
-        </select>`:''}
-      </div>`).join('') || '<div class="it">—</div>'
-      + (_more>0
-          ? `<div class="it pipe-more">还有 ${_more} 人 ·
-              <a href="javascript:void(0)" onclick="pipeExpand('${escA(s)}')"
-                 title="就在这一列里把剩下的也显示出来">在本列展开</a> ·
-              <a href="javascript:void(0)" onclick="goStageFilter('${escA(s)}')"
-                 title="跳到人才库，只看「${esc(s)}」阶段的人">去人才库筛选</a></div>`
-          : (_all.length>PIPE_PER_COL && _expandAll
-              ? `<div class="it pipe-more">已展开全部 ${_all.length} 人 ·
-                   <a href="javascript:void(0)" onclick="pipeExpand('${escA(s)}')">收起</a></div>`
-              : ''));
+      </div>`;}).join('') || '<div class="it">—</div>')
+      + (_src.length > _per
+          ? `<div class="pipe-pager">
+              ${_p > 1
+                  ? `<a href="javascript:void(0)" title="上一页" onclick="pipePage('${escA(s)}',-1)">‹</a>`
+                  : '<span class="off" title="已是第一页">‹</span>'}
+              <span class="pg">${_p}/${_pages}</span>
+              ${_p < _pages
+                  ? `<a href="javascript:void(0)" title="下一页" onclick="pipePage('${escA(s)}',1)">›</a>`
+                  : '<span class="off" title="已是最后一页">›</span>'}
+            </div>`
+          : '');
     return `<div class="pcol"><div class="h"><span>${esc(s)}</span>
       <span style="color:${v.overdue?'var(--bad)':'var(--ink-3)'}">${v.count}${v.overdue?(' / 超期'+v.overdue):''}</span></div>
       ${rows}</div>`;
@@ -2452,7 +3167,7 @@ function pipeBoardHtml(p){
   return `<div class="card" id="pipeCard" style="margin-bottom:12px">${head}
     <div class="cols" style="margin-top:10px">${cols}</div>
     <div class="small" style="color:var(--ink-3);margin-top:8px"
-         title="点姓名打开完整档案；行内下拉可直接推进阶段（写审计）；停留超过 ${_od} 天标红">每列最多显示 ${PIPE_PER_COL} 人（超出可展开或去人才库按阶段筛）· 点姓名看档案 · 超 ${_od} 天标红</div>
+         title="点姓名打开完整档案；推进阶段请在人才库卡片的下拉里操作（写审计）；停留超过 ${_od} 天标红">每列每页 ${PIPE_PER_COL} 人，超出可翻页 · 点姓名看档案 · 超 ${_od} 天标红</div>
   </div>`;
 }
 
@@ -2489,8 +3204,8 @@ async function viewArchive(){
       <span class="small">按最后一条投递的年份整批归档，适合"新一年开始、旧简历收起来"</span>
     </div></div>
   ${items.length ? items.map(x=>{
-    const t = x.tier_effective || 'D';
-    const [fg,bg] = TIER_COLOR[t] || TIER_COLOR.D;
+    const t = x.tier_effective || tierFallback();
+    const [fg,bg] = tierColor(t);
     const am = x.archive || {};
     const left = am.days_left;
     const expiring = left!=null && left<=7;
@@ -2845,28 +3560,26 @@ async function markReview(aid, undo, fromDetail){
 
 /* ------------------------------ 智能助手 ------------------------------ */
 async function viewChat(){
-  const runs = await api('/api/agent/runs?limit=1');
-  const t = META.tools || {};
+  /* v1.29.10（业务方）：删掉头部那块工具/运行统计文字与写操作说明句；
+     「恢复对话」从输入区挪到右上角。 */
   document.getElementById('view').innerHTML = `  <div class="panel chat-page">
     <div class="flexbetween">
-      <div><h2 style="margin:0">HR 助手（智能体）</h2>
-        <div class="note">写操作只生成待确认提案，点确认才生效。</div></div>
-      <div class="small" style="text-align:right">
-        工具 ${t.total||0} 个：读 ${(t.read||[]).length} / 算 ${(t.compute||[]).length}
-        / 写(需确认) ${(t.write_requires_confirmation||[]).length}<br>
-        禁用：${(t.disabled||[]).join('、')}<br>
-        累计运行 ${(runs.cost||{}).runs||0} 次，平均 ${(runs.cost||{}).avg_latency_ms||0} ms
-      </div>
+      <div><h2 style="margin:0">HR 助手（智能体）</h2></div>
+      <button id="chatRestoreBtn" onclick="restoreChat()" style="display:none"
+              title="把刚清空的对话找回来。清空后 30 天内有效，到期系统自动清理底层记录">恢复对话</button>
     </div>
     <div id="chatRetention" class="note" style="display:none;margin-bottom:8px"></div>
     <div class="chatlog" id="chatLog"></div>
     <div class="bar chat-foot">
-      <input id="chatInput" placeholder="输入问题或指令" style="flex:1;min-width:240px"
-             onkeydown="if(event.key==='Enter'){askAgent()}">
-      <button class="btn-primary" onclick="askAgent()">发送</button>
-      <button id="chatRestoreBtn" onclick="restoreChat()" style="display:none"
-              title="把刚清空的对话找回来。清空后 30 天内有效，到期系统自动清理底层记录">恢复对话</button>
-      <button onclick="clearChat()" title="清空对话展示；30 天内可恢复，到期系统自动清理底层运行记录">清空</button>
+      <div class="chat-input-wrap">
+        <textarea id="chatInput" rows="3" placeholder="输入问题或指令（Enter 发送，Shift+Enter 换行）"
+                  oninput="chatGrow(this)"
+                  onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();askAgent()}"></textarea>
+        <div class="chat-input-actions">
+          <button class="btn-primary" onclick="askAgent()">发送</button>
+          <button onclick="clearChat()" title="清空对话展示；30 天内可恢复，到期系统自动清理底层运行记录">清空记录</button>
+        </div>
+      </div>
     </div>
   </div>`;
   // v1.6：进页面就把已落库的对话拉回来（刷新/重启后不再"历史消失"）
@@ -2965,10 +3678,17 @@ function pushMsg(role, text, isMd){
   log.appendChild(d); log.scrollTop = log.scrollHeight;
   return d;
 }
+/* v1.29.8：输入框随内容自动增高（240px 封顶，超出内部滚动）。
+   发完清空后要调一次把高度收回来（先置 auto 再按 scrollHeight 定高）。 */
+function chatGrow(el){
+  if (!el) return;
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 240) + 'px';
+}
 async function askAgent(){
   const inp = document.getElementById('chatInput');
   const q = (inp.value||'').trim(); if (!q) return;
-  inp.value = ''; pushMsg('user', q);
+  inp.value = ''; chatGrow(inp); pushMsg('user', q);
   const holder = pushMsg('assistant', '思考中…');
   const r = await api('/api/agent/chat', {method:'POST',
     body:JSON.stringify({message:q, history:CHAT})});
@@ -3256,7 +3976,7 @@ async function sendDraftNow(key, btn){
     html: d.body_html||'', candidate_id: d.candidate_id, template_name:'智能助手草稿'})});
   const card = document.getElementById('draft-' + key);
   if (r.__http_error || r.error){
-    toast(r.detail || r.error || '发送失败','danger');
+    toast(errText(r.detail) || r.error || '发送失败','danger');
     if (btn) btn.disabled = false;
     return;
   }
@@ -3540,6 +4260,9 @@ async function viewOrg(){
     <div class="jdform" style="margin-top:12px">
       <label>岗位名称 *</label>
       <input id="jobTitle" placeholder="如：工艺工程师">
+      <label>招聘数量</label>
+      <input id="jobHeadcount" type="number" min="0" step="1" style="width:130px"
+             placeholder="计划招几人（留空=未填）">
       <label>必需技能</label>
       <div class="multi" id="multi_jmust"></div>
       <label>加分技能</label>
@@ -3567,17 +4290,18 @@ async function viewOrg(){
       <span class="small">技能按逗号 / 顿号 / 分号分隔都认。</span>
     </div>
     <div class="spacer"></div>
-    <table><thead><tr><th>岗位</th><th>JD（判断尺子）</th><th class="nw">投递数</th><th class="nw">状态</th><th class="nw">操作</th></tr></thead>
+    <table><thead><tr><th>岗位</th><th>JD（判断尺子）</th><th class="nw">招聘数量</th><th class="nw">投递数</th><th class="nw">状态</th><th class="nw">操作</th></tr></thead>
       <tbody>${jobs.map(x=>`<tr>
         <td>${esc(x.title)}</td>
         <td class="small jdsum">${jdSummary(x.jd_json)}</td>
+        <td class="nw" title="招聘需求：计划招几人">${x.headcount?'<b>'+x.headcount+'</b> 人':'—'}</td>
         <td class="nw">${x.applications_count||0}</td>
         <td class="nw">${x.active?'<span class="chip" style="color:var(--ok);background:var(--ok-soft)">开放</span>':'<span class="chip" style="color:var(--ink-3);background:var(--surface-2)">已停用</span>'}</td>
         <td class="nw"><button onclick="editJd(${x.id})">查看 / 编辑 JD</button>
           <button onclick="regradeJob(${x.id})"
             title="按当前 JD 重算该岗位已有投递的建议档位">重新分析</button>
           ${x.active?`<button class="btn-danger" onclick="toggleJob(${x.id},false)">停用</button>`:`<button onclick="toggleJob(${x.id},true)">启用</button>`}</td>
-      </tr>`).join('')||'<tr><td colspan="5">暂无岗位</td></tr>'}</tbody></table>
+      </tr>`).join('')||'<tr><td colspan="6">暂无岗位</td></tr>'}</tbody></table>
   </div>`;
   // 学科目录补进 <datalist>：HR 填专业需求时能直接选学科名，不用凭记忆写。
   // 这一步只影响输入体验——填错名字不会报错，只会在报告里标「未识别」。
@@ -3639,31 +4363,43 @@ let JD_MULTI = {};
    岗位管理页的表单用 jmust/jpref/jmajor 三个 key，与 JD 编辑器的
    must/pref/major 分开——两处同屏出现时不会互相覆盖。 */
 const MULTI_IDS = {must:'ejMust', pref:'ejPref', major:'ejMajor',
-                   jmust:'jobMust', jpref:'jobPref', jmajor:'jobMajor'};
-/* 每个 key 的渲染参数（下拉 id / 占位文字）。
+                   jmust:'jobMust', jpref:'jobPref', jmajor:'jobMajor',
+                   /* v1.29.11（业务方）：档案「面试与录用信息」的面试单位多选。
+                      隐藏域沿用原 id `ivUnit` —— 保存/差异比对的逻辑一行不用改，
+                      存库用顿号连接（如「分析测试中心、稀土研究院」）。 */
+                   ivunit:'ivUnit'};
+/* 每个 key 的渲染参数（下拉 id / 占位文字 / 连接符）。
    记下来是为了**重渲染时不丢参数**：原来 multiDel 只能从 DOM 里反查，
-   结果 placeholder 会变成空字符串、datalist 也掉了。 */
+   结果 placeholder 会变成空字符串、datalist 也掉了。
+   `sep` 可选：默认 ', '（技能/专业沿用原口径），面试单位用 '、' 更自然。 */
 const MULTI_OPTS = {};
-function multiRender(key, listId, ph){
+function multiRender(key, listId, ph, sep){
   const box = document.getElementById('multi_'+key);
   if (!box) return;
-  if (listId !== undefined && listId !== null) MULTI_OPTS[key] = {listId, ph};
-  const o = MULTI_OPTS[key] || {listId: '', ph: ''};
+  if (listId !== undefined && listId !== null) MULTI_OPTS[key] = {listId, ph, sep};
+  const o = MULTI_OPTS[key] || {listId: '', ph: '', sep: ''};
   const vals = JD_MULTI[key] || [];
   box.innerHTML = `${vals.map((v,i)=>`<span class="multi-chip">${esc(v)}
       <b onclick="multiDel('${key}',${i})" title="移除">×</b></span>`).join('')}
     <input id="madd_${key}" list="${o.listId}" placeholder="${esc(o.ph||'输入后回车，或从下拉里选')}"
       onkeydown="if(event.key==='Enter'){event.preventDefault();multiAdd('${key}');}"
       onchange="multiAdd('${key}')">
-    <input type="hidden" id="${MULTI_IDS[key]}" value="${esc(vals.join(', '))}">`;
+    <input type="hidden" id="${MULTI_IDS[key]}" value="${esc(vals.join(o.sep || ', '))}">`;
 }
 function multiAdd(key){
+  /* v1.29.11：粘贴「A、B、C」时**按分隔符拆成多个**（原来是把分隔符删掉
+     接成一个词——技能栏贴一串时全糊在一起）；单个输入行为不变。 */
   const inp = document.getElementById('madd_'+key);
-  const v = (inp && inp.value || '').trim().replace(/[，、；;]/g, '');
-  if (!v){ if (inp) inp.focus(); return; }
+  const raw = (inp && inp.value || '').trim();
+  if (!raw){ if (inp) inp.focus(); return; }
   JD_MULTI[key] = JD_MULTI[key] || [];
-  if (JD_MULTI[key].indexOf(v) >= 0){ toast('「'+v+'」已经加过了','warn'); inp.value=''; return; }
-  JD_MULTI[key].push(v);
+  let added = 0;
+  for (const v of raw.split(/[、，,;；\\n]+/).map(s=>s.trim()).filter(Boolean)){
+    if (JD_MULTI[key].indexOf(v) >= 0) continue;
+    JD_MULTI[key].push(v); added++;
+  }
+  if (!added) toast('没有新增（都已在列表里）','warn');
+  inp.value = '';
   multiRender(key);                       // 参数已记住，重渲染不会丢
   const again = document.getElementById('madd_'+key);
   if (again) again.focus();
@@ -3673,7 +4409,8 @@ function multiDel(key, idx){
   multiRender(key);
 }
 
-function jdEditorHtml(jid, jd){
+function jdEditorHtml(jid, jd, job){
+  job = job || {};
   const must = jd.must || {}, pref = jd.preferred || {};
   const eduOpts = ['','大专','本科','硕士','博士'].map(v =>
     `<option value="${v}" ${v===(must.education_min||'')?'selected':''}>${v||'（不限 / 沿用默认）'}</option>`).join('');
@@ -3692,6 +4429,9 @@ function jdEditorHtml(jid, jd){
       <option value="3"></option><option value="5"></option><option value="8"></option>
       <option value="10"></option>
     </datalist>
+    <label>招聘数量</label>
+    <input id="ejHeadcount" type="number" min="0" step="1" style="width:130px"
+           value="${(job.headcount==null||job.headcount==0)?'':job.headcount}" placeholder="留空=未填">
     <label>专业需求（学科名）</label>
     <div class="multi" id="multi_major"></div>
     <label>职责说明</label>
@@ -3710,7 +4450,7 @@ async function editJd(jid){
   const d = await api('/api/jobs/'+jid);
   if (d.__http_error){ toast(d.detail||'读取失败','danger'); return; }
   setModalTitle((d.job.title||'岗位') + ' · 岗位 JD');
-  document.getElementById('mBody').innerHTML = jdEditorHtml(jid, d.jd||{});
+  document.getElementById('mBody').innerHTML = jdEditorHtml(jid, d.jd||{}, d.job||{});
   document.getElementById('modal').classList.add('on');
   // 多值组件要在 DOM 到位后初始化（顺序反了就是"控件是空的"——踩过）
   JD_MULTI = {
@@ -3730,11 +4470,19 @@ async function saveJd(jid){
   if (yv !== '' && yv !== '不限' && (isNaN(yvNum) || yvNum < 0)){
     toast('最低年限请填非负数字，或选「不限」','warn'); return;
   }
+  // 招聘数量（v1.29.6）：清空 = 0 → 后端落 NULL（未填）。它存在 jobs 表上，不参与档位判定。
+  const hcRaw = (document.getElementById('ejHeadcount').value || '').trim();
+  let hcNum = 0;
+  if (hcRaw !== ''){
+    hcNum = parseInt(hcRaw, 10);
+    if (isNaN(hcNum) || hcNum < 0){ toast('招聘数量请填非负整数','warn'); return; }
+  }
   const body = {
     must_skills: splitSkills(document.getElementById('ejMust').value),
     preferred_skills: splitSkills(document.getElementById('ejPref').value),
     education_min: document.getElementById('ejEdu').value,
     years_min: yvNum,
+    headcount: hcNum,
     major_required: splitSkills(document.getElementById('ejMajor').value),
     note: document.getElementById('ejNote').value
   };
@@ -3782,7 +4530,7 @@ async function regradeJob(jid, apply){
     return;
   }
   const rows = (r.items||[]).map(x=>{
-    const tcol = k => (TIER_COLOR[k]||TIER_COLOR.D)[0];
+    const tcol = k => tierColor(k)[0];
     let diff;
     if (x.skipped){
       diff = `<span class="small warn-txt">${esc(x.skipped)}</span>`;
@@ -3829,6 +4577,13 @@ async function regradeJob(jid, apply){
 async function addJob(){
   const title = document.getElementById('jobTitle').value.trim();
   if(!title){toast('请输入岗位名称','warn');return;}
+  // 招聘数量（v1.29.6）：计划招几人 = 招聘需求；留空 = 未填（纯管理信息，不参与判定）
+  const hcRaw = (document.getElementById('jobHeadcount').value||'').trim();
+  let hcNum = null;
+  if(hcRaw!==''){
+    hcNum = parseInt(hcRaw,10);
+    if(isNaN(hcNum)||hcNum<0){toast('招聘数量请填非负整数','warn');return;}
+  }
   const must = splitSkills(document.getElementById('jobMust').value);
   const pref = splitSkills(document.getElementById('jobPref').value);
   const edu  = document.getElementById('jobEdu').value;
@@ -3849,6 +4604,7 @@ async function addJob(){
   if(yv!=='') body.years_min = yvNum;
   if(mreq.length) body.major_required = mreq;
   if(note) body.note = note;
+  if(hcNum!==null) body.headcount = hcNum;
   const r = await api('/api/jobs',{method:'POST',body:JSON.stringify(body)});
   if(r.__http_error||r.error){toast(r.detail||r.error||'新增失败','danger');return;}
   const jdFilled = must.length||pref.length||edu||yv!==''||mreq.length||note;
@@ -4047,6 +4803,15 @@ function mailVarChanged(key){
     if (box) box.style.display = online ? '' : 'none';
     if (hint) hint.style.display = online ? '' : 'none';
     if (!online && box) box.value = '';
+    // v1.29：线上面试时**自动带出系统配置里的会议号**（面试字典页维护）。
+    // 只在框为空时填 —— HR 手敲过的不能被配置值冲掉。
+    if (online && box && !box.value){
+      // 读**当前字典**（IDICT 由进邮件页的 viewMail / 档案页的 ensureInterviewDict 填充）。
+      // 原来读 window.IDICT —— 邮件页只更新了 IDICT、从不写 window.IDICT，
+      // "自动带出"实测永远填不上（v1.29 缺口A 一并修）。
+      const mn = (IDICT || {}).meeting_no;
+      if (mn) box.value = mn;
+    }
   }
   // ③ 联系人 → 自动带出电话（字典联动，不用手抄）。
   //    现在是组合框（可手打），所以按"输入的名字"去字典里找电话；
@@ -4075,6 +4840,9 @@ async function viewMail(){
   // 存全量候选人（按姓氏筛选收件人用）
   window.MAIL_CANDS = cands_.map(c => ({
     id: c.id, name: c.name || ('未识别#'+c.id), email: c.email || '' }));
+  // v1.29.2：邮件页自带的候选人**完整项**（含 interview_unit）留一份，
+  // 供"自动带出已登记的面试单位"用 —— 不然从邮件页进来时查不到人（实测填不上）。
+  window.MAIL_CAND_FULL = cands_.slice();
   const tlist = MAIL_TPL.map(t =>
     `<option value="${t.id}">${esc(t.name)}${t.scene?('（'+esc(t.scene)+'）'):''}</option>`).join('');
   // v1.20：这些字段不该是"带灰色提示的文本框"——那是让 HR 凭记忆敲键盘。
@@ -4128,8 +4896,6 @@ async function viewMail(){
         : '<span style="color:var(--bad)">未配置</span>'}
       <button onclick="checkSmtp()" style="margin-left:6px">检查发信配置</button>
       <span id="smtpMsg" class="small"></span></div>
-    <div class="small" style="margin-top:8px">收发信配置（邮箱账号、授权码、来源目录、模板管理）都在
-      <a href="javascript:go('sys')" style="color:var(--accent-ink)">系统配置</a> 里。</div>
   </div>
   <div class="card"><h2>第一步 · 选人、选模板</h2>
     <div class="kv">
@@ -4150,6 +4916,23 @@ async function viewMail(){
         <select id="mTpl" style="width:55%">
           <option value="">（不用模板，直接手写）</option>${tlist}</select>
         ${MAIL_TPL.length ? '' : '<span class="small">还没有模板 —— 去「系统配置 → 模板管理」新建一个</span>'}</div>
+      <!-- v1.29.9（业务方）：附件区**不再自动列出候选人的简历/归档材料**——
+           这里只保留「上传附件」一条路（offer 扫描件或其他文件）。
+           原 v1.27 的候选人归档材料勾选区（mAttBox）由此移除。 -->
+      <div class="k">附件</div><div>
+        <!-- v1.29：临时上传附件（录用通知扫描件那类"不属于任何候选人"的材料）。
+             库内原件通道**故意不收任意文件**（防"前端指定服务端读哪个文件"），
+             所以另开这条受控通道：只收 PDF/JPG/PNG、≤20MB、不入库。 -->
+        <div class="bar" style="margin-top:6px;flex-wrap:wrap;gap:8px">
+          <button onclick="document.getElementById('upAttach').click()"
+            title="上传录用通知扫描件等临时材料。只支持 PDF / JPG / PNG，单份 ≤20MB；发出后文件仍保留可追溯">上传附件</button>
+          <input id="upAttach" type="file" hidden multiple
+                 accept=".pdf,.jpg,.jpeg,.png"
+                 onchange="uploadOutbox(this.files)">
+          <span class="small" id="upAttMsg"></span>
+        </div>
+        <div id="mOutBox"></div>
+      </div>
       ${rvars}
     </div>
     <div class="bar" style="margin-top:10px">
@@ -4159,6 +4942,10 @@ async function viewMail(){
   </div>
   <div class="card"><h2>第二步 · 预览与修改</h2>
     <div class="kv">
+      <!-- v1.29.2（业务方反馈"看不到是否添加附件成功"）：预览区必须**看得见附件**。
+           原来附件只在第一步的勾选区里，而 HR 的注意力在下面的预览正文；
+           "勾了"与"发出去了"又是两件事，不回显就只能靠记性。 -->
+      <div class="k">附件</div><div id="mailAttPreview"></div>
       <div class="k">主题</div><div><input id="mSubject" style="width:100%"></div>
       <div class="k">正文</div><div>
         ${richEditorHtml('mailEditor')}
@@ -4180,6 +4967,15 @@ async function viewMail(){
     <div id="mailSentBox"></div>
   </div>
 `;
+  // v1.29.2：变量区渲染完再带出一次已登记的面试单位。
+  // 为什么必须在这里也调一次（`pickCandidate` 里那次不够）：
+  // HR 的正常顺序是**先选人再选模板**，而变量区（`mv_面试单位` 那个输入框）
+  // 是**选模板时才渲染出来的** —— 选人的时候它根本还不存在，
+  // 于是"自动带出"永远填不上（实测：选完人再选模板，单位是空的）。
+  // 两个时机都调一次，谁先到谁生效；`autofillInterviewVars` 内部只在**值为空**时填，
+  // 所以不会覆盖 HR 手输的内容。
+  autofillInterviewVars();
+  renderAttPreview();
   // v1.25：若是从对话草稿卡"在编辑器中修改"切过来的，自动把草稿填进编辑器。
   // 放在渲染末尾（编辑器元素已存在），且消费后清空，避免后续普通进邮件页也被填上旧草稿。
   if (PENDING_DRAFT){
@@ -4313,7 +5109,136 @@ function pickCand(cid){
   document.getElementById('mCand').value = c.id;
   document.getElementById('mCandDrop').style.display = 'none';
   setMailTo(c.email, c.name);
+  // v1.29.9（业务方）：不再加载候选人的归档附件清单（附件区只留「上传附件」）。
+  autofillInterviewVars();     // v1.29：带出档案里已登记的面试单位
 }
+
+/* v1.29.9（业务方）：原 v1.27 的"候选人归档材料勾选"已按业务要求从界面移除——
+   附件区只保留上传（offer 扫描件等）。MAIL_ATTS / MAIL_ATT_NAMES 留作兼容，
+   恒为空数组；下面预览区列出**上传的附件**（v1.29.2：上传 / 清空之后都要
+   刷新 —— 任何一处变了而回显没变，HR 就会以为"没添加成功"，业务方反馈过）。 */
+function renderAttPreview(){
+  const box = document.getElementById('mailAttPreview');
+  if (!box) return;
+  // v1.29.10（业务方）：附件要能**预览** —— 上传的临时附件点名字直接打开看；
+  // 归档原件（MAIL_ATT_NAMES，按新需求恒为空）只列名字，不提供预览。
+  const names = (MAIL_ATT_NAMES||[]).filter(a => MAIL_ATTS.includes(a.id)).map(a => a.name);
+  const ups = (MAIL_OUTBOX||[]);
+  const nAll = names.length + ups.length;
+  box.innerHTML = nAll
+    ? names.map(n => `<span class="chip" style="margin-right:6px">${esc(n)}</span>`).join('')
+      + ups.map(o => `<span class="chip" style="margin-right:6px;cursor:pointer"
+            title="点击预览这个附件"
+            onclick="outboxOpen('${escA(o.outbox_id)}','${escA(o.filename)}')">${esc(o.filename)}</span>`).join('')
+      + `<div class="small" style="margin-top:4px">将随这封邮件发出，共 ${nAll} 份。</div>`
+    : '<span class="small">不带附件（纯文字邮件）</span>';
+}
+let MAIL_ATTS = [];
+/** 附件名索引 [{id, name}]：确认框与发送后留痕都要显示"发了哪几个文件"，
+    只有一个 id 数组是不够的（那时拿不到名字）。 */
+let MAIL_ATT_NAMES = [];
+/* v1.29：把档案里**已登记的面试单位**带出到面试邀请模板。
+   为什么需要带出：面试单位是人事处在「初筛通过」阶段登记的，
+   到了「待面试」写邀请函时如果还要再手输一遍，早晚会填错部门
+   （"分析测试中心" vs "稀土研究院" 填错，面试当天就找不到人）。
+   已在档案内手工改过的值优先 —— 模板里已经填了内容就不覆盖 HR 的输入。 */
+function autofillInterviewVars(){
+  const u = document.getElementById('mv_面试单位');
+  if (!u || (u.value || '').trim()) return;          // 已填 = HR 自己的，别动
+  const cid = parseInt(((document.getElementById('mCand')||{}).value)||'0', 10);
+  if (!cid) return;
+  // 两个来源都要看：邮件页自己拉了一份 /api/candidates（MAIL_CAND_FULL），
+  // 从人才库点过来时则是 ITEMS。列表 SQL 视图里有 interview_unit 这一列。
+  const it = (window.MAIL_CAND_FULL || []).find(x => x && x.id === cid)
+          || (window.ITEMS || []).find(x => x && x.id === cid);
+  if (it && it.interview_unit) u.value = it.interview_unit;
+}
+
+/* v1.29：把 HR 填好的**结构化**运行时变量一起回传给发信接口。
+   服务端按模板用途（mail_templates.kind）回写投递档案：
+     interview_invite → 面试日期 / 时段 / 单位 / 方式
+     offer            → 录用函发送时间
+   ⚠️ 绝不能靠解析正文取这些值：正文是自然语言
+   （"本次采用线上视频面试""腾讯会议进行"……写法无穷），解析必然出错。 */
+function collectMailVars(){
+  const out = {};
+  for (const v of ((window.MAIL_VARS || {}).runtime || [])){
+    const el = document.getElementById('mv_' + v.key);
+    if (!el) continue;
+    const val = String(el.value == null ? '' : el.value).trim();
+    if (val) out[v.key] = val;
+  }
+  return out;
+}
+
+/* v1.29：本次会话里临时上传的附件 [{outbox_id, filename, size}]。
+   与 MAIL_ATTS（库内原件的 id 数组）**分开存**，因为两者在发信请求里
+   走的是不同字段（document_id / outbox_id），混在一个数组里会分不清。 */
+let MAIL_OUTBOX = [];
+function renderOutbox(){
+  const box = document.getElementById('mOutBox');
+  if (!box) return;
+  // v1.29.10（业务方）：每个已传附件给「预览 / 删除」——没有删除按钮不合理；
+  // 传错文件（比如把别人的 offer 传进来）此前只能刷新页面清掉列表。
+  box.innerHTML = MAIL_OUTBOX.length
+    ? `<div class="small" style="margin-top:6px">已上传的临时附件（发送时随邮件带上）：</div>`
+      + MAIL_OUTBOX.map(o => `<div class="small" style="display:flex;align-items:center;gap:10px;margin-top:2px">
+          <span>${esc(o.filename)}（${Math.round((o.size||0)/1024)}KB）</span>
+          <a href="javascript:void(0)" onclick="outboxOpen('${escA(o.outbox_id)}','${escA(o.filename)}')"
+             title="在新标签页打开预览">预览</a>
+          <a href="javascript:void(0)" style="color:var(--bad)"
+             onclick="outboxDel('${escA(o.outbox_id)}','${escA(o.filename)}')"
+             title="从这封邮件里移除（临时文件同时从服务器删除）">删除</a>
+        </div>`).join('')
+    : '';
+}
+/* v1.29.10（业务方）：附件的「预览 / 删除」。
+   预览走浏览器原生导航（和简历原件同一口径：带不了自定义请求头，
+   登录模式下用 ?token= 兜底，withToken 已有）。 */
+function outboxOpen(oid, name){
+  if (!oid) return;
+  window.open(withToken('/api/mail/outbox/' + encodeURIComponent(oid)
+                        + '?name=' + encodeURIComponent(name || '')), '_blank');
+}
+async function outboxDel(oid, name){
+  if (!await askConfirm(`删除附件「${name || ''}」？\n\n只从这封邮件里移除；`
+      + `对应的临时文件也会从服务器清理。`)) return;
+  const r = await api('/api/mail/outbox/' + encodeURIComponent(oid) + '/delete', {method:'POST'});
+  if (r.__http_error || r.error){ toast(errText(r.detail) || r.error || '删除失败','danger'); return; }
+  MAIL_OUTBOX = MAIL_OUTBOX.filter(o => o.outbox_id !== oid);
+  renderOutbox(); renderAttPreview();
+  toast('附件已删除（临时文件已从服务器清理）','ok');
+}
+/* 上传：裸字节 POST（服务端不用 multipart —— 打包产物里没有 python-multipart，
+   引入它会让"能不能跑"取决于打包有没有收进去）。一个文件一个请求。 */
+async function uploadOutbox(files){
+  const list = Array.from(files||[]);
+  if (!list.length) return;
+  const msg = document.getElementById('upAttMsg');
+  if (msg) msg.textContent = '上传中…';
+  let ok = 0;
+  for (const f of list){
+    try{
+      const r = await fetch('/api/mail/outbox?name=' + encodeURIComponent(f.name),
+                            {method:'POST', headers: hdr({'Content-Type':'application/octet-stream'}),
+                             body: f});
+      const b = await r.json();
+      if (!r.ok || b.error){ throw new Error(b.detail || b.error || ('HTTP ' + r.status)); }
+      MAIL_OUTBOX.push({outbox_id: b.outbox_id, filename: b.filename, size: b.size });
+      ok++;
+    }catch(e){
+      if (msg) msg.textContent = f.name + ' 上传失败：' + (e.message || e);
+      return;
+    }
+  }
+  if (msg) msg.textContent = '已上传 ' + ok + ' 个临时附件';
+  renderOutbox();
+  renderAttPreview();
+}
+
+/* v1.29.9（业务方）：候选人归档材料的勾选（v1.27 那两个附件函数）已随
+   "附件区只留上传附件"一并移除。MAIL_ATTS / MAIL_ATT_NAMES 保留为空数组，
+   发送接口的组装代码兼容它们（永远为空，不会误发候选人材料）。 */
 // 键盘：上下选、Enter 选中、Esc 收起
 function candKey(e){
   const drop = document.getElementById('mCandDrop');
@@ -4848,9 +5773,20 @@ async function sendMailConfirm(){
   const plain = (editorEl('mailEditor') || {}).innerText || '';
   if (!subject && !plain.trim()){ toast('主题和正文都是空的','warn'); return; }
   if (!to || to.indexOf('@') < 0){ toast('收件人为空 —— 先选候选人','warn'); return; }
+  // v1.27：确认框里**列出附件名**。发出去撤不回来，
+  // 附错文件（把别人的成绩单发给候选人）比发错正文更敏感 —— 必须让 HR 看见。
+  const _attNames = (MAIL_ATT_NAMES||[]).filter(a => MAIL_ATTS.includes(a.id));
+  // v1.29：临时附件（录用函扫描件那类）也要列进确认框 —— 它不在 `_attNames` 里，
+  // 漏列就等于「发出去撤不回来、HR 却没看见」（v1.27 加附件时踩过同类问题）。
+  const _obNames = (MAIL_OUTBOX||[]).map(o => o.filename);
+  const _allAtt = _attNames.concat(_obNames);
+  const _attLine = _allAtt.length
+    ? `<br><b>附件（${_allAtt.length} 份）：</b>`
+      + _allAtt.map(a => esc(a)).join('、')
+    : '';
   const ok = await askConfirm({
     title: '确认发送这封邮件？',
-    body: `<b>收件人：</b>${esc(to)}<br><b>主题：</b>${esc(subject || '(无主题)')}
+    body: `<b>收件人：</b>${esc(to)}<br><b>主题：</b>${esc(subject || '(无主题)')}${_attLine}
            <br><br><span class="small">发出后无法撤回。确认无误再点「确认发送」。</span>`,
     okText: '确认发送', danger: false});
   if (!ok) return;
@@ -4864,22 +5800,35 @@ async function sendMailConfirm(){
     r = await api('/api/mail/send', {method:'POST', body:JSON.stringify({
       to: to, subject: subject, body: plain, html: html,
       candidate_id: cid ? parseInt(cid,10) : null,
-      template_name: tname})});
+      template_name: tname,
+      // v1.27：勾选的原件附件。只传 id，服务端自己从归档区读字节。
+      // 库内原件 + 临时上传的录用函扫描件：两条通道在请求里用不同字段
+      attachments: (MAIL_ATTS||[]).map(id => ({document_id: id}))
+        .concat((MAIL_OUTBOX||[]).map(o => ({outbox_id: o.outbox_id, filename2: o.filename}))),
+      // v1.29：结构化运行时变量 → 服务端按**模板用途**回写面试/录用信息
+      // （面试邀约模板回写面试日期/时段/单位/方式；录用函模板回写发送时间）
+      vars: collectMailVars()})});
   } finally {
     if (btn){ btn.disabled = false; btn.textContent = '确认发送'; }
   }
   if (r.__http_error || r.error){
-    mailSentBanner(false, r.detail || r.error || '发送失败');
-    toast(r.detail || r.error || '发送失败','danger');
+    mailSentBanner(false, errText(r.detail) || r.error || '发送失败');
+    toast(errText(r.detail) || r.error || '发送失败','danger');
     return;
   }
+  // 发完清空勾选：留着勾选会让 HR 再点一次「确认发送」时**把附件又发一遍**
+  //（而且那封的内容可能已经改了，重复发附件是实实在在的困扰）。
+  MAIL_ATTS = [];
+  // v1.29：临时附件同理清空（同一个坑）
+  MAIL_OUTBOX = []; renderOutbox(); renderAttPreview();
   // v1.23.8：发信成功后**在编辑区就地留痕**，不只靠顶部 toast。
   // 原来只有 `toast('邮件已发送')`，而 #alerts 在页面顶部、发信操作在最下方，
   // toast 7 秒后还消失——用户盯着编辑器根本看不到，回过神又不知道发没发出去，
   // 于是会重复点。**发信是不可撤销的动作，必须留下"已发出去"的证据。**
   mailSentBanner(true, r.note || '邮件已发送',
-    {to, subject, when: new Date(), from_header: r.from_header || ''});
-  toast(r.note || '邮件已发送', 'ok');
+    {to, subject, when: new Date(), from_header: r.from_header || '',
+     attachments: r.attachments || []});
+  toast(r.note || '邮件已发送', (r.attachments_missing||[]).length ? 'warn' : 'ok');
 }
 
 /* 发信结果横幅：成功=绿、失败=红，都留在编辑区里（不自动消失），
@@ -4914,6 +5863,26 @@ function mailSentBanner(ok, msg, info){
     </div>`;
   }
   if (host.scrollIntoView) host.scrollIntoView({block:'nearest'});
+}
+
+/* v1.29.9：把后端的校验错误翻译成人话。
+   FastAPI 的 422 detail 是数组（元素为 {loc, msg, type}），直接拼进模板
+   会显示成 "[object Object],[object Object]" —— 业务方实测反馈过。 */
+function errText(d){
+  if (d == null) return '';
+  if (typeof d === 'string') return d;
+  if (Array.isArray(d)){
+    return d.map(x => {
+      if (typeof x === 'string') return x;
+      if (x && x.msg){
+        const loc = (x.loc||[]).map(k => String(k)).join(' → ');
+        return (loc ? loc + '：' : '') + x.msg;
+      }
+      try { return JSON.stringify(x); } catch(e){ return String(x); }
+    }).join('；');
+  }
+  if (typeof d === 'object'){ try { return JSON.stringify(d); } catch(e){ return String(d); } }
+  return String(d);
 }
 
 /* ---- 模板编辑 ---- */
@@ -5053,7 +6022,8 @@ async function renderMailCfgInto(boxId){
       <div class="k">账号</div><div><input id="cfgUser" value="${esc(c.imap_user||'')}" style="width:260px" placeholder="jobs@example.cn"></div>
       <div class="k">授权码 / 口令</div><div><input id="cfgPass" type="password" style="width:260px"
         placeholder="${c.password_set?'已保存（留空则不修改）':'未设置'}">
-        <span class="small">${c.password_set?'当前已保存口令（不回显）':'尚未保存口令'}</span></div>
+        <span class="small">${c.password_set?'当前已保存口令（不回显）':'尚未保存口令'}
+          —— 这是<b>收信</b>授权码；发信另有一份，在下方「发信配置」里单独填。</span></div>
       <div class="k">收件文件夹</div><div><input id="cfgFolder" value="${esc(c.imap_folder||'INBOX')}" style="width:180px"></div>
       <div class="k">附件白名单</div><div><input id="cfgExt" value="${esc(attExt)}" style="width:340px" placeholder=".pdf,.docx,.doc,.txt,.md"></div>
       <div class="k">单个附件上限</div><div class="bar">
@@ -5097,10 +6067,15 @@ async function renderSmtpCfgInto(boxId){
       <div class="k">端口 / SSL</div><div class="bar">
         <input id="spPort" value="${c.port==null?465:c.port}" style="width:90px">
         <label style="display:flex;align-items:center;gap:5px"><input type="checkbox" id="spSsl" ${c.ssl?'checked':''}> 使用 SSL/TLS（465 端口勾它）</label></div>
-      <div class="k">发信账号</div><div><input id="spUser" value="${esc(c.user||'')}" style="width:260px" placeholder="jobs@example.cn"></div>
-      <div class="k">授权码</div><div><input id="spPwd" type="password" style="width:260px"
+      <div class="k">发信账号</div><div>
+        <input id="spUser" value="${esc(c.user||'')}" style="width:260px" placeholder="对外发件用的账号">
+      </div>
+      <div class="k">发信授权码</div><div><input id="spPwd" type="password" style="width:260px"
         placeholder="${c.password_set?'已保存（留空则不修改）':'未设置'}">
-        <span class="small">${c.password_set?'当前已保存（不回显）':'尚未保存'}　留空 = 不修改</span></div>
+        <span class="small">${c.password_set
+          ? ('当前已保存（不回显）　留空 = 不修改'
+             + (c.own_password_file ? '' : '　目前与收信口令共用一个文件，在此处保存后即独立'))
+          : '尚未保存'}</span></div>
       <div class="k">发件人显示名</div><div><input id="spFrom" value="${esc(c.from_name||'')}" style="width:260px"
         placeholder="西北有色金属研究院 人力资源部"></div>
     </div>
@@ -5227,6 +6202,11 @@ function _dictPayload(){
     slots: (window._dictData.slots||[]).slice(),
     modes: (window._dictData.modes||[]).slice(),
     contacts: (window._dictData.contacts||[]).slice(),
+    // v1.29 缺口A：会议号是单值，读**输入框当前值**——空串也要如实提交（清空是
+    // 正当操作，写成 `|| 兜底` 会让"清空"永远存不进去）。输入框不在时回落快照。
+    meeting_no: (document.getElementById('dictMeetingNo')
+                 ? document.getElementById('dictMeetingNo').value.trim()
+                 : ((window._dictData||{}).meeting_no || '')),
   };
 }
 async function dictSave(next, msg){
@@ -5236,6 +6216,11 @@ async function dictSave(next, msg){
   IDICT = window._dictData;
   renderDictBox();
   toast(msg || '已保存','ok');
+}
+async function dictMeetingNoSave(){
+  // v1.29 缺口A：会议号改动（失焦/回车触发 change）即保存——与字典增删同一套落盘路径。
+  // 不另设按钮：改完不点保存就走的"配了没反应"是这个项目踩过多次的雷。
+  await dictSave(_dictPayload(), '已保存会议号');
 }
 async function dictDel(key, idx){
   const next = _dictPayload();
@@ -5281,13 +6266,19 @@ function renderDictBox(){
   const d = IDICT || {};
   window._dictData = {units:d.units||[], rooms:d.rooms||[], slots:d.slots||[],
                       modes:d.modes||[], contacts:(d.contacts||[]).map(c=>({
-                        dept:c.dept||'', name:c.name||'', phone:c.phone||''}))};
+                        dept:c.dept||'', name:c.name||'', phone:c.phone||''})),
+                      meeting_no: d.meeting_no || ''};
   const cs = window._dictData.contacts;
   box.innerHTML = `<div class="kv">
     ${_dictList('units', '面试单位', window._dictData.units, '如：材料研究中心')}
     ${_dictList('rooms', '会议室', window._dictData.rooms, '如：创新大楼1519会议室')}
     ${_dictList('slots', '面试时段', window._dictData.slots, '如：08:00-09:00')}
     ${_dictList('modes', '面试方式', window._dictData.modes, '如：现场面试')}
+    <div class="k" style="vertical-align:top">会议号</div><div>
+      <input id="dictMeetingNo" style="width:52%" placeholder="如：123-456-789"
+             value="${esc(d.meeting_no||'')}" onchange="dictMeetingNoSave()">
+      <span class="small" style="margin-left:8px">选「线上面试」发邀请时自动带出</span>
+    </div>
   </div>
   <div class="kv" style="margin-top:12px">
     <div class="k" style="vertical-align:top">联系人</div><div>
@@ -5325,7 +6316,7 @@ async function viewSys(){
   <!--顺序原则（v1.15）：**需要填写/填错会出问题**的排最前（邮箱、SMTP、导入来源），
        可选与只读的往后（模板是写作素材，红线/数据存放只需读）。
        HR 的原话：「所有需要填写的配置的部分尽量往前面放」。 -->
-  <div class="panel"><h2>面试字典（单位 / 会议室 / 时段 / 联系人）</h2>
+  <div class="panel"><h2>面试字典（单位 / 会议室 / 时段 / 会议号 / 联系人）</h2>
     <div class="note">写邮件时的面试单位、地点、时段、联系人都从这份字典出。</div>
     <div id="dictBox"></div>
     <div class="bar" style="margin-top:8px">
@@ -5435,6 +6426,23 @@ async function saveModelCfg(){
 // 刻意不在这里放"一键导入"：导入会改写全院共用的技能本体，属于口径级动作，
 // 走命令行 `cli.py import-domain` 或接口的"先预演再落盘"两步，比在设置页点一下更稳。
 
+/* v1.29.4（业务方）：全站禁用浏览器「历史输入」候选项 —— 输入框会冒出以前
+   随手打过的词（如"西安/建筑"），既不准确也挡视线。统一给所有 input/textarea
+   盖上 autocomplete=off；页面随时重渲染，所以用 MutationObserver 覆盖动态节点。
+   （我们自己的 datalist 下拉不受影响 —— 那是显式声明，与浏览器历史填充无关。） */
+(function(){
+  const stamp = el => { try { el.setAttribute('autocomplete','off'); } catch(e){} };
+  const sweep = node => {
+    if (!node || node.nodeType !== 1) return;
+    if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA') stamp(node);
+    if (node.querySelectorAll) node.querySelectorAll('input,textarea').forEach(stamp);
+  };
+  try{
+    new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(sweep)))
+      .observe(document.documentElement, {childList:true, subtree:true});
+    sweep(document.documentElement);
+  }catch(e){ /* 老浏览器忽略 */ }
+})();
 boot();
 </script></body></html>"""
 
@@ -5483,9 +6491,44 @@ def _logo_data_uri(size: int = 64) -> str:
 
 def render_page(auth_enabled: bool = False) -> str:
     uri = _logo_data_uri()
-    brand = (f'<img class="logo" alt="企业人才库智能体" src="{uri}">' if uri
+    brand = (f'<img class="logo" alt="NIN人才库智能助手" src="{uri}">' if uri
              else '<span class="logo">才</span>')
+    # v1.29：阶段/结论/配色/动作一并注入前端 —— 前端不再有第二份阶段表。
+    # 走 JSON 而不是拼 JS 字面量：阶段名是人写的（可能带引号或反斜杠），
+    # 手工拼串遇到这种名字就会把整页 JS 打断（白屏）。json.dumps 保证转义正确。
+    # ⚠️ 注入是**全量文本替换**：占位符在 `_PAGE` 里出现几次就替换几次，
+    # 出现在**注释或字符串里也会被换掉** —— 页面被撑大，且值里万一带 `*` + `/`
+    # 会把注释提前截断、整页 JS 挂掉。
+    #
+    # 合法次数 = **2**：前端那行用的是 `typeof X === 'undefined' ? 兜底 : X` 这个
+    # 惯用法，标识符天然要引用两次（判空一次、取值一次）。这是唯一允许的形态。
+    # 出现第 3 次就一定是"有人在别处（注释、文档串、另一个注入点）又抄了一遍"，
+    # 那种情况必须当场报错，而不是留下一个"能跑但很脆"的页面。
+    for _ph in ("__STAGES" + "_JSON__", "__TIERS" + "_JSON__"):
+        _n = _PAGE.count(_ph)
+        if _n != 2:
+            raise RuntimeError(
+                f"注入占位符 {_ph} 在页面里出现 {_n} 次（应恰好 2 次：前端那行的 "
+                "typeof 判空 + 取值）。多出来的那处（哪怕是注释或文档串）也会被替换成"
+                "整坨 JSON，撑大页面、并可能截断注释导致整页 JS 挂掉。")
+    _stages_json = json.dumps({
+        "order": stages_mod.all_stages(),
+        "pipeline": stages_mod.pipeline_stages(),
+        "terminal": stages_mod.terminal_stages(),
+        "colors": {s: stages_mod.stage_color(s) for s in stages_mod.all_stages()},
+        "actions": {s: stages_mod.actions_of(s) for s in stages_mod.all_stages()},
+        "outcomes": {s: stages_mod.outcomes_of(s) for s in stages_mod.all_stages()},
+        "default_stage": stages_mod.DEFAULT_STAGE,
+    }, ensure_ascii=False)
+    # v1.29：档位（字母 + 中文名）同样注入 —— 前端不再抄第二份档位表。
+    _tiers_json = json.dumps({
+        "order": tiers_mod.all_tiers(),
+        "labels": tiers_mod.labels(),
+        "hard_shortfall_tier": tiers_mod.hard_shortfall_tier(),
+    }, ensure_ascii=False)
     return (_PAGE
             .replace("__BRAND_LOGO__", brand)
             .replace("__UI_BUILD__", _UI_BUILD)
+            .replace("__STAGES_JSON__", _stages_json)
+            .replace("__TIERS_JSON__", _tiers_json)
             .replace("__AUTH_ENABLED__", "true" if auth_enabled else "false"))

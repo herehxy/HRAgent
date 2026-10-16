@@ -35,6 +35,7 @@ from datetime import datetime
 
 from . import db
 from . import mailbox as mb
+from . import tiers as tiers_mod
 from .identity import build_identity_key
 from .pipeline import freshness
 from .pipeline import parse as parse_mod
@@ -52,21 +53,61 @@ from .pipeline import tier as tier_mod
 _PROGRESS: dict[str, dict] = {}
 _PROGRESS_LOCK = threading.Lock()
 
+#: 可停止任务的中断旗（task_id → Event）。与 _PROGRESS 分开存 ——
+#: get_progress 的返回值要能 JSON 序列化（事件对象不能混进去）。
+_STOP_FLAGS: dict[str, threading.Event] = {}
+_STOP_LOCK = threading.Lock()
 
-def register_progress(title: str, total: int) -> str:
-    """登记一个后台任务，返回 task_id（自动分析的进度靠它查询）。"""
+
+def request_stop(task_id: str) -> bool:
+    """请求停止一个可停止的后台任务（收取/导入）。返回是否受理。
+
+    语义是**协作式**：执行方在"每处理完一份文件/一封邮件"的边界检查一次，
+    读到就停在下一个边界 —— 不会把正在处理的半份砍断，游标也停在
+    最后成功处理的那条（下次从那里继续，不重复、不丢件）。
+    ⚠️ 已结束的任务不再受理 —— 否则"点停止 → 被回答已请求"会让人以为它还在跑。
+    """
+    with _STOP_LOCK:
+        ev = _STOP_FLAGS.get(task_id)
+    if ev is None:
+        return False
+    with _PROGRESS_LOCK:
+        p = _PROGRESS.get(task_id)
+    if p is not None and p.get("status") != "running":
+        return False
+    ev.set()
+    return True
+
+
+def stop_requested(task_id: str | None) -> bool:
+    if not task_id:
+        return False
+    with _STOP_LOCK:
+        ev = _STOP_FLAGS.get(task_id)
+    return bool(ev and ev.is_set())
+
+
+def register_progress(title: str, total: int, stoppable: bool = False) -> str:
+    """登记一个后台任务，返回 task_id（自动分析的进度靠它查询）。
+
+    `stoppable=True` 时同时登记中断旗（收取/导入用，见 `request_stop`）。
+    """
     import uuid
     tid = uuid.uuid4().hex[:12]
     with _PROGRESS_LOCK:
         _PROGRESS[tid] = {"title": title, "total": total, "done": 0,
                           "failed": 0, "status": "running", "message": "",
                           "started_at": __import__("time").time()}
+    if stoppable:
+        with _STOP_LOCK:
+            _STOP_FLAGS[tid] = threading.Event()
     return tid
 
 
 def update_progress(tid: str, *, done: int | None = None,
                     failed: int | None = None, status: str | None = None,
-                    message: str | None = None) -> None:
+                    message: str | None = None, total: int | None = None,
+                    extra: dict | None = None) -> None:
     with _PROGRESS_LOCK:
         p = _PROGRESS.get(tid)
         if not p:
@@ -79,12 +120,39 @@ def update_progress(tid: str, *, done: int | None = None,
             p["status"] = status
         if message is not None:
             p["message"] = message
+        if total is not None:          # v1.29.4：收取任务"统计完数量再报总数"
+            p["total"] = total
+        if extra:
+            p.update(extra)
 
 
 def get_progress(tid: str) -> dict | None:
     with _PROGRESS_LOCK:
         p = _PROGRESS.get(tid)
         return dict(p) if p else None
+
+
+def list_running() -> list[dict]:
+    """列出**还在跑**的后台任务（收取 / 导入 / 分析）。
+
+    给"页面刷新、或进度弹窗被误关后重新挂回去"用（v1.29.10，业务方：
+    "弹窗关了就无法停止了"）：前端先问一句有没有在跑的，有就挂回进度窗口
+    （可停止的带停止按钮），避免重复开任务、也避免傻等。
+    排序：可停止的在前、新开的在前。
+    """
+    with _PROGRESS_LOCK:
+        rows = [(tid, dict(p)) for tid, p in _PROGRESS.items()
+                if p.get("status") == "running"]
+    out = []
+    for tid, p in rows:
+        with _STOP_LOCK:                      # 不嵌套拿锁，避免与 request_stop 反向死锁
+            can_stop = tid in _STOP_FLAGS
+        out.append({"task_id": tid, "title": p.get("title") or "",
+                    "total": p.get("total") or 0, "done": p.get("done") or 0,
+                    "message": p.get("message") or "", "stoppable": can_stop,
+                    "started_at": p.get("started_at") or 0})
+    out.sort(key=lambda x: (not x["stoppable"], -(x["started_at"] or 0)))
+    return out
 
 
 def _enrich_major(cand: dict, text: str) -> tuple[dict, str]:
@@ -294,6 +362,9 @@ def ensure_person(conn, cand: dict, channel: str, text: str,
         "edu_level": cand.get("education"),
         # 毕业时间：从原文里带"毕业"上下文的年月取，供"应届/往届未就业"判定
         "grad_date": freshness.find_grad_date(text),
+        # v1.29.4（业务方 2026-10-16）：在读判定 —— 硕士「2024.9-至今」这类还没毕业的
+        # 学生，不能被本科毕业年份判成"往届未就业"；在读按应届处理（见 freshness.find_in_school）。
+        "in_school": 1 if freshness.find_in_school(text) else 0,
         "school": cand.get("school"),
         "major": cand.get("major"),
         "years_exp": cand.get("years"),
@@ -301,6 +372,17 @@ def ensure_person(conn, cand: dict, channel: str, text: str,
         # 性别：仅当简历明写标签行时才有值；**不参与任何评分/分级**，
         # 只用于界面标签与可开关的筛选（见 server 的 gender_filter_enabled）。
         "gender": cand.get("gender"),
+        # v1.27：英语四六级原文表述（HR 拿它做硬筛选）。归一在读取侧做
+        # （`pipeline.extract.cet_level`），这里只存"简历上写了什么"。
+        "cet": cand.get("cet"),
+        # v1.29：第一学历（本科）院校。与 school（最高学历院校）**分开存** ——
+        # 拿 school 当第一学历会把"本科双非、硕士985"的人筛进「本科985」。
+        # 抽不到就是空，界面显示「未识别（可补录）」、筛选落独立的「未识别」档。
+        "first_degree_school": cand.get("first_degree_school"),
+        # v1.29.2：完整学历院校经历（本科/硕士/博士各一段）。存 JSON 字符串 ——
+        # 只随简历抽取一次、只读不编辑，建子表不划算（读时 loads 一次即可）。
+        "edu_history": (json.dumps(_edu_hist or [], ensure_ascii=False)
+                        if (_edu_hist := cand.get("education_history")) else None),
         "source_first": channel,
         "pii_level": classify_pii(text),
     })
@@ -354,7 +436,8 @@ def _open_jobs_with_jd(conn) -> list[dict]:
 
 
 def _route_by_open_jobs(conn, text: str, jd_default: dict,
-                        filename: str | None = None, use_llm: bool = False,
+                        filename: str | None = None,
+                        prefer_text: str | None = None, use_llm: bool = False,
                         llm_conf: dict | None = None) -> dict | None:
     """给未归岗的简历找「建议岗位」：**关键词已在上游试过**（没命中才走到这里），这一步问模型。
 
@@ -371,6 +454,25 @@ def _route_by_open_jobs(conn, text: str, jd_default: dict,
         return None
     empty = {"id": None, "title": "", "jd": None, "cand": None,
              "usable": False, "considered": len(jobs), "why": ""}
+    # v1.29.5（业务方）：**投递标题/文件名里的应聘方向优先做"建议岗位"** ——
+    # 本人写下的意向，只要能和在招岗位"对应上"（宽口径 match_job_soft），
+    # 就优先于按正文内容让模型去猜。⚠️ 产物仍是**建议**（只进 suggested_job_id），
+    # 不直接归岗；"完全对应"的情形在上游就已经直接归岗了，走不到这里。
+    wish = (prefer_text or "").strip()
+    if not wish and filename:
+        try:
+            wish = str((subject_meta_mod.parse(filename).get("fields") or {})
+                       .get("direction") or "")
+        except Exception:                                    # noqa: BLE001
+            wish = ""
+    if wish:
+        _sjid, _sjd = db.match_job_soft(conn, wish)
+        _sjob = next((j for j in jobs if j["id"] == _sjid), None) if _sjid else None
+        if _sjob is not None:
+            _scand = extract(text, _sjob["jd"], use_llm=use_llm, llm_conf=llm_conf,
+                             filename=filename)
+            return {**_sjob, "cand": _scand, "usable": True, "considered": len(jobs),
+                    "why": f"按投递标题/文件名的应聘方向「{wish}」对应到本岗位"}
     if not use_llm:
         # 模型未启用时不猜岗位：宁可待指定，也不要随机塞一个
         return {**empty, "why": "模型未启用，未做归岗判断"}
@@ -482,8 +584,10 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     #   ② 没有 → 请模型判断最像哪个在招岗位（一次调用）；
     #   ③ 模型也说不出 → 保持待指定、不出建议，由 HR 手动归岗。
     # 岗位本身仍然不落 `job_id`——系统只建议，HR 点「采纳」才真正归岗。
-    route = (_route_by_open_jobs(conn, text, jd, filename=filename, use_llm=use_llm,
-                                 llm_conf=llm_conf)
+    route = (_route_by_open_jobs(conn, text, jd, filename=filename,
+                                 prefer_text=((subject_meta or {}).get("fields") or {})
+                                 .get("direction"),
+                                 use_llm=use_llm, llm_conf=llm_conf)
              if job_id is None else None)
     if route and route.get("cand") is not None:
         # 画像用"胜出岗位"那一轮抽取的结果：技能清单里会包含该岗位 JD 写的词
@@ -492,8 +596,8 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         g = grade(cand, route["jd"] or jd)
     else:
         # 判不出岗位 / 无在招岗位 → **保留上面那次带模型的抽取结果**，不重抽、不覆盖。
-        # 只有**明确归岗**（job_id 来自文件名/邮件标题命中）时才允许判 D；
-        # 用默认尺子试算的待指定投递不判 D（见 tier.grade 的 job_confirmed）。
+    # 学历门槛判"最差档"的口径见 pipeline/tier.py（v1.24.15 起不再要求已归岗；
+    # v1.29 起档位字母来自 config/tiers.json，当前硬门槛档是 C）。
         g = grade(cand, jd, job_confirmed=(job_id is not None))
 
     # —— 邮件主题 / 文件名里的结构化字段（v1.9）：**优先于正文抽取** ——
@@ -583,6 +687,11 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         db.update_candidate(conn, cid,
                             honors_json=_json.dumps(_hon, ensure_ascii=False))
         result["notes"].append(f"识别到荣誉/论文/专利 {len(_hon)} 项")
+
+    # v1.27.1：四六级由模型判定，但它给的档位/证据没通过原文自证时已退回规则值 ——
+    # 这种情况必须留痕，否则 HR 看到的其实是规则值却以为是模型判的（不留静默降级）。
+    if "cet" in (cand.get("unverified_fields") or []):
+        result["notes"].append("英语四六级的模型判定未能在简历原文中核实，已改按原文抽取")
 
     if is_new:
         apply_tags(conn, cid, cand, channel, text)
@@ -815,6 +924,10 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
     cand = extract(text, jd_used, use_llm=use_llm, llm_conf=llm_conf,
                    filename=doc.get("file_name"))
     steps.append(f"重新抽取字段（{cand.get('extract_mode')}）")
+    # 毕业时间与"在读"由**原文**重算（extract 不产出这两个；不补的话下面 want
+    # 取到 None 会把已算好的值冲掉）。与入库时（ensure_person）同一口径。
+    cand["grad_date"] = freshness.find_grad_date(text)
+    cand["in_school"] = 1 if freshness.find_in_school(text) else 0
 
     # ---- ④ 写回字段：保住 HR 人工更正过的 ----
     kept_hr: list[str] = []
@@ -822,7 +935,17 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
     want = {"name": cand.get("name"), "edu_level": cand.get("education"),
             "school": cand.get("school"), "major": cand.get("major"),
             "years_exp": cand.get("years"), "gender": cand.get("gender"),
-            "grad_date": cand.get("grad_date"), "current_org": cand.get("current_org")}
+            "grad_date": cand.get("grad_date"), "current_org": cand.get("current_org"),
+            # v1.29.4：在读状态一起重算（换了份没写"至今"的简历不能还挂着在读）
+            "in_school": cand.get("in_school"),
+            # v1.27：四六级一起重算。漏掉的后果很隐蔽 —— 首次入库抽到了、
+            # 换了一份没写四六级的简历后重新分析就会静默清空，HR 筛六级时人不见了。
+            "cet": cand.get("cet"),
+            # v1.29：第一学历同理一起重算（同一个坑）
+            "first_degree_school": cand.get("first_degree_school"),
+            # v1.29.2：完整学历院校经历同样重算（换了一份没写教育经历的简历就会空）
+            "edu_history": (json.dumps(_eh or [], ensure_ascii=False)
+                            if (_eh := cand.get("education_history")) else None)}
     changes: dict[str, list] = {}
     upd: dict = {}
     for k, v in want.items():
@@ -852,6 +975,12 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
 
     # ---- ⑥ 重判档（只写建议档，绝不动 HR 定档与阶段）----
     g = grade(cand, jd_used, job_confirmed=bool(app_row.get("job_id")))
+    # ⚠️ v2.0.1：`grade()` 在"学历门槛之外"已经**不再产出档位**（返回 None）——
+    # 三档制下 A/B/C 由模型定，规则只负责学历门槛那条硬规则。
+    # 而这里原来无条件把 `g.get("tier_suggested")` 写回去，等于**先抹成空**，
+    # 全靠下面第 ⑧ 步模型成功返回才补回来；模型超时/不可用就永久留空。
+    # 实测：副本上重跑张思瑞，档位由 C 变成 None。所以规则没给档时**保留原值**。
+    _keep_tier = g.get("tier_suggested") or app_row.get("tier_suggested")
     if app_id:
         with lk:                                # 写段持锁（v1.24.8）
             conn.execute(
@@ -860,7 +989,7 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
                        suggested_job_id=COALESCE(?, suggested_job_id),
                        suggested_job_reason=COALESCE(?, suggested_job_reason),
                        updated_at=? WHERE id=?""",
-                (g.get("score"), g.get("tier_suggested"), cand.get("extract_mode"),
+                (g.get("score"), _keep_tier, cand.get("extract_mode"),
                  json.dumps(g.get("reasons") or [], ensure_ascii=False),
                  json.dumps(g.get("risks") or [], ensure_ascii=False),
                  json.dumps(g.get("hit") or [], ensure_ascii=False),
@@ -871,7 +1000,7 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
                  (route.get("why") if route else None),
                  db.now(), app_id))
             conn.commit()
-        steps.append(f"重算建议档：{g.get('tier_suggested') or '—'}")
+        steps.append(f"重算建议档：{g.get('tier_suggested') or '—（规则不产档，保留原值）'}")
 
     # ---- ⑦ 附件台账补清洗记录与解析引擎 ----
     if doc:
@@ -901,9 +1030,55 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
 
 
 
+def _save_other_attachments(conn, cfg: dict, atts: list[dict],
+                            candidate_id: int | None, message_id: str | None,
+                            received_at: str | None = None) -> int:
+    """归档**非简历附件**（v1.27）。返回成功归档的数量。
+
+    做的事：按内容哈希落一份到原件区 + 写一条 `documents(kind='other')` 台账。
+    刻意**不做**的事：不解析、不建档、不参与任何评分与去重判断。
+
+    幂等：`documents.file_hash` 是 UNIQUE，重复收取同一份作品集只留一条台账、
+    磁盘上也只有一份（`archive_file` 按内容哈希命名）。
+
+    `candidate_id` 为 None 时照样归档 —— 本封邮件没有可归属的简历（比如简历本身
+    被白名单过滤掉了），此时台账的 candidate_id 为空，"完整档案"里看不到，
+    但原件仍在库里且可按 `source_message_id` 追溯。**宁可暂存也不丢件**。
+    """
+    saved = 0
+    for att in atts or []:
+        name = att.get("filename") or "attachment"
+        data = att.get("data")
+        if not data:
+            continue
+        try:
+            archived, size = archive_file(cfg, name, data)
+            digest = sha256_bytes(data)
+            db.insert_document(conn, {
+                "file_hash": digest, "candidate_id": candidate_id,
+                "application_id": None,
+                "file_name": name, "file_path": archived, "archived_path": archived,
+                "mime": att.get("mime") or parse_mod.mime_of(name), "size": size,
+                "received_at": received_at or db.now(),
+                "source_message_id": message_id,
+                # 不解析：raw_text 空、parse_ok=None（不是 True也不是 False，
+                # 界面据此显示"未解析"而不是"已解析"）
+                "raw_text": "", "parse_engine": "非简历附件，未解析",
+                "parse_ok": None, "kind": "other",
+            })
+            saved += 1
+        except Exception:                                    # noqa: BLE001
+            # 单个附件归档失败不能拖垮整封邮件（简历已经入库了）。
+            # 失败只丢这一个附件，不回滚、不影响简历 —— 但也不能当没事发生，
+            # 邮件台账里 attachment_count 仍记着它（record_email 已写）。
+            continue
+    return saved
+
+
 def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: str,
                  job_id: int | None = None, use_llm: bool = False,
-                 llm_conf: dict | None = None) -> dict:
+                 llm_conf: dict | None = None, report: dict | None = None,
+                 spawn: bool = True) -> dict:
     """邮件批次入库。
 
     归岗口径：**只看邮件标题**。标题里出现某个在招岗位名 → 该封简历归到那个岗位，
@@ -912,11 +1087,20 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
 
     因此 `job_id` 参数**不参与归岗**（保留仅为兼容调用签名）：显式传一个岗位 id
     也不会让标题没写岗位名的简历自动挂上去 —— 否则一次误传就会把整批简历写错岗位。
+
+    `report` / `spawn`（v1.29.4）：逐封调用时把一个**累积报表**传进来（计数与
+    details 往它上面累加），并把 `spawn=False`（整批结束后由调用方挂一次分析）——
+    避免"收一封分析一批"把进度和提示窗口搅乱。
     """
     conn = db.connect(db_path)
-    report = {"mails": len(mails), "attachments": 0, "added": 0, "merged_versions": 0,
-              "skipped_dup": 0, "failed": 0, "no_attachment": 0, "parse_failed": 0,
-              "routed": 0, "unassigned": 0, "details": []}
+    if report is None:
+        report = {"mails": 0, "attachments": 0, "added": 0, "merged_versions": 0,
+                  "skipped_dup": 0, "failed": 0, "no_attachment": 0, "parse_failed": 0,
+                  "routed": 0, "unassigned": 0,
+                  # v1.27：非简历附件计数（收到几个 / 归档成功几个）
+                  "other_attachments": 0, "other_saved": 0,
+                  "details": []}
+    report["mails"] = int(report.get("mails") or 0) + len(mails)
     try:
         for mail in mails:
             mid = mail.get("message_id")
@@ -958,8 +1142,18 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
                                 error=mail.get("error") or "无简历附件")
                 continue
 
-            added = mm = skipped = failed = pf = 0
-            for att in atts:
+            added = mm = skipped = failed = pf = other_saved = 0
+            # v1.27：先按 kind 分流。非简历附件（作品集/成绩单/证书扫描件…）
+            # **不建档、不解析** —— 解析它们只会得到一堆空字段，
+            # 然后各自变成一个"解析失败的新人"混进人才库。
+            # 它们在下面统一挂到本封邮件**那位投递人**的档案上。
+            _resume_atts = [a for a in atts if (a.get("kind") or "resume") == "resume"]
+            _other_atts = [a for a in atts if (a.get("kind") or "resume") == "other"]
+            # 本封邮件建出来的人（**局部变量**）。不能回头扫 `report["details"]` ——
+            # 那个列表是**整批累积**的，会把上一封邮件的人挂到这封的附件上。
+            _mail_cid: int | None = None
+
+            for att in _resume_atts:
                 report["attachments"] += 1
                 try:
                     r = ingest_one(conn, cfg, eff_jd, tiers,
@@ -979,29 +1173,95 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
                     # v1.24.9 文案改成「简历读不出」后，按字符串匹配会静默失效。
                     if r.get("parse_failed"):
                         pf += 1
+                    if _mail_cid is None and r.get("candidate_id"):
+                        _mail_cid = r["candidate_id"]
                     report["details"].append(r)
                 except Exception as exc:  # 单份附件失败不影响整批
                     failed += 1
                     report["details"].append({"file": att.get("filename"), "status": "failed",
                                               "notes": [f"处理异常：{exc}"]})
+
+            # 非简历附件：挂到**这封邮件建出来的人**下面。
+            # 挂不上的（本封没有任何简历成功建档）也要归档，只是暂时找不到归属
+            # —— 不能静默丢弃，那等于"收到了但没存"。
+            if _other_atts:
+                other_saved += _save_other_attachments(
+                    conn, cfg, _other_atts, candidate_id=_mail_cid, message_id=mid,
+                    received_at=mail.get("received_at"))
+                report["other_attachments"] += len(_other_atts)
+                report["details"].append({
+                    "file": f"（本封共 {len(_other_atts)} 个非简历附件）",
+                    "status": "other_saved",
+                    "candidate_id": _mail_cid,
+                    "notes": [f"{n}已归档"
+                              + ("" if _mail_cid else "（本封没有可归属的简历，暂存未挂人）")
+                              for n in
+                              [a.get("filename", "") for a in _other_atts]],
+                })
             report["added"] += added
             report["merged_versions"] += mm
             report["skipped_dup"] += skipped
             report["failed"] += failed
             report["parse_failed"] += pf
+            report["other_saved"] += other_saved
             db.update_email(conn, mid, processed=1, processed_at=db.now(),
                             added=added, skipped=skipped, failed=failed)
-        # 入库完成 → 后台异步做分析（不阻断本次返回，失败也不影响上面这些计数）
-        spawn_auto_analysis(db_path, report)
+        # 入库完成 → 后台异步做分析（不阻断本次返回，失败也不影响上面这些计数）。
+        # spawn=False 时（逐封调用的批次）由调用方在整批结束后挂一次分析（v1.29.4）。
+        if spawn:
+            spawn_auto_analysis(db_path, report)
         return report
     finally:
         conn.close()
 
 
+def source_roots(cfg: dict | None = None) -> list[str]:
+    """允许作为「导入目录」的根：配置的三个来源目录 + 数据目录本身。"""
+    from .paths import DATA_DIR
+    roots = [os.path.join(DATA_DIR, "resumes"), DATA_DIR]
+    for k in ("folder_dir", "eml_dir", "archive_dir"):
+        v = (cfg or {}).get(k)
+        if v:
+            roots.append(mb.resolve_dir(v))
+    out: list[str] = []
+    for r in roots:
+        try:
+            rp = os.path.realpath(r)
+        except OSError:
+            continue
+        if rp not in out:
+            out.append(rp)
+    return out
+
+
+def resolve_source_dir(value: str | None, cfg: dict | None = None) -> str:
+    """把导入目录解析成绝对路径，并**收口在允许的来源目录内**（代码审查 P1-12）。
+
+    `folder` 这类参数直接来自请求体/模型参数，而 `mb.resolve_dir` 对**绝对路径
+    原样返回**——不校验就等于开一个本地任意文件读取口子：谁都能让服务去扫
+    （并入库）本机任意目录里的 PDF / Word。
+    不传值时走配置的 `folder_dir`（界面「导入本地文件夹」就走这条），行为不变。
+
+    越界抛 `ValueError`，由调用方决定怎么告诉用户（接口转 4xx、助手回一句话）。
+    """
+    from .paths import DATA_DIR
+    raw = (value or "").strip()
+    if not raw:
+        return mb.resolve_dir((cfg or {}).get("folder_dir") or os.path.join(DATA_DIR, "resumes"))
+    if ".." in raw.replace("\\", "/").split("/"):
+        raise ValueError("导入目录不合法（不接受 ..）")
+    real = os.path.realpath(mb.resolve_dir(raw))
+    for root in source_roots(cfg):
+        if real == root or real.startswith(root + os.sep):
+            return real
+    raise ValueError(f"导入目录不在允许的来源目录内：{real}"
+                     "（可在系统配置里改「导入文件夹」后再导入）")
+
+
 def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
                cfg: dict | None = None, channel: str = "文件夹",
                job_id: int | None = None, use_llm: bool = False,
-               llm_conf: dict | None = None) -> dict:
+               llm_conf: dict | None = None, progress_tid: str | None = None) -> dict:
     """手工导入文件夹中的简历（离线可用，不依赖邮箱）。
 
     体积上限与邮件附件**同一口径**（`max_attachment_mb`）。此前这条校验只在
@@ -1017,8 +1277,20 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
     report = {"scanned": len(files), "added": 0, "merged_versions": 0,
               "skipped_dup": 0, "skipped_oversize": 0, "failed": 0,
               "parse_failed": 0, "max_attachment_mb": limit // (1024 * 1024), "details": []}
+    # v1.29.4（业务方）：带 progress_tid 时 = "先报总数、再逐份推进 + 可停止"。
+    # 停止是**读完当前文件**到下一个循环边界才停（不会把半份文件砍断）；
+    # 不带进度的旧调用方（助手工具 / 自检）行为与原来完全一致。
+    if progress_tid:
+        update_progress(progress_tid, total=len(files),
+                        message=f"已发现 {len(files)} 份文件，开始读取…")
     try:
-        for path in files:
+        for _i, path in enumerate(files):
+            if stop_requested(progress_tid):
+                report["stopped"] = True
+                if progress_tid:
+                    update_progress(progress_tid,
+                                    message=f"已停止：完成 {_i} / {len(files)} 份后按你的要求停下")
+                break
             base = os.path.basename(path)
             try:
                 size = os.path.getsize(path)
@@ -1026,6 +1298,8 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
                 report["failed"] += 1
                 report["details"].append({"file": base, "status": "failed",
                                           "notes": [f"读取文件失败：{exc}"]})
+                if progress_tid:
+                    update_progress(progress_tid, done=_i + 1)
                 continue
             if size > limit:
                 report["skipped_oversize"] += 1
@@ -1036,6 +1310,8 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
                 })
                 db.add_audit(conn, "source_file", base, "oversize_skipped", "",
                              f"{size} 字节 > {limit} 字节，未导入", "system", "system")
+                if progress_tid:
+                    update_progress(progress_tid, done=_i + 1)
                 continue
             try:
                 # 文件名归岗（与邮件「标题归岗」同一口径）：
@@ -1070,6 +1346,8 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
                 report["failed"] += 1
                 report["details"].append({"file": base, "status": "failed",
                                           "notes": [f"处理异常：{exc}"]})
+            if progress_tid:
+                update_progress(progress_tid, done=_i + 1)
         # 与邮件路径同一处钩子：文件夹导入同样"进门就有判断"
         spawn_auto_analysis(db_path, report)
         return report
@@ -1077,42 +1355,128 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
         conn.close()
 
 
+def _cursor_load(raw, account: str) -> str:
+    """读收信游标（v1.29.4：游标**按账号隔离**）。
+
+    新格式 {"account": "user@host", "uid": "403"}：账号不一致 → 当没有游标，
+    重扫一遍（去重兜底，不丢不重）—— 换账号后拿旧账号的 UID 去跳邮件 = 静默漏收，
+    这是比"多扫一遍"严重得多的事故。
+    历史格式（纯 UID 字符串、没有账号信息）：沿用一次，下次保存自动升级为新格式
+    —— 升级当天的行为与以前完全一致，不做任何隐式清零。
+    """
+    if isinstance(raw, dict):
+        return str(raw.get("uid") or "") if str(raw.get("account") or "") == account else ""
+    s = str(raw or "").strip()
+    return s if s.isdigit() else ""
+
+
+def _cursor_save(db_path: str, folder: str, account: str, uid: str) -> tuple[bool, str]:
+    """写收信游标（best-effort）。返回 (是否成功, 错误文本)。
+
+    游标只是"上次收到哪"的备忘，**写不进去不该让整条收取报错**：
+    邮件此刻已经收到并入库了，让 HR 看到 500 反而以为白跑了。
+    v1.24.11：实测"目录刚复制完、进程刚启动"瞬间 SQLite 还在建 WAL，
+    这里会抛 attempt to write a readonly database —— 降级为警告即可，
+    最坏后果只是下次重扫一遍（入库侧按内容去重）。中途停止时也照常落盘。
+    """
+    try:
+        conn = db.connect(db_path)
+        try:
+            db.set_email_cursor(conn, folder, {"account": account, "uid": str(uid)})
+        finally:
+            conn.close()
+        return True, ""
+    except Exception as exc:                             # noqa: BLE001
+        print(f"[ingest] 邮件游标写入失败（不影响本次收取结果）：{exc}")
+        return False, str(exc)
+
+
 def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                  use_llm: bool = False, llm_conf: dict | None = None,
-                 cfg: dict | None = None) -> dict:
-    """拉取邮箱 → 入库。统一的"收简历"动作。"""
+                 cfg: dict | None = None, progress_tid: str | None = None,
+                 limit: int = 200) -> dict:
+    """拉取邮箱 → 入库。统一的"收简历"动作。
+
+    v1.29.4（业务方）：带 `progress_tid`（且 imap 模式）时按**逐封**处理 ——
+      · 先生出总数（"已发现 N 封"），再每收完一封报一次进度；
+      · 每封之间检查中断旗（`request_stop`），"读完当前这封"就停下，
+        游标停在最后成功处理的那封（下次从这里继续，不重复、不丢件）；
+      · 每封入库**不单独挂分析**，整批结束后挂一次 —— "抓一个分析一个"
+        会把进度与提示窗口搅乱，业务方点名不要。
+    不带 progress_tid 时行为与旧版一致（一次性拉全再入库，分析钩子在 ingest_mails 里）。
+    """
     cfg = cfg or mb.load_config()
     if cfg.get("mode") == "off":
         return {"mode": "off", "mails": 0, "added": 0,
                 "message": "邮箱抓取已在 config/mailbox.json 中关闭"}
+    ic = cfg.get("imap") or {}
+    folder_name = ic.get("folder", "INBOX")
+    # v1.29.4：游标按账号隔离（换收信账号不再共享同一个 UID 游标）
+    account = f"{ic.get('user') or ''}@{ic.get('host') or ''}"
     conn = db.connect(db_path)
-    cursor = db.email_cursor(conn, (cfg.get("imap") or {}).get("folder", "INBOX"))
+    cursor = _cursor_load(db.email_cursor(conn, folder_name), account)
     conn.close()
-    try:
-        mails, new_cursor = mb.incoming(cfg, cursor)
-    except Exception as exc:
-        return {"mode": cfg.get("mode"), "mails": 0, "added": 0, "error": str(exc)}
-    report = ingest_mails(mails, cfg, jd, tiers, db_path, job_id, use_llm, llm_conf)
-    report["mode"] = cfg.get("mode")
-    if cfg.get("mode") == "imap" and new_cursor:
-        # 游标只是"上次收到哪"的备忘，**写不进去不该让整条收取报错**：
-        # 邮件此刻已经收到并入库了，让 HR 看到 500 反而以为白跑了。
-        # v1.24.11：实测在"目录刚复制完、进程刚启动"的瞬间，
-        # SQLite 还在建 WAL 文件，这里会抛 attempt to write a readonly database，
-        # 导致整个收取在界面上变成失败。
-        # 写失败的最坏后果只是下次重新扫一遍这批邮件（入库侧按内容去重），
-        # 所以降级为警告即可。真要让 HR 知道，报告里带上 cursor_saved=False。
+
+    newest = cursor or ""
+    stopped = False
+
+    if cfg.get("mode") == "imap" and progress_tid:
+        # ---- 逐封模式：先总数、再逐封（可停止、可接力分析）----
+        report: dict = {"mails": 0, "attachments": 0, "added": 0, "merged_versions": 0,
+                        "skipped_dup": 0, "failed": 0, "no_attachment": 0,
+                        "parse_failed": 0, "routed": 0, "unassigned": 0,
+                        "other_attachments": 0, "other_saved": 0, "details": []}
+        total = 0
+        done = 0
         try:
-            conn = db.connect(db_path)
-            try:
-                db.set_email_cursor(conn, (cfg.get("imap") or {}).get("folder", "INBOX"),
-                                    new_cursor)
-            finally:
-                conn.close()
+            for kind, item in mb.iter_imap(cfg, cursor, limit):
+                if kind == "total":
+                    total = item
+                    update_progress(progress_tid, total=total,
+                                    message=f"已发现 {total} 封邮件，开始收取…")
+                    continue
+                if stop_requested(progress_tid):
+                    stopped = True
+                    update_progress(progress_tid,
+                                    message=f"已停止：完成 {done} / {total} 封后按你的要求停下")
+                    break
+                ingest_mails([item], cfg, jd, tiers, db_path, job_id, use_llm, llm_conf,
+                             report=report, spawn=False)
+                newest = item.get("uid") or newest
+                done += 1
+                update_progress(progress_tid, done=done)
+                # v1.29.4：长批次（一次几百封）每 25 封落一次游标 ——
+                # 中途断电/被强杀时，下次从最后落盘的进度继续（去重兜底不丢件）。
+                if done % 25 == 0 and newest:
+                    _cursor_save(db_path, folder_name, account, newest)
+        except Exception as exc:                      # 连接/登录失败等：如实带回
+            report["error"] = str(exc)
+        # 整批结束后挂一次分析（中途停止时分析"已收到的这批"）
+        spawn_auto_analysis(db_path, report)
+    else:
+        # ---- 旧路径（eml 演练模式 / 不带进度的调用）----
+        try:
+            mails, new_cursor = mb.incoming(cfg, cursor)
         except Exception as exc:
+            return {"mode": cfg.get("mode"), "mails": 0, "added": 0, "error": str(exc)}
+        if progress_tid:
+            update_progress(progress_tid, total=len(mails),
+                            message=f"已发现 {len(mails)} 封邮件，开始收取…")
+        report = ingest_mails(mails, cfg, jd, tiers, db_path, job_id, use_llm, llm_conf)
+        newest = new_cursor or newest
+        if progress_tid:
+            update_progress(progress_tid, done=len(mails))
+
+    report["mode"] = cfg.get("mode")
+    if stopped:
+        report["stopped"] = True
+    # ⚠️ 中途停止/报错也走这里：游标停在"最后成功处理的那封"，下次继续。
+    # 写失败只降级为警告（v1.24.11 口径不变），报告里带 cursor_saved=False。
+    if cfg.get("mode") == "imap" and newest and newest != (cursor or ""):
+        _ok, _err = _cursor_save(db_path, folder_name, account, newest)
+        if not _ok:
             report["cursor_saved"] = False
-            report["cursor_error"] = str(exc)
-            print(f"[ingest] 邮件游标写入失败（不影响本次收取结果）：{exc}")
+            report["cursor_error"] = _err
     return report
 
 
@@ -1183,7 +1547,7 @@ def analyze_one(conn, candidate_id: int, application_id: int,
                           business_direction=ins.get("business_direction"))
         # 模型建议档位 → 更新 tier_suggested（HR 未确认时才更新）
         mt = ins.get("suggested_tier")
-        if mt and mt in ("A", "B", "C", "D") and application_id:
+        if mt and mt in tiers_mod.all_tiers() and application_id:
             ar = conn.execute(
                 "SELECT tier_suggested, tier_final FROM applications WHERE id=?",
                 (application_id,)).fetchone()
@@ -1202,7 +1566,8 @@ def analyze_one(conn, candidate_id: int, application_id: int,
                       f"（{gate.get('edu')}<{gate.get('edu_min')}），保留 {_t}", file=sys.stderr)
                 mt = _t
             if ar and not ar["tier_final"] and ar["tier_suggested"] != mt \
-                    and not (_edu_locked and ar["tier_suggested"] == "D" and mt != "D"):
+                    and not (_edu_locked and ar["tier_suggested"] == tiers_mod.hard_shortfall_tier()
+                             and mt != tiers_mod.hard_shortfall_tier()):
                 conn.execute(
                     "UPDATE applications SET tier_suggested=?, updated_at=? WHERE id=?",
                     (mt, db.now(), application_id))

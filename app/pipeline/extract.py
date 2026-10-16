@@ -13,12 +13,18 @@
 
     {
       "name", "education", "years", "school", "major", "current_org",
-      "certificates", "contact": {"phone","email"},
+      "certificates", "contact": {"phone","email"}, "gender",
+      "cet",                                 # 英语四六级：简历原文表述（见 `_cet_from_llm`）
       "skills": [canonical, ...],            # 仅含 verified=1
       "skill_detail": [{canonical, category, evidence, verified, level}],
       "unverified_skills": [...],            # 未通过证据校验的，留待人工核对
+      "unverified_fields": [...],            # 模型给了但原文核实不了的字段（含 cet）
       "extract_mode", "confidence", "sensitive_found": {类别: 次数}
     }
+
+英语四六级（`cet`）的取值口径（v1.27.1）：**模型判定优先，正则兜底**。
+模型给档位 + 原文证据，两者能对上且证据在原文里逐字存在才采信；
+对不上或模型没给，退回规则抽取，并在 `unverified_fields` 里留痕。
 """
 from __future__ import annotations
 
@@ -275,9 +281,153 @@ def _find_gender(text: str) -> str | None:
     return None
 
 
+#: 院校名（中文写法）。抽成常量供 `_find_school` 与 `_find_first_degree_school` 共用 ——
+#: 两处各写一份的话，改一处（比如加上「分校」「校区」）另一处就悄悄漏了。
+_SCHOOL_RE = re.compile(r"([\u4e00-\u9fa5]{2,15}(?:大学|学院|研究院|研究所|职业技术学院))")
+
+#: 「这是本科段」的关键词。**「学士」也算** —— 简历里常写「XX大学 工学学士」。
+_BACHELOR_KW = ("本科", "学士")
+
+#: 显式标签写法（最强信号，"第一学历"就是 HR 想要的那个东西）
+_FIRST_DEGREE_LABEL_RE = re.compile(
+    r"(?:第一学历|本科院校|本科学校|本科毕业于|本科就读于|本科学校为)\s*[:：]?\s*"
+    r"([\u4e00-\u9fa5]{2,15}(?:大学|学院|研究院|研究所|职业技术学院))")
+
+
 def _find_school(text: str) -> str | None:
-    m = re.search(r"([\u4e00-\u9fa5]{2,15}(?:大学|学院|研究院|研究所|职业技术学院))", text)
+    m = _SCHOOL_RE.search(text)
     return m.group(1) if m else None
+
+
+#: v1.29.2：学历层次白名单（与 `EDU_RANK` 的键一致，模型给别的词就丢那一项）
+DEGREE_WORDS = ("大专", "本科", "硕士", "博士")
+
+
+def _same_school(name: str, seen: set) -> bool:
+    """这个校名是不是 `seen` 里某所学校的**同一个**（含"同校不同院系"）。
+
+    为什么不能只比全名：简历常写「北京航空航天大学」又写
+    「北京航空航天大学仪器学院」（在职读研时），两句话是同一所学校。
+    只比全名会把它列成两段，HR 看到重复的学校会以为数据有问题 ——
+    而这份表是要给用人单位看的。
+
+    判据：**一方是另一方的前缀**（保留短的那个，它才是院校名单里认的形式，
+    长的那个查层次查不到：`uni_tier('北航仪器学院')` 是 None，
+    `uni_tier('北京航空航天大学')` 才是 985）。
+    """
+    n = str(name or "").strip()
+    if n in seen:
+        return True
+    for prev in seen:
+        if n.startswith(prev) or prev.startswith(n):
+            return True
+    return False
+
+
+def _edu_history_heuristic(text: str) -> list[dict]:
+    """规则版学历院校经历：逐行找「院校 + 层次词」，按出现顺序。
+
+    刻意保守：**同一行必须既有院校名又有层次词**才算一段（只写校名不写层次的行
+    无法判断是不是本科段 —— 与 `_find_first_degree_school` 同一个纪律）。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for line in (text or "").split("\n"):
+        schools = [m.group(1) for m in _SCHOOL_RE.finditer(line)]
+        if not schools:
+            continue
+        deg = next((d for d in ("博士", "硕士", "本科", "大专") if d in line), None)
+        if not deg:
+            continue
+        sch = schools[0]
+        if _same_school(sch, seen):
+            continue
+        seen.add(sch)
+        mjr = None
+        mm = re.search(r"(?:专业|所学专业)\s*[:：]?\s*([\u4e00-\u9fa5A-Za-z]{2,20})", line)
+        if mm:
+            mjr = mm.group(1)
+        out.append({"degree": deg, "school": sch, "major": mjr or ""})
+    return out
+
+
+def _edu_history_from_llm(raw, text: str) -> list[dict]:
+    """模型给的 `education_history` → 可入库的列表（每段都必须在原文里）。
+
+    三道闸门，缺一不可：
+      ① **结构**：`{degree, school, major}`，缺 `degree`/`school` 的整项丢掉；
+         `degree` 必须在 `DEGREE_RANGES` 的白名单里（模型自造"研究生"这类词不算）。
+      ② **校名在原文里**（与基本信息同一道关）：原文没有的院校直接丢。
+         宁可少一段，也不要一个编出来的学校 —— HR 会拿它做取舍。
+      ③ **去重**：同一所学校重复出现只留一条（模型偶尔会把同一段输出两遍）。
+
+    返回空列表 = 抽不到（界面显示「教育经历未识别」，**不编**）。
+    """
+    src = str(text or "")
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in (raw if isinstance(raw, list) else []):
+        if not isinstance(item, dict):
+            continue
+        deg = str(item.get("degree") or "").strip()
+        sch = str(item.get("school") or "").strip()
+        if not deg or not sch or deg not in DEGREE_WORDS:
+            continue
+        if sch not in src:                    # ② 编出来的院校
+            continue
+        if _same_school(sch, seen):            # ③ 重复段（含"同校不同院系"）
+            continue
+        seen.add(sch)
+        out.append({"degree": deg, "school": sch,
+                    "major": str(item.get("major") or "").strip()[:40]})
+    return out
+
+
+def _find_first_degree_school(text: str) -> str | None:
+    """从教育经历里取**本科那一段**的院校（取不到返回 None）。
+
+    ⚠️ 为什么必须单独抽，不能拿 `school` 顶替：
+    `school` 是**最高学历**院校。校招简历常见写法是——
+
+        2019.09-2023.06  XX学院   材料成型及控制工程  本科
+        2023.09-2026.06  YY大学   材料科学与工程      硕士
+
+    这时 `school` = YY大学（985），但第一学历是双非。**拿 school 当第一学历，
+    会把"本科双非、只有硕士是 985"的人筛进「本科985」名单** ——
+    而 HR 是拿这个名单做取舍的，筛错人比筛不到人严重得多。
+
+    识别口径（**只认"同一段里既有院校名又有本科/学士"**）：
+      ① 显式标签优先：「第一学历：XX大学」「本科院校：XX大学」；
+      ② 否则按行找：该行含「本科」或「学士」，且含院校名 → 取离「本科/学士」**最近**的院校。
+         为什么要"最近"：简历常把本硕写在同一行
+         （「2019-2023 XX大学 本科；2023-2026 YY大学 硕士」），
+         简单取第一个学校在这类写法下会取错。
+      ③ 一行只写校名不写层次 → **不认**（无法判断那是不是本科段）。
+
+    取不到就返回 None → 界面显示「第一学历院校未识别（可补录）」、
+    筛选里落**独立的「未识别」档**。绝不能退回 `school`：
+    那等于用一个已知不可靠的值冒充事实，而 HR 看不出来。
+    """
+    src = text or ""
+    if not src.strip():
+        return None
+    # ① 显式标签
+    m = _FIRST_DEGREE_LABEL_RE.search(src)
+    if m:
+        return m.group(1)
+    # ② 逐行找「本科/学士」段
+    for line in src.split("\n"):
+        kws = [line.find(k) for k in _BACHELOR_KW if k in line]
+        if not kws:
+            continue
+        schools = [(m2.start(), m2.group(1)) for m2 in _SCHOOL_RE.finditer(line)]
+        if not schools:
+            continue
+        # 取离任一「本科/学士」关键词最近的院校
+        best = min(schools, key=lambda s: min(abs(s[0] - k) for k in kws))
+        if best[1]:
+            return best[1]
+    return None
 
 
 def _find_major(text: str) -> str | None:
@@ -300,6 +450,218 @@ def _find_org(text: str) -> str | None:
 
 def _find_certs(text: str) -> list[str]:
     return [c for c in CERT_LEXICON if c in text]
+
+
+# ---------------------------------------------------------------- 英语四六级（v1.27）
+#
+# 为什么单独抽一个字段而不是靠 `certificates` 里那两条「英语四级/英语六级」：
+#  ① 筛选要能比 —— certificates 是**数组**，界面上只能当标签展示，不能当筛选条件；
+#  ② 表述千变万化 ——「大学英语六级」「CET-6」「英语6级」「通过全国英语等级考试六级」
+#     「英语专业八级」「雅思 6.5」，而 certificates 走的是 `CERT_LEXICON` 的字面包含，
+#     只能认出「英语四级」「英语六级」这两种写法，其余全漏。
+#
+# 归一后的档位（存 `candidates.cet` 的**原文**，归一在读取时做，见 `cet_level`）：
+#     "六级" / "四级" / "专业八级" / "专业四级" / "考研英语" / "无" / ""
+# 取"最高"的一档：同一个人既写了四级又写了六级（六级通常是后考的），存六级。
+
+#: 归一后的可比等级。数值越大 = 水平越高，用于"取最高档"与界面排序。
+CET_RANK: dict[str, int] = {
+    "无": 0, "四级": 1, "专业四级": 2, "考研英语": 3, "六级": 4, "专业八级": 5,
+}
+#: 人才库筛选下拉用（顺序 = 从高到低，与 `CET_RANK` 同源，别在两处各写一份）
+CET_FILTER_LEVELS = ["六级", "四级", "专业八级", "专业四级", "考研英语"]
+#: 「未通过/未取得/没有」这类表述 → 归一后的 '无'（与"没写"的 '' 严格区分）
+#: ⚠️ 「无四六级」必须单列：它是简历里很常见的写法（「无四六级证书」），
+#: 但 `[四六]\s*级` 那条命中正则会从「无**四六**级」里抠出「六级」，
+#: 而这组负判里原本只有"未通过/未取得"——于是写了"无四六级"的人被判成六级。
+#: 这是写 v1.27.1 的 `_cet_from_llm` 用例时才撞出来的（规则通道的兜底路径）。
+_CET_NEG_RE = re.compile(
+    r"未通过|未取得|没有.{0,3}英语|无(?:英语)?等级"
+    r"|无\s*四\s*[、,，和及]?\s*六\s*级|无\s*四六级|无\s*六级|无\s*四级")
+
+#: 候选表述的正则。**顺序无关**（取最高档靠 `CET_RANK`），
+#: 但每条都要能覆盖一种真实写法 —— 这组是靠 `cet_level` 的 15 条用例逐条试出来的：
+#:   漏「专八」「专业四级」「考研英语」时，"非985/211强势院校+四六级"这种
+#:   HR 常问的组合就会漏人；而漏「考研英语」是因为它不带"级"字，
+#:   只匹配 `[1-8]\s*[级]?` 那几条永远抓不到。
+_CET_HIT_PATS = (
+    r"TEM\s*-?\s*8",                       # TEM-8
+    r"TEM\s*-?\s*4",                       # TEM-4
+    r"英语专业[^，,。;；\n]{0,6}",          # 英语专业八级
+    # 「专业四级」「专八」「专4」—— 专业/简称、数字与汉字四种组合都要
+    # （`cet_level` 同理，漏任何一种都会归一成空 → 界面上是空标签、筛选永远 0 人）
+    r"专\s*业\s*[4四8八]\s*[级]?",
+    r"专\s*[8八]\s*[级]?",
+    r"专\s*[4四]\s*[级]?",
+    r"考研[^，,。;；\n]{0,3}英语|英语[^，,。;；\n]{0,3}考研",   # 考研英语
+    r"(?:大学|全国)?英语\s*(?:等级考试)?\s*[1-8一二三四五六七八]\s*[级]?",
+    r"CET\s*-?\s*[1-8]\b",
+    r"(?:英语|英文)\s*[1-8一二三四五六七八]\s*[级]?",
+    # v1.27：裸的「四级」「六级」「4级」「6级」，**但必须带英语上下文**。
+    # 为什么必须有：「通过大学英语四级**和六级**」里第二个"六级"前面是"和"、
+    # 不是"英语"，上面几条都抓不到 → 取最高档时只剩"四级"，存成四级，
+    # HR 筛"六级"就漏掉这个实际过了六级的人。
+    # 为什么必须带上下文：裸 `[1-8]` 会把简历里**所有**数字都命中 ——
+    # 出生年份、工作年限、专利号、电话，全被判成"六级/四级"。这就是为什么
+    # 这里写成「英语/四六级/通过…和…」这类**锚定**形式，而不是一个宽泛的数字。
+    r"(?:英语|四六级|级英语)[^，,。;；\n]{0,6}?[1-8一二三四五六七八]\s*[级]?",
+    # v1.27：裸的「四级」「六级」（**必须带"级"字**）。
+    # 为什么安全：「四级」「六级」带"级"在简历里没有第二种含义，
+    # 而「四节」「六项」之类的假阳性被"级"字挡掉了。
+    # ⚠️ 绝不放行不带"级"的裸「四/六」或阿拉伯数字 —— 那样会把
+    # 「周四面试」「3年经验」之类全部误判，而**数字版本**更致命：
+    # 出生年份 1994、工作年限 6、专利号、电话都会被当成英语等级。
+    r"[四六]\s*级",
+    # 带上下文的**阿拉伯数字**：CET-6 / 6级 / 考试6 —— 必须有"级"或"考试"收尾，
+    # 否则「6人团队」「6年经验」全是误报。
+    r"(?:CET\s*-?\s*[48]|英语\s*[48]\s*[级]|考试\s*[48]\s*[级]|[48]\s*级)",
+    r"[1-8一二三四五六七八]\s*[级]\s*(?:和|及|、|,|，|/|＋|\+)?\s*[1-8一二三四五六七八]\s*[级]",
+)
+
+
+def _find_cet(text: str) -> str | None:
+    """从简历原文抽英语等级，返回**原文表述**（抽不到返回 None）。
+
+    原文表述存库、归一在读取时做（`cet_level`）：库里保持"简历上写了什么"，
+    HR 打开档案看到的与原件一致；筛选与展示要的那一档由 `cet_level()` 算。
+
+    v1.27.1 定位：**兜底通道**。模型可用时四六级以模型判定为准
+    （见 `_cet_from_llm`），这里只在两种情况下被调用：
+      ① 模型不可用 / 抽取失败（规则通道、`mode="failed"`）；
+      ② 模型给了档位但没通过原文证据自证，退回这里取。
+    仍然保留它而不是删掉：模型挂了的时候字段不能整个消失，
+    而"抽不到"的代价（界面显示 —、HR 可手填）远小于"给个错值"。
+    拿不准就返回 None —— 界面显示"—"，HR 可以手填，不会拿到错值。
+    """
+    src = text or ""
+    if not src.strip():
+        return None
+    # 收集候选表述：每命中一个正则就把那一段原文存起来（存原文是为了可追溯）
+    hits: list[str] = []
+    for pat in _CET_HIT_PATS:
+        for m in re.finditer(pat, src, re.I):
+            got = m.group(0).strip()
+            hits.append(got)
+            # 「四级和六级」这类并列：整串归一只会认出靠前的"四级"，
+            # 必须把并列的**每一项单独**也作为候选塞进去，取最高档才对。
+            # 用 `[1-8一二三四五六七八]级` 在**命中串内部**切，不看整篇原文，
+            # 所以不会把工作年限「3年」之类误当等级。
+            for one in re.findall(r"[1-8一二三四五六七八]\s*[级]", got):
+                hits.append(one)
+    # v1.27：**「未通过」优先于任何正等级，且必须在这里、归一之前判**。
+    # 两个坑叠在一起过：
+    # ① 这里原来写成"先算 best、只在没命中时才看未通过" → 「英语六级 未通过」
+    #    被当成六级；
+    # ② `cet_level` 原来又把负判放在最后 → 即使这里返回了带"未通过"的原文，
+    #    归一时仍会先命中"六级"分支。
+    # 现在两边都是"负判优先"，口径才真正一致。
+    # 误判代价不对称：漏认只是少一个人，误判会把没通过的人放进面谈名单。
+    _neg = _CET_NEG_RE.search(src)
+    if _neg:
+        # 存**命中的那一段原文**（不是硬编码"未通过"）——简历写的是「无四六级证书」
+        # 就存「无四六级」，HR 打开档案看到的才与原件一致。
+        return _neg.group(0)
+    if hits:
+        # 同一次抽取里可能同时命中「四级」与「六级」，取**等级最高**的那段原文 ——
+        # 与 `cet_level` 的"最高档优先"口径一致，否则库里存了四级、
+        # 归一后却是六级，两边对不上（同一个值两套口径 = 迟早分叉）。
+        best = max(hits, key=lambda h: (CET_RANK.get(cet_level(h), 0), len(h)))
+        if CET_RANK.get(cet_level(best), 0) > 0:
+            return best
+    return None
+
+
+def cet_level(raw: str | None) -> str:
+    """英文/等级表述 → 归一档位。
+
+    返回值取值范围：`'专业八级' / '专业四级' / '考研英语' / '六级' / '四级' / '无' / ''`
+    - `''`  = 简历里没写（**不是**"没有证书"）——筛选时算"未提供"，
+              必须与 `'无'`（简历明写"未通过"）分开，两者对 HR 的含义完全相反；
+    - `'无'` = 简历明确写了没通过。
+
+    **最高档优先**：`专业八级 > 六级 > 考研英语 > 专业四级 > 四级`。
+    一个人既写了四级又写了六级（六级通常是后考的），展示与筛选都该按六级 ——
+    否则 HR 筛"六级"会漏掉这个人，而对 HR 而言他就是六级。
+
+    读取侧唯一口径：`server` 的筛选与 `ui` 的展示都调它，不在别处重写归一规则。
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    # v1.27：「未通过」必须**最先判**。
+    # 原来放在最后，于是「英语六级 未通过」先命中下面的"六级"分支直接返回
+    # —— 归一成六级，HR 筛"六级"会把一个没通过的人筛进来。这比漏一个严重得多：
+    # 漏只是少一个人，误判是把不该要的人排进了面谈名单。
+    if _CET_NEG_RE.search(s):
+        return "无"
+    # 往下按"最高档优先"扫，一旦命中即返回 —— 顺序即优先级。
+    # ⚠️ 每一档都必须同时认**阿拉伯数字与汉字**（「专八」/「专8」、「四级」/「四」）。
+    # 原来只写 `[8]` 时「专八」匹配不上、`cet_level` 返回 "" → 界面上是空标签、
+    # 筛选"专业八级"永远 0 人，而数据其实是抽到了的。
+    if re.search(r"专业\s*八|专\s*八|专\s*8|tem\s*-?\s*8", s, re.I):
+        return "专业八级"
+    if re.search(r"六级|六\s*级|cet\s*-?\s*6|(?:^|[^\d])6(?:[^\d]|$)", s, re.I):
+        return "六级"
+    if re.search(r"考研.{0,4}英语|英语.{0,4}考研", s):
+        return "考研英语"
+    if re.search(r"专业\s*四|专\s*四|专\s*4|tem\s*-?\s*4", s, re.I):
+        return "专业四级"
+    if re.search(r"四级|四\s*级|cet\s*-?\s*4|(?:^|[^\d])4(?:[^\d]|$)", s, re.I):
+        return "四级"
+    return ""
+
+
+#: **不是**四六级的英语考试（雅思/托福/托业/剑桥商务/全国英语等级考试 PETS）。
+#: 为什么必须显式排除：提示词里已经写了"别往档位里套"，但弱模型不听；
+#: 而 `cet_level` 的裸数字分支 `(?:^|[^\d])6(?:[^\d]|$)` 会把「雅思 6.5」
+#: 里的 6 直接判成"六级" —— 光靠"模型自证"拦不住（它引的原文自己也会被判成六级）。
+#: 这是一条**排除**规则，不是抽取规则：它不会让谁被判成六级，只会挡掉误套。
+#: ⚠️ 只列英文/缩写与雅思托福这类专名，**不要**把"全国英语等级考试"的中文名
+#: 写进来 —— 简历里「通过全国英语等级考试六级」实际就是指六级，排掉会漏人。
+_CET_NOT_ENGLISH_RE = re.compile(
+    r"雅思|ielts|托福|toefl|托业|toeic|bec\b|剑桥商务|商务英语|pets", re.I)
+
+
+def _cet_from_llm(level, evidence, text: str) -> tuple[str | None, bool]:
+    """四六级**以模型判定为准**，正则（`_find_cet`）只当兜底。
+
+    返回 `(存库的原文表述, 模型值是否被拒)`。
+
+    v1.27.1：由「正则优先、模型值一律不采信」改为「模型优先」。
+    为什么改：四六级是**硬筛选条件**，而简历上的写法规则穷举不完 ——
+    「CET6 已过」「英语六级 520 分」「考研英语一 78」「TEM-8（良好）」
+    「通过全国英语等级考试六级」……每遇到一种就得补一条正则，
+    补错了还会误判（裸数字会把出生年份、工作年限、专利号全当成等级）。
+    语义理解正是模型的强项，所以判定交给模型。
+
+    但模型值**不能裸用** —— 与 `verify_profile_against_text` 同款纪律，
+    必须同时满足三条，缺一即退回规则值：
+      1. 档位在白名单里（`CET_RANK` 的键，挡住模型自造的档位）；
+      2. 给了 `cet_evidence` 证据片段；
+      3. 证据能在简历**原文**里逐字找到（证明它不是凭空编的）。
+    再加一条**模型自证**：它给的档位必须能由它自己引的原文片段推出
+    （`cet_level(证据) == 档位`），对不上就当它没给。
+
+    ⚠️ 这里的 `cet_level()` 只做**一致性校验**，不是抽取手段 ——
+    在整篇简历里「找」英语等级这件事由模型完成，它不在原文里扫数字。
+
+    存库的是**证据原文**而不是档位字符串：与"库里保持简历上写了什么"一致，
+    HR 打开档案能看到原件表述；筛选/展示要的档位由 `cet_level()` 归一。
+    第二个返回值用于**不留静默降级**：模型给了却没过校验时要告诉 HR，
+    而不是悄悄换成规则值（本项目的反幻觉纪律）。
+    """
+    lv = str(level or "").strip()
+    ev = str(evidence or "").strip()
+    gave = bool(lv)
+    if lv in CET_RANK and ev and not _CET_NOT_ENGLISH_RE.search(ev) and cet_level(ev) == lv:
+        # 证据校验两档：先认**逐字相同**，再认**排版差异**（空格/全角/换行不同，
+        # 与 `verify_profile_against_text` 用 `_norm_for_search` 同款口径）。
+        # 只做逐字会让模型因一个空格就被判"编造"→ 频繁退回规则值，
+        # 等于把模型优先改回正则优先，所以这里必须有第二档。
+        src = str(text or "")
+        if ev in src or _norm_for_search(ev) in _norm_for_search(src):
+            return ev, False
+    return _find_cet(text), gave
 
 
 _PHONE_LABEL = r"(?:手机(?:号码)?|电话|联系方式|Tel|TEL|Phone|Mobile)"
@@ -366,11 +728,18 @@ def extract_heuristic(text: str, jd: dict) -> dict:
             "education": _find_education(text),
             "years": _find_years(text),
             "school": _find_school(text),
+            # v1.29：第一学历（本科）院校。与 school 是两件事，抽不到留空（筛选落「未识别」）
+            "first_degree_school": _find_first_degree_school(text),
+            # v1.29.2：完整学历院校经历（规则通道兜底，模型不可用时至少给得出）
+            "education_history": _edu_history_heuristic(text),
             "major": _find_major(text),
             "current_org": _find_org(text),
             "certificates": _find_certs(text),
             "contact": _find_contact(text),
             "gender": _find_gender(text),
+            # v1.27.1：四六级原文表述。**规则通道 = 兜底**（模型可用时以模型判定为准，
+            # 见 `_cet_from_llm`）；HR 拿它做硬筛选，不能只靠 certificates。
+            "cet": _find_cet(text),
         },
         detail,
         mode="heuristic",
@@ -381,14 +750,32 @@ _LLM_SYSTEM = (
     "你是简历结构化抽取器。只依据给定简历原文抽取字段，**严禁编造**。\n"
     "严格输出 JSON，不要解释、不要代码块标记。字段：\n"
     "name, education(大专/本科/硕士/博士), years(整数), school, major, current_org,\n"
+    # v1.29：第一学历（本科）院校。必须与 school 分开给 —— 简历里学校常不止一所，
+    # 而「本科985/211」这个筛选要的是**本科那所**，不是最高学历那所。
+    "first_degree_school(第一学历/本科就读的院校；简历没写本科是哪所就**不要输出**),\n"
+    "first_degree_evidence(first_degree_school 对应的**原文原样片段**，逐字照抄),\n"
+    # v1.29.2（业务方要求）：学历院校经历要**完整**，不能只给最高那一所 ——
+    # HR 看学校水平是从本科一路看到博士的，中间的研究生段丢了就没法判断。
+    "education_history(数组，**教育经历里写了几段就给几段**，按时间先后；每项 {degree:大专/本科/硕士/博士, school:院校全名, major:专业}；只写了一段就给一项，简历没写学历经历则输出空数组),\n"
     "skills(数组，每项 {name:技能名, evidence:该技能在原文中出现的**原样片段**}),\n"
     "certificates(字符串数组),\n"
+    # v1.27：**四六级由模型判定**（用户 2026-10-15 要求：不要正则匹配）。
+    # 语义理解是模型的强项：「通过全国英语等级考试（PETS）五级」「英语六级 520 分」
+    # 「CET6 已过」「英语专业八级」「考研英语一 78」这类写法规则穷举不完。
+    # 但它是**硬筛选条件**（HR 会拿它筛人），所以模型给的值必须**过原文校验**
+    # （`verify_profile_against_text` 的同款纪律：证据不在原文里就退回规则值）。
+    # 模型要给两样东西：档位（归一后的）＋ 原文片段（可追溯、可被校验）。
+    "cet_level(英语等级档位，从下面这些里**选一个**：\"六级\" / \"四级\" / "
+    "\"专业八级\" / \"专业四级\" / \"考研英语\" / \"无\"；"
+    "写\"无\"只用于简历**明确说没通过/未取得**的情况；"
+    "简历里压根没提英语等级就**不要输出这个字段**),\n"
+    "cet_evidence(cet_level 对应的**原文原样片段**，逐字照抄，不得改写拼接),\n"
     "honors(数组，每项 {category:奖学金/荣誉/论文/专利, name:简短名称, "
     "evidence:该条在原文中出现的**原样片段**}),\n"
     "contact{phone,email},\n"
     "confidence(0-1，抽取可信度)。\n"
     "field_evidence(对象)：基本信息每个字段对应的**原文原样片段**，"
-    "键为 name/education/school/major/years/current_org，"
+    "键为 name/education/school/major/years/current_org/first_degree_school，"
     "例如 {\"school\":\"西安电子科技大学\",\"major\":\"计算机科学与技术\"}；"
     "原文里没有的字段不要给证据，也不要给值。\n"
     "纪律：\n"
@@ -396,6 +783,9 @@ _LLM_SYSTEM = (
     "2) evidence 必须是原文中逐字存在的片段，不得改写、不得拼接；\n"
     "3) 原文未提及的信息一律留空或不输出，不要猜测；\n"
     "   3.1) honors 要抽全：奖学金/奖项（含国家、校级、专项）、荣誉称号、论文（含发表/收录/篇数/期刊）、专利（含专利号、实用新型、软著），以及连续多年获奖、团体奖这类表述；\n"
+    "   3.2) cet_level 只认**英语等级**：一个人同时写了四级和六级，给**更高的那档**（六级）；"
+    "「雅思 6.5 / 托福 90 / PETS 五级 / 商务英语」**不属于**上面的档位，不要往里套——"
+    "那就输出这个字段会害 HR 筛错人。\n"
     "4) 禁止抽取民族、婚姻、生育、宗教、健康、身份证号、住址、政治面貌、身高体重、照片等敏感信息。"
 )
 
@@ -422,7 +812,9 @@ def verify_profile_against_text(fields: dict, field_evidence: dict,
     t_norm = _norm_for_search(t_raw)
     ok: dict = {}
     bad: list[str] = []
-    for k in ("name", "education", "school", "major", "current_org"):
+    # v1.29：`first_degree_school` 同样要过"值必须在原文里"这道关 ——
+    # 它和 school 一样是可直接改变筛选结果的事实，不能凭模型一句话就写进库。
+    for k in ("name", "education", "school", "major", "current_org", "first_degree_school"):
         v = fields.get(k)
         if v in (None, "", "—"):
             continue
@@ -680,6 +1072,11 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
                               base_url=llm_conf.get("base_url", "https://api.deepseek.com/v1"),
                               api_key=llm_conf["api_key"])
             clean, removed = sanitize.strip_forbidden(raw)
+            # v1.27.1：四六级**由模型判定**（带原文证据自证），规则只兜底。
+            # 必须在 `_llm_fields` 之前算 —— 下面两处都要用同一个值，
+            # 各算一遍必然分叉（本项目在别处已经为这个栽过）。
+            cet_val, cet_rejected = _cet_from_llm(
+                clean.get("cet_level"), clean.get("cet_evidence"), text)
 
             raw_skills: list[str] = []
             claims: dict[str, str] = {}
@@ -701,6 +1098,12 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
                 "education": clean.get("education") if clean.get("education") in EDU_RANK else None,
                 "years": int(clean["years"]) if str(clean.get("years", "")).strip().isdigit() else None,
                 "school": clean.get("school"),
+                # v1.29：第一学历院校。与 school 分开抽、分开验 —— 简历里常有两所学校，
+                # 合在一起就会把"本科双非、硕士985"的人算成"本科985"。
+                "first_degree_school": clean.get("first_degree_school"),
+                # v1.29.2：完整学历院校经历。**逐段校验校名在原文里**（与
+                # 其它基本信息同一道关）——编一个原文没有的院校比少抽一段严重。
+                "education_history": _edu_history_from_llm(clean.get("education_history"), text),
                 "major": clean.get("major"),
                 "current_org": clean.get("current_org"),
                 "certificates": [c for c in (clean.get("certificates") or []) if isinstance(c, str)],
@@ -709,16 +1112,31 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
                 # 模型即便返回了 gender 也已在 strip_forbidden 里被丢掉，这里再明确覆盖一次，
                 # 保证"性别永远不会来自模型"这条约束不依赖上游是否记得过滤。
                 "gender": _find_gender(text),
+                # v1.27.1：四六级取**模型判定 + 原文证据自证**的结果（见 `_cet_from_llm`）。
+                "cet": cet_val,
             }
             # 规则通道兜底填空，保证字段不全时不至于全空
             heur = extract_heuristic(safe_text, jd)
-            fields, _unverified = verify_profile_against_text(
-                _llm_fields, clean.get("field_evidence") or {}, text)
+            # 第一学历的证据单独给（模型按 first_degree_evidence 返回），
+            # 合并进 field_evidence 才能走同一套"证据必须逐字在原文里"的校验。
+            _ev = dict(clean.get("field_evidence") or {})
+            if clean.get("first_degree_evidence"):
+                _ev.setdefault("first_degree_school", str(clean["first_degree_evidence"]))
+            fields, _unverified = verify_profile_against_text(_llm_fields, _ev, text)
             # 校验只负责"值可信"，证书与性别不参与那个校验，但必须补回来：
             # 性别**永远只取本地规则**（合规红线，不依赖模型自觉）。
             fields["certificates"] = _llm_fields.get("certificates") or []
             fields["gender"] = _find_gender(text)
-            for k in ("name", "education", "years", "school", "major", "current_org"):
+            # v1.27.1：四六级**不进** `verify_profile_against_text` ——
+            # 那条校验的规则是"值本身要在原文里找到"，而四六级存的是档位判断，
+            # 靠的是模型引的证据片段（`_cet_from_llm` 已经验过），不是值本身。
+            # 这里用上面算好的同一个值补回，别再调一次（两处各算一遍 = 必然分叉）。
+            fields["cet"] = cet_val
+            if cet_rejected:
+                # 模型给了档位但没通过原文自证 → 如实告诉 HR，不静默换成规则值
+                _unverified = list(_unverified or []) + ["cet"]
+            for k in ("name", "education", "years", "school", "major", "current_org",
+                      "first_degree_school", "education_history"):
                 if not fields.get(k):
                     fields[k] = heur.get(k)
             # v1.23.6：**工作年限合理性质检**。实测踩到：校招简历里写着
@@ -766,7 +1184,9 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
         out = _assemble(safe_text, {
             "name": None, "education": None, "years": None, "school": None, "major": None,
             "current_org": None, "certificates": [], "contact": {},
+            "first_degree_school": None,
             "gender": _find_gender(text),
+            "cet": _find_cet(text),
         }, [], mode="failed")
     out["sensitive_found"] = sensitive_found
     out["sensitive_fields_removed"] = []

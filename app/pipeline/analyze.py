@@ -11,19 +11,30 @@ from __future__ import annotations
 import sys
 
 from ..agent import llm
+from .. import tiers as tiers_mod
 from . import normalize as nz
 from . import sanitize
 from .tier import edu_gate, guess_major_family, lock_tier
+
+#: v1.29：档位口径文案与枚举**由配置生成**，不再写死 "A/B/C/D"。
+#: 提示词里写死档位是最隐蔽的一处分叉：人事处把 4 档并成 3 档后，
+#: 模型仍被要求输出 `D` —— 而它多半照做（它不知道那是废弃值），库里就混进脏档位，
+#: 界面上徽章显示空白，还查不出是谁写进去的。
+_ENUM = tiers_mod.enum_str()
+_CALIBER = "档位口径：" + "；".join(
+    f"{t}={tiers_mod.desc(t)}" for t in tiers_mod.all_tiers()) + "。"
+_HARD = tiers_mod.hard_shortfall_tier()
 
 _FIT_SYSTEM = (
     "你是稀有金属材料行业的资深招聘官。依据岗位要求(JD)与候选人简历，做匹配分析。"
     "只依据给定信息，不要编造经历。严格输出 JSON："
     '{"highlights":["亮点，最多4条"],"risks":["不足或需确认点，最多4条"],'
-    '"summary":"一句话结论(40字内)","suggested_tier":"A/B/C/D（必填，不能省略）",'
+    '"summary":"一句话结论(40字内)","suggested_tier":"' + _ENUM + '（必填，不能省略）",'
     '"confidence":0.0到1.0,"business_direction":"这个人实际做的业务方向(2-8字，如 材料工艺/后端开发)"}。'
-    "**suggested_tier 必须输出 A/B/C/D 之一，这是最重要的字段，漏了等于没做分析。**"
-    "档位口径：A=必需条件全中且明显匹配；B=基本匹配、缺1项可培养；C=条件偏弱但有潜力；"
-    "D=本岗位暂不匹配（仍会保留进人才库）。"
+    "**suggested_tier 必须输出 " + _ENUM + " 之一，这是最重要的字段，漏了等于没做分析。**"
+    + _CALIBER
+    # 学历门槛由系统兜底：不让模型去算，否则它会为了"照顾"候选人给出偏高结论
+    + f"学历低于岗位门槛由系统直接判 {_HARD}，你**不用管学历**。"
     "**科研产出要展示**（v1.25.7）：若简历里有论文/专利/荣誉/奖学金，"
     "必须在 highlights 里单独列一条，按简历原文列出（或概述数量与方向），"
     "不要丢弃这部分信息。"
@@ -136,9 +147,18 @@ def _cand_brief(cand: dict) -> str:
         f"\n技能专业大类分布:{_cat_text(skills)}"
         f"\n证书:{'、'.join(certs) or '无'}"
         + honors_txt
-        + f"\n系统规则评分:{cand.get('score')}（建议档 {cand.get('tier_suggested')}，"
-        f"命中{cand.get('hits') or []}，缺失{cand.get('miss') or []}）\n"
-        f"简历原文:\n{raw}"
+        # ⚠️ v2.0.2：这里原来还有一行
+        #   「系统规则评分:{score}（建议档 {tier_suggested}，命中{hits}，缺失{miss}）」
+        # 已删除 —— 它是 v1.12 打分制的遗留物，三档制下 `score` **恒为 None**
+        # （规则不再打分，见 tier.grade 的 "score": None）；`建议档` 取的是
+        # applications 行的存量值，可能是**上一轮的旧结论**（会自我强化）；
+        # `命中/缺失` 在技能被重抽（regrade.refresh_skills）之后也不跟着更新。
+        # 实测后果：同一位候选人，入库即分析时锚是"缺失[材料成型,...]"→模型判 C；
+        # 技能刷新后锚变成"命中[同样三项]"→模型又判 B —— **模型基本在复述这一行**，
+        # 而这两版锚至少有一版是错的（那三项在简历里根本没有出处）。
+        # 候选人技能（未核验项已带标记）与岗位必需技能上下都给全了，
+        # 让模型自己比对，不要再递一个会自我强化的旧结论。
+        + f"\n简历原文:\n{raw}"
     )
 
 
@@ -160,10 +180,10 @@ def _jd_brief(jd: dict) -> str:
 
 
 def tier_from_fit(fit: dict | None) -> str | None:
-    """从模型的分析结果里取**建议档位**（A/B/C/D）。
+    """从模型的分析结果里取**建议档位**（取值见 config/tiers.json）。
 
     三层兜底（实测 deepseek-flash 有概率漏字段，不能只认那一个键）：
-      1. `suggested_tier` 直接是 A/B/C/D；
+      1. `suggested_tier` 直接是配置里的档位字母（见 config/tiers.json）；
       2. 它给了档位但键名不同（档位/tier/评级/level…）——模型偶尔自己改键名；
       3. 完全没给字段，但结论写在 summary 里（"建议A档"、"整体评为B"）→ 从文字里取。
     取不到返回 None，调用方会**再单独追问一次**（见 `ask_tier`）——
@@ -171,25 +191,27 @@ def tier_from_fit(fit: dict | None) -> str | None:
     """
     if not isinstance(fit, dict):
         return None
+    _ok = tiers_mod.all_tiers()
     t = str(fit.get("suggested_tier") or "").strip().upper()
-    if t in ("A", "B", "C", "D"):
+    if t in _ok:
         return t
     for k in ("tier", "档位", "建议档位", "评级", "level", "grade"):
         v = str(fit.get(k) or "").strip().upper()
-        if v in ("A", "B", "C", "D"):
+        if v in _ok:
             return v
     import re as _re
     blob = " ".join(str(fit.get(x) or "") for x in ("summary", "conclusion", "结论"))
-    m = _re.search(r"(?:建议|初判|评分|评为|判定为|档位)\s*[:：]?\s*([A-D])\s*档?", blob)
+    # 用配置生成的枚举式（不用 `[A-D]` 字符类 —— 档位一旦不是连续字母就漏）
+    m = _re.search(r"(?:建议|初判|评分|评为|判定为|档位)\s*[:：]?\s*("
+                   + tiers_mod.tier_regex() + r")\s*档?", blob)
     return m.group(1) if m else None
 
 
 _TIER_SYSTEM = (
     "你是招聘档位评定员。依据岗位要求与候选人简历，给出**一个**建议档位字母。"
-    "档位口径：A=必需条件全中且明显匹配；B=基本匹配、缺1项可培养；"
-    "C=条件偏弱但有潜力；D=本岗位暂不匹配（仍保留进人才库）。"
-    "注意：学历不达标由系统直接判 D，你不用管学历。"
-    '严格只输出 JSON：{"tier":"A"} 或 {"tier":"B"} / {"tier":"C"} / {"tier":"D"}。'
+    + _CALIBER
+    + f"注意：学历不达标由系统直接判 {_HARD}，你不用管学历。"
+    '严格只输出 JSON：{"tier":"X"}，其中 X 只能是 ' + _ENUM + "。"
 )
 
 
@@ -208,7 +230,7 @@ def ask_tier(cand: dict, jd: dict) -> str | None:
         print(f"[ask_tier] 模型调用失败：{type(exc).__name__}: {exc}", file=sys.stderr)
         return None
     t = str((r or {}).get("tier") or "").strip().upper()
-    return t if t in ("A", "B", "C", "D") else None
+    return t if t in tiers_mod.all_tiers() else None
 
 
 def resolve_tier(cand: dict, jd: dict, fit: dict | None) -> str | None:
@@ -442,16 +464,16 @@ def auto_insight(cand: dict, jd: dict | None, grade_result: dict | None = None) 
         # v1.24.15 修掉的缺陷：这里的 `grade_result` 参数**从来不是判档结果**——
         # 两个调用方（server.analyze / ingest.analyze_one）传进来的都是
         # applications 行，里面 `tier_suggested` 是**上一次存进去的值**。
-        # 于是旧代码 `if rule_tier != "D"` 形同虚设：库里存的是 C 时，
+        # 于是旧代码「只看历史档位是不是最差档」形同虚设：库里存的是中间档时，
         # 学历不够的人也能被模型改成 A 档。现在一律现算 `edu_gate`。
         gate = edu_gate(cand, jd or {})
         model_tier = None if gate.get("failed") else resolve_tier(cand, jd, fit)
         final_tier, tier_src = lock_tier(None, model_tier, gate)
         _risks = [x for x in (fit.get("risks") or []) if x][:4]
         if gate.get("failed"):
-            # 说清是谁定的档：HR 看到 D 时要知道这是硬门槛结论、不可被模型改写
+            # 说清是谁定的档：HR 看到最差档时要知道这是硬门槛结论、不可被模型改写
             _risks = [f"学历{gate['edu']}低于岗位要求（{gate['edu_min']}），"
-                      f"已由系统直接判 D（不采用模型建议）"] + _risks
+                      f"已由系统直接判 {tiers_mod.hard_shortfall_tier()}（不采用模型建议）"] + _risks
         return {
             "summary": (fit.get("summary") or "").strip(),
             "reasons": [x for x in (fit.get("highlights") or []) if x][:4],
@@ -482,7 +504,7 @@ def auto_insight(cand: dict, jd: dict | None, grade_result: dict | None = None) 
         "source": "rule_fallback",
         "model": "",
         "suggested_tier": g.get("tier_suggested"),
-        "tier_source": "学历门槛" if g.get("tier_suggested") == "D" else "规则",
+        "tier_source": "学历门槛" if g.get("tier_suggested") == tiers_mod.hard_shortfall_tier() else "规则",
         "edu_gate": edu_gate(cand, jd or {}),
         "confidence": g.get("confidence"),
         "business_direction": None,

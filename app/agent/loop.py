@@ -19,7 +19,7 @@ import re
 import time
 import uuid
 
-from .. import db
+from .. import db, stages as stages_mod
 from ..pipeline import normalize as nz
 from . import llm
 from . import tools as tools_write
@@ -97,6 +97,11 @@ SYSTEM_PROMPT = (
     "严禁编造姓名；也不要把示例、常识或之前对话里提到的名字当库内数据。"
     "**零工具调用时不要声称『已调用工具/已获取数据』**；要名单就先调 search_candidates，"
     "要统计就先调 pool_stats；工具查不到的人，就如实回答『查不到』。\n"
+    # v1.29.8（业务方截图：技能像的人被列进了别的岗位名单，还编"缓存问题"解释）：
+    # 「某岗位的候选人」= 归岗关系，必须走 search_candidates 的 job 参数。
+    "7d) 问『**某岗位有哪些候选人 / 谁归在这个岗位**』时，search_candidates **必须带 job 参数**"
+    "（按归岗关系筛）。**技能匹配 ≠ 归岗**：技能像不表示归在这个岗位；"
+    "工具结果里每条的 job_title 就是他的真实归岗，照实引用，不要按技能重新归堆。\n"
     # v1.25：实测「把 #1 推进至初面」时模型**不查就反问**，
     # 而 HR 已经把编号给出来了 —— 再问一遍等于把活儿推回去。
     # 编号可能是投递 id 也可能是候选人 id，**两个都查一下**再决定要不要问。
@@ -126,7 +131,10 @@ SYSTEM_PROMPT = (
 #: 零工具调用却在谈论它们 → 就是编造。
 _ARCHIVE_OBJ_RE = re.compile(
     r"(提案|待确认|待\s*(?:HR|您|你)\s*确认|pending_confirmation"
-    r"|阶段|档位|标签|备注|合并|档案|已入职|初面|复面|新投递|已联系)")
+    r"|阶段|档位|标签|备注|合并|档案|"
+    # v1.29：阶段名从配置生成，**不再手抄**——写死的话人事处一改流程，
+    # 新阶段名就不在这个白名单里，模型"零工具却谈论新阶段"会漏过而不被拦。
+    + stages_mod.stage_regex() + r")")
 
 #: 「我已生成/已提交待确认提案」这类**明确承诺**。
 #: 它比档案对象本身更严重：模型在句子里写"已为您生成待确认提案"，

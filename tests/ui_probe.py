@@ -569,8 +569,14 @@ def main() -> int:
         c.shot(os.path.join(args.out, "18c-人才库-批量归档与建议岗位.png"))
 
         # ⑦c-e 投递管道嵌入人才库（v1.7.2 下拉 → v1.7.4 看板 → v1.7.5 折叠定稿）：
-        # 独立导航页退出；**默认折叠一行**只看各阶段人数（已入职/已结束终态不展示）；
-        # 点「展开」出完整看板（在招 5 阶段列、人员全量、行内推进下拉、点人开档案）。
+        # 独立导航页退出；**默认折叠一行**只看各阶段人数（终态不展示）；
+        # 点「展开」出完整看板（在招阶段列、人员全量、行内推进下拉、点人开档案）。
+        # v1.29：阶段名与列数**一律从配置取**，不再手抄 —— 抄一份旧阶段表的话，
+        # 人事处一改流程这几条界面验收会全挂，而挂的原因是测试抄错了、不是界面坏了。
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from app import stages as stages_mod  # noqa: PLC0415
+        _PIPE = stages_mod.pipeline_stages()
+        _TERM = stages_mod.terminal_stages()
         c.goto(f"{args.url}/#pool")
         time.sleep(1.8)
         pool3 = c.eval("(document.getElementById('pipeCard')||{innerText:''}).innerText") or ""
@@ -578,13 +584,12 @@ def main() -> int:
             (c.eval("(document.getElementById('view').innerHTML||'')") or ""))
         nav_pipe_gone = c.eval("!document.getElementById('tabs').innerHTML.includes(\"go('pipe')\")")
         collapsed_cols = c.eval("document.querySelectorAll('#view .pcol').length") or 0
-        one_line_counts = ("在流程中" in pool3) and all(s in pool3 for s in
-            ["新投递", "已联系", "初面", "复面", "待offer"])
-        no_terminal = ("已入职" not in pool3) and ("已结束" not in pool3)
+        one_line_counts = ("在流程中" in pool3) and all(s in pool3 for s in _PIPE)
+        no_terminal = all(s not in pool3 for s in _TERM)
         c.eval("pipeToggle()")
         time.sleep(1.8)
         col_cnt = c.eval("document.querySelectorAll('#view .pcol').length") or 0
-        all_stages = int(col_cnt) == 5          # 在招流程 5 列（已入职/已结束不占板）
+        all_stages = int(col_cnt) == len(_PIPE)   # 列数 == 配置里的在招阶段数
         rows_clickable = "showDetail(" in (c.eval(
             "(document.getElementById('view').innerHTML||'')") or "")
         stage_sel_cnt = c.eval(
@@ -592,7 +597,7 @@ def main() -> int:
         # 点人 → 完整档案弹层真的打开（取管道里有 candidate_id 的第一条）
         pid = c.eval(
             "(async()=>{const r=await api('/api/pipeline');"
-            "for (const s of ['新投递','已联系','初面','复面','待offer'])"
+            "for (const s of " + json.dumps(_PIPE, ensure_ascii=False) + ")"
             "  for (const it of ((r.stages||{})[s]||{items:[]}).items)"
             "    if (it.candidate_id) return it.candidate_id;"
             "return null;})()", await_promise=True)
@@ -607,7 +612,7 @@ def main() -> int:
         cap_ok = c.eval(
             "(async()=>{const r=await api('/api/pipeline');"
             "const dom=document.querySelectorAll('#view .pcol');"
-            "const order=['新投递','已联系','初面','复面','待offer'];"
+            "const order=" + json.dumps(_PIPE, ensure_ascii=False) + ";"
             "return order.every((s,i)=>{const v=(r.stages||{})[s]||{items:[]};"
             "const col=dom[i]; if(!col) return false;"
             "return col.querySelectorAll('.it').length===Math.max(1,(v.items||[]).length);});})()",

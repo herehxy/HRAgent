@@ -4,3 +4,6 @@ uvicorn[standard]>=0.29
 pymupdf>=1.24
 markitdown[pdf,docx]>=0.1.6
 websocket-client>=1.8          # tests/ui_probe.py 的 Chrome DevTools 协议依赖
+openpyxl>=3.1               # v1.29：导出 xlsx。纯 Python、可离线装 wheel、打包无副作用
+#   为什么不用 CSV 顶替：CSV 在 Excel 里打开会把手机号变成 1.38E+10（科学计数法），
+#   且无表头加粗/列宽 —— 而导出表是要发给用人单位、贴进汇报的。

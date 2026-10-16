@@ -79,13 +79,17 @@ def get_key(create: bool = True) -> bytes | None:
     if not create:
         return None
     raw = secrets.token_bytes(_KEY_BYTES)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(base64.b64encode(raw).decode())
     try:
-        os.chmod(path, 0o600)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(base64.b64encode(raw).decode())
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
     except OSError:
-        pass
+        # 密钥目录不可写（Program Files / 受限账户）：不抛异常，返回 None 走 plain: 降级。
+        return None
     _CACHE[path] = raw
     return raw
 
@@ -95,11 +99,16 @@ def protection() -> dict:
     return {
         "algorithm": "AES-256-GCM" if _HAVE_AESGCM else "明文（加密库不可用）",
         "encrypted": bool(_HAVE_AESGCM and key),
+        "blind_index": bool(key),
         "key_source": (
             "环境变量 " + _ENV_KEY if os.environ.get(_ENV_KEY)
             else ("本地密钥文件 config/master.key" if key else "无")
         ),
         "degraded": not (_HAVE_AESGCM and key),
+        "note": (
+            "" if key
+            else "未取得密钥：字段以 plain: 明文存储，手机/邮箱盲索引不可用（身份比对退化为姓名等字段）"
+        ),
     }
 
 
@@ -177,13 +186,19 @@ def hash_field(value: str | None) -> str | None:
 
 
 def blind_index(value: str | None) -> str | None:
-    """带密钥的盲索引：同一密钥下可比对，脱离密钥不可反推。"""
+    """带密钥的盲索引：同一密钥下可比对，脱离密钥不可反推。
+
+    无密钥时返回 None（不写盲索引），而不是退回某个写死在源码里的常量密钥——
+    手机/邮箱取值空间小，公开常量密钥等于把盲索引做成可逆字典，违背「脱离密钥不可反推」。
+    """
     if not value:
         return None
     norm = "".join(str(value).split()).lower()
     if not norm:
         return None
-    key = get_key() or b"tp-fallback-index-key"
+    key = get_key()
+    if not key:
+        return None
     return hmac.new(key, norm.encode("utf-8"), hashlib.sha256).hexdigest()[:40]
 
 

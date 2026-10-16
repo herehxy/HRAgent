@@ -44,7 +44,7 @@ if not os.path.isdir(_PACK_CFG):
 # interview.json 也从这里走：源码内置的是旧字典（15 个单位），
 # 而 HR 运行库里是他自己维护的（10 个单位）→ 要"以用户设置的为准"就得从库里取。
 for _f in ("mailbox.json", "secrets.json", "model.json", "interview.json",
-           "tiers.json", "imap.secret", "embedding.json"):
+           "tiers.json", "imap.secret", "embedding.json", "stages.json"):
     _src = os.path.join(_PACK_CFG, _f)
     if os.path.exists(_src):
         # 目标写 "config" 而不是 "_internal/config"：onedir 打包时 PyInstaller
@@ -59,10 +59,14 @@ _dict = os.path.join(_PACK_CFG, "interview.json")
 if not os.path.isfile(_dict):
     raise SystemExit("[spec] 缺 _package_cfg/interview.json —— 写邮件页下拉框会全空")
 _units = json.load(open(_dict, encoding="utf-8")).get("units", [])
-if len(_units) != 10:
-    raise SystemExit(f"[spec] 面试字典单位数 = {len(_units)}（应为 10）。"
-                     "是不是拿到了源码内置的旧字典？确认 _package_cfg/interview.json 来自运行库。")
-print(f"[spec] 面试字典：{len(_units)} 个单位（HR 维护版）")
+# ⚠️ 原来硬断言 ==10（当时 HR 维护的是 10 个单位）。单位数量是业务方随时增删的
+# （2026-10-16 已是 13 个），写死数字会让"重新采集后打包直接中止"。这里改成
+# 非空校验 + 打印数量：真正的保护是"必须来自采集步骤"（spec 的 datas 只认这份文件，
+# 没有它下面 interview 字典断言就会炸）。
+if not _units:
+    raise SystemExit("[spec] _package_cfg/interview.json 没有单位 —— "
+                     "先跑 python _collect_pack_config.py 从运行库采集")
+print(f"[spec] 面试字典：{len(_units)} 个单位（运行库采集版）")
 
 # 同理，档位规则也必须来自运行库（HR 调过 A/B/C 阈值）。
 # 这条断言是被坑出来的：漏了 tiers.json，包里就只有源码内置那份，
@@ -97,6 +101,24 @@ if os.path.isfile(_secret) and os.path.getsize(_secret) > 0:
 else:
     print("[spec] 邮箱授权码：**未随包分发** —— 收件人需自己在「系统配置」里"
           "填授权码才能收简历（跑 python _write_pack_secret.py 可随包带上）")
+
+# v1.29：**发信**口令（config/smtp.secret）的可见性提示。
+# 这个文件刻意放在白名单**之外**（上面那份 datas 列表里没有它）——
+# 因为收发信已分离，收件人完全可能是另一个账号，"随包带上发信口令"
+# 等于把 HR 企业邮箱的发信能力一起发出去。这是有意收紧，不是漏了。
+# 但**必须把结果打出来**：否则收件人拿到包、点发信才看到
+# 「还没保存发信授权码」，而打包人以为自己已经配好了。
+# ⚠️ 另外提醒：read_smtp_secret() 在 smtp.secret 缺失时会**回退读 imap.secret**，
+#    所以收件人若与发件人同号，能靠回退直接工作；异号则必须自己填。
+_smtp_secret = os.path.join(_PACK_CFG, "smtp.secret")
+if os.path.isfile(_smtp_secret) and os.path.getsize(_smtp_secret) > 0:
+    print("[spec] ⚠️ 发信口令：_package_cfg/smtp.secret 存在，但**不在 datas 白名单里**，"
+          "不会被分发。若要连发信一起给出去，需显式把 smtp.secret 加进上面的列表"
+          "（那等于交出你的企业邮箱发信能力，对外分发前请三思）。")
+else:
+    print("[spec] 发信口令：未随包分发 —— 收件人需在「系统配置 → 发信配置」自填"
+          "客户端专用密码；若收件人与发件人是同一账号、同一口令，"
+          "程序会回退读 imap.secret 而直接可用。")
 
 # 随包分发演示数据（v1.24.8 修：上一版只打了 config、没打 data →
 # 收件人首次启动是**空库**，没有演示候选人、没有邮件模板、没有面试字典。
@@ -146,6 +168,25 @@ if os.path.isdir(_PACK_DATA):
             _con.execute("DELETE FROM proposals")
             if _n3:
                 print(f"[spec] 清洗演示库：已清除遗留提案 {_n3} 条")
+        # 2c) v1.29.4：收信游标与收取痕迹**绝不能随包分发** ——
+        #     游标是"这台电脑收到哪了"（含旧格式纯 UID），带到收件人机器上会让它
+        #     直接跳过收件人邮箱的头 N 封邮件（换账号也一样，旧格式没有账号信息）。
+        #     同理清掉"最近一次收取"记录与聊天清空痕迹（与 2) 的审计口径一致）。
+        if "settings" in _tabs:
+            _sk = ("k LIKE 'imap_cursor%' OR k='last_ingest' "
+                   "OR k LIKE 'chat_cleared%' OR k LIKE 'chat_purge%'")
+            _n4 = _con.execute(f"SELECT count(*) FROM settings WHERE {_sk}").fetchone()[0]
+            _con.execute(f"DELETE FROM settings WHERE {_sk}")
+            if _n4:
+                print(f"[spec] 清洗演示库：已清除收信游标/收取痕迹 {_n4} 条")
+        # 2d) v1.29.4：**收信台账也不能随包** —— `email_messages.processed=1`
+        #     会让收件人首次拉取时把老邮件全部判成"已处理"而静默跳过入库，
+        #     他要的"从头拉全量"就永远拉不到（与 2c 是同一套问题）。
+        if "email_messages" in _tabs:
+            _n5 = _con.execute("SELECT count(*) FROM email_messages").fetchone()[0]
+            _con.execute("DELETE FROM email_messages")
+            if _n5:
+                print(f"[spec] 清洗演示库：已清除收信台账 {_n5} 条")
         # 3) 自增序列归零：让收件人库里 id 从 1 开始，不带着我的历史偏移
         for _t in ("agent_runs", "proposals"):
             if _t in _tabs:

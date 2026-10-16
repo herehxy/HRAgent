@@ -51,8 +51,14 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             if not auth.can(role, need):
                 return _denied(conn, p, operator, role, need)
             aid, stage = int(args["application_id"]), args["stage"]
-            r = db.set_application_stage(conn, aid, stage, operator, role)
-            result["after"] = {"application_id": aid, "stage": r.get("stage") if r else None}
+            # v1.29：结论标签一起落库。参数是**可选**的——老提案里没有这个键，
+            # 传 None 表示"不改结论"（与"把结论清空"用空串区分，见 db.update_application_fields）。
+            # ⚠️ 校验放在 db.set_application_stage 里（那里是唯一真源），这里不重复判一遍：
+            # 两处各判一次，迟早会出现"这处放行、那处拒绝"。
+            r = db.set_application_stage(conn, aid, stage, args.get("outcome"),
+                                         operator, role)
+            result["after"] = {"application_id": aid, "stage": r.get("stage") if r else None,
+                               "outcome": r.get("outcome") if r else None}
 
         elif tool == "set_tier":
             if not auth.can(role, "confirm"):
@@ -149,7 +155,9 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             if not auth.can(role, "set_stage"):
                 return _denied(conn, p, operator, role, "set_stage")
             jid = int(args["job_id"])
-            db.update_job_jd(conn, jid, args.get("jd") or {}, operator=operator, role=role)
+            # db.update_job_jd 的入参只有 (operator)，不接受 role——存量小坑：
+            # 之前传 role=role 会直接 TypeError，这只是走不到才没炸（2026-10-16 修）。
+            db.update_job_jd(conn, jid, args.get("jd") or {}, operator=operator)
             result["after"] = {"job_id": jid}
 
         elif tool == "regrade_job":

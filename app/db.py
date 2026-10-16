@@ -25,7 +25,15 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta
 
-from . import univ as univ_mod  # noqa: PLC0415 — 院校层次识别（985/211 标签）
+from . import univ as univ_mod  # noqa: PLC0415 — 院校层次识别（985/211/强势 标签）
+# v1.29：阶段与结论标签的唯一真源。顶层导入（`stages` 只依赖 paths，不反向依赖 db，无环）——
+# 阶段取值要在建表默认值、迁移、归档判定、统计口径里用到，延迟导入会变成"有时可用有时不可用"。
+from . import stages as stages_mod
+from . import tiers as tiers_mod
+# v1.27：英语四六级归一。**顶层导入**（不延迟导入）——
+# `pipeline.extract` 只依赖 `net`/`normalize`，不反向依赖 db，不构成环；
+# 而延迟导入会让 `cet_level` 的口径在"有时可用有时不可用"之间摇摆。
+from .pipeline import extract as extract_mod
 
 SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -75,7 +83,10 @@ CREATE TABLE IF NOT EXISTS applications (
     score REAL,
     tier_suggested TEXT,
     tier_final TEXT,
-    stage TEXT DEFAULT '新投递',          -- 新投递/已联系/初面/复面/待offer/已入职/已结束
+    -- ⚠️ 取值域以 config/stages.json 为准（唯一真源，见 app/stages.py）；这里只是注释。
+    -- v1.29.2：全部简历/初筛通过/待面试/已面试/已发放offer/已结束
+    -- （旧的 已联系/初面/复面/待offer/已入职 已废弃）
+    stage TEXT DEFAULT '全部简历',
     status TEXT DEFAULT '待确认',         -- 待确认/已确认
     note TEXT DEFAULT '',
     needs_review INTEGER DEFAULT 0,
@@ -365,9 +376,13 @@ def _migrate_v01(conn: sqlite3.Connection) -> dict | None:
                (candidate_id, channel, applied_at, resume_doc_id, score, tier_suggested,
                 tier_final, stage, status, note, needs_review, reasons, risks, hits, miss,
                 extract_mode, confidence, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?, '新投递', ?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?,?,?)""",
             (cid, d.get("source", "文件夹"), d.get("created_at"), doc_id, d.get("score"),
-             d.get("tier_suggested"), d.get("tier_final"), d.get("status") or "待确认",
+             d.get("tier_suggested"), d.get("tier_final"),
+             # 第 8 位是 stage：读配置里的初始档（**不写字面量**——
+             # 阶段名改过一次（v1.29.2 新投递→全部简历），字面量就会跟着过期）
+             d.get("stage") or stages_mod.DEFAULT_STAGE,
+             d.get("status") or "待确认",
              d.get("note", ""), d.get("needs_review", 0), d.get("reasons"), d.get("risks"),
              d.get("hits"), d.get("miss"), d.get("extract_mode"), d.get("confidence"),
              d.get("created_at"), d.get("updated_at")),
@@ -463,6 +478,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         "jobs": {
             "dept_id": "INTEGER",
             "active": "INTEGER DEFAULT 1",
+            # v1.29.6（业务方 2026-10-16）：招聘数量（招聘需求，计划招几人）。
+            # 纯管理信息，不参与归岗/判档；NULL=未填。
+            "headcount": "INTEGER",
         },
         # 候选人软归档（v1.4 试用反馈）：归档后不再出现在人才库与检索，
         # 集中在「归档」页展示，可随时取消——不是删除，历史投递全保留。
@@ -476,10 +494,35 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             # v1.8.5：毕业时间（YYYY-MM 或 YYYY）。校招场景要靠它判"应届/往届未就业"，
             # 光看工作年限不够——去年毕业还没参加工作的人，年限是 0，身份却不是应届。
             "grad_date": "TEXT",
+            # v1.29.4（业务方 2026-10-16）：是否仍在读（1/0）。硕士「2024.9-至今」
+            # 这类没毕业的学生不能被本科毕业年份判成"往届未就业"；在读按应届处理。
+            "in_school": "INTEGER",
             # v1.17：奖学金/荣誉/论文/专利
             "honors_json": "TEXT",
             # v1.25.7：人工备注（HR 工作记录：沟通印象/内推关系/谈薪情况……），不参与档位判定
             "note": "TEXT",
+            # v1.27：英语等级。存**原文表述**（如「大学英语六级」「CET-4」）
+            # 而不是归一后的档位——归一交给 `pipeline/extract.cet_level()`，
+            # 这样将来加「英语专业八级」「雅思」时不用改库、也不用迁移老数据。
+            # 空串/None = 简历里没写（界面显示为"—"，筛选时算"未提供"而非"没有证书"）。
+            "cet": "TEXT",
+            # v1.29：第一学历（本科）院校。**与 `school` 是两件事**：
+            # `school` 只存一所学校，也就是最高学历那所；而"本科985/本科211"
+            # 要的是**本科就读院校**。拿 school 当第一学历用，会把"本科双非、
+            # 硕士985"的人筛进「本科985」名单 —— 而 HR 是拿这个名单做取舍的，
+            # 筛错人比筛不到人严重得多。
+            # 抽不到就留空 → 筛选里单列「未识别」一档（与"不满足"严格分开，
+            # 否则 HR 会把"没识别出来"当成"不是985"）。
+            "first_degree_school": "TEXT",
+            # v1.29.2：**完整学历院校经历**（业务方要求「本科什么学校、硕士什么学校、
+            # 博士什么学校」在分析结果里完整体现）。
+            # 存 JSON 数组字符串：[{"degree":"本科","school":"…","major":"…"}, …]。
+            # 为什么不用现成的 `school` + `first_degree_school` 两个字段拼：
+            # 那是"最高 + 本科"两段，**中间的研究生段（硕士/博士）就丢了**，
+            # 而 HR 看一个人的学校水平时恰恰会顺着学历一路看下去。
+            # 存 JSON 而不是建子表：一段教育经历只随简历抽取一次、只读不编辑，
+            # 建表会带来主键/级联/合并不必要的复杂度；读时 `json.loads` 一次即可。
+            "edu_history": "TEXT",
         },
         # v1.5：待指定投递的「建议岗位」（轮询在招岗位取最适者，只建议不归岗）
         "applications": {
@@ -494,6 +537,41 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "stage_changed_at": "TEXT",
             # v1.17：奖学金/荣誉/论文/专利（规则抽取 + 原文片段）
             "honors_json": "TEXT",
+            # ---- v1.29：面试与录用流程 ----
+            # 结论标签（取值受阶段约束，见 app/stages.py 的 outcomes_of）：
+            # `已面试` → 不录用；`已发放offer` → 已签约 / 拒签；其余阶段为空。
+            # 注意**没有「拟录用」**：业务方裁定「拟录用 ≡ 待发offer」，
+            # 它就是那个阶段本身，不再另打一个标签（否则"阶段+标签"两处都能表达同一件事）。
+            "outcome": "TEXT",
+            # 面试单位（＝面试部门）。初筛通过阶段由 HR 登记；发面试邀请时自动带出，
+            # 发信成功后再以**邮件实际值**为准回写（候选人被告知的是邮件里那个单位）。
+            "interview_unit": "TEXT",
+            # 面试日期/时段/方式：**发面试邀请邮件成功那一刻**从邮件的运行时变量里捕获，
+            # 不是"HR 点了推进按钮那天"。两者能差好几天（提前一周发邀请是常态）。
+            # 存两个字段（日期 / 时段原文）而不是一个拼好的串：改时段不必重填日期，
+            # 且导出时要显示到分钟，拼串后还得再拆一次。
+            "interview_date": "TEXT",
+            "interview_slot": "TEXT",
+            "interview_mode": "TEXT",
+            # 进入「已面试」阶段的时刻。**只用于圈定"曾到过已面试"的导出行集**，
+            # 不参与展示。为什么不能用 interview_date 代替：面试日期在**邀约时**就有了
+            # （待面试阶段），而"到底面了没有"要等面试完成 —— 用日期当标记会把
+            # "被邀约但没来"的人算进已面试台账；反过来用进阶段时间当面试日期，
+            # HR 看到的就是"我点按钮那天"，不是面试安排。
+            "interviewed_at": "TEXT",
+            # 录用接收函发出时刻：**发信成功后系统自动写**，绝不手工填。
+            "offer_sent_at": "TEXT",
+            # 以下三项由人事处人工维护（业务方明确要求「入职最后期限」也手工填）
+            "signed_at": "TEXT",
+            "onboard_deadline": "TEXT",
+            "onboard_status": "TEXT",
+        },
+        # v1.29：模板用途。**必须显式存**而不是按模板名判断 ——
+        # 模板名 HR 随时会改（「初面邀约」改成「面试通知」），按名字匹配的话
+        # 改个名"发信自动回写面试信息"就静默失效了。用途是结构化的，改名字不影响。
+        # interview_invite=面试邀约（回写面试日期/时段/单位/方式）；offer=录用相关（回写 offer_sent_at）
+        "mail_templates": {
+            "kind": "TEXT DEFAULT 'other'",
         },
         # v1.13.6：合并来源。documents 也要有——老库不会因为 CREATE TABLE 补列，
         # 没有这一列时拆分只能"如实说明搬不回"，等于白拆。
@@ -504,6 +582,14 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             # "到底哪些信息没给模型看"，而这恰恰是隐私红线要能被核查的地方。
             # 注意：这个字典**只能有一份 documents 键**，重复会互相覆盖（踩过）。
             "sensitive_found": "TEXT",
+            # v1.27：附件性质 'resume'（简历，参与解析与建档） / 'other'（其他附件，
+            # 随简历一起收下但**不进人才库、不参与解析**）。
+            # 为什么需要：求职邮件常在简历之外还带作品集、成绩单、证书扫描件、
+            # 身份证/学位证照片。过去这些一律走完整入库链路 —— 它们解析不出
+            # 姓名电话，会被当成一个"解析失败的新人"塞进人才库（实测：多附件邮件
+            # 一次能凭空多出好几个人）。现在只归档、展示在档案里，不建档。
+            # 默认 'resume'：老库全是简历，不回填成 other 就等于把老附件全变附件。
+            "kind": "TEXT DEFAULT 'resume'",
         },
         # v1.8 主动提案：区分「HR 问出来的」与「系统自己发现的」。
         # 两者的确认流、留痕、执行路径完全一致，只有来源不同——
@@ -550,7 +636,10 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     for table in re.findall(r'^\s{8}"(\w+)":\s*\{', _ADD_SRC, re.M):
         if table in _seen_tables:
             raise RuntimeError(
-                f"db._ADD 里表 {table!r} 出现了两次：同名键会互相覆盖，"
+                # 措辞里**别写成"模块名 . _ADD"那种点号形式**：自检的静态调用面检查
+                # 会把它当成一次属性调用，而 `_ADD` 是本函数内的局部变量、不在
+                # `dir(db)` 里，于是年年报一条假警。只写「_ADD」即可。
+                f"_ADD 里表 {table!r} 出现了两次：同名键会互相覆盖，"
                 f"导致新增的列不迁移。请把同一个表的列合并到同一个键下。")
         _seen_tables.add(table)
 
@@ -679,7 +768,7 @@ def upsert_job(conn: sqlite3.Connection, jd: dict, title: str | None = None,
 
 def create_job(conn: sqlite3.Connection, title: str, dept_id: int | None = None,
                jd: dict | None = None, owner: str = "HR",
-               operator: str = "HR") -> int:
+               operator: str = "HR", headcount: int | None = None) -> int:
     """创建岗位。**部门是可选的**：`dept_id=None` 时 `jobs.dept` 留空字符串，
     岗位照常打分、归岗、重算——部门只影响展示，不参与任何判定。
     jd_json 由调用方提供（默认用通用 JD 模板）。"""
@@ -693,19 +782,20 @@ def create_job(conn: sqlite3.Connection, title: str, dept_id: int | None = None,
     row = conn.execute("SELECT id FROM jobs WHERE title = ? AND dept = ?",
                        (title, dept_name)).fetchone()
     stamp = now()
+    hc = None if not headcount or headcount <= 0 else int(headcount)   # 0/负 = 未填
     if row:
         conn.execute(
             "UPDATE jobs SET dept_id = ?, jd_json = ?, active = 1, status = '开放',"
-            " closed_at = NULL, updated_at = ? WHERE id = ?",
-            (dept_id, json.dumps(jd or {}, ensure_ascii=False), stamp, row["id"]))
+            " closed_at = NULL, headcount = COALESCE(?, headcount), updated_at = ? WHERE id = ?",
+            (dept_id, json.dumps(jd or {}, ensure_ascii=False), hc, stamp, row["id"]))
         conn.commit()
         return row["id"]
     cur = conn.execute(
         """INSERT INTO jobs (title, dept, dept_id, jd_json, owner, status, active,
-                             opened_at, created_at, updated_at)
-           VALUES (?,?,?,?,?,'开放',1,?,?,?)""",
+                             headcount, opened_at, created_at, updated_at)
+           VALUES (?,?,?,?,?,'开放',1,?,?,?,?)""",
         (title, dept_name, dept_id, json.dumps(jd or {}, ensure_ascii=False), owner,
-         stamp, stamp, stamp),
+         hc, stamp, stamp, stamp),
     )
     conn.commit()
     add_audit(conn, "job", str(cur.lastrowid), "create", "", title, operator, "hr")
@@ -776,13 +866,21 @@ def open_jobs_with_jd(conn: sqlite3.Connection) -> list[dict]:
 
 
 def update_job_jd(conn: sqlite3.Connection, jid: int, jd: dict,
-                  operator: str = "HR") -> dict | None:
-    """更新岗位 JD 尺子。只影响之后新入库的投递评分，不改动历史档位。"""
+                  operator: str = "HR", headcount: int | None = None) -> dict | None:
+    """更新岗位 JD 尺子。只影响之后新入库的投递评分，不改动历史档位。
+
+    headcount（招聘数量，v1.29.6）：None = 本次没传，保持原值；0/负 = 清空（NULL）。
+    它是岗位的管理信息，和 JD 尺子一起在同一个弹窗里编辑。"""
     j = get_job(conn, jid)
     if not j:
         return None
-    conn.execute("UPDATE jobs SET jd_json = ?, updated_at = ? WHERE id = ?",
-                 (json.dumps(jd or {}, ensure_ascii=False), now(), jid))
+    sets = ["jd_json = ?", "updated_at = ?"]
+    vals: list = [json.dumps(jd or {}, ensure_ascii=False), now()]
+    if headcount is not None:
+        sets.append("headcount = ?")
+        vals.append(headcount if headcount > 0 else None)
+    vals.append(jid)
+    conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id = ?", vals)
     conn.commit()
     must = (jd or {}).get("must") or {}
     add_audit(conn, "job", str(jid), "update_jd",
@@ -1009,6 +1107,56 @@ def match_job_by_direction(conn: sqlite3.Connection, direction: str) -> tuple[in
     return None, {}
 
 
+def match_job_soft(conn: sqlite3.Connection, text: str) -> tuple[int | None, dict]:
+    """宽口径"能对应上"的岗位匹配（**只用于建议岗位的优先序**，不自动归岗）。
+
+    v1.29.5（业务方）：投递方在标题/文件名里写明的应聘方向，只要能和某个在招岗位
+    "对应上"，就该优先于按正文内容让模型去猜——它是**本人写下的意向**。
+
+    与 `match_job_by_direction` 的保守关爱不同：这里允许**共有连续片段**命中
+    （方向「数字化中心」↔ 岗位「数字化工程师」共有「数字化」）。宽一点是安全的：
+    输出只是"建议"，错了 HR 一眼能看见并纠正；漏掉意向反而误导。
+    规则：与岗位标题/核心词的**最长公共连续子串 ≥ 2 字、且不少于较短一侧的一半**；
+    多条命中取更长者。仍匹配不到 → (None, {})。
+    """
+    import re as _re
+
+    d = _re.sub(r"\s+", "", str(text or "")).strip()
+    if len(d) < 2:
+        return None, {}
+
+    def _lcs(a: str, b: str) -> int:
+        # 最长公共**连续**子串长度（两串都很短，直接 O(n*m)）
+        best = 0
+        prev = [0] * (len(b) + 1)
+        for ca in a:
+            cur = [0] * (len(b) + 1)
+            for j, cb in enumerate(b, 1):
+                if ca == cb:
+                    cur[j] = prev[j - 1] + 1
+                    if cur[j] > best:
+                        best = cur[j]
+            prev = cur
+        return best
+
+    jobs = [j for j in list_jobs(conn, include_inactive=False)
+            if (j.get("title") or "").strip()]
+    best, best_score = None, 0
+    for j in jobs:
+        title = _re.sub(r"\s+", "", str(j.get("title") or ""))
+        core = _re.sub(r"\s+", "", _job_core_title(title))
+        for cand in (title, core):
+            if not cand or len(cand) < 2:
+                continue
+            n = _lcs(d, cand)
+            # ≥2 字、且不少于较短一侧的一半 —— 避免只共用一个"工/学"字就命中
+            if n >= 2 and n * 2 >= min(len(d), len(cand)) and n > best_score:
+                best, best_score = j, n
+    if best:
+        return best["id"], best.get("jd_json") or {}
+    return None, {}
+
+
 # ============================================================
 # 候选人（人）
 # ============================================================
@@ -1019,9 +1167,10 @@ def insert_candidate(conn: sqlite3.Connection, rec: dict) -> int:
         """INSERT INTO candidates
            (identity_key, name, gender, birth_year, phone_enc, email_enc, phone_bidx, email_bidx,
             edu_level, school, major, years_exp, current_org, source_first,
-            first_seen_at, last_active_at, pool_status, pii_level, blind, grad_date,
+            first_seen_at, last_active_at, pool_status, pii_level, blind, grad_date, in_school, cet,
+            first_degree_school, edu_history,
             created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (rec.get("identity_key"), rec.get("name"), rec.get("gender"), rec.get("birth_year"),
          rec.get("phone_enc"), rec.get("email_enc"), rec.get("phone_bidx"), rec.get("email_bidx"),
          rec.get("edu_level"), rec.get("school"), rec.get("major"), rec.get("years_exp"),
@@ -1032,6 +1181,16 @@ def insert_candidate(conn: sqlite3.Connection, rec: dict) -> int:
          # 毕业时间（v1.13.6 补写）：ingest 明明传了却曾被静默丢弃，
          # 导致新人"应届/往届未就业"永远判不出来——只能靠启动时的存量补写救。
          rec.get("grad_date"),
+         # v1.29.4：在读（同一个显式列清单坑的第四次）
+         rec.get("in_school"),
+         # v1.27：英语四六级原文表述。本函数是**显式列清单**（不是字典展开），
+         # 漏加这一列的症状与其他字段一样是"传了却静默丢弃"——已修过 grad_date 一次。
+         rec.get("cet"),
+         # v1.29：第一学历（本科）院校。同一个坑第三次了（grad_date、cet 各一次）——
+         # 本函数是**显式列清单**，新增列别忘了同步加进来，否则"传了却静默丢弃"。
+         rec.get("first_degree_school"),
+         # v1.29.2：完整学历院校经历（本科/硕士/博士各一段）。JSON 字符串。
+         rec.get("edu_history"),
          stamp, stamp),
     )
     conn.commit()
@@ -1110,6 +1269,18 @@ SELECT c.*,
        a.suggested_job_id AS suggested_job_id,
        sj2.title          AS suggested_job_title,
        a.suggested_job_reason AS suggested_job_reason,
+       -- v1.29：面试与录用流程字段。**必须在这里显式列出**（本视图是列清单不是 `a.*`），
+       -- 漏列的症状与 insert 的显式列清单一样：库里明明有值，界面永远读不到。
+       a.outcome       AS outcome,
+       a.interview_unit  AS interview_unit,
+       a.interview_date  AS interview_date,
+       a.interview_slot  AS interview_slot,
+       a.interview_mode  AS interview_mode,
+       a.interviewed_at  AS interviewed_at,
+       a.offer_sent_at   AS offer_sent_at,
+       a.signed_at       AS signed_at,
+       a.onboard_deadline AS onboard_deadline,
+       a.onboard_status  AS onboard_status,
        j.title         AS job_title,
        j.active        AS job_active,
        -- v1.24.9：区分「简历读不出」与「信息缺失」，两者过去共用 needs_review
@@ -1122,7 +1293,12 @@ LEFT JOIN applications a ON a.id = (
 LEFT JOIN jobs j ON j.id = a.job_id
 LEFT JOIN jobs sj2 ON sj2.id = a.suggested_job_id
 LEFT JOIN documents d0 ON d0.id = (
+    -- v1.27：**只取简历附件**（kind='resume'）。原来这里取"最新一条附件"，
+    -- 多附件邮件下最新那条很可能是作品集/证书扫描件（kind='other'），
+    -- 它的 parse_ok 常年为真 → 列表里"简历读不出"会假性消失。
+    -- `COALESCE(kind,'resume')` 兜住老库没补列的极端情况（此时恒不命中 → NULL，安全）。
     SELECT id FROM documents WHERE candidate_id = c.id
+      AND COALESCE(kind, 'resume') != 'other'
     ORDER BY id DESC LIMIT 1
 )
 """
@@ -1209,6 +1385,23 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
                     skill: str | list[str] | None = None, min_years: int | None = None,
                     education: str | None = None, job_id: int | None = None,
                     univ: str | None = None,
+                    # v1.27：`strong` = 特定院校（逗号分隔的多个校名，**并集**语义），
+                    # `cet` = 英语四六级（逗号分隔，归一档位；"未提供"是特殊值）。
+                    # 两者在**这一层**实现而不是只在 server 层 —— 否则智能助手的
+                    # `search_candidates` 与导出走的是同一个 `list_candidates`，
+                    # 却拿不到这两个参数，"界面上能筛、助手查不到"必然发生
+                    #（与 v1.23.4 把 univ 筛选下沉到 db 的道理完全一样）。
+                    strong: str | None = None, cet: str | None = None,
+                    # v1.29：新增筛选维度。全部在**这一层**实现，理由同 strong/cet ——
+                    # 智能助手的 `search_candidates` 与导出共用本函数，
+                    # 只在 server 层筛会出现"界面上能筛、助手查不到"。
+                    #   overseas = 海外院校：1=名单内 / 0=名单外 / 未识别=学校为空
+                    #   bachelor = 第一学历层次：985 / 211 / 特殊 / 未识别
+                    #   date_from / date_to = 投递时间段（按 applied_at，含当天）
+                    #   interview_unit = 面试部门（逗号分隔 = 并集）
+                    overseas: str | None = None, bachelor: str | None = None,
+                    date_from: str | None = None, date_to: str | None = None,
+                    interview_unit: str | None = None,
                     stage: str | None = None, pool_status: str | None = None,
                     needs_review: bool | None = None, include_merged: bool = False,
                     archived: bool | None = None, limit: int | None = None,
@@ -1237,6 +1430,32 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
     if needs_review is not None:
         where.append("a.needs_review = ?")
         args.append(1 if needs_review else 0)
+    # 投递时间段：按 applied_at（**投递时间**，不是入库时间）——
+    # 补录历史简历时两者能差几个月，按入库时间筛会把"上个月投的"当成"今天投的"。
+    # 比较用字符串（库里存的是 `YYYY-MM-DD HH:MM:SS`，字典序即时间序）。
+    if date_from:
+        where.append("COALESCE(a.applied_at,'') >= ?")
+        args.append(str(date_from).strip()[:10])
+    if date_to:
+        # 含当天：界面只给到「日」，所以上界取**次日**。
+        # 写成 `<= date_to` 会把当天 00:00 之后投的全漏掉
+        # （字符串比较下 `2026-10-15 09:00` > `2026-10-15`）——HR 会以为"今天没人投"。
+        where.append("COALESCE(a.applied_at,'') < ?")
+        args.append(_plus_one_day(str(date_to).strip()[:10]))
+    if interview_unit:
+        # v1.29.11：面试单位支持**多选**（「分析测试中心、稀土研究院」）。
+        # 旧实现是 IN（整串相等），多值记录谁也筛不到；现在把 , ， 、 一律当
+        # 分隔符，用「以逗号为边界」的 LIKE 命中任一所选单位 —— 避免
+        # 「第一实验室」误中「第十一实验室」这类子串假命中。
+        _units = [u.strip() for u in re.split(r"[、,，]+", str(interview_unit)) if u.strip()]
+        if _units:
+            _norm = ("REPLACE(REPLACE(REPLACE(COALESCE(a.interview_unit,''),"
+                     " '、', ','), '，', ','), ' ', '')")
+            conds = []
+            for u in _units:
+                conds.append(f"(',' || {_norm} || ',') LIKE ?")
+                args.append("%," + u.replace(" ", "") + ",%")
+            where.append("(" + " OR ".join(conds) + ")")
     if keyword:
         # v1.23.5：关键词改为**在 SQL 里筛**（原来是把全库装配成对象后在 Python 里逐条比）。
         # 两个原因：
@@ -1260,16 +1479,20 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
         args.extend([like] * 8)
     if where:
         sql += " WHERE " + " AND ".join(where)
-    # 排序（v1.8.8，HR 口径）：**D 档一律沉底**，其余不看分数、按导入时间倒序。
+    # 排序（v1.8.8，HR 口径）：**最差档一律沉底**，其余不看分数、按导入时间倒序。
     # 为什么不再按分数排：分数受"是否识别出年限/技能词表命中"影响，准确性还不到
     # 能当排序依据的程度——按分数排会让 HR 误以为"前几名就是最优"。档位里
     # D 是唯一明确的否（学历不过线），所以只有它特殊处理；A/B/C 按投递时间排，
     # 最新投递在最上面，符合"刚收到的先看"的实际工作方式。
-    sql += (" ORDER BY CASE WHEN COALESCE(a.tier_final, a.tier_suggested, '') = 'D'"
+    sql += (" ORDER BY CASE WHEN COALESCE(a.tier_final, a.tier_suggested, '') = ?"
             " THEN 1 ELSE 0 END, COALESCE(a.applied_at,'') DESC, c.id DESC")
     if limit:
         sql += f" LIMIT {int(limit)}"
 
+    # ⚠️ ORDER BY 里那个 `?` 是**最后**追加的参数，顺序不能错 —— 它必须跟在
+    # 所有 WHERE 参数之后。用 `?` 而不是把档位字母拼进 SQL：档位来自配置文件，
+    # 拼串一旦配置里带了引号就会把整条 SQL 弄坏。
+    args = [*args, tiers_mod.hard_shortfall_tier()]
     items = [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
     # v1.24.9：把"缺哪些字段"与"简历有没有读出来"解出来给界面用。
     # 过去只有 needs_review 一个布尔，两种情况都显示"待人工判读"，
@@ -1297,11 +1520,82 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
     # 同一份口径只能有一处实现，否则两处必然漂移。
     for _i in items:
         _i["uni_tier"] = univ_mod.uni_tier(_i.get("school") or "")
-    if univ in ("985", "211"):
-        # 985 院校全部同时是 211，所以选 211 时 985 也算（与界面提示一致）
+        # v1.27：英语四六级归一后的档位。**在这一处算**（与 uni_tier 同一原则）：
+        # 列表接口、智能体 `search_candidates`、导出都读这一个字段，
+        # 不然"界面上筛六级"与"助手查六级"会给出两拨人。
+        # 归一规则在 `pipeline.extract.cet_level`（唯一口径）。
+        _i["cet_level"] = extract_mod.cet_level(_i.get("cet"))
+        # v1.29.2：学历院校经历（JSON → 列表）。解析失败给空列表，
+        # 绝不让一个脏值把整个列表接口带崩（这个字段只用于展示）。
+        _i["edu_history"] = _loads_edu_history(_i.get("edu_history"))
+        # v1.29：第一学历（本科）院校层次 + 海外院校标记。
+        # **两个独立维度**（海外校既不是 985 也不是 211），也在这里算一次给三处用。
+        _i["bachelor_tier"] = univ_mod.uni_tier(_i.get("first_degree_school") or "")
+        _i["overseas"] = univ_mod.is_overseas(_i.get("school") or "")
+        _i["verdict"] = stages_mod.verdict(_i.get("stage"), _i.get("outcome"))
+    # v1.29：国内院校层次。取值 985/211/**特殊**/**未识别**。
+    # 「特殊」= v1.27 的 strong 名单（非 985/211 的强校）；v1.29 把它并进这一个维度，
+    # 界面上不再有第二个入口指向同一批人（原来「院校层次」与「特定院校」是两个下拉，
+    # 其中的"强势"与"特定院校"说的是同一集合）。
+    # 「未识别」= **学校字段为空**，与"不是 985/211"严格分开：前者要人工补录，
+    # 后者可以直接排除，混在一起 HR 会读成"这人不是 985"。
+    if univ:
+        _u = str(univ).strip()
+        if _u == "未识别":
+            items = [i for i in items if not (i.get("school") or "").strip()]
+        elif _u == "特殊":
+            items = [i for i in items if i.get("uni_tier") == "强势"]
+        elif _u == "985":
+            items = [i for i in items if i.get("uni_tier") == "985"]
+        elif _u == "211":
+            # 985 院校全部同时是 211，所以选 211 时 985 也算（与界面提示一致）
+            items = [i for i in items
+                     if i.get("uni_tier") in ("985", "211")]
+    # v1.29：海外院校（**独立维度**，不与上面的国内层次混）。1 / 0 / 未识别。
+    if overseas:
+        _o = str(overseas).strip()
+        if _o == "未识别":
+            items = [i for i in items if i.get("overseas") is None]
+        elif _o in ("1", "海外"):
+            items = [i for i in items if i.get("overseas") is True]
+        elif _o in ("0", "非海外"):
+            items = [i for i in items if i.get("overseas") is False]
+    # v1.29：第一学历层次。985 / 211 / 特殊 / 未识别（未识别 = 本科院校没抽到，需补录）
+    if bachelor:
+        _b = str(bachelor).strip()
+        if _b == "未识别":
+            items = [i for i in items
+                     if not (i.get("first_degree_school") or "").strip()]
+        elif _b == "特殊":
+            items = [i for i in items if i.get("bachelor_tier") == "强势"]
+        elif _b == "985":
+            items = [i for i in items if i.get("bachelor_tier") == "985"]
+        elif _b == "211":
+            items = [i for i in items
+                     if i.get("bachelor_tier") in ("985", "211")]
+    # v1.27：特定院校（strong）。逗号分隔 = 并集（"看下这几所学校的人"）。
+    # 比较前走 `univ._norm/_base` 归一，否则「中国科学院大学（北京）」这类
+    # 带括号/校区的写法会漏。
+    if strong:
+        _names = [s for s in str(strong).split(",") if s.strip()]
+        _want = {univ_mod._norm(s) for s in _names} | {univ_mod._norm(univ_mod._base(s)) for s in _names}
         items = [i for i in items
-                 if i.get("uni_tier") == "985"
-                 or (univ == "211" and i.get("uni_tier") == "211")]
+                 if univ_mod._norm(i.get("school") or "") in _want
+                 or univ_mod._norm(univ_mod._base(i.get("school") or "")) in _want]
+    # v1.27：英语四六级。逗号分隔 = 并集；"未提供"是**特殊值**（简历里没写）。
+    # ⚠️ 三种语义必须严格分开：`cet_level` 有三个取值域 ——
+    #   归一档位（'六级'/'专业四级'…）、'无'（简历明写未通过）、''（简历里没写）。
+    # 不能写成 `i.get("cet_level") or "" in _want_lv`：
+    # Python 里 `'' in ['六级']` 恒为 True（空串是任何串的子串），
+    # 于是筛"六级"会把**全部没写四六级的人**都放进来 —— 看起来"筛了没用"。
+    # 也不能让 '' 命中'未提供'之外的任何值，两者对 HR 的含义完全相反。
+    if cet:
+        _parts = [c.strip() for c in str(cet).split(",") if c.strip()]
+        _want_lv = [c for c in _parts if c != "未提供"]
+        _want_missing = "未提供" in _parts
+        items = [i for i in items
+                 if ((i.get("cet_level") or "") in _want_lv
+                     if (i.get("cet_level") or "") else _want_missing)]
 
     if tier and tier != "ALL":
         if tier == "REVIEW":
@@ -1390,6 +1684,16 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         _a["status_display"], _a["status_hint"] = app_status_display(_a)
     docs = [_decode(dict(r)) for r in conn.execute(
         "SELECT * FROM documents WHERE candidate_id = ? ORDER BY id DESC", (cid,)).fetchall()]
+    # v1.27：档案里简历附件与其他附件**分开两组**下发。
+    # 为什么在服务端拆而不是让前端 filter：`documents[0]`（原文取用）必须是简历
+    # ——若让前端自己过滤，它按下标取"最新一条"时可能取到作品集，简历原文就空了。
+    # 口径：老库无 kind 列时 `_ensure_columns` 已补 'resume' 默认值，
+    # 兜底再判一次 `kind != 'other'`（而不是 `== 'resume'`），
+    # 免得手工改过库的记录两边都不显示。
+    resume_docs = [d for d in docs if (d.get("kind") or "resume") != "other"]
+    other_docs = [d for d in docs if (d.get("kind") or "resume") == "other"]
+    for _d in docs:
+        _d["kind"] = _d.get("kind") or "resume"
     skills = [_decode(dict(r)) for r in conn.execute(
         """SELECT s.canonical_name AS name, s.category, cs.level, cs.verified,
                   cs.evidence, cs.source, cs.from_doc_id
@@ -1417,6 +1721,10 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         **c,
         "applications": apps,
         "documents": docs,
+        # v1.27：简历附件 / 其他附件分开。`documents` 保留全量（老消费方不变），
+        # 界面用这两个分组渲染两张表。
+        "resume_documents": resume_docs,
+        "other_documents": other_docs,
         "skills": skills,
         "tags": tags,
         "latest": latest,
@@ -1425,27 +1733,61 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         "score": latest.get("score"),
         "stage": latest.get("stage"),
         "status": latest.get("status"),
+        # v1.29.2：面试信息**提到顶层**。档案弹层的「面试信息」区读的是 `d.*`，
+        # 而这些值只存在于最新那条投递上 —— 之前没往顶层拷，界面输入框**永远是空的**，
+        # HR 看到"这一步必填"的提示却又看不到已登记的单位，
+        # 很可能就再填一遍（值倒是一样的，但会多一条审计，看着像改过）。
+        # 与 `stage`/`status` 同一处理：那也是"当前这条投递的状态"。
+        "application_id": latest.get("id"),
+        "interview_unit": latest.get("interview_unit"),
+        "interview_date": latest.get("interview_date"),
+        "interview_slot": latest.get("interview_slot"),
+        "interview_mode": latest.get("interview_mode"),
+        "outcome": latest.get("outcome"),
+        "offer_sent_at": latest.get("offer_sent_at"),
+        "signed_at": latest.get("signed_at"),
+        "onboard_deadline": latest.get("onboard_deadline"),
+        "onboard_status": latest.get("onboard_status"),
         # v1.25.7：投递备注不再占用顶层 note（改名 app_note 保留数据）；
         # 顶层 note 现在由 **c 提供 = 候选人的人工备注（HR 工作记录）。
         "app_note": latest.get("note"),
         "needs_review": latest.get("needs_review"),
         # v1.25.6：给完整档案用的"缺什么"清单与"原文是否读得出"（界面直接展示）
         "missing_fields": _missing,
-        "parse_failed": bool(docs) and docs[0].get("parse_ok") is not None
-                        and not docs[0].get("parse_ok"),
+        # v1.27：`parse_failed` / `raw_text` / `file_name` / `file_path` 全部改用
+        # **简历附件组**（resume_docs）而不是 docs。
+        # 原因：docs 是按 id 倒序的全量附件，最新一条很可能是作品集（kind='other'），
+        # 而作品集 `parse_ok` 常为真、`raw_text` 是空的 —— 那样"简历读不出"
+        # 会假性消失、简历原文变空。全程只读 docs[0] 的写法在这条数据下是错的。
+        "parse_failed": bool(resume_docs) and resume_docs[0].get("parse_ok") is not None
+                        and not resume_docs[0].get("parse_ok"),
         "reasons": latest.get("reasons") or [],
         "risks": latest.get("risks") or [],
         "hits": latest.get("hits") or [],
         "miss": latest.get("miss") or [],
-        "raw_text": (docs[0].get("raw_text") if docs else "") or "",
-        "file_name": docs[0].get("file_name") if docs else None,
+        "raw_text": (resume_docs[0].get("raw_text") if resume_docs else "") or "",
+        "file_name": resume_docs[0].get("file_name") if resume_docs else None,
         # 注意：守卫必须在**取值之前**。此前写成
         # `docs[0].get("archived_path") or (docs[0].get("file_path") if docs else None)`
         # —— `or` 左侧先求值，`docs` 为空时 `docs[0]` 直接 IndexError，
         # 于是"没有任何附件的候选人"（手工录入、或附件被清理过的）打开完整档案会 500。
-        "file_path": ((docs[0].get("archived_path") or docs[0].get("file_path"))
-                      if docs else None),
+        "file_path": ((resume_docs[0].get("archived_path") or resume_docs[0].get("file_path"))
+                      if resume_docs else None),
         "tier_effective": latest.get("tier_final") or latest.get("tier_suggested"),
+        # v1.27：英语四六级。`cet` 是简历原文表述（库里存的那份），
+        # `cet_level` 是归一后的档位（界面下拉与人才库筛选都用它）。
+        # 两个都下发：档案里 HR 要看到原文（与原件一致），也要能按档位改。
+        "cet_level": extract_mod.cet_level(c.get("cet")),
+        # v1.29.2：学历院校经历（库里是 JSON 字符串，这里解成列表给界面）
+        "edu_history": _loads_edu_history(c.get("edu_history")),
+        # v1.29.4（业务方）：档案「教育经历」要标 985/211 —— 与列表层同一口径
+        # （`list_candidates` 里早就有这两个字段，详情层此前漏了），
+        # 最高学历院校与第一学历院校的层次在这里一并算好下发。
+        "uni_tier": univ_mod.uni_tier(c.get("school") or ""),
+        "bachelor_tier": univ_mod.uni_tier(c.get("first_degree_school") or ""),
+        # v1.29.4（业务方）：来源邮件（标题/发件人/收信时间）随档案下发，
+        # 展示在「简历附件」上方；非邮件来源（文件夹/上传）为 None。
+        "source_mail": _source_mail_of(conn, resume_docs),
         # v1.17：荣誉/论文/专利（按类分组，界面直接渲染）
         "honors": _group_honors(c.get("honors_json")),
     }
@@ -1571,7 +1913,7 @@ def insert_application(conn: sqlite3.Connection, rec: dict) -> int:
          # `rec.get("applied_at", stamp)` 在 key 存在但值为 None 时会返回 None，
          # 写成 NULL 后排序会把它甩到最后（COALESCE 到空串），档案页"最新投递"就取错行。
          (rec.get("applied_at") or stamp), rec.get("resume_doc_id"), rec.get("score"),
-         rec.get("tier_suggested"), None, rec.get("stage", "新投递"),
+         rec.get("tier_suggested"), None, rec.get("stage") or stages_mod.DEFAULT_STAGE,
          rec.get("status", "待确认"), rec.get("note", ""),
          1 if rec.get("needs_review") else 0,
          json.dumps(rec.get("reasons", []), ensure_ascii=False),
@@ -1676,23 +2018,172 @@ def unreview_mark(conn: sqlite3.Connection, aid: int, operator: str = "HR",
     return get_application(conn, aid)
 
 
-def set_application_stage(conn: sqlite3.Connection, aid: int, stage: str,
-                          operator: str = "HR", role: str = "recruiter") -> dict | None:
+#: 建单**之后**可更新的 applications 字段（**白名单**）。
+#: 为什么要有白名单：`insert_application` 是**显式列清单**，新增列漏加进去会
+#: "传了却静默丢弃"（`cet`、`grad_date` 各栽过一次）。这个白名单让"建单后写入"
+#: 有一条明确的、可枚举的通道，配合自检里的覆盖判据：
+#: `_ADD['applications']` 的每一列，必须落在 insert 列清单或本白名单里 —— 二者皆无即报错。
+APPLICATION_WRITABLE = (
+    "outcome", "interview_unit", "interview_date", "interview_slot", "interview_mode",
+    "interviewed_at", "offer_sent_at", "signed_at", "onboard_deadline", "onboard_status",
+)
+
+#: 写审计时字段的中文名（缺一个就会在审计文案里露出英文键名）
+APPLICATION_FIELD_LABEL = {
+    "outcome": "结论", "interview_unit": "面试单位", "interview_date": "面试日期",
+    "interview_slot": "面试时段", "interview_mode": "面试方式",
+    "interviewed_at": "进入面试时间", "offer_sent_at": "录用函发送时间",
+    "signed_at": "签约时间", "onboard_deadline": "入职最后期限",
+    "onboard_status": "入职情况",
+}
+
+
+def update_application_fields(conn: sqlite3.Connection, aid: int, *,
+                              operator: str = "HR", role: str = "recruiter",
+                              outcome: str | None = None, **fields) -> dict | None:
+    """更新一条投递的业务字段（**白名单**，逐字段写审计）。
+
+    只认 `APPLICATION_WRITABLE` 里的列，白名单外的键**直接忽略**（不报错）——
+    这样调用方多传一个内部字段不会炸，但也绝不会悄悄写进库。
+    返回更新后的投递；没变化则原样返回且不写审计（避免"保存了但什么都没改"制造噪音）。
+
+    ⚠️ `outcome` 单独提出来是为了能区分"**不改结论**"与"**把结论清空**"：
+    `outcome=None` 表示不改；要清空传空串 `""`。两者在流程上含义不同
+    （拒签→改判拟录用时必须能把结论清掉），用一个 None 表达不了。
+    """
     cur = get_application(conn, aid)
     if not cur:
         return None
-    # stage_changed_at 一直没写入过 → 停滞待办只能回退到 applied_at，
-    # 于是"今天刚面完的人"今天就被算成停滞半年（v1.13.6 补上写入）。
+    patch: dict = {}
+    if outcome is not None:
+        patch["outcome"] = str(outcome).strip() or None
+    for k, v in fields.items():
+        if k in APPLICATION_WRITABLE and k != "outcome":
+            patch[k] = v if v is None or isinstance(v, str) else str(v)
+
+    changed = {k: v for k, v in patch.items()
+               if (cur.get(k) or None) != (v or None)}
+    if not changed:
+        return cur
     _stamp = now()
-    conn.execute("UPDATE applications SET stage = ?, stage_changed_at = ?, updated_at = ? "
-                 "WHERE id = ?", (stage, _stamp, _stamp, aid))
-    add_audit(conn, "application", str(aid), "set_stage", cur.get("stage"), stage, operator, role)
+    sets = ", ".join(f"{k} = ?" for k in changed)
+    conn.execute(f"UPDATE applications SET {sets}, updated_at = ? WHERE id = ?",
+                 (*changed.values(), _stamp, aid))
+    # 审计逐字段写：改前改后都留痕，"谁把结论从拒签改回拟录用"能查
+    for k, v in changed.items():
+        add_audit(conn, "application", str(aid), "set_field",
+                  str(cur.get(k) or "（空）"),
+                  f"{APPLICATION_FIELD_LABEL.get(k, k)} → {v or '（空）'}", operator, role)
     conn.commit()
     return get_application(conn, aid)
 
 
+def set_application_stage(conn: sqlite3.Connection, aid: int, stage: str,
+                          outcome: str | None = None,
+                          operator: str = "HR", role: str = "recruiter",
+                          skip_auto_archive: bool = False) -> dict | None:
+    """推进投递阶段，可选同时写结论标签，并在**走到「已结束」时**归档。
+
+    ⚠️ **归档只有两个入口**（业务方 2026-10-16 明确）：
+      ① 阶段推进到「已结束」；② HR 点「归档」（单个 / 批量 / 按年）。
+      **其它任何操作都不归档** —— 改档位、改面试信息、发邮件、导出、打结论标签
+      （拟录用 / 不录用）都只是改字段。
+      理由：归档会把人从人才库**移走**（不可逆的隐藏动作，档案与原件都还在），
+      而"信息填全了""标签打好了"这类中间状态远没到该收起来的时候 ——
+      之前把"打标签"顺手带上归档，就会出现"刚标了不录用、人就没了、
+      HR 改判回来还得去归档页捞"的荒谬情况。
+
+    v1.29 新增：
+      - `outcome`：结论标签。**必须属于该阶段**（`已面试`→拟录用/不录用、
+        `已发放offer`→已签约/拒签），否则拒绝 —— 挡住「已面试·已签约」这种
+        不存在的组合。传 None 表示不改结论。**打标签不动阶段**。
+      - 进入「已面试」时写 `interviewed_at`（只在首次写；重复推进不覆盖）。
+        它的**唯一用途**是圈定"曾到过已面试"的导出行集 —— 详见 `list_interviewed`。
+      - 走到「已结束」时：该候选人**所有**投递都到终点才归档
+        （`count_pending_applications`："必须全部到终点才算处理完"）。
+
+    ⚠️ **防双向环**：`set_candidate_archived(archived=True)` 里有反向联动 ——
+    归档时把该人进行中的投递统一置为「已结束」。两个方向同时存在。
+    `skip_auto_archive=True` 就是用来切断这条潜在环的：归档流程内部的写操作
+    **不得**再触发归档判定。**不要**把这个参数当成可选项删掉。
+    """
+    cur = get_application(conn, aid)
+    if not cur:
+        return None
+    st = str(stage or "").strip()
+    if not st:
+        return get_application(conn, aid)
+    if not stages_mod.is_valid_stage(st):
+        raise ValueError(f"未知阶段「{st}」；可用阶段：{'、'.join(stages_mod.all_stages())}")
+    _from = str(cur.get("stage") or "")
+    # v1.29：这一步**必填**的字段没过就先拦住（业务方裁定：面试单位在进入待面试之前就要填）。
+    # 放在 db 层而不是界面层：界面有三条推进路径（卡片下拉 / 管道下拉 / 智能助手提案），
+    # 只在界面拦 = 另两条绕过；助手那条更糟，会生成一个注定失败的提案。
+    _req = stages_mod.required_fields(_from, st)
+    if _req:
+        _missing = [k for k in _req if not str(cur.get(k) or "").strip()]
+        if _missing:
+            _labels = "、".join(stages_mod.REQUIRED_FIELD_LABEL.get(k, k) for k in _missing)
+            raise ValueError(
+                f"从「{_from}」推进到「{st}」之前必须先填：{_labels}。"
+                + (stages_mod.require_hint(_from, st) or ""))
+    oc = str(outcome).strip() if outcome is not None else None
+    # 结论标签必须属于"离开的那个环节"（见 stages.outcome_allowed_from）：
+    # 只按目标阶段校验的话，`已面试→已结束+不录用` 会被自己拦住——流程根本走不通。
+    if oc and not stages_mod.outcome_allowed_from(_from, st, oc):
+        _ok = stages_mod.outcomes_of(_from) + [
+            o for o in stages_mod.outcomes_of(st) if o not in stages_mod.outcomes_of(_from)]
+        raise ValueError(
+            f"「{_from} → {st}」这一步不能打结论「{oc}」；"
+            + (f"可选：{'、'.join(_ok)}" if _ok else "这一步没有结论标签"))
+
+    _stamp = now()
+    sets = ["stage = ?", "stage_changed_at = ?", "updated_at = ?"]
+    vals: list = [st, _stamp, _stamp]
+    # 结论：只在调用方明确传了才动（None = 保留原值，"" = 清空）
+    if outcome is not None:
+        sets.insert(1, "outcome = ?")
+        vals.insert(1, oc or None)
+    # 「已面试」写首次进入时间：已有值就不覆盖，否则"第一次面试时间"会被反复改掉
+    if st == "已面试" and not cur.get("interviewed_at"):
+        sets.insert(1, "interviewed_at = ?")
+        vals.insert(1, _stamp)
+    conn.execute(f"UPDATE applications SET {', '.join(sets)} WHERE id = ?", (*vals, aid))
+    _desc = st + (f"（{oc}）" if oc else "")
+    add_audit(conn, "application", str(aid), "set_stage", cur.get("stage"), _desc, operator, role)
+    conn.commit()
+
+    # ---- 流程走完 → 自动归档（只在该阶段被标记为 auto_archive_on 时）----
+    # ⚠️ **自动归档只有这一处**。原先 `server.api_set_stage` 里还写了一份
+    # "到「已结束/已入职」就归档"的**无条件**版本 —— 那是错的：一个人可能同时
+    # 在两个岗位的流程里，结束其中一个不代表该归档（`count_pending_applications`
+    # 的 docstring 写得很清楚："必须全部到终点"）。两处并存必然分叉，
+    # 所以服务端那份已删除，改为读本函数返回的 `_auto_archived`。
+    auto_archived = False
+    if not skip_auto_archive and stages_mod.is_auto_archive(st):
+        cid = cur.get("candidate_id")
+        if cid:
+            left = count_pending_applications(conn, int(cid))
+            c = get_candidate(conn, int(cid))
+            if left == 0 and c and not (c.get("archived_at") or ""):
+                # 显式 skip：归档内部会把"进行中"的投递置为已结束，
+                # 若那里回头再调本函数就会形成环（见 docstring）
+                set_candidate_archived(conn, int(cid), archived=True,
+                                       operator=operator, role=role,
+                                       skip_auto_archive=True)
+                auto_archived = True
+    out = get_application(conn, aid)
+    if out is not None:
+        # 给调用方（服务端/助手）一个明确的"刚才顺手归档了"信号。
+        # 用下划线前缀与普通业务字段区分开，和 candidates 上的 `_ended_applications` 同一约定。
+        out["_auto_archived"] = auto_archived
+    return out
+    return get_application(conn, aid)
+
+
 def set_candidate_archived(conn: sqlite3.Connection, cid: int, archived: bool,
-                           operator: str = "HR", role: str = "hr") -> dict | None:
+                           operator: str = "HR", role: str = "hr",
+                           skip_auto_archive: bool = False) -> dict | None:
     """候选人软归档（v1.4）：归档后不再出现在人才库与检索，集中在「归档」页展示。
 
     是"归档"不是"删除"：档案、投递、附件、审计全部原样保留，可随时取消归档。
@@ -1702,6 +2193,11 @@ def set_candidate_archived(conn: sqlite3.Connection, cid: int, archived: bool,
     归档的含义就是"这个人处理完了"——若留着流程挂在"新投递/初面"，
     人才库里看不到、归档页里也不显眼，就成了没人管的孤儿数据。
     结束了多少条放在返回值的 `_ended_applications` 里，由调用方提示给 HR。
+
+    v1.29：`skip_auto_archive` 是给**自动归档流程自己**用的标志 ——
+    自动归档由 `set_application_stage` 在"所有投递都已到终点"时触发，
+    而本函数内部又会把"进行中"的投递置为已结束。两向并存，
+    这个参数把潜在的反向环切断（见 `set_application_stage` 的说明）。
     """
     cur = get_candidate(conn, cid)
     if not cur:
@@ -1710,10 +2206,14 @@ def set_candidate_archived(conn: sqlite3.Connection, cid: int, archived: bool,
     conn.execute("UPDATE candidates SET archived_at = ? WHERE id = ?", (ts, cid))
     ended = 0
     if archived:
+        # 终态表从配置取（v1.29）：不再写死 `(已结束, 已入职)` 两个值——
+        # 「已入职」已按业务方裁定去掉，写死的话历史值会被当成"未结束"，
+        # 卡住上面那条自动归档，也会混进"进行中投递"统计。
+        _ph, _fin = _finished_in_clause()
         cur2 = conn.execute(
-            """UPDATE applications SET stage = ?, updated_at = ?
-               WHERE candidate_id = ? AND stage NOT IN (?, ?)""",
-            (STAGE_ENDED, now(), cid, STAGE_ENDED, STAGE_HIRED))
+            f"""UPDATE applications SET stage = ?, updated_at = ?
+                WHERE candidate_id = ? AND stage NOT IN ({_ph})""",
+            (STAGE_ENDED, now(), cid, *_fin))
         ended = cur2.rowcount or 0
         if ended:
             add_audit(conn, "candidate", str(cid), "auto_end_stage", "",
@@ -1733,11 +2233,16 @@ def count_pending_applications(conn: sqlite3.Connection, cid: int) -> int:
 
     用于"流程都结束了 → 自动归档"的判断：一个人可能同时在两个岗位的流程里，
     结束其中一个不代表该归档，**必须全部到终点**才算处理完。
+
+    ⚠️ v1.29 之前这个函数**从未被任何代码调用过**（死代码）——
+    "流程全结束 → 自动归档"这个设计早就写好了，只是没接线。
+    `set_application_stage` 现在会调它。
     """
+    _ph, _fin = _finished_in_clause()
     row = conn.execute(
-        """SELECT COUNT(*) AS n FROM applications
-           WHERE candidate_id = ? AND stage NOT IN (?, ?)""",
-        (int(cid), STAGE_ENDED, STAGE_HIRED)).fetchone()
+        f"""SELECT COUNT(*) AS n FROM applications
+            WHERE candidate_id = ? AND stage NOT IN ({_ph})""",
+        (int(cid), *_fin)).fetchone()
     return int(row["n"] if row else 0)
 
 
@@ -1915,14 +2420,25 @@ def insert_document(conn: sqlite3.Connection, rec: dict) -> int:
             """INSERT INTO documents
                (file_hash, candidate_id, application_id, file_name, file_path, archived_path,
                 mime, size, received_at, source_message_id, raw_text, text_len,
-                parse_engine, parse_ok, sensitive_found, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                parse_engine, parse_ok, sensitive_found, kind, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (rec.get("file_hash"), rec.get("candidate_id"), rec.get("application_id"),
              rec.get("file_name"), rec.get("file_path"), rec.get("archived_path"),
              rec.get("mime"), rec.get("size"), rec.get("received_at", now()),
              rec.get("source_message_id"), rec.get("raw_text", ""), len(rec.get("raw_text") or ""),
-             rec.get("parse_engine"), 1 if rec.get("parse_ok", True) else 0,
-             rec.get("sensitive_found"), now()),
+             rec.get("parse_engine"),
+             # v1.27：`parse_ok` 有三态 —— True 解析成功 / False 解析失败 /
+             # **None 未解析**（非简历附件刻意不解析）。
+             # 原来写的是 `1 if rec.get("parse_ok", True) else 0`：显式传 None
+             # 会被当成 False，界面把作品集显示成"简历读不出"——又是一次
+             # "None 当 False"的坑（与 pipeline 里 db.get_setting 同类）。
+             # 只有 `is False` / `0` 才记 0，None 原样存 NULL。
+             (None if rec.get("parse_ok", True) is None
+              else (1 if rec.get("parse_ok", True) else 0)),
+             rec.get("sensitive_found"),
+             # v1.27：附件性质。老库/未显式给的一律按 'resume'，
+             # 与列默认值一致 —— 不给会让"完整档案"里的简历附件表少行。
+             (rec.get("kind") or "resume"), now()),
         )
         conn.commit()
         return cur.lastrowid
@@ -2185,6 +2701,10 @@ AUDIT_FIELD_LABEL = {
     "phone_enc": "电话", "email_enc": "邮箱", "tier_suggested": "建议档",
     "tier_final": "最终档", "stage": "阶段", "job_id": "岗位", "note": "备注",
     "tags": "标签", "score": "匹配分",
+    # v1.27：英语四六级。放在这个 dict 的位置无关 —— `humanize_audit` 会按
+    # key **长度倒序**替换（短的先替会把长的切碎），加新键不必考虑书写顺序。
+    "cet": "英语四六级",
+    "first_degree_school": "第一学历（本科）院校",
 }
 
 
@@ -2728,12 +3248,79 @@ def delete_mail_template(conn: sqlite3.Connection, tid: int) -> None:
     conn.commit()
 
 
-# 阶段口径：这两个是终点，不再需要推进
-#: 流程终点：到了这两个阶段就不再推进。
-#: 「已结束」= 正常走完或中途终止；「已入职」= 已录用。
+# 阶段口径：**从 config/stages.json 读**，不再在这里写字面量（v1.29 收口）。
+#: 流程终点：到了这个阶段就不再推进。原来是 `(已入职, 已结束)` 两个，
+#: v1.29 按业务方裁定去掉「已入职」（已签约的人停在「已发放offer」），只留「已结束」。
 STAGE_ENDED = "已结束"
-STAGE_HIRED = "已入职"
-_FINISHED_STAGES = (STAGE_HIRED, STAGE_ENDED)
+_FINISHED_STAGES = tuple(stages_mod.terminal_stages()) or (STAGE_ENDED,)
+
+
+def _loads_edu_history(raw) -> list:
+    """`candidates.edu_history`（JSON 字符串）→ 列表。坏值给空列表，绝不抛。"""
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return raw
+    try:
+        v = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(v, list):
+        return []
+    # v1.29.2：**逐段挂院校层次**（985/211/强势）。HR 判断学校水平是顺着学历
+    # 一路看下去的 —— 只在档案开头标一个「最高学历」等于把中间的段抹掉了。
+    # 层次判定复用 `univ.uni_tier`（同一份名单，前端不自己判）。
+    for h in v:
+        if isinstance(h, dict):
+            h["tier"] = univ_mod.uni_tier(h.get("school") or "")
+    return v
+
+
+def _source_mail_of(conn: sqlite3.Connection, resume_docs: list) -> dict | None:
+    """简历附件对应的**来源邮件**（标题 / 发件人 / 收信时间）。取不到返回 None。
+
+    v1.29.4（业务方）：邮件标题本身是"应聘意向的表达"（也参与按标题归岗），
+    展示在档案「简历附件」上方；文件夹导入 / 上传没有来源邮件 → None，界面不渲染。
+    纯展示信息，任何异常都不该影响档案打开。
+    """
+    try:
+        sid = next((d.get("source_message_id") for d in resume_docs
+                    if d.get("source_message_id")), None)
+        if not sid:
+            return None
+        row = conn.execute(
+            "SELECT subject, from_addr, received_at FROM email_messages "
+            "WHERE message_id = ?", (sid,)).fetchone()
+        if not row:
+            return None
+        return {"subject": row["subject"] or "", "from": row["from_addr"] or "",
+                "received_at": row["received_at"] or ""}
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+def _plus_one_day(day: str) -> str:
+    """`YYYY-MM-DD` → 次日（同格式）。解析不出来就原样返回（宁可筛松也不报错）。
+
+    用途：投递时间段的上界。界面只给到「日」，而库里是 `YYYY-MM-DD HH:MM:SS`，
+    字符串比较下 `2026-10-15 09:00` > `2026-10-15` —— 用 `<= date_to` 会把
+    当天投的全漏掉，HR 会以为"今天没人投"。取次日再比 `<` 才是"含当天"。
+    """
+    try:
+        return (datetime.strptime(str(day)[:10], "%Y-%m-%d")
+                + timedelta(days=1)).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return str(day)[:10]
+
+
+def _finished_in_clause() -> tuple[str, tuple]:
+    """终态集合的 `NOT IN (?, ?, ...)` 占位串与参数（跟着配置走，不写死个数）。
+
+    为什么要有这个 helper：原来两处 SQL 都写死 `NOT IN (?, ?)` 并绑
+    `(已结束, 已入职)`。终态个数一变（v1.29 就去掉了一个），写死的地方
+    要么漏改、要么得手动数问号——**问号个数和参数个数对不上是会静默取错的**。
+    """
+    return ",".join("?" * len(_FINISHED_STAGES)), _FINISHED_STAGES
 
 
 def pending_workload(conn: sqlite3.Connection, stuck_days: int = 7,
@@ -3452,8 +4039,11 @@ def set_setting(conn: sqlite3.Connection, key: str, value) -> None:
 # 统计
 # ============================================================
 
-TIER_LABELS = {"A": "优先面试", "B": "建议面试", "C": "储备", "D": "暂不匹配当前岗位"}
-STAGES = ["新投递", "已联系", "初面", "复面", "待offer", "已入职", "已结束"]
+TIER_LABELS = tiers_mod.labels()
+#: v1.29：阶段表**不再在这里写**，统一读 `config/stages.json`（见 app/stages.py）。
+#: 保留这个名字是为了不动所有 `db.STAGES` 的调用方（含 test 与 agent），
+#: 但它现在是"计算出来的"，不是"抄下来的"。
+STAGES = stages_mod.all_stages()
 
 
 def pool_stats(conn: sqlite3.Connection) -> dict:
@@ -3479,7 +4069,7 @@ def pool_stats(conn: sqlite3.Connection) -> dict:
     # 档位取 tier_final 优先于 tier_suggested（`tier_effective`）。
     _LATEST = ("a.id = (SELECT id FROM applications WHERE candidate_id = c.id "
                "ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT 1)")
-    tiers = {t: 0 for t in ("A", "B", "C", "D")}
+    tiers = {t: 0 for t in tiers_mod.all_tiers()}
     for r in conn.execute(
             f"""SELECT COALESCE(a.tier_final, a.tier_suggested) AS t, COUNT(*) AS n
                 FROM candidates c JOIN applications a ON {_LATEST}
@@ -3576,7 +4166,11 @@ def pipeline_stats(conn: sqlite3.Connection) -> dict:
     """
     rows = conn.execute(
         """SELECT a.stage, a.channel, a.applied_at, a.id, a.candidate_id,
-                  c.name AS candidate_name, j.title AS job_title
+                  c.name AS candidate_name, j.title AS job_title,
+                  -- v1.29：待面试那一列要能看出"这人归哪个单位面"，否则 HR 认领不了
+                  a.interview_unit AS interview_unit,
+                  -- v1.29.2：结论标签要展示在管道里（拟录用/已签约/不录用/拒签）
+                  a.outcome AS outcome
            FROM applications a
            JOIN candidates c ON c.id = a.candidate_id
            LEFT JOIN jobs j ON j.id = a.job_id
@@ -3598,7 +4192,11 @@ def pipeline_stats(conn: sqlite3.Connection) -> dict:
         item = {"application_id": r["id"], "candidate_id": r["candidate_id"],
                 "candidate_name": r["candidate_name"],
                 "job_title": r["job_title"], "days": days, "applied_at": r["applied_at"],
-                "channel": r["channel"]}
+                "channel": r["channel"],
+                # v1.29：面试单位（待面试那一列按它认领人）
+                "interview_unit": r["interview_unit"],
+                # v1.29.2：结论标签（界面与导出同款口径）
+                "outcome": r["outcome"]}
         stages.setdefault(st, []).append(item)
         channels[r["channel"] or "未知"] = channels.get(r["channel"] or "未知", 0) + 1
     # v1.25.7：超期阈值可配置（HR 在管道上的「超期设置」里改；默认 15 天）。
@@ -3611,7 +4209,8 @@ def pipeline_stats(conn: sqlite3.Connection) -> dict:
                        "overdue": sum(1 for i in v if i["days"] >= _overdue_days)}
                    for s, v in stages.items()},
         "channels": channels,
-        "open_total": sum(len(v) for s, v in stages.items() if s not in ("已入职", "已结束")),
+        "open_total": sum(len(v) for s, v in stages.items()
+                          if s not in set(stages_mod.terminal_stages())),
         "overdue_days": _overdue_days,
     }
 

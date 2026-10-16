@@ -69,22 +69,46 @@ def list_packs() -> list[dict]:
     return out
 
 
+def _resolve_pack_file(path_or_name: str) -> str:
+    """把"领域包名 / 文件名"解析成 `config/domains` 下的真实文件路径。
+
+    只接受**纯文件名**（可带或不带 `.json`）或领域包显示名；不接受绝对路径、
+    不接受 `..`、解析后必须仍在包目录内（防符号链接跳出去）。
+
+    为什么要收口（代码审查 P1-12）：`pack` 直接来自请求体，原先会对任意路径
+    `open()`，而预演接口会把读到的内容差异**回显**给调用方——等于一个本机
+    任意 JSON 文件读取口子。
+    """
+    raw = (path_or_name or "").strip()
+    if not raw:
+        raise ValueError("领域包名为空")
+    norm = raw.replace("\\", "/")
+    if os.path.isabs(norm) or norm.startswith("/") or (len(norm) > 1 and norm[1] == ":"):
+        raise ValueError("领域包只接受 config/domains 下的文件名或领域名，不接受绝对路径")
+    if ".." in norm.split("/"):
+        raise ValueError("领域包名不合法")
+    base = os.path.realpath(DOMAIN_DIR)
+    for cand in (os.path.join(base, norm), os.path.join(base, norm + ".json")):
+        if os.path.isfile(cand):
+            real = os.path.realpath(cand)
+            if os.path.dirname(real) != base:
+                raise ValueError("领域包不在允许的目录内：" + raw)
+            return real
+    # 没匹配到文件名时，按领域包**显示名**在包目录里找（不扫别处）
+    for f in sorted(glob.glob(os.path.join(base, "*.json"))):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except Exception:
+            continue
+        if (d.get("name") or "") == raw:
+            return os.path.realpath(f)
+    raise FileNotFoundError(f"未找到领域包：{raw}（可用包见 /api/domains）")
+
+
 def load_pack(path_or_name: str) -> dict:
-    """按文件名或领域名读领域包。"""
-    p = path_or_name
-    if not os.path.isabs(p) and not os.path.exists(p):
-        cand = os.path.join(DOMAIN_DIR, p)
-        if os.path.exists(cand):
-            p = cand
-        elif os.path.exists(cand + ".json"):
-            p = cand + ".json"
-        else:
-            for f in glob.glob(os.path.join(DOMAIN_DIR, "*.json")):
-                with open(f, encoding="utf-8") as fh:
-                    d = json.load(fh)
-                if (d.get("name") or "") == path_or_name:
-                    p = f
-                    break
+    """按文件名或领域名读领域包（路径已收口在 config/domains 内）。"""
+    p = _resolve_pack_file(path_or_name)
     with open(p, encoding="utf-8") as fh:
         data = json.load(fh)
     data["_path"] = p

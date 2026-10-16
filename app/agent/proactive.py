@@ -20,11 +20,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .. import db
+from .. import db, stages as stages_mod
 
-#: 与 agent/tools.py 的 STAGES 保持同一口径（阶段是全系统共用的封闭集合）
-STAGES = ["新投递", "已联系", "初面", "复面", "待offer", "已入职", "已结束"]
-_FINISHED = ("已入职", "已结束")
+#: v1.29：阶段表**不再各自抄一份**。原来这里和 agent/tools.py 各写了一遍，
+#: 注释还写着"与 tools.py 保持同一口径"——靠注释约束的同步等于没有约束，
+#: 人事处一调流程就必然有一处漏改。现在统一从 `app/stages.py`（配置驱动）取。
+STAGES = stages_mod.all_stages()
+_FINISHED = tuple(stages_mod.terminal_stages())
 
 #: 去重窗口：同一件事多久内不重复提
 DEDUP_DAYS = 7
@@ -75,7 +77,7 @@ def scan_and_propose(conn, stuck_days: int = 7, max_per_run: int = MAX_PER_RUN,
     result: dict = {"session_id": session_id, "created": [], "skipped": 0,
                     "scanned": w["counts"], "stuck_days": stuck_days}
 
-    # —— 规则 1：A 档却还停在新投递 → 建议推进到初面（**有后果的动作**）——
+    # —— 规则 1：A 档却还停在最初一档 → 建议推进到初筛（**有后果的动作**）——
     # 为什么不再催"确认档位"（v1.14）：确认与否系统行为完全一样（不自动推进、
     # 不自动发信、不自动归档），拿一个没后果的动作当待办催人，只会让 HR 学会忽略待办。
     # 现在只催**推进阶段**：阶段一变，管道看板、停滞计时、后续动作全跟着变。
@@ -85,8 +87,11 @@ def scan_and_propose(conn, stuck_days: int = 7, max_per_run: int = MAX_PER_RUN,
         aid = it["id"]
         tier = it.get("tier_suggested")
         name = it.get("name") or f"候选人#{it.get('candidate_id')}"
-        stage = it.get("stage") or "新投递"
-        if not tier or stage != "新投递":
+        # ⚠️ 必须 **normalize**：库里可能还留着改名前的旧值（v1.29.2 之前是「新投递」），
+        # 直接拿原始值跟 DEFAULT_STAGE 比的话，老数据一律匹配不上，
+        # 这条规则会**静默失效**（实测：主动提案产出 0 条，判据全红）。
+        stage = stages_mod.normalize_stage(it.get("stage"))
+        if not tier or stage != stages_mod.DEFAULT_STAGE:
             continue                      # 已经在流程里就交给规则 2（停滞推进）
         nxt = _next_stage(stage)
         if not nxt:
@@ -94,7 +99,7 @@ def scan_and_propose(conn, stuck_days: int = 7, max_per_run: int = MAX_PER_RUN,
         _propose_if_new(
             conn, tool="set_stage",
             args={"application_id": aid, "stage": nxt},
-            summary=f"{name} 系统判为 {tier} 档（明显匹配），但还停在「新投递」——"
+            summary=f"{name} 系统判为 {tier} 档（明显匹配），但还停在「{stage}」——"
                     f"建议推进到「{nxt}」，不合适可拒绝",
             risk="中", dedup_key=f"tierA_stage:app#{aid}",
             session_id=session_id, result=result)
