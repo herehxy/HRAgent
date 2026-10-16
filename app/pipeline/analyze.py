@@ -147,7 +147,7 @@ def _cand_brief(cand: dict) -> str:
         f"\n技能专业大类分布:{_cat_text(skills)}"
         f"\n证书:{'、'.join(certs) or '无'}"
         + honors_txt
-        # ⚠️ v2.0.2：这里原来还有一行
+        # ⚠️ v2.0.1：这里原来还有一行
         #   「系统规则评分:{score}（建议档 {tier_suggested}，命中{hits}，缺失{miss}）」
         # 已删除 —— 它是 v1.12 打分制的遗留物，三档制下 `score` **恒为 None**
         # （规则不再打分，见 tier.grade 的 "score": None）；`建议档` 取的是

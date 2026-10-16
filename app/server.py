@@ -2349,6 +2349,10 @@ def api_bundle_initial_pass(x_tp_token: str | None = Header(default=None, alias=
     """把**初筛通过**人员的简历打包下载，文件名按 `匹配岗位-学历-学校-最高学历专业-姓名-性别`。
 
     ⚠️ 只改**包内名**，不动归档原件的文件名（原件是审计凭据，见 `app/naming.py` 的规则 2）。
+
+    v2.0.1（业务方要求）：**包里再附一份「初筛通过名单」Excel**，
+    用的是导出入口那同一套 13 列（`export.bundle_roster` → `build_roster`），
+    所以"简历包里那张表"和"导出的名单"永远是一套口径。
     """
     s = _session(x_tp_token, x_tp_role)
     require(s, "read")
@@ -2357,15 +2361,18 @@ def api_bundle_initial_pass(x_tp_token: str | None = Header(default=None, alias=
         zname, pairs = export_mod.bundle_name(conn, {}, operator=s["username"],
                                               role=s["role"], scope="初筛通过",
                                               n=0)
+        # 表是**每次点击现查库**生成的，没有磁盘路径 → 走 _zip_response 的 extra 通道
+        roster = export_mod.bundle_roster(conn, operator=s["username"], role=s["role"])
         db.add_audit(conn, "bundle", "initial-pass", "bundle_download", "",
-                     f"下载初筛通过简历 {len(pairs)} 份",
+                     f"下载初筛通过简历 {len(pairs)} 份，附名单表 {roster['n']} 条",
                      s["username"], s["role"])
     finally:
         conn.close()
     if not pairs:
         raise HTTPException(status_code=404,
                             detail="当前筛选下没有可打包的简历（只有已入库并留了原件的候选人）")
-    return _zip_response(pairs, zname)
+    return _zip_response(pairs, zname,
+                         extra=[(roster["filename"], roster["data"])])
 
 
 @app.post("/api/applications/{aid}/interview-info")
@@ -2914,9 +2921,16 @@ def _unique_name(name: str, used: set[str]) -> str:
     return out
 
 
-def _zip_response(pairs: list[tuple[str, str]], zip_name: str) -> Response:
-    """把若干磁盘文件打成 zip 一次性下发。`pairs` 是 (磁盘路径, 包内文件名)。"""
-    if not pairs:
+def _zip_response(pairs: list[tuple[str, str]], zip_name: str,
+                  extra: list[tuple[str, bytes]] | None = None) -> Response:
+    """把若干磁盘文件打成 zip 一次性下发。`pairs` 是 (磁盘路径, 包内文件名)。
+
+    `extra`（v2.0.1）：**内存里现算、不落磁盘**的附加条目 `[(包内文件名, 字节)]`。
+    为什么要这条通道：随简历包下发的名单表是**每次点击现查库生成的**，没有磁盘路径
+    可以塞进 `pairs`；而"先写临时文件再打包"会留下要清理的残留，
+    并发点两次还可能同名打架。
+    """
+    if not pairs and not extra:
         raise HTTPException(status_code=400, detail="没有选择任何文件")
     if len(pairs) > MAX_BUNDLE_FILES:
         raise HTTPException(status_code=400,
@@ -2933,6 +2947,9 @@ def _zip_response(pairs: list[tuple[str, str]], zip_name: str) -> Response:
                 raise HTTPException(status_code=400,
                                     detail="所选文件合计超过 500MB，请分批下载")
             z.write(path, _unique_name(os.path.basename(name), used))
+        # 内存生成的条目（名单表等）：同一条去重规则，中文名由 zipfile 自动打 UTF-8 flag
+        for name, data in (extra or []):
+            z.writestr(_unique_name(os.path.basename(name), used), data)
     data = buf.getvalue()
     if not data:
         raise HTTPException(status_code=404, detail="所选文件都已不在磁盘上")

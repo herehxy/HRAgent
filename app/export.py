@@ -147,6 +147,36 @@ def bundle_name(conn, filters: dict, *, operator: str, role: str,
     return f"初筛通过-{stamp}.zip", pairs
 
 
+def bundle_roster(conn, *, operator: str = "HR", role: str = "hr") -> dict:
+    """「初筛通过」名单表（xlsx 字节），随「下载初筛简历」的压缩包一起下发（v2.0.1）。
+
+    业务方要求：下载初筛简历时附一份初筛通过的人员名单，Excel，放进压缩包里。
+
+    **为什么不在这里另写一套列定义**：直接复用 `build_roster()` 的 13 列口径
+    —— 那是业务方 2026-10-15 定的一张表（"一份名单、一套列、一个入口"）。
+    另写一份"简历包里那张表"必然与导出入口分叉，本项目在"两处各写一份组装"上
+    已踩过多次（写工具清单 5vs14、草稿字段清单两份），所以列定义只能有一处。
+
+    口径与 `bundle_name()` 对齐：都取**未归档**且阶段为「初筛通过」的人。
+    ⚠️ 两者仍可能差几个人：`bundle_name()` 会把"原件不在磁盘上"的人**跳过**
+    （拿不到文件就没法放进 zip），而名单表按**阶段**给 ——
+    那个人确实初筛通过了，只是文件丢了。这是有意的：**名单是事实，zip 是能给的交付物**；
+    反过来"名单里少一个人"才会让人以为系统漏了他。
+    """
+    headers, rows, tcols, n = build_roster(
+        conn, operator=operator, role=role,
+        include_archived=False, stage="初筛通过")
+    stamp = datetime.now().strftime("%Y%m%d")
+    return {
+        "filename": f"初筛通过名单-{stamp}.xlsx",
+        "data": xlsx_mod.write_sheet(
+            rows, headers, text_cols=tcols,
+            meta=xlsx_mod.meta_line("初筛通过名单（随简历包）", "初筛通过", n),
+            sheet_title="初筛通过名单"),
+        "n": n,
+    }
+
+
 def _latest_resume_doc(conn, cid: int) -> tuple[str, str] | None:
     """这个人最新一份**简历**原件（不含"其他附件"）的 (绝对路径, 文件名)。
 

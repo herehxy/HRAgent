@@ -2174,6 +2174,30 @@ def main(verbose: bool = True) -> int:
             # 大数字 —— 那样判据会因为"数据变少"而失败，与功能无关。
             c.ok(len(_csv_b) > 100 and _csv_b.startswith(b"\xef\xbb\xbf"),
                  "csv 同口径且带 BOM（没 BOM Excel 会按本地编码猜、中文乱码）")
+
+            # ---- v2.0.1（业务方要求）：下载初筛简历时，包里**附带初筛通过名单 Excel** ----
+            # 判据必须真跑一遍、把 xlsx **解开看表头和行集** —— 只查"字符串在不在源码里"
+            # 抓不到这类缺陷（今天在 ㉟ 上已经吃过两次亏）。
+            import openpyxl as _oxl
+            _ro = _ex.bundle_roster(_ec, operator="hr", role="hr")
+            _ws = _oxl.load_workbook(io.BytesIO(_ro["data"])).active
+            _hdr = [_c.value for _c in _ws[1]]
+            _names_in = [_ws.cell(row=_r, column=4).value for _r in range(2, 2 + _ro["n"])]
+            c.ok(_ro["filename"].startswith("初筛通过名单")
+                 and _ro["filename"].endswith(".xlsx")
+                 and _hdr == _ex.ROSTER_COLS and len(_hdr) == 13,
+                 "简历包名单：与导出入口**同一套 13 列**（不另写一份列定义，避免两处分叉）",
+                 str(_hdr[:4]) + "…")
+            c.ok(_names_in == ["丙未面试"],
+                 "简历包名单：行集只有**初筛通过**的人（不是全库、不含其他阶段）",
+                 str(_names_in))
+            # 进 zip：走 _zip_response 的 extra 通道（表是现算的，没有磁盘路径可塞）
+            _zr = srv._zip_response([], "初筛通过-测试.zip",
+                                    extra=[(_ro["filename"], _ro["data"])])
+            _znames = zipfile.ZipFile(io.BytesIO(_zr.body)).namelist()
+            c.ok(_znames == [_ro["filename"]],
+                 "简历包：名单表确实被装进 zip（extra 内存通道，不落磁盘、不留残留）",
+                 str(_znames))
             _ec.close()
 
             # ⑤ 命名模板：六段齐全、缺值 `—` 不省略、非法字符清洗、性别按普通字段
