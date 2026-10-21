@@ -347,22 +347,22 @@ def parse_file(path: str) -> str:
 
 
 def engine_capabilities() -> dict:
-    caps = {"pymupdf": False, "markitdown": False, "ocr": False}
+    caps = {"pymupdf": False, "markitdown": False, "ocr": False, "errors": {}}
     try:
         import pymupdf  # noqa: F401
         caps["pymupdf"] = True
-    except Exception:
-        pass
+    except Exception as exc:
+        caps["errors"]["pymupdf"] = f"{type(exc).__name__}: {exc}"
     try:
         import markitdown  # noqa: F401
         caps["markitdown"] = True
-    except Exception:
-        pass
+    except Exception as exc:
+        caps["errors"]["markitdown"] = f"{type(exc).__name__}: {exc}"
     try:
         import pytesseract  # noqa: F401
         caps["ocr"] = True
-    except Exception:
-        pass
+    except Exception as exc:
+        caps["errors"]["pytesseract"] = f"{type(exc).__name__}: {exc}"
     # v1.13.8：OCR 变成可插拔（RapidOCR/PaddleOCR/Tesseract）后，
     # 这里如实报告**当前真正能用哪个** + 没装时怎么装。
     # 原来的 `caps["ocr"]=True` 只看 pytesseract 能不能 import，

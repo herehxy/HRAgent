@@ -25,11 +25,11 @@ import urllib.request
 
 from . import db, net
 
-from .paths import BASE      # 根目录唯一来源（认 TP_HOME）
-CONFIG_PATH = os.path.join(BASE, "config", "embedding.json")
+from .paths import cfg as _cfg_path
+CONFIG_PATH = _cfg_path("embedding.json")
 # API Key 走独立密钥文件，不进 embedding.json——那是要随包分发的文件。
 # 与 agent/llm.py 读的是同一个 config/secrets.json，同一份凭据两处用。
-SECRETS_PATH = os.path.join(BASE, "config", "secrets.json")
+SECRETS_PATH = _cfg_path("secrets.json")
 
 HASH_DIM = 384
 _HASH_MODEL = "local-hash-v1"

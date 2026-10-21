@@ -37,10 +37,18 @@ import urllib.request
 from datetime import datetime
 
 from .. import net
+from .. import univ as univ_mod
 from . import normalize as nz
 from . import sanitize
 
 EDU_RANK = {"大专": 1, "专科": 1, "本科": 2, "学士": 2, "研究生": 3, "硕士": 3, "博士": 4}
+
+#: 学历同义写法 → 标准档位。
+#: 简历里写「工学学士」「硕士研究生」「专科」都是常事，不归一会有两个后果：
+#: ① 该条教育经历被整行丢弃（原来词表里没有「学士」）；
+#: ② 即使认出来，`degree` 存成「学士」，下游按 `== "本科"` 找第一学历的代码会漏掉人。
+#: 归一之后全链路只有 大专/本科/硕士/博士 四种取值，与 `EDU_RANK` 的键保持一致。
+_DEGREE_ALIAS = {"学士": "本科", "研究生": "硕士", "专科": "大专"}
 
 # 证书词表（与技能本体分开：证书属于"资格"而非"能力"）
 CERT_LEXICON = [
@@ -161,6 +169,20 @@ def _find_years(text: str) -> int | None:
     return max(end for _s, end in spans) - min(start for start, _e in spans)
 
 
+_NAME_REJECT_RE = re.compile(
+    r"大学|学院|学校|公司|集团|单位|简历|教育|工作|实习|硕士|本科|博士|在读|"
+    r"荣誉|奖项|科研|项目|技能|评价|经历")
+_NAME_REJECT_LEAD = re.compile(r"^(?:基于|通过|针对|面向|负责|参与|担任|研究|项目|系统|个人|本校|该)")
+
+
+def _valid_person_name(name: str | None) -> bool:
+    value = str(name or "").strip()
+    return (bool(re.fullmatch(r"[\u4e00-\u9fa5·]{2,4}", value))
+            and not _NAME_REJECT_RE.search(value)
+            and not _NAME_REJECT_LEAD.search(value)
+            and value not in SECTION_HEADS)
+
+
 def _find_name(text: str) -> str | None:
     """从正文抽姓名：显式「姓名：」标签 > 首行。
 
@@ -168,11 +190,15 @@ def _find_name(text: str) -> str | None:
     第一行是「教育经历」这类标题——曾经被当成姓名建档，整个档案变成"教育经历"。
     """
     m = re.search(r"姓名\s*[:：]\s*([\u4e00-\u9fa5·]{2,4})", text)
-    if m:
+    if m and _valid_person_name(m.group(1)):
+        return m.group(1)
+    m = re.search(
+        r"(?m)^\s*([\u4e00-\u9fa5·]{2,4})(?=\s*[A-Z][A-Z\s]{2,})", text)
+    if m and _valid_person_name(m.group(1)):
         return m.group(1)
     first = (text.strip().split("\n") or [""])[0].strip()
     first = re.sub(r"^(个人简历|简历|应聘简历)[\s:：]*", "", first)
-    if re.fullmatch(r"[\u4e00-\u9fa5·]{2,4}", first) and first not in SECTION_HEADS:
+    if _valid_person_name(first):
         return first
     return None
 
@@ -183,7 +209,9 @@ SECTION_HEADS = set(_EDU_HEADS) | set(_OTHER_HEADS) | {
     "求职意向", "个人信息", "个人资料", "基本情况", "教育", "工作", "实习",
     "技能", "擅长", "校园经历", "社会经历", "学术成果", "获奖情况", "荣誉奖项",
     "自我介绍", "个人优势", "代表作品", "研究方向", "业务方向", "专业方向",
-    "主讲课程", "承担项目", "发表论文", "授权专利", "联系方式",
+    "主讲课程", "承担项目", "发表论文", "授权专利", "联系方式", "个人荣誉",
+    "荣誉奖项", "获奖情况", "教育背景", "科研经历", "实习实践", "项目经历",
+    "技能特长", "自我评价",
 }
 
 
@@ -244,6 +272,9 @@ def name_from_filename(filename: str | None) -> str | None:
 
 
 def _find_education(text: str) -> str | None:
+    entries = _structured_edu_entries(text)
+    if entries:
+        return max(entries, key=lambda item: _EDU_RANK.get(item.get("degree"), 9))["degree"]
     best: tuple[str, int] | None = None
     for kw, rank in EDU_RANK.items():
         if kw in text and (best is None or rank > best[1]):
@@ -285,6 +316,30 @@ def _find_gender(text: str) -> str | None:
 #: 两处各写一份的话，改一处（比如加上「分校」「校区」）另一处就悄悄漏了。
 _SCHOOL_RE = re.compile(r"([\u4e00-\u9fa5]{2,15}(?:大学|学院|研究院|研究所|职业技术学院))")
 
+#: 教育经历行通常带起止年月。只有带时间段的院校才用于“第一学历/最高学历”判断，
+#: 避免把“在本科期间担任材料学院通讯员”这类校园经历误当学校。
+_EDU_RANGE_RE = re.compile(
+    r"((?:19|20)\d{2}\s*[./-]\s*\d{1,2})\s*(?:-|–|—|~|至|到)\s*"
+    r"((?:19|20)\d{2}\s*[./-]\s*\d{1,2}|至今|现在|今)")
+_ACTIVITY_CONTEXT_RE = re.compile(
+    r"担任|负责|参与|实习|工作|通讯社|学生助理|研究生会|就职|任职|"
+    r"对接|合作|共建|所在|所属|辅导员")
+_GENERIC_COLLEGE_RE = re.compile(
+    r"^(?:材料|机械|电子|计算机|化学|物理|管理|外国语|艺术|体育|医学)学院$")
+_EDU_RANK = {"大专": 0, "本科": 1, "硕士": 2, "博士": 3}
+_MAJOR_HINTS = (
+    "工程", "科学", "技术", "材料", "机械", "计算机", "软件", "电子", "通信",
+    "自动化", "电气", "网络", "信息", "人工智能", "数据", "统计", "化学", "物理",
+    "数学", "经济", "管理", "金融", "会计", "财务", "审计", "营销", "法学",
+    "医学", "药学", "护理", "生物", "环境", "能源", "动力", "土木", "建筑",
+    "水利", "交通", "航空", "航天", "船舶", "海洋", "食品", "冶金", "工业",
+    "设计", "新闻", "传媒", "教育", "心理", "艺术", "音乐", "美术", "体育",
+    "哲学", "文学", "历史", "农学", "生态", "地理", "地质", "测绘", "安全",
+)
+_MAJOR_REJECT = re.compile(
+    r"大学|学院|奖学金|课题|项目|研究|辅导|助理|担任|负责|参与|获得|获评|"
+    r"绩点|排名|至今|在读|毕业|学校|学历|学位")
+
 #: 「这是本科段」的关键词。**「学士」也算** —— 简历里常写「XX大学 工学学士」。
 _BACHELOR_KW = ("本科", "学士")
 
@@ -294,9 +349,107 @@ _FIRST_DEGREE_LABEL_RE = re.compile(
     r"([\u4e00-\u9fa5]{2,15}(?:大学|学院|研究院|研究所|职业技术学院))")
 
 
+def _valid_school_name(name: str | None) -> str:
+    sch = univ_mod.clean_school_name(name)
+    sch = re.sub(r"^(?:获评|获|年)+", "", sch).strip()
+    if not sch or sch == "学院":
+        return ""
+    if _ACTIVITY_CONTEXT_RE.search(sch) or _GENERIC_COLLEGE_RE.match(sch):
+        return ""
+    # “兰州大学材料学院”“北航仪器学院”统一落到院校本体，避免同一段重复、排名查不到。
+    base = re.match(
+        r"^([\u4e00-\u9fa5]{2,20}(?:大学|研究院|研究所)).+(?:学院|研究院|研究所)$", sch)
+    if base:
+        sch = base.group(1)
+    return sch
+
+
+def _looks_like_major(token: str) -> bool:
+    if len(token) < 2 or _MAJOR_REJECT.search(token):
+        return False
+    return any(hint in token for hint in _MAJOR_HINTS)
+
+
+def _major_from_edu_line(line: str, school: str, degree: str,
+                         raw_school: str | None = None) -> str:
+    body = _EDU_RANGE_RE.sub(" ", line)
+    if raw_school:
+        body = body.replace(raw_school, " ")
+    body = body.replace(school, " ")
+    body = re.sub(r"（[^）]*）|\([^)]*\)", " ", body)
+    body = re.split(
+        r"绩点|GPA|排名|前\s*\d|研究方向|主修课程|奖学金|荣誉|获评|获得|项目|课题",
+        body, maxsplit=1)[0]
+    body = re.sub(r"博士|硕士|本科|大专|学士|研究生|推荐免试|在读|全日制", " ", body)
+    for token in re.findall(r"[\u4e00-\u9fa5A-Za-z]{2,30}", body):
+        token = token.strip("　 、，,。；;：:（）()【】[]")
+        if token.endswith("专业") and len(token) > 4:
+            token = token[:-2]
+        if token != degree and _looks_like_major(token):
+            return token[:40]
+    return ""
+
+
+def _structured_edu_entries(text: str) -> list[dict]:
+    """从带时间段的学历行抽 `{degree, school, major}`，同一学校不同学历各保留一条。"""
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for line in (text or "").split("\n"):
+        if _ACTIVITY_CONTEXT_RE.search(line):
+            continue
+        date_match = _EDU_RANGE_RE.search(line)
+        if not date_match:
+            continue
+        # 学历词表必须含**简历里真会写的同义说法**（见 _DEGREE_ALIAS）。
+        # 原来只认 博士/硕士/本科/大专，写成「工学学士」的那一行**整条被丢弃** ——
+        # 不是学历显示成"学士"，而是这条教育经历根本不存在（业务方 2026-10-21 反馈）。
+        # 顺序仍然从高到低：「博士研究生」要先命中「博士」，「硕士研究生」先命中「硕士」。
+        raw_degree = next((d for d in ("博士", "硕士", "研究生", "本科", "学士", "大专", "专科")
+                           if d in line), None)
+        if not raw_degree:
+            continue
+        degree = _DEGREE_ALIAS.get(raw_degree, raw_degree)
+        schools = []
+        for match in _SCHOOL_RE.finditer(line):
+            school = _valid_school_name(match.group(1))
+            if school:
+                schools.append((match.start(), school, match.group(1)))
+        if not schools:
+            continue
+        degree_pos = line.find(raw_degree)
+        chosen = min(schools, key=lambda item: abs(item[0] - degree_pos))
+        school = chosen[1]
+        key = (degree, school)
+        if key in seen:
+            continue
+        seen.add(key)
+        start = re.sub(r"\s+", "", date_match.group(1)).replace("/", ".").replace("-", ".")
+        end = re.sub(r"\s+", "", date_match.group(2)).replace("/", ".").replace("-", ".")
+        if end in ("现在", "今"):
+            end = "至今"
+        out.append({
+            "degree": degree,
+            "school": school,
+            "major": _major_from_edu_line(line, school, degree, chosen[2]),
+            "start": start,
+            "end": end,
+        })
+    out.sort(key=lambda item: _EDU_RANK.get(item.get("degree"), 9))
+    return out
+
+
 def _find_school(text: str) -> str | None:
-    m = _SCHOOL_RE.search(text)
-    return m.group(1) if m else None
+    entries = _structured_edu_entries(text)
+    if entries:
+        return max(entries, key=lambda item: _EDU_RANK.get(item.get("degree"), 9))["school"]
+    for line in (text or "").split("\n"):
+        if _ACTIVITY_CONTEXT_RE.search(line):
+            continue
+        for match in _SCHOOL_RE.finditer(line):
+            school = _valid_school_name(match.group(1))
+            if school:
+                return school
+    return None
 
 
 #: v1.29.2：学历层次白名单（与 `EDU_RANK` 的键一致，模型给别的词就丢那一项）
@@ -330,23 +483,33 @@ def _edu_history_heuristic(text: str) -> list[dict]:
     刻意保守：**同一行必须既有院校名又有层次词**才算一段（只写校名不写层次的行
     无法判断是不是本科段 —— 与 `_find_first_degree_school` 同一个纪律）。
     """
+    structured = _structured_edu_entries(text)
+    if structured:
+        return structured
     out: list[dict] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for line in (text or "").split("\n"):
+        if _ACTIVITY_CONTEXT_RE.search(line):
+            continue
         schools = [m.group(1) for m in _SCHOOL_RE.finditer(line)]
         if not schools:
             continue
         deg = next((d for d in ("博士", "硕士", "本科", "大专") if d in line), None)
         if not deg:
             continue
-        sch = schools[0]
-        if _same_school(sch, seen):
+        sch = _valid_school_name(schools[0])
+        if not sch:
             continue
-        seen.add(sch)
+        key = (deg, sch)
+        if key in seen:
+            continue
+        seen.add(key)
         mjr = None
         mm = re.search(r"(?:专业|所学专业)\s*[:：]?\s*([\u4e00-\u9fa5A-Za-z]{2,20})", line)
         if mm:
             mjr = mm.group(1)
+        if not mjr:
+            mjr = _major_from_edu_line(line, sch, deg)
         out.append({"degree": deg, "school": sch, "major": mjr or ""})
     return out
 
@@ -365,21 +528,64 @@ def _edu_history_from_llm(raw, text: str) -> list[dict]:
     """
     src = str(text or "")
     out: list[dict] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
+    heuristic = _edu_history_heuristic(text)
+    heuristic_map = {(item["degree"], item["school"]): item for item in heuristic}
     for item in (raw if isinstance(raw, list) else []):
         if not isinstance(item, dict):
             continue
         deg = str(item.get("degree") or "").strip()
-        sch = str(item.get("school") or "").strip()
+        # v2.0.8：**校名必须先清洗**再进闸门。模型会把"在……就读""本硕……"整段当校名
+        # （实测脏样本：`在太原理工大学`、`本硕太原理工大学`），这些值既能通过
+        # "在原文里"这道闸，又匹配不上院校名单 → 层次/排名全空、同一所学校显示成多条。
+        sch = _valid_school_name(item.get("school"))
         if not deg or not sch or deg not in DEGREE_WORDS:
             continue
         if sch not in src:                    # ② 编出来的院校
             continue
-        if _same_school(sch, seen):            # ③ 重复段（含"同校不同院系"）
+        key = (deg, sch)
+        if key in seen:                        # ③ 同一学历同一学校只留一条
             continue
-        seen.add(sch)
+        seen.add(key)
+        major = str(item.get("major") or "").strip()[:40]
+        start = str(item.get("start") or "").strip()[:10]
+        end = str(item.get("end") or "").strip()[:10]
+        if not major:
+            major = str((heuristic_map.get(key) or {}).get("major") or "")
+        if not start:
+            start = str((heuristic_map.get(key) or {}).get("start") or "")
+        if not end:
+            end = str((heuristic_map.get(key) or {}).get("end") or "")
         out.append({"degree": deg, "school": sch,
-                    "major": str(item.get("major") or "").strip()[:40]})
+                    "major": major, "start": start, "end": end})
+    return out
+
+
+def _merge_edu_history(primary, fallback) -> list[dict]:
+    """按「学历 + 学校」合并模型与规则结果；同项补空字段，不按学校粗暴去重。"""
+    out: list[dict] = []
+    index: dict[tuple[str, str], dict] = {}
+    for item in list(primary or []) + list(fallback or []):
+        if not isinstance(item, dict):
+            continue
+        degree = str(item.get("degree") or "").strip()
+        school = _valid_school_name(item.get("school"))
+        if degree not in DEGREE_WORDS or not school:
+            continue
+        key = (degree, school)
+        if key not in index:
+            index[key] = {"degree": degree, "school": school,
+                          "major": str(item.get("major") or "").strip()[:40],
+                          "start": str(item.get("start") or "").strip()[:10],
+                          "end": str(item.get("end") or "").strip()[:10]}
+            out.append(index[key])
+        elif not index[key].get("major") and item.get("major"):
+            index[key]["major"] = str(item.get("major") or "").strip()[:40]
+        if not index[key].get("start") and item.get("start"):
+            index[key]["start"] = str(item.get("start") or "").strip()[:10]
+        if not index[key].get("end") and item.get("end"):
+            index[key]["end"] = str(item.get("end") or "").strip()[:10]
+    out.sort(key=lambda item: _EDU_RANK.get(item.get("degree"), 9))
     return out
 
 
@@ -414,13 +620,23 @@ def _find_first_degree_school(text: str) -> str | None:
     # ① 显式标签
     m = _FIRST_DEGREE_LABEL_RE.search(src)
     if m:
-        return m.group(1)
+        school = _valid_school_name(m.group(1))
+        if school:
+            return school
+    entries = _structured_edu_entries(src)
+    bachelor = [item for item in entries if item.get("degree") == "本科"]
+    if bachelor:
+        return bachelor[0]["school"]
     # ② 逐行找「本科/学士」段
     for line in src.split("\n"):
+        if _ACTIVITY_CONTEXT_RE.search(line):
+            continue
         kws = [line.find(k) for k in _BACHELOR_KW if k in line]
         if not kws:
             continue
-        schools = [(m2.start(), m2.group(1)) for m2 in _SCHOOL_RE.finditer(line)]
+        schools = [(m2.start(), _valid_school_name(m2.group(1)))
+                   for m2 in _SCHOOL_RE.finditer(line)]
+        schools = [item for item in schools if item[1]]
         if not schools:
             continue
         # 取离任一「本科/学士」关键词最近的院校
@@ -431,6 +647,11 @@ def _find_first_degree_school(text: str) -> str | None:
 
 
 def _find_major(text: str) -> str | None:
+    entries = _structured_edu_entries(text)
+    if entries:
+        best = max(entries, key=lambda item: _EDU_RANK.get(item.get("degree"), 9))
+        if best.get("major"):
+            return best["major"]
     m = re.search(r"(?:专业|所学专业)[:：]\s*([\u4e00-\u9fa5A-Za-z]{2,20})", text)
     if m:
         return m.group(1)
@@ -818,6 +1039,12 @@ def verify_profile_against_text(fields: dict, field_evidence: dict,
         v = fields.get(k)
         if v in (None, "", "—"):
             continue
+        if k == "name" and not _valid_person_name(v):
+            bad.append(k)
+            continue
+        if k in ("school", "first_degree_school") and not _valid_school_name(v):
+            bad.append(k)
+            continue
         ev = str((field_evidence or {}).get(k) or "")
         # 证据片段本身必须在原文里（证明模型不是凭空写的），且值也要在原文里
         ev_ok = bool(ev) and _norm_for_search(ev) in t_norm
@@ -1135,10 +1362,19 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
             if cet_rejected:
                 # 模型给了档位但没通过原文自证 → 如实告诉 HR，不静默换成规则值
                 _unverified = list(_unverified or []) + ["cet"]
-            for k in ("name", "education", "years", "school", "major", "current_org",
-                      "first_degree_school", "education_history"):
+            for k in ("name", "education", "years", "school", "major", "current_org"):
                 if not fields.get(k):
                     fields[k] = heur.get(k)
+            # 学历历史按「学历 + 学校」合并：模型与规则各补对方缺的段落/专业。
+            fields["education_history"] = _merge_edu_history(
+                fields.get("education_history"), heur.get("education_history"))
+            # 有明确时间段的教育行时，第一学历以规则结果为准 —— 比模型的上下文猜测可靠。
+            if heur.get("first_degree_school"):
+                fields["first_degree_school"] = heur["first_degree_school"]
+            elif not fields.get("first_degree_school"):
+                fields["first_degree_school"] = None
+            if not fields.get("major") and heur.get("major"):
+                fields["major"] = heur["major"]
             # v1.23.6：**工作年限合理性质检**。实测踩到：校招简历里写着
             # 「出生年份：1999」+「2026年6月毕业」，模型算出 years=27
             # （2026-1999），把出生年份当成了工作年限 —— 27 年经验的应届生。

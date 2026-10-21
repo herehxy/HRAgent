@@ -501,6 +501,11 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "honors_json": "TEXT",
             # v1.25.7：人工备注（HR 工作记录：沟通印象/内推关系/谈薪情况……），不参与档位判定
             "note": "TEXT",
+            # v2.0.4：从简历原件里抽出来的证件照（相对 BASE 的路径，如 data/avatars/12.jpg）。
+            # 三态：NULL=还没试过（首次渲染懒抽一次）｜"-"=试过、没有可用照片（不再重试）｜其他=有图。
+            # 抽错是真实风险（logo/架构图/整页缩略图），所以卡片上照片只是叠加层，
+            # 抽不到或被删掉都自动回落到"姓首字"；档案页可重新抽取/去掉。
+            "avatar_path": "TEXT",
             # v1.27：英语等级。存**原文表述**（如「大学英语六级」「CET-4」）
             # 而不是归一后的档位——归一交给 `pipeline/extract.cet_level()`，
             # 这样将来加「英语专业八级」「雅思」时不用改库、也不用迁移老数据。
@@ -1402,6 +1407,11 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
                     overseas: str | None = None, bachelor: str | None = None,
                     date_from: str | None = None, date_to: str | None = None,
                     interview_unit: str | None = None,
+                    # v2.25：面试结论筛选（拟录用/不录用/已签约/拒签）。
+                    # 与其它筛选一样**下沉到 db 层**：智能助手的 search_candidates
+                    # 与导出共用本函数，只在 server 层筛会出现"界面上能筛、助手查不到"。
+                    # 逗号分隔 = 并集；精确匹配（结论是枚举值，不存在子串误命中问题）。
+                    outcome: str | None = None,
                     stage: str | None = None, pool_status: str | None = None,
                     needs_review: bool | None = None, include_merged: bool = False,
                     archived: bool | None = None, limit: int | None = None,
@@ -1455,6 +1465,14 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
             for u in _units:
                 conds.append(f"(',' || {_norm} || ',') LIKE ?")
                 args.append("%," + u.replace(" ", "") + ",%")
+            where.append("(" + " OR ".join(conds) + ")")
+    if outcome:
+        _outs = [o.strip() for o in re.split(r"[、,，]+", str(outcome)) if o.strip()]
+        if _outs:
+            conds = []
+            for o in _outs:
+                conds.append("a.outcome = ?")
+                args.append(o)
             where.append("(" + " OR ".join(conds) + ")")
     if keyword:
         # v1.23.5：关键词改为**在 SQL 里筛**（原来是把全库装配成对象后在 Python 里逐条比）。
@@ -1527,7 +1545,9 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
         _i["cet_level"] = extract_mod.cet_level(_i.get("cet"))
         # v1.29.2：学历院校经历（JSON → 列表）。解析失败给空列表，
         # 绝不让一个脏值把整个列表接口带崩（这个字段只用于展示）。
-        _i["edu_history"] = _loads_edu_history(_i.get("edu_history"))
+        _i["edu_history"] = _loads_edu_history(
+            _i.get("edu_history"),
+            top_school=_i.get("school"), top_degree=_i.get("edu_level"))
         # v1.29：第一学历（本科）院校层次 + 海外院校标记。
         # **两个独立维度**（海外校既不是 985 也不是 211），也在这里算一次给三处用。
         _i["bachelor_tier"] = univ_mod.uni_tier(_i.get("first_degree_school") or "")
@@ -1605,8 +1625,12 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
         else:
             items = [i for i in items if (i.get("tier_final") or i.get("tier_suggested")) == tier]
     if education:
-        rank = _EDU_RANK.get(education, 0)
-        items = [i for i in items if _EDU_RANK.get(i.get("edu_level") or "", 0) >= rank]
+        # v2.0.2：**精确档位多选**（原来是"≥ 最低学历"，选大专会带出硕博）。
+        # 解析规则与 server 层共用 `parse_education()`，不各写一份。
+        _edu_want = parse_education(education)
+        if _edu_want:
+            items = [i for i in items
+                     if _EDU_RANK.get(i.get("edu_level") or "", 0) in _edu_want]
     if min_years is not None:
         items = [i for i in items if (i.get("years_exp") or 0) >= int(min_years)]
 
@@ -1634,9 +1658,33 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
 
 
 _EDU_RANK = {"大专": 1, "专科": 1, "本科": 2, "学士": 2, "研究生": 3, "硕士": 3, "博士": 4}
-# 公开别名：server 层做「最低学历」筛选与"无法判定人数"统计时复用同一把尺子，
+# 公开别名：server 层做「学历」筛选与"无法判定人数"统计时复用同一把尺子，
 # 避免两处各写一份阶梯、将来口径漂移。
 EDU_RANK = _EDU_RANK
+
+
+def parse_education(education: str | None) -> set[int]:
+    """`education` 参数 → **精确档位集合**（v2.0.2：多选、精确匹配）。
+
+    语义变更（业务方 2026-10-19）：原来是**最低学历**（≥ 该档），
+    想筛"只要大专"时会把硕博一起带出来，用不了。现在改成**精确档位多选**：
+    `education=大专,硕士` 只回这两档的人，不选 = 不限。
+
+    同义档合并：`专科→大专`、`学士→本科`、`研究生→硕士`（都按 `_EDU_RANK` 归到同一档）。
+    不合并会漏人 —— 简历里真会写"研究生"，选"硕士"时那个人就消失了。
+
+    **为什么单独一个函数**：这条筛选在**两处**用到 ——
+    `list_candidates()`（导出、智能助手、`/api/sources` 等）和
+    `api_candidates()`（人才库界面，且它还要数"学历无法判定被隐藏了几人"）。
+    解析规则只留一份，否则"界面筛出来的"和"导出的"迟早分叉
+    （本项目在"两处各写一份组装"上已踩过多次）。
+    """
+    out: set[int] = set()
+    for x in str(education or "").split(","):
+        r = _EDU_RANK.get(x.strip(), 0)
+        if r:
+            out.add(r)
+    return out
 
 # 性别分组（含"未标注"）。**只用于展示与筛选，绝不进入 `tier.grade()`**。
 # “未标注”是一个真实分组：简历没写性别的档案不能因为筛选而凭空消失。
@@ -1779,15 +1827,33 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         # 两个都下发：档案里 HR 要看到原文（与原件一致），也要能按档位改。
         "cet_level": extract_mod.cet_level(c.get("cet")),
         # v1.29.2：学历院校经历（库里是 JSON 字符串，这里解成列表给界面）
-        "edu_history": _loads_edu_history(c.get("edu_history")),
+        "edu_history": _loads_edu_history(
+            c.get("edu_history"),
+            top_school=c.get("school"), top_degree=c.get("edu_level")),
         # v1.29.4（业务方）：档案「教育经历」要标 985/211 —— 与列表层同一口径
         # （`list_candidates` 里早就有这两个字段，详情层此前漏了），
         # 最高学历院校与第一学历院校的层次在这里一并算好下发。
         "uni_tier": univ_mod.uni_tier(c.get("school") or ""),
         "bachelor_tier": univ_mod.uni_tier(c.get("first_degree_school") or ""),
+        # v2.0.6：最高学历 / 第一学历院校的**软科名次**（档案里两处都要显示排名）
+        "uni_rank": (univ_mod.school_band(c.get("school") or "") or (None, None))[1],
+        "uni_band": (univ_mod.school_band(c.get("school") or "") or (None, None))[0],
+        "bachelor_rank": (univ_mod.school_band(c.get("first_degree_school") or "") or (None, None))[1],
+        # v2.23（业务方 2026-10-21）：境外院校的 **QS 名次**。
+        # 境外院校不在软科主榜里，硬用软科会全部显示"无排名"——
+        # 两把尺子并列下发，界面按"有哪个显示哪个"决定标签文案。
+        "uni_qs": univ_mod.school_qs(c.get("school") or ""),
+        "bachelor_qs": univ_mod.school_qs(c.get("first_degree_school") or ""),
+        "uni_overseas": univ_mod.is_overseas(c.get("school") or ""),
+        "bachelor_overseas": univ_mod.is_overseas(c.get("first_degree_school") or ""),
         # v1.29.4（业务方）：来源邮件（标题/发件人/收信时间）随档案下发，
         # 展示在「简历附件」上方；非邮件来源（文件夹/上传）为 None。
         "source_mail": _source_mail_of(conn, resume_docs),
+        # v2.0.8：**校名清洗**（展示口径）。库里实测有 `本硕太原理工大学` 这种脏值 ——
+        # 它会让院校层次/排名匹配不上（连带校实力不参与档位判断），档案里也很难看。
+        # 这里只改**下发值不写库**：HR 在档案里点保存时，干净的值才会落回库里。
+        "school": univ_mod.clean_school_name(c.get("school")),
+        "first_degree_school": univ_mod.clean_school_name(c.get("first_degree_school")),
         # v1.17：荣誉/论文/专利（按类分组，界面直接渲染）
         "honors": _group_honors(c.get("honors_json")),
     }
@@ -1873,26 +1939,23 @@ def split_candidate(conn: sqlite3.Connection, src_id: int, operator: str = "HR",
 
 
 def suspicious_duplicates(conn: sqlite3.Connection, cid: int) -> list[dict]:
-    """给出"疑似重复"提示（不自动合并）。同姓名或同院校+专业。"""
+    """给出“疑似重复”提示（不自动合并）。
+
+    业务口径：**只按姓名完全一致提示**。同校、同专业、同手机号、同邮箱等
+    其他相似条件都不进入这里，避免把同名以外的大量正常档案误报成重复。
+    """
     me = get_candidate(conn, cid)
     if not me:
         return []
-    out: list[dict] = []
-    if me.get("name"):
-        for r in conn.execute(
-            "SELECT id, name, school, major, edu_level FROM candidates "
-            "WHERE name = ? AND id != ? AND merged_into IS NULL", (me["name"], cid)
-        ).fetchall():
-            out.append({**_decode(dict(r)), "reason": "姓名相同"})
-    if me.get("school") and me.get("major"):
-        for r in conn.execute(
-            "SELECT id, name, school, major, edu_level FROM candidates "
-            "WHERE school = ? AND major = ? AND id != ? AND merged_into IS NULL",
-            (me["school"], me["major"], cid),
-        ).fetchall():
-            if not any(o["id"] == r["id"] for o in out):
-                out.append({**_decode(dict(r)), "reason": "同院校同专业"})
-    return out
+    name = str(me.get("name") or "").strip()
+    if not name or name in {"未识别", "未知", "姓名未识别"}:
+        return []
+    rows = conn.execute(
+        "SELECT id, name, school, major, edu_level FROM candidates "
+        "WHERE TRIM(name) = ? AND id != ? AND merged_into IS NULL",
+        (name, cid),
+    ).fetchall()
+    return [{**_decode(dict(r)), "reason": "姓名相同"} for r in rows]
 
 
 # ============================================================
@@ -2260,24 +2323,26 @@ def set_candidates_archived(conn: sqlite3.Connection, cids: list[int], archived:
     """
     changed: list[int] = []
     skipped: list[int] = []
+    ended = 0
     for cid in cids:
         cur = get_candidate(conn, cid)
         if not cur:
             skipped.append(cid)
             continue
-        ts = now() if archived else None
         if (cur.get("archived_at") or "") and archived:
             skipped.append(cid)          # 已归档的不重复写审计
             continue
-        conn.execute("UPDATE candidates SET archived_at = ? WHERE id = ?", (ts, cid))
-        add_audit(conn, "candidate", str(cid), "archive" if archived else "unarchive",
-                  "未归档" if archived else "已归档",
-                  "批量归档（移入「归档」页，不再在人才库与检索中展示）" if archived
-                  else "批量取消归档（恢复在人才库与检索中展示）", operator, role)
+        # 复用单人归档：它会同时结束进行中的投递。批量入口不能只改
+        # candidates.archived_at，否则取消归档后会复活一批仍在旧阶段里的流程。
+        out = set_candidate_archived(conn, cid, archived, operator, role)
+        if not out:
+            skipped.append(cid)
+            continue
+        ended += int(out.get("_ended_applications") or 0)
         changed.append(cid)
-    conn.commit()
     return {"changed": len(changed), "skipped": len(skipped),
-            "ids": changed, "skipped_ids": skipped, "archived": bool(archived)}
+            "ids": changed, "skipped_ids": skipped, "archived": bool(archived),
+            "ended_applications": ended}
 
 
 #: 归档满多少天后**彻底删除**（试用反馈："删除那个应该做成 30 天后彻底删除"）。
@@ -3255,8 +3320,19 @@ STAGE_ENDED = "已结束"
 _FINISHED_STAGES = tuple(stages_mod.terminal_stages()) or (STAGE_ENDED,)
 
 
-def _loads_edu_history(raw) -> list:
-    """`candidates.edu_history`（JSON 字符串）→ 列表。坏值给空列表，绝不抛。"""
+def _loads_edu_history(raw, *, top_school: str | None = None,
+                       top_degree: str | None = None) -> list:
+    """`candidates.edu_history`（JSON 字符串）→ 列表。坏值给空列表，绝不抛。
+
+    `top_school` / `top_degree`（v2.0.8）：传入「最高学历院校 / 学历层次」时，
+    把**同层次但校名不同**的那一段剔除 —— 那种段是旧解析的残留，与基本信息自相矛盾。
+
+    为什么必须收这一刀（业务方 2026-10-20 实地截图）：`school` 是档位/排名/筛选的依据，
+    而 `edu_history` 来自另一次抽取；两者不一致时档案里会同时出现
+    「西北工业大学（旧）」和「西安电子科技大学（当前）」两条硕士，HR 没法判断哪个是真的。
+    规则：**最高学历这一档以 `school` 为准**，剔掉后由界面用 `school + edu_level` 补齐那一条
+    （界面早就有这个补齐分支）。同校不同译名 —— "澳大利亚国立大学 / 澳洲国立大学" —— 也靠这条收掉。
+    """
     if not raw:
         return []
     if isinstance(raw, list):
@@ -3272,8 +3348,41 @@ def _loads_edu_history(raw) -> list:
     # 层次判定复用 `univ.uni_tier`（同一份名单，前端不自己判）。
     for h in v:
         if isinstance(h, dict):
+            # v2.0.8：**读取时也清洗校名** —— 库里已有历史脏数据（`在太原理工大学`、
+            # `本硕太原理工大学`），不清洗的话即使重新分析也只修新数据，老档案照样花。
+            # 清洗是幂等的，重复读不会变样；这里**不改库**，只在展示/分析口径上纠正。
+            h["school"] = univ_mod.clean_school_name(h.get("school"))
             h["tier"] = univ_mod.uni_tier(h.get("school") or "")
-    return v
+            # v2.0.6（业务方 2026-10-20）：档案「教育经历」每所学校后面要能看到**软科排名**。
+            # 985/211 只是身份标签、看不出强弱（西电 211 排在第 40，比 985 的西北农林第 71 强），
+            # 所以把名次一并算好下发 —— 前端不自己判，口径与卡片/分析完全一致。
+            _band = univ_mod.school_band(h.get("school") or "")
+            h["rank_band"] = _band[0] if _band else None
+            h["rank_no"] = _band[1] if _band else None
+            # v2.23：境外院校补 QS 名次（软科主榜查不到海外校，会全部显示"无排名"）
+            h["qs_no"] = univ_mod.school_qs(h.get("school") or "")
+            h["overseas"] = univ_mod.is_overseas(h.get("school") or "")
+    # 清洗后同一段可能重名（"太原理工大学" 与 "在太原理工大学" 归一成同一条）→ 去重，
+    # 按 (层次, 校名) 判；保留先出现的（简历里通常按时间倒序，前面那条更权威）。
+    _top = univ_mod.clean_school_name(top_school) if top_school else ""
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for h in v:
+        if not isinstance(h, dict):
+            continue
+        deg = str(h.get("degree") or "").strip()
+        sch = str(h.get("school") or "").strip()
+        if not sch:
+            continue
+        # 与基本信息矛盾的"最高学历那一段"：剔除，界面会用 school 补齐正确的那条
+        if _top and top_degree and deg == str(top_degree).strip() and sch != _top:
+            continue
+        key = (deg, sch)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(h)
+    return out
 
 
 def _source_mail_of(conn: sqlite3.Connection, resume_docs: list) -> dict | None:

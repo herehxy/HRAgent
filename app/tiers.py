@@ -19,9 +19,9 @@ from __future__ import annotations
 import json
 import os
 import re
-from .paths import BASE
+from .paths import cfg as _cfg_path
 
-CONFIG_PATH = os.path.join(BASE, "config", "tiers.json")
+CONFIG_PATH = _cfg_path("tiers.json")
 
 #: 配置缺失/损坏时的兜底。**必须与 config/tiers.json 一致**（有判据校验）。
 _FALLBACK: dict = {

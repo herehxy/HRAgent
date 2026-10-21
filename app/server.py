@@ -80,6 +80,7 @@ from . import tiers as tiers_mod
 # v1.29：导出（xlsx/CSV）与简历命名
 from . import export as export_mod
 from . import xlsx as xlsx_mod
+from . import avatar as avatar_mod
 from .agent import brief as brief_mod
 from .agent import llm
 from .agent import proactive as proactive_mod
@@ -95,16 +96,22 @@ from .pipeline import sanitize
 from .pipeline import tier as tier_mod
 from .pipeline.analyze import analyze_fit, draft_interview
 from .ui import render_page, ui_build
+from .ui_v2 import render_page_v2
 
 #: 程序根目录。默认按文件位置推导；**TP_HOME 可覆盖**——
 #: 开发/测试时用它把源码版指向已安装目录（_internal/），
 #: 这样源码跑起来用的是同一套 data/ 与 config/，测的就是真实数据。
 from .paths import BASE      # 根目录唯一来源（认 TP_HOME）
 from .paths import DATA_DIR  # 数据目录（认 TP_DATA_DIR，可能不在 BASE 下）
+from .paths import cfg as _cfg_path
+from .paths import resolve_data_path
+from .version import VERSION as PRODUCT_VERSION
 # 允许用 TP_DB_PATH 指向另一个库：演练、验收、接口实测时不必动真实人才库
 DB_PATH = os.environ.get("TP_DB_PATH") or os.path.join(DATA_DIR, "workbench.db")
-JD_PATH = os.path.join(BASE, "config", "jd.json")
-TIERS_PATH = os.path.join(BASE, "config", "tiers.json")
+JD_PATH = _cfg_path("jd.json")
+TIERS_PATH = _cfg_path("tiers.json")
+#: v2.0.4：从简历里抽出来的证件照落这里（相对 BASE 的 data/avatars/）
+AVATAR_DIR = os.path.join(DATA_DIR, "avatars")
 RESUME_DIR = os.path.join(DATA_DIR, "resumes")
 # 回收目录：界面上"删除来源文件"只是**移入这里**，随时可恢复。
 # 刻意与 data/archive（原件区，只增不改）分开——两个目录的不变式完全不同，
@@ -129,13 +136,20 @@ def _abs_stored(rel: str) -> str:
     数据目录被挪走（TP_DATA_DIR）后，按 BASE 拼就会指回只读的包内目录，
     于是"文件明明在那儿却读不到"。其余相对路径仍按 BASE 拼，行为不变。
     """
-    if not rel or os.path.isabs(rel):
-        return rel
-    if rel.replace("\\", "/").startswith("data/"):
-        return os.path.join(DATA_DIR, rel[5:].replace("/", os.sep))
-    return os.path.join(BASE, rel)
+    return resolve_data_path(rel)
 
-app = FastAPI(title="NIN人才库智能助手", version="1.7.0")
+
+def _inside_allowed_root(path: str) -> bool:
+    """原件只允许来自程序资源根或用户数据根。"""
+    real = os.path.realpath(path)
+    for root in (BASE, DATA_DIR):
+        normalized = os.path.realpath(root)
+        if real == normalized or real.startswith(normalized + os.sep):
+            return True
+    return False
+
+
+app = FastAPI(title="NIN人才库智能助手", version=PRODUCT_VERSION)
 
 
 # ---- 本机来源校验（防 DNS rebinding / 本地 CSRF）----
@@ -192,21 +206,28 @@ async def _guard_local_origin(request: Request, call_next):
 # 前端 `/api/tasks/{task_id}` 轮询，弹窗里画进度条。
 _PROGRESS: dict[str, dict] = {}
 _PROGRESS_LOCK = threading.Lock()
+#: 邮件请求幂等表：client_request_id -> task_id。网络中断后前端重试同一封邮件时，
+#: 后端返回原任务，而不是再发一封。
+_MAIL_REQ: dict[str, str] = {}
+_MAIL_REQ_LOCK = threading.Lock()
 
 
-def _progress_new(title: str, total: int) -> str:
+def _progress_new(title: str, total: int, *, kind: str = "general",
+                  meta: dict | None = None) -> str:
     """开一个新任务，返回 task_id。"""
     tid = uuid.uuid4().hex[:12]
     with _PROGRESS_LOCK:
         _PROGRESS[tid] = {"title": title, "total": total, "done": 0,
                           "failed": 0, "status": "running", "message": "",
-                          "started_at": _time.time()}
+                          "started_at": _time.time(), "kind": kind,
+                          "meta": meta or {}}
     return tid
 
 
 def _progress_set(tid: str, *, done: int | None = None,
                   failed: int | None = None, status: str | None = None,
-                  message: str | None = None) -> None:
+                  message: str | None = None,
+                  extra: dict | None = None) -> None:
     """更新任务进度（缺省字段不动）。"""
     with _PROGRESS_LOCK:
         p = _PROGRESS.get(tid)
@@ -220,6 +241,43 @@ def _progress_set(tid: str, *, done: int | None = None,
             p["status"] = status
         if message is not None:
             p["message"] = message
+        if extra:
+            p.update(extra)
+
+
+@app.get("/api/tasks/active")
+def api_tasks_active(kind: str | None = None, include_done: bool = False,
+                     x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                     x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """当前后台任务；静态路径必须放在 `/api/tasks/{task_id}` 前面。
+
+    除了可停止的收取/导入任务，也返回邮件发送任务。页面刷新或误关进度窗后，
+    前端可以靠这里恢复轮询，而不是重新提交一封邮件。
+    """
+    _session(x_tp_token, x_tp_role)
+    wanted = str(kind or "").strip()
+    items: list[dict] = []
+    with _PROGRESS_LOCK:
+        for tid, p in _PROGRESS.items():
+            if wanted and p.get("kind") != wanted:
+                continue
+            if not wanted and p.get("kind") not in ("ingest",):
+                continue
+            if not include_done and p.get("status") != "running":
+                continue
+            item = dict(p)
+            item["task_id"] = tid
+            item.setdefault("kind", "general")
+            items.append(item)
+    # 收取/导入任务由 ingest 模块维护独立进度表；原先这里只有它。
+    if not wanted or wanted == "ingest":
+        for t in (ingest_mod.list_running() if hasattr(ingest_mod, "list_running") else []):
+            item = dict(t)
+            item.setdefault("kind", "ingest")
+            items.append(item)
+    items.sort(key=lambda x: x.get("started_at") or 0, reverse=True)
+    return {"ok": bool(items), "task": (items[0] if items else None),
+            "tasks": items, "count": len(items)}
 
 
 @app.get("/api/tasks/{task_id}")
@@ -256,6 +314,8 @@ def api_task_progress(task_id: str,
     for _k in ("report", "stopped"):
         if _k in p:
             out[_k] = p[_k]
+    if "result" in p:
+        out["result"] = p["result"]
     return out
 
 
@@ -275,21 +335,6 @@ def api_task_stop(task_id: str,
     return {"ok": ok,
             "message": ("已请求停止：读完当前文件后停下" if ok
                         else "该任务不可停止（可能已结束，或不是收取任务）")}
-
-
-@app.get("/api/tasks/active")
-def api_tasks_active(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
-                     x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    """当前还在跑的**收取/导入/分析**后台任务（v1.29.10）。
-
-    业务方反馈：进度弹窗被误关后，页面上就再没有"停止"入口了。前端点导入
-    按钮前先问一句：有在跑的就重新挂上进度窗口（优先给**可停止**的那个），
-    没有才开新任务——同时也防了"刷新页面后重复开任务抢游标"。
-    """
-    _session(x_tp_token, x_tp_role)
-    items = ingest_mod.list_running() if hasattr(ingest_mod, "list_running") else []
-    return {"ok": bool(items), "task": (items[0] if items else None),
-            "count": len(items)}
 
 
 def _load(path: str) -> dict:
@@ -364,13 +409,40 @@ def _ctx(session: dict, conn=None) -> ToolCtx:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> Response:
-    """首页（**整个前端内联在这一个 HTML 里**）。
+    """首页 = **v2 主从两栏版**（v2.2.0 起）。
+
+    旧版单页仍在 `/v1`，随时可切回（改这一行即可：把 render_page_v2 换回
+    render_page，并把 /v1 的内容对调）。
 
     必须带 `Cache-Control: no-store`（v1.14.3）：JS 是内联的，所以浏览器一旦缓存了
     这个 HTML，就等于缓存了旧版前端——HR 会看到"我明明改了却没反应"（当天反复遇到）。
     这个工具是单机自用、页面只有几十 KB，不值得为它做缓存。
     """
+    resp = HTMLResponse(render_page_v2(auth_enabled=_auth_enabled()))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
+
+@app.get("/v1", response_class=HTMLResponse)
+def index_v1() -> Response:
+    """**旧版**单页（保留为回退入口，不是默认）。"""
     resp = HTMLResponse(render_page(auth_enabled=_auth_enabled()))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
+
+@app.get("/v2", response_class=HTMLResponse)
+def index_v2() -> Response:
+    """v2 页面（`/` 的别名，两个地址都能开）。
+
+    设计取向写在 `app/ui_v2.py` 的模块 docstring 里：从"卡片流"改成"主从两栏"，
+    一屏内完成 找人 → 判断 → 推进；证据默认可见；单一强调色。
+    """
+    resp = HTMLResponse(render_page_v2(auth_enabled=_auth_enabled()))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
@@ -432,6 +504,7 @@ def api_meta(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
         cfg = mb.load_config()
         return {
             "session": s,
+            "product_version": PRODUCT_VERSION,
             "jd": jd,
             "tiers": _load(TIERS_PATH),
             # 前端版本戳：验收脚本据此证明"页面跑的是当前这版前端"
@@ -603,7 +676,7 @@ async def api_upload(request: Request, name: str = Query(...),
 
 
 # ---- 面试字典（v1.20）：单位 / 会议室 / 时段 / 联系人，可在线增删 ----
-INTERVIEW_PATH = os.path.join(BASE, "config", "interview.json")
+INTERVIEW_PATH = _cfg_path("interview.json")
 
 
 #: 兜底字典：config/interview.json 缺失时用这份，保证下拉框**不会是空的**
@@ -729,6 +802,7 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                    overseas: str | None = None, bachelor: str | None = None,
                    date_from: str | None = None, date_to: str | None = None,
                    interview_unit: str | None = None,
+                   outcome: str | None = None,
                    min_years: int | None = None, gender: str | None = None,
                    archived: str | None = None,
                    page: int = 0, page_size: int = 0,
@@ -739,8 +813,12 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
     性别筛选是**普通筛选条件**（v1.29.4，业务方 2026-10-16 定调：性别不做脱敏、
     不设"红线"开关）。性别只来自简历**明写**的标签行（绝不推断），也不参与评分。
 
-    最低学历（v1.7.3）：`education=硕士` 即"硕士及以上"，尺子是 `db.EDU_RANK`
-    （博士>硕士>本科>大专）。学历"无法判定"的人不命中任何具体层次——
+    学历（v2.0.2，业务方 2026-10-19 改口径）：**精确档位多选**，逗号分隔。
+    `education=大专,硕士` 只回这两档；不传 = 不限。
+    原来是"≥ 最低学历"（`education=大专` 会把硕博一起带出来），HR 想只看大专时用不了。
+    同义档由 `db.parse_education()` 归并（专科→大专、学士→本科、研究生→硕士）——
+    不归并的话选"硕士"会漏掉简历里写"研究生"的人。
+    学历"无法判定"的人不命中任何具体档位 ——
     但**不能静默消失**：被隐藏的人数放进 `edu_filter.hidden_unknown`，界面出提示。
 
     院校层次（v1.7.3）：`univ=985 / 211`。985 学校全部同时是 211，
@@ -792,21 +870,24 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                                    date_from=(date_from or "").strip() or None,
                                    date_to=(date_to or "").strip() or None,
                                    interview_unit=(interview_unit or "").strip() or None,
+                                   outcome=(outcome or "").strip() or None,
                                    # 分页请求时先**轻量**取（不装配技能明细）：
                                    # 1000 人时全装配是 59ms，而一屏只要 20 条。
                                    # 筛选与 facets 都不依赖技能字段，切片后再装配即可。
                                    light=bool(page_size and page_size > 0),
                                    archived=True if want_archived else False)
-        # 最低学历：在 server 层做而不是塞进 list_candidates——
-        # "无法判定被隐藏的人数"要数的是**除学历外其他条件都命中**的人，
-        # 这个集合只有在这里拿得到。
+        # 学历：**精确档位多选**（v2.0.2 业务方要求；原来是"≥ 最低学历"，
+        # 想筛"只要大专"会把硕博一起带出来）。在 server 层做而不是塞进
+        # list_candidates —— "无法判定被隐藏的人数"要数的是**除学历外其他条件
+        # 都命中**的人，这个集合只有在这里拿得到。
+        # 解析规则共用 `db.parse_education()`，与导出/助手那条路同源。
+        _edu_want = db.parse_education(want_edu)
         hidden_unknown = 0
-        if want_edu:
-            rank = db.EDU_RANK.get(want_edu, 0)
+        if _edu_want:
             hidden_unknown = sum(1 for i in items
                                  if db.EDU_RANK.get(i.get("edu_level") or "", 0) == 0)
             items = [i for i in items
-                     if db.EDU_RANK.get(i.get("edu_level") or "", 0) >= rank]
+                     if db.EDU_RANK.get(i.get("edu_level") or "", 0) in _edu_want]
         # 院校层次 facets：只统计、**不过滤**（过滤已下沉到 db）。
         # v1.27：`uni_tier` 现在有三档（985/211/强势），facets 必须**按值比对**
         # 而不是靠"是不是985/211" —— 否则"强势"会被当成"非985非211"
@@ -963,7 +1044,7 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                    "strong": (strong or "").strip(), "stage": (stage or "").strip(),
                    "education": want_edu or "",
                },
-               "edu_filter": {"min": want_edu, "applied": bool(want_edu),
+               "edu_filter": {"levels": want_edu, "applied": bool(_edu_want),
                               "hidden_unknown": hidden_unknown},
                "paging": paging,
                "gender_filter": {
@@ -1217,6 +1298,114 @@ def api_candidate_reanalyze(cid: int, full: bool = True, req: dict | None = None
         conn.close()
 
 
+@app.get("/api/candidates/{cid}/avatar")
+def api_candidate_avatar(cid: int, token: str | None = None,
+                         x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")):
+    """证件照（卡片头像 / 档案用）。v2.0.4。
+
+    **懒抽**：`avatar_path` 还是 NULL 时，第一次请求才去原件里抽一张；
+    抽不到就记 `"-"`，以后不再重试 —— 否则每次渲染 20 张卡片都要重开 20 个 PDF。
+
+    为什么用 query `token` 而不是只认 header：这个地址是给 `<img src>` 用的，
+    `<img>` 带不了自定义头。和 `/api/sources/file` 走同一个 `_file_session` 口径。
+    """
+    s = _file_session(x_tp_token, token)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        row = conn.execute("SELECT avatar_path FROM candidates WHERE id = ?", (cid,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="未找到该候选人")
+        rel = row["avatar_path"]
+    finally:
+        conn.close()
+    # **请求线程绝不抽图**（抽图会把接口堵到 9 秒，实测见 avatar.py 里的说明）：
+    # 还没抽过就排进后台队列、立刻返回 404；客户端隔 2 秒重试，抽好之后自然出现。
+    if rel is None:
+        avatar_mod.enqueue(DB_PATH, cid, AVATAR_DIR)
+        raise HTTPException(status_code=404, detail="照片正在后台抽取")
+    if rel == avatar_mod.NONE_MARK:
+        raise HTTPException(status_code=404, detail="这份简历里没有可用的证件照")
+    path = _abs_stored(rel)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="照片文件已不在磁盘上")
+    # 私有缓存：同一次浏览里不重复请求，但换人/换图能立刻生效
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=300"})
+
+
+@app.post("/api/candidates/{cid}/avatar")
+def api_candidate_avatar_refresh(cid: int,
+                                 x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                                 x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """**重新抽取**证件照（抽错一张图时用）。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    conn = db.connect(DB_PATH)
+    try:
+        if not conn.execute("SELECT 1 FROM candidates WHERE id = ?", (cid,)).fetchone():
+            raise HTTPException(status_code=404, detail="未找到该候选人")
+        avatar_mod.reset(conn, cid)
+        rel = avatar_mod.ensure(conn, cid, AVATAR_DIR)
+        ok = bool(rel) and rel != avatar_mod.NONE_MARK
+        db.add_audit(conn, "candidate", str(cid), "avatar_refresh", "",
+                     "重新抽取证件照" + ("" if ok else "（没抽到）"), s["username"], s["role"])
+    finally:
+        conn.close()
+    return {"ok": ok, "avatar_path": rel}
+
+
+@app.delete("/api/candidates/{cid}/avatar")
+def api_candidate_avatar_clear(cid: int,
+                               x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                               x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """**去掉**证件照（抽到的不是这个人 / 不想显示）。卡片自动回落到"姓首字"。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    conn = db.connect(DB_PATH)
+    try:
+        if not conn.execute("SELECT 1 FROM candidates WHERE id = ?", (cid,)).fetchone():
+            raise HTTPException(status_code=404, detail="未找到该候选人")
+        avatar_mod.clear(conn, cid)
+        db.add_audit(conn, "candidate", str(cid), "avatar_clear", "",
+                     "去掉证件照", s["username"], s["role"])
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/avatars/backfill")
+def api_avatar_backfill_start(
+        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """可选地补齐历史头像。只处理 avatar_path=NULL，跳过已确认和无照片标记。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    state = avatar_mod.start_backfill(DB_PATH, AVATAR_DIR)
+    return {"ok": True, **state,
+            "note": ("已启动历史头像补扫（后台串行，不覆盖已有头像）" if state.get("running")
+                     else "没有待补扫的历史头像")}
+
+
+@app.get("/api/avatars/backfill/status")
+def api_avatar_backfill_status(
+        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    _session(x_tp_token, x_tp_role)
+    return {"ok": True, **avatar_mod.backfill_status()}
+
+
+@app.post("/api/avatars/backfill/stop")
+def api_avatar_backfill_stop(
+        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    return {"ok": True, **avatar_mod.stop_backfill(),
+            "note": "已请求停止；当前这一张抽完后就停"}
+
+
 @app.get("/api/candidates/{cid}/channel-compare")
 def api_channel_compare(cid: int,
                         x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
@@ -1445,6 +1634,107 @@ def api_candidate_rename(cid: int, req: dict,
         return {"ok": True, "id": cid, "changed": sorted(changed),
                 "note": "已更正：" + "、".join(label[k] for k in changed)
                         + "（改前改后都记在操作审计里）。"}
+    finally:
+        conn.close()
+
+
+@app.post("/api/candidates/{cid}/edu-history")
+def api_candidate_edu_history(cid: int, req: dict,
+                              x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                              x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """改**某一段**教育经历的学校/专业（业务方 2026-10-21）。
+
+    为什么单独开一个口子：档案上方会列出本科/硕士/博士多段，但原来只能改
+    「第一学历」和「最高学历」两个字段 —— 中间那段（比如硕士学校解析错了）
+    在界面上根本没有入口，只能整份重导。
+
+    约定：
+      · `index` 是 `edu_history` 里的下标（前端渲染顺序，与库内顺序一致）；
+      · 只改 `school` / `major`，`degree` / 起止时间不动（那是抽取的核心结论）；
+      · **若这一段就是最高学历**（degree 与 `edu_level` 相同），同步更新主字段
+        `school` / `major` —— 档位、院校层次、排名都读主字段，不改会导致
+        "上面显示改了、档位还按旧学校判"。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    req = req or {}
+    try:
+        k = int(req.get("index", -1))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="index 必须是数字")
+    conn = db.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT edu_history, edu_level, school, major FROM candidates WHERE id = ?",
+            (cid,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="未找到该候选人")
+        try:
+            hist = json.loads(row["edu_history"]) if row["edu_history"] else []
+        except (ValueError, TypeError):
+            hist = []
+        if not isinstance(hist, list) or not hist:
+            raise HTTPException(status_code=422,
+                                detail="这个人没有分段的教育经历（可改「第一学历 / 最高学历」）")
+        if k < 0 or k >= len(hist):
+            raise HTTPException(status_code=422, detail="教育经历段编号超出范围")
+        seg = dict(hist[k]) if isinstance(hist[k], dict) else {}
+        old = {"degree": seg.get("degree") or "",
+               "school": seg.get("school") or "", "major": seg.get("major") or ""}
+        new = dict(old)
+        if "degree" in req:
+            deg_v = str(req.get("degree") or "").strip()
+            if deg_v and deg_v not in db.EDU_RANK:
+                raise HTTPException(status_code=422,
+                                    detail="学历只能填：大专 / 本科 / 硕士 / 博士")
+            new["degree"] = deg_v
+        if "school" in req:
+            new["school"] = str(req.get("school") or "").strip()[:80]
+        if "major" in req:
+            new["major"] = str(req.get("major") or "").strip()[:60]
+        if old == new:
+            return {"ok": True, "id": cid, "changed": [],
+                    "note": "这一段的学历/学校/专业没有变化。"}
+        seg["degree"] = new["degree"] or seg.get("degree")
+        seg["school"] = new["school"] or None
+        seg["major"] = new["major"] or None
+        hist[k] = seg
+        conn.execute("UPDATE candidates SET edu_history = ? WHERE id = ?",
+                     (json.dumps(hist, ensure_ascii=False), cid))
+        # 同步主字段：**只有这一段原本就是最高学历段**时才同步。
+        # ⚠️ 用**改前**的 degree 判断，不能用改后的 —— 否则把"本科段"的学历改成硕士时，
+        # 它会临时变成"最高学历段"，连带把主字段 school 覆盖成本科那所学校、
+        # 或把 edu_level 改错（实测会把整个人变成"本科 + 硕士学校"的自相矛盾状态，
+        # 而 `_loads_edu_history` 会把这种矛盾的段直接剔除，档案里就少一段）。
+        deg = str(seg.get("degree") or "").strip()
+        old_deg = str(old.get("degree") or "").strip()
+        top = str(row["edu_level"] or "").strip()
+        sync = bool(old_deg and top and old_deg == top)
+        if sync:
+            sets, args = [], []
+            if "school" in req:
+                sets.append("school = ?")
+                args.append(new["school"] or None)
+            if "major" in req:
+                sets.append("major = ?")
+                args.append(new["major"] or None)
+            if "degree" in req:
+                sets.append("edu_level = ?")
+                args.append(new["degree"] or None)
+            if sets:
+                args.append(cid)
+                conn.execute(f"UPDATE candidates SET {', '.join(sets)} WHERE id = ?", args)
+        before = (f"第{k + 1}段（{old['degree'] or '学历'}）学校={old['school']}，"
+                  f"专业={old['major']}")
+        after = (f"第{k + 1}段（{new['degree'] or '学历'}）学校={new['school']}，"
+                 f"专业={new['major']}")
+        db.add_audit(conn, "candidate", str(cid), "edit_edu_segment", before, after,
+                     s["username"], s["role"])
+        conn.commit()
+        return {"ok": True, "id": cid, "changed": ["school", "major"],
+                "synced_top": sync,
+                "note": "已更正第 " + str(k + 1) + " 段教育经历"
+                        + ("（同时更新了最高学历院校）" if sync else "") + "。"}
     finally:
         conn.close()
 
@@ -1836,9 +2126,14 @@ def api_candidates_archive_batch(req: ArchiveBatchReq,
         out = db.set_candidates_archived(conn, sorted(ids), req.archived, s["username"], s["role"])
         out["picked_by_year"] = picked_by_year
         out["purge_after_days"] = db.PURGE_AFTER_DAYS
-        out["note"] = ("已归档，可在「归档」页查看；满 "
-                       f"{db.PURGE_AFTER_DAYS} 天后会被彻底删除" if req.archived
-                       else "已取消归档，恢复在人才库与检索中展示")
+        _ended = int(out.get("ended_applications") or 0)
+        out["note"] = (
+            ("已归档，可在「归档」页查看；满 "
+             f"{db.PURGE_AFTER_DAYS} 天后会被彻底删除"
+             + (f"；同时结束 {_ended} 条进行中的投递" if _ended else ""))
+            if req.archived
+            else "已取消归档，恢复在人才库与检索中展示"
+        )
         return out
     finally:
         conn.close()
@@ -2103,7 +2398,7 @@ def api_duplicates(cid: int, x_tp_token: str | None = Header(default=None, alias
     conn = db.connect(DB_PATH)
     try:
         return {"candidate_id": cid, "suspects": db.suspicious_duplicates(conn, cid),
-                "note": "系统只提示疑似重复，不会自动合并；合并需 HR 确认且可撤销"}
+                "note": "仅姓名完全一致时提示疑似重复；不会自动合并，合并需 HR 确认且可撤销"}
     finally:
         conn.close()
 
@@ -2163,6 +2458,8 @@ class StageReq(BaseModel):
     #: v1.29：结论标签（可选）。只在「离开的阶段」允许它时才认：
     #: 已面试→不录用；已发放offer→已签约/拒签。不给 = 不改结论。
     #: 想**清空**结论传空串 ""（与"不改"区分开）。
+    #: v2 的「只改结论」会传当前阶段；若当前还在「已面试」之前，
+    #: 服务端会把实际阶段自动推进到「已面试」。
     outcome: str | None = None
 
 
@@ -2221,11 +2518,16 @@ def api_set_stage(aid: int, req: StageReq, x_tp_token: str | None = Header(defau
         raise HTTPException(status_code=400, detail=f"阶段只能是 {'/'.join(db.STAGES)}")
     conn = db.connect(DB_PATH)
     try:
+        _before = db.get_application(conn, aid)
+        if not _before:
+            raise HTTPException(status_code=404, detail="未找到该投递")
+        _actual_stage = stages_mod.auto_advance_stage(
+            _before.get("stage"), req.stage, req.outcome)
         # v1.29：结论标签一起落库；自动归档由 db.set_application_stage **统一负责**
         # （它会先确认该人所有投递都已到终点）。原来这里还写了一份"看到已结束就归档"的
         # 无条件版本 —— 那人若同时在两个岗位流程里，结束一个就把整档收起来是错的。
         try:
-            r = db.set_application_stage(conn, aid, req.stage, req.outcome,
+            r = db.set_application_stage(conn, aid, _actual_stage, req.outcome,
                                          s["username"], s["role"])
         except ValueError as exc:
             # 非法阶段/非法结论：如实回 400 并说清可用取值，别让它变成 500
@@ -2233,7 +2535,11 @@ def api_set_stage(aid: int, req: StageReq, x_tp_token: str | None = Header(defau
         if not r:
             raise HTTPException(status_code=404, detail="未找到该投递")
         archived = bool(r.pop("_auto_archived", False))
-        return {**r, "auto_archived": archived,
+        _before_stage = str(_before.get("stage") or "").strip()
+        _advanced_to = (_actual_stage
+                        if _actual_stage != _before_stage and req.stage == _before_stage
+                        else None)
+        return {**r, "auto_archived": archived, "advanced_to": _advanced_to,
                 "note": ("阶段已更新，并已自动归档该候选人"
                          "（他的投递都走完了；可在「归档」页随时取消归档）。"
                          if archived else "")}
@@ -2417,8 +2723,8 @@ def api_interview_info(aid: int, req: dict,
         _date("interview_date")            # 面试日期 YYYY-MM-DD
         _date("onboard_deadline")           # 入职最后期限（**人工维护**）
         # v1.29.2：面试结论（拟录用 / 不录用）。
-        # ⚠️ **只写标签、不流转**（业务方 2026-10-16 裁定）：打「不录用」不再
-        # 自动进「已结束」并归档 —— 归档是不可逆的隐藏动作，而结论可能还要改。
+        # 打「不录用」**不自动进「已结束」并归档** —— 归档是不可逆的隐藏动作，
+        # 而结论可能还要改；但人若还在「已面试」之前，需要同步推进到「已面试」。
         if "outcome" in req:
             v = str(req.get("outcome") or "").strip()
             # 取值范围 = 配置里**「已面试」这一档**允许的标签，不写死字面量
@@ -2427,16 +2733,17 @@ def api_interview_info(aid: int, req: dict,
                 raise HTTPException(
                     status_code=422,
                     detail=f"面试结论只能是：{'、'.join(_ok) or '（未配置）'}（清空表示未判）")
-            # v1.29.3（业务方 2026-10-16）：**在「待面试」打结论标签 → 自动进「已面试」**。
-            # 「待面试」意味着人已经面过、只是结论还没录，所以打标签的同时就该走到
-            # 「已面试」这一档；**其它阶段不动**（在「已面试」打标签只改标签，
-            # 要不要推进到已发放offer 是另一步，由 HR 单独决定）。
+            # v1.29.3（业务方 2026-10-16）：**在「已面试」之前打结论标签 → 自动进「已面试」**。
+            # 当前配置下能打这两个结论的前序阶段是「待面试」；这里仍走统一判定，
+            # 避免把阶段名散落成多份。已在「已面试」或之后只改标签，
+            # 要不要推进到已发放offer 是另一步，由 HR 单独决定。
             # ⚠️ 放**服务端**而不是前端：助手提案、脚本调接口也应该同一套行为 ——
             # 流转规则写在界面里，就等于只有界面那条路算数。
             _cur_stage = stages_mod.normalize_stage(
                 (db.get_application(conn, aid) or {}).get("stage"))
-            if v and _cur_stage == "待面试":
-                db.set_application_stage(conn, aid, "已面试", outcome=v,
+            _target_stage = stages_mod.auto_advance_stage(_cur_stage, _cur_stage, v)
+            if v and _target_stage != _cur_stage:
+                db.set_application_stage(conn, aid, _target_stage, outcome=v,
                                          operator=s["username"], role=s["role"],
                                          skip_auto_archive=True)
                 advanced = True          # outcome 由 set_application_stage 写，不重复
@@ -2862,7 +3169,7 @@ def api_document_file(did: int, inline: int = 0, token: str | None = None,
     # 而且自检里"构造越界路径必须被拒"这条断言，在 Windows（该路径不存在）
     # 上会拿到 404 而不是 403，掩盖真实的越界分支是否生效。
     real = os.path.realpath(path)
-    if not real.startswith(os.path.realpath(BASE) + os.sep):
+    if not _inside_allowed_root(real):
         raise HTTPException(status_code=403, detail="原件路径超出允许范围，已拒绝")
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail=f"原件不在磁盘上：{path}")
@@ -3043,7 +3350,7 @@ def api_sources_bundle(req: BundleReq,
                 # 同 /api/documents/{id}/file：先判越界再判存在，
                 # 否则越界文件会被记成"原件不在磁盘上"，把实情报错。
                 real = os.path.realpath(path)
-                if not real.startswith(os.path.realpath(BASE) + os.sep):
+                if not _inside_allowed_root(real):
                     skipped.append(f"{d.get('file_name') or did}（路径越界，已拒绝）")
                     continue
                 if not os.path.isfile(path):
@@ -4831,6 +5138,9 @@ class MailSendReq(BaseModel):
     application_id: int | None = None
     template_name: str | None = None
     attachments: list[MailAttachmentReq] | None = None   # v1.27：附件（原件 id）
+    #: 浏览器为同一次“确认发送”生成的幂等键。网络中断后重试同一请求时，
+    #: 服务端返回原任务，绝不重复投递 SMTP。
+    client_request_id: str | None = None
     #: v1.29：HR 在写邮件页填好的**结构化**运行时变量
     #: （面试时间 / 面试时段 / 面试单位 / 面试方式 / 会议号 …）。
     #: 发信成功后按**模板用途**回写进投递档案，省得 HR 再手工录一遍。
@@ -5098,8 +5408,19 @@ def _mail_kind(conn, template_name: str | None) -> str:
 #: 收**原始字节**而不是 multipart 表单，是为了不新增 `python-multipart` 依赖：
 #: 前端 `fetch(url, {body: file})` 直接发二进制即可，服务端按 `Content-Length` 收。
 OUTBOX_DIRNAME = "outbox"
-OUTBOX_EXTS = (".pdf", ".jpg", ".jpeg", ".png")
+OUTBOX_EXTS = (
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".docm", ".dot", ".dotx", ".xlsm", ".xlsb", ".xltx",
+    ".pptm", ".pps", ".ppsx",
+    ".txt", ".csv", ".md", ".rtf", ".odt", ".ods", ".odp",
+    ".wps", ".et", ".dps", ".ofd", ".zip", ".rar", ".7z",
+    ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
+    ".jfif", ".tif", ".tiff", ".heic", ".heif", ".avif",
+)
 OUTBOX_MAX_BYTES = 20 * 1024 * 1024
+#: SMTP 的 25MB 限制通常按编码后的报文计算；附件原始字节合计再卡一道，
+#: 避免多个单文件都合法、最后在 SMTP 阶段才失败。
+OUTBOX_MAX_TOTAL_BYTES = 20 * 1024 * 1024
 
 
 def _outbox_dir() -> str:
@@ -5147,7 +5468,7 @@ async def api_mail_outbox(request: Request, name: str = "",
     跟他无关的录用函），所以这里单开一个受控通道。
 
     边界（都是有意收窄的）：
-      · 只收 **PDF / JPG / PNG**，单份 ≤ 20MB；
+      · 收常见图片与办公文档（PDF/Word/Excel/PPT/TXT/压缩包等），单份 ≤ 20MB；
       · 文件名按内容 sha256 生成，**客户端给的路径一律不采信**；
       · **不入库**（不进 candidates / documents），只落在 `data/outbox/`；
       · 写审计（文件名 + 大小 + sha256 前 16 位），事后能查"发出去的是哪份"。
@@ -5157,7 +5478,7 @@ async def api_mail_outbox(request: Request, name: str = "",
     ext = os.path.splitext(str(name or ""))[1].lower()
     if ext not in OUTBOX_EXTS:
         raise HTTPException(status_code=422,
-                            detail=f"只能上传 {'/'.join(OUTBOX_EXTS)}（录用通知一般是 PDF 扫描件）")
+                            detail=f"不支持这个文件格式；可上传：{'、'.join(OUTBOX_EXTS)}")
     body = await request.body()
     if not body:
         raise HTTPException(status_code=422, detail="文件是空的")
@@ -5242,10 +5563,7 @@ def api_mail_outbox_delete(outbox_id: str,
     return {"ok": True, "removed": removed, "note": "附件已删除"}
 
 
-@app.post("/api/mail/send")
-def api_mail_send(req: MailSendReq,
-                  x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
-                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+def _mail_send_sync(req: MailSendReq, s: dict) -> dict:
     """**真正发信**。需要 `confirm` 权限；成功与否都留痕。
 
     内容里若还残留 `【待填：...】` 会被拦下——宁可让 HR 补一句，也不发半成品出去。
@@ -5257,8 +5575,6 @@ def api_mail_send(req: MailSendReq,
     读不到（文件被挪走/删了）的**跳过并如实回报**，不静默少发 ——
     面试通知漏附岗位说明比发不出去更糟，HR 不会知道少了什么。
     """
-    s = _session(x_tp_token, x_tp_role)
-    require(s, "confirm")
     html_body = (mail_template_mod.sanitize_email_html(req.html) if req.html
                  else (req.body if mail_template_mod.looks_like_html(req.body)
                        else (mail_template_mod.to_html(req.body)
@@ -5315,12 +5631,21 @@ def api_mail_send(req: MailSendReq,
                                 detail="附件都读不出来，邮件未发送："
                                        + "；".join(att_missing[:5])
                                        + "。请在档案里重新上传原件，或去掉附件先发。")
+        _att_bytes = sum(len(a.get("data") or b"") for a in att_payloads)
+        if _att_bytes > OUTBOX_MAX_TOTAL_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(f"附件合计 {_att_bytes / 1024 / 1024:.1f}MB，"
+                        f"超过邮件上限 {OUTBOX_MAX_TOTAL_BYTES // 1024 // 1024}MB；"
+                        "请压缩或减少附件后再发。"),
+            )
     r = mail_send_mod.send_mail(req.to, req.subject, plain, html=html_body,
                                  attachments=att_payloads or None)
-    conn = db.connect(DB_PATH)
     _written: dict = {}          # 实际回写下去的字段（给前端提示用）
     _write_warn = ""             # 回写失败时的警告（邮件已发出，不算发送失败）
+    conn = None
     try:
+        conn = db.connect(DB_PATH)
         _att_names = [a["filename"] for a in att_payloads]
         _att_txt = ("｜附件：" + "、".join(_att_names)) if _att_names else ""
         db.add_audit(conn, "mail", str(req.candidate_id or ""), "send",
@@ -5361,6 +5686,19 @@ def api_mail_send(req: MailSendReq,
                                                      operator=s["username"], role=s["role"],
                                                      **_patch)
                         _written = _patch
+                    # 发出面试邀请 = 已经进入面试安排。与 interview-info 的
+                    # “登记面试单位后推进到待面试”保持同一条业务口径。
+                    _cur = db.get_application(conn, int(req.application_id)) or {}
+                    _cur_stage = stages_mod.normalize_stage(_cur.get("stage"))
+                    _order = stages_mod.all_stages()
+                    if (_cur_stage in _order and "待面试" in _order
+                            and _order.index(_cur_stage) < _order.index("待面试")):
+                        db.set_application_stage(
+                            conn, int(req.application_id), "待面试",
+                            operator=s["username"], role=s["role"],
+                            skip_auto_archive=True,
+                        )
+                        _written["stage"] = "待面试"
                 elif _kind == "offer":
                     # 录用函发出时刻 = 这一刻。**绝不手工填**，HR 常记错日期，
                     # 而"录用函发送时间"是后面所有时限的起算点。
@@ -5379,8 +5717,15 @@ def api_mail_send(req: MailSendReq,
                 # 让 HR 以为"发送失败"会促使他重发一封（重复打扰候选人）。
                 # 与"邮件游标写失败不许拖垮入库"同一条纪律。
                 _write_warn = f"邮件已发出，但没能自动回写面试/录用信息：{type(_e).__name__}"
+    except Exception as _e:                               # noqa: BLE001
+        # 审计、备注或数据库连接失败也必须降级为警告：SMTP 已成功时，
+        # 再返回“发送失败”会直接诱发重复发送。
+        if r.get("ok"):
+            _write_warn = (f"邮件已发出，但后续审计/备注/档案回写失败："
+                           f"{type(_e).__name__}")
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     if not r.get("ok"):
         # ⚠️ 必须把 hint 一起抛出去。原来只传 r["error"]，
         # 于是 mail_send 里辛苦写好的那段"465 用 SSL、587 用 STARTTLS"的提示
@@ -5406,3 +5751,83 @@ def api_mail_send(req: MailSendReq,
         _extra += f"｜⚠️ {_write_warn}"
     return {"ok": True, **r, "written": _written, "write_warning": _write_warn,
             "note": ((r.get("note") or "邮件已发出，动作已写入审计。") + _extra)}
+
+
+def _run_mail_send_task(tid: str, req: MailSendReq, session: dict) -> None:
+    """后台真正发信；浏览器只轮询任务，避免大附件把 HTTP 连接拖断。"""
+    try:
+        _progress_set(tid, message="正在连接发信服务器…")
+        result = _mail_send_sync(req, session)
+        _progress_set(
+            tid, done=1, status="done",
+            message="邮件已发送",
+            extra={"result": result},
+        )
+    except HTTPException as exc:
+        msg = str(exc.detail or "发送失败")
+        _progress_set(
+            tid, done=1, status="error", message=msg,
+            extra={"result": {"ok": False, "error": msg}},
+        )
+    except Exception as exc:                                   # noqa: BLE001
+        traceback.print_exc()
+        msg = f"发送任务异常：{type(exc).__name__}: {exc}"
+        _progress_set(
+            tid, done=1, status="error", message=msg,
+            extra={"result": {"ok": False, "error": msg}},
+        )
+
+
+@app.post("/api/mail/send")
+def api_mail_send(req: MailSendReq,
+                  async_mode: bool = Query(default=False, alias="async"),
+                  x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """发信入口。`?async=1` 时立即返回任务号，SMTP 在后台继续执行。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "confirm")
+    if not async_mode:
+        return _mail_send_sync(req, s)
+    req_id = str(req.client_request_id or "").strip()[:80]
+    if req_id:
+        with _MAIL_REQ_LOCK:
+            existing_tid = _MAIL_REQ.get(req_id)
+            if existing_tid:
+                with _PROGRESS_LOCK:
+                    existing = dict(_PROGRESS.get(existing_tid) or {})
+                if existing:
+                    out = {
+                        "ok": True,
+                        "pending": existing.get("status") == "running",
+                        "task_id": existing_tid,
+                        "deduped": True,
+                        "note": "同一封邮件的发送请求已存在，未重复提交。",
+                    }
+                    if "result" in existing:
+                        out["result"] = existing["result"]
+                    return out
+            # 创建任务与登记幂等键必须原子完成，防两个同键请求同时穿透。
+            tid = _progress_new(
+                f"发送邮件：{req.subject or '（无主题）'}", 1, kind="mail",
+                meta={"candidate_id": req.candidate_id,
+                      "application_id": req.application_id,
+                      "to": req.to, "subject": req.subject,
+                      "client_request_id": req_id},
+            )
+            _MAIL_REQ[req_id] = tid
+    else:
+        tid = _progress_new(
+            f"发送邮件：{req.subject or '（无主题）'}", 1, kind="mail",
+            meta={"candidate_id": req.candidate_id,
+                  "application_id": req.application_id,
+                  "to": req.to, "subject": req.subject,
+                  "client_request_id": ""},
+        )
+    threading.Thread(
+        target=_run_mail_send_task,
+        name="mail-send",
+        daemon=True,
+        args=(tid, req, dict(s)),
+    ).start()
+    return {"ok": True, "pending": True, "task_id": tid, "deduped": False,
+            "note": "邮件已进入后台发送队列。"}

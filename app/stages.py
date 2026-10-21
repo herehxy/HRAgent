@@ -21,10 +21,10 @@ from __future__ import annotations
 import json
 import os
 import re
-from .paths import BASE
+from .paths import cfg as _cfg_path
 
 #: 配置路径（与其它字典同目录，便于 HR/运维直接改）
-CONFIG_PATH = os.path.join(BASE, "config", "stages.json")
+CONFIG_PATH = _cfg_path("stages.json")
 
 #: 配置缺失/损坏时的兜底。**必须与 config/stages.json 内容一致**（有判据校验）。
 _FALLBACK: dict = {
@@ -216,6 +216,32 @@ def outcome_allowed_from(from_stage: str, to_stage: str, outcome) -> bool:
         return True                      # 空 = 清空结论，不算打标签
     base = str(from_stage or "").strip() or str(to_stage or "").strip()
     return o in outcomes_of(base)
+
+
+def auto_advance_stage(current_stage: str, requested_stage: str, outcome) -> str:
+    """只改结论时，决定实际要写入的阶段。
+
+    v2 把「改结论」和「推进阶段」拆成了两个动作，但业务上人既然已经有面试结论，
+    就不该还停在「已面试」之前。这里只处理**同一个阶段的标签编辑**（例如
+    `待面试 → 待面试 + 拟录用`）；显式选了其它阶段时仍以调用方选择为准。
+
+    自动推进只发生在这三个条件同时满足时：
+      1. 当前阶段确实早于「已面试」；
+      2. 当前阶段允许这个结论（避免从「初筛通过」直接跳档绕过流程）；
+      3. 「已面试」也允许这个结论（只认面试结论，不把签约标签带进来）。
+    """
+    current = str(current_stage or "").strip()
+    requested = str(requested_stage or "").strip()
+    oc = str(outcome or "").strip()
+    order = all_stages()
+    target = "已面试"
+    if not oc or current != requested or target not in order:
+        return requested
+    if current not in order or order.index(current) >= order.index(target):
+        return requested
+    if oc not in outcomes_of(current) or oc not in outcomes_of(target):
+        return requested
+    return target
 
 
 def actions_of(stage: str) -> list[dict]:

@@ -22,8 +22,8 @@ import os
 import re
 
 DEFAULT_PATH = os.path.join(
-    __import__("app.paths", fromlist=["BASE"]).BASE,
-    "config", "majors.json",
+    __import__("app.paths", fromlist=["CONFIG_DIR"]).CONFIG_DIR,
+    "majors.json",
 )
 
 # 相似度兜底：低于此值不算命中。0.55 是"共享至少一半字符片段"的量级，

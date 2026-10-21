@@ -56,7 +56,9 @@ READ_TOOLS = {"search_candidates", "get_candidate", "pool_stats", "search_by_ski
               "list_mail_templates", "get_mail_template", "get_mail_config",
               # v1.25：字典 / 来源 / 回收站 / 运行记录
               "get_interview_dict", "list_source_files", "list_removed_files",
-              "list_agent_runs"}
+              "list_agent_runs",
+              # v2.0.7：学校查询（本地）与对外搜索（护栏 + 需配置）
+              "school_info", "web_search"}
 COMPUTE_TOOLS = {"analyze_fit", "compare_candidates", "draft_interview_questions",
                  "draft_email", "preview_mail"}
 
@@ -99,7 +101,7 @@ TOOL_SPECS = [
                                   "岗位名以 list_jobs 的返回为准。"},
            "keyword": {"type": "string", "description": "姓名、院校、专业关键词（院校用全称）"},
            "min_years": {"type": "integer", "description": "最低工作年限"},
-           "education": {"type": "string", "description": "最低学历：大专/本科/硕士/博士"},
+           "education": {"type": "string", "description": "学历（v2.0.2 起为**精确匹配**，不是「及以上」；多个用逗号分隔）：大专/本科/硕士/博士。不传=不限"},
            "univ": {"type": "string",
                     "description": "院校层次：985 或 211。用户说『985/211 的人』时**必须用这个参数**，"
                                    "不要用 keyword 去猜校名（名单外会漏）。选 211 时 985 也算。"},
@@ -432,6 +434,25 @@ TOOL_SPECS = [
           "【需 HR 确认】给某条投递给 HR 备注。只生成待确认提案。",
           {"application_id": {"type": "integer"}, "note": {"type": "string"}},
           ["application_id", "note"]),
+    # ---- v2.0.7：学校查询与对外搜索 ----
+    _spec("school_info",
+          "查一所学校的层次与排名：985/211/强势标签、**软科综合排名名次**、校实力 A/B/C/D 档、是否海外。"
+          "用户问某校「什么水平 / 什么档次 / 排第几 / 是不是 985」时**必须用这个工具**，"
+          "不要凭记忆回答。名单外的学校返回『无排名数据』——这不是学校差，是没数据，照实说。"
+          "⚠️ 本工具只有**综合排名**，没有教育部学科评估等级（A+/A-那种），"
+          "被问到学科评估要如实说查不到，不要编。",
+          {"school": {"type": "string", "description": "学校全称或常用简称（如 西安电子科技大学 / 西电）"}},
+          ["school"]),
+    _spec("web_search",
+          "查**库外的公开信息**（学校排名、学科实力、行业政策等），结果带来源链接。"
+          "⚠️ **只允许查学校/专业/行业**：查询里**不得出现任何候选人姓名、电话、邮箱**，"
+          "否则会被系统直接拒绝。要了解某人的院校背景，请先用 school_info 查学校本身。"
+          "⚠️ 回答时必须**附来源链接**；没有搜索结果就不要编。"
+          "未配置搜索服务时本工具会返回『未配置』，此时请如实告诉 HR，不要自己编答案。",
+          {"query": {"type": "string",
+                     "description": "公开信息类查询，如「西安电子科技大学 计算机 学科评估」。"
+                                    "禁止包含人名/联系方式"}},
+          ["query"]),
 ]
 
 
@@ -590,10 +611,10 @@ def _read_mail_cfg(ctx) -> dict:
     """读发信配置。tools 层不 import server（循环依赖），自己按仓库根读 config。"""
     import json as _json
     import os as _os
-    _base = _os.path.dirname(_os.path.dirname(_os.path.dirname(
-        _os.path.abspath(__file__))))
+    from ..paths import CONFIG_DIR
+
     for rel in ("config/mail.json", "config/mailbox.json"):
-        p = _os.path.join(_base, rel)
+        p = _os.path.join(CONFIG_DIR, _os.path.basename(rel))
         if _os.path.exists(p):
             try:
                 with open(p, encoding="utf-8") as fh:
@@ -611,9 +632,9 @@ def _repo_config_path(*rel: str) -> str:
     （app/agent/tools.py 上溯三层 = 仓库根）。
     """
     import os as _os
-    base = _os.path.dirname(_os.path.dirname(_os.path.dirname(
-        _os.path.abspath(__file__))))
-    return _os.path.join(base, "config", *rel)
+    from ..paths import CONFIG_DIR
+
+    return _os.path.join(CONFIG_DIR, *rel)
 
 
 def _read_json_or(path: str, default):
@@ -1866,6 +1887,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             # v1.29：结论标签。**在这一层就校验**（与 db.set_application_stage 同一口径）——
             # 让模型在"提案阶段"就知道打错了，而不是等 HR 点了确认才 500。
             outcome = (args.get("outcome") or "").strip() or None
+            # 同一阶段只改面试结论时，提案目标也要显示为「已面试」，确认后同口径落库。
+            stage = stages_mod.auto_advance_stage(app.get("stage"), stage, outcome)
             if outcome and not stages_mod.outcome_allowed_from(app.get("stage"), stage, outcome):
                 _ok_oc = stages_mod.outcomes_of(app.get("stage"))
                 return _err(
@@ -1932,6 +1955,45 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             return _propose(conn, ctx, "add_note",
                             {"application_id": aid, "note": args["note"]},
                             f"给投递 #{aid} 写入备注：{str(args['note'])[:60]}", risk="低")
+
+        # ---- v2.0.7：查学校（本地数据，零外发） ----
+        if name == "school_info":
+            from .. import univ as _univ
+
+            school = str(args.get("school") or "").strip()
+            if not school:
+                return _err("school 不能为空")
+            band = _univ.school_band(school)
+            return _ok({
+                "school": school,
+                # 985 / 211 / 强势 / None —— 身份标签
+                "tier": _univ.uni_tier(school),
+                # 软科**综合**排名名次与实力档（A/B/C/D）。None = 名单里没有这所学校。
+                "rank": band[1] if band else None,
+                "band": band[0] if band else None,
+                "rank_source": "2025 软科中国大学排名（主榜）",
+                "overseas": _univ.is_overseas(school),
+                # 明确告诉模型"没有学科评估数据"，否则它会拿综合排名去冒充 A+/A-
+                "has_discipline_eval": False,
+                "discipline_note": "本系统只有综合排名，没有教育部学科评估等级（A+/A-/B+），"
+                                   "被问到学科评估请如实说查不到。",
+                "note": ("" if band else "无排名数据只表示名单里没有这所学校，**不代表学校差**。"),
+            })
+
+        # ---- v2.0.7：对外搜索（**护栏在代码里**，见 app/websearch.py） ----
+        if name == "web_search":
+            from .. import websearch as _ws
+
+            query = str(args.get("query") or "").strip()
+            # 两关：① 必须查学校/专业/行业 ② 不能带候选人姓名/电话/邮箱/身份证
+            # 不满足就直接拒，并把原因如实返回 —— 静默失败会让模型自己编答案。
+            deny = _ws.guard(conn, query)
+            if deny:
+                return _err(deny)
+            res = _ws.search(query, limit=5)
+            if not res.get("ok"):
+                return _err(res.get("reason") or "搜索失败")
+            return _ok(res)
 
         return _err(f"未知工具 {name}。可用工具：{', '.join(sorted(READ_TOOLS | COMPUTE_TOOLS | WRITE_TOOLS))}")
     except KeyError as exc:

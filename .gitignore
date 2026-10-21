@@ -22,6 +22,17 @@ __pycache__/
 
 # Python 虚拟环境
 .venv/
+.runtime_local/
+.runtime_build/
+.runtime_pyinstaller/
+.wheels/
+
+# 生产构建中间件与产物
+build_prod_assets/
+build_prod_work/
+dist_prod/
+dist_prod_tools/
+release_prod/
 
 # ---------- 上传 GitHub 前的隐私加固（2026-09-23） ----------
 # data 整目录不入库：库文件/简历原件（含真实简历）/备份/收信缓存全部属于本地数据
@@ -29,3 +40,27 @@ data/
 # 邮箱配置里有真实账号；仓库提供 mailbox.example.json 模板
 config/mailbox.json
 .DS_Store
+
+# ---------- 隐私加固（2026-10-21 v2.2.0 推送前补） ----------
+# ⚠️ 任何 **备份文件** 一律不入库：备份里往往是"改动前"的那份，
+# 而改动前那份可能正带着内网端点（如 model.json.bak_20241021 里就是 ws-*.maas.aliyuncs.com）。
+# 之前只挡了 "_bak_" 前缀，挡不住 "model.json.bak_xxx" 这种后缀形式 —— 差点推上去。
+*.bak
+*.bak_*
+*.old_*
+
+# 本地配置含**内网端点**，远端保留的是脱敏版，不要用本地版覆盖
+config/model.json
+config/embedding.json
+
+# 凭据与本机产物
+.github_token
+_package_cfg/
+release/
+dist/
+build/
+_tmp/
+_pack_data/
+
+# 真实用户档案的整份镜像（真实简历 + 证件照 + 密钥）——绝不入库
+_prod_verify/

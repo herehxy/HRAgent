@@ -32,11 +32,11 @@ import os
 import shutil
 from datetime import datetime
 
-from ..paths import BASE as ROOT        # 根目录唯一来源（认 TP_HOME）
-ONTOLOGY_PATH = os.path.join(ROOT, "config", "ontology.json")
-MAJORS_PATH = os.path.join(ROOT, "config", "majors.json")
-DOMAIN_DIR = os.path.join(ROOT, "config", "domains")
-BACKUP_DIR = os.path.join(ROOT, "data", "backup")
+from ..paths import CONFIG_DIR, DATA_DIR
+ONTOLOGY_PATH = os.path.join(CONFIG_DIR, "ontology.json")
+MAJORS_PATH = os.path.join(CONFIG_DIR, "majors.json")
+DOMAIN_DIR = os.path.join(CONFIG_DIR, "domains")
+BACKUP_DIR = os.path.join(DATA_DIR, "backup")
 
 
 def pack_dir() -> str:

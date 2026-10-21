@@ -303,6 +303,37 @@ _PAGE = """<!DOCTYPE html>
   .tab:hover{color:var(--accent);border-color:var(--accent-line)}
   .tab.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink);font-weight:500}
   .chip{font-size:13px;padding:2px 9px;border-radius:var(--r-card);display:inline-block;margin:0 4px 4px 0}
+  /* v2.0.2：学历档位胶囊（精确多选）。选中用**浅蓝底深蓝字**（与主按钮同一套口径 ——
+     HR 反复反馈深底浅字看不清）；未选中保持中性，免得一排彩按钮抢走卡片档位徽章的注意力。 */
+  .edu-chips{display:inline-flex;gap:4px;align-items:center}
+  .edu-chip{font-size:12px;line-height:18px;padding:1px 9px;border-radius:999px;
+    border:1px solid var(--line-2);background:var(--surface);color:var(--ink-2);cursor:pointer}
+  .edu-chip:hover{border-color:var(--accent-line);color:var(--accent-ink)}
+  .edu-chip.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink);font-weight:500}
+  /* 卡片「推进初筛通过」按钮：跟在岗位 chip 后面，与 18px 的名字行对齐 */
+  .stage-go{font-size:12px;padding:3px 10px;white-space:nowrap;vertical-align:middle;margin-left:2px}
+  /* v2.0.3（业务方 2026-10-20：卡片太高、一屏放不下一张）：
+     系统分析块原来是一整块**满宽浅蓝面板 + 3~4 行**，每张卡片约 150px，
+     而且 20 张卡片全是同一块蓝 —— 强调色被稀释成"到处都是蓝"。
+     现在默认折叠成一行：左边中性灰、只留一个源码标签和一句摘要（超长省略），
+     点开才看全文。蓝色只留给真正要点的东西（档位徽章、推进按钮）。 */
+  .insight-box{margin-top:10px;background:var(--surface-2);border-left:3px solid var(--line-2);
+    border-radius:0 6px 6px 0;padding:6px 10px;font-size:13px}
+  .insight-box>summary{display:flex;gap:6px;align-items:baseline;cursor:pointer;
+    list-style:none;outline:none}
+  .insight-box>summary::-webkit-details-marker{display:none}
+  .insight-box>summary::after{content:"展开";color:var(--ink-3);font-size:12px;flex:none}
+  .insight-box[open]>summary::after{content:"收起"}
+  .insight-box>summary>b{font-size:12px;font-weight:400;color:var(--ink-3);flex:none}
+  .ins-src{font-size:12px;color:var(--ink-3);flex:none}
+  .ins-src.warn{color:var(--warn)}
+  /* v2.0.3（业务方 2026-10-20）：总结那句话是**这张卡片的结论**，要能一眼读到 ——
+     放大到 15px + 用深蓝（--accent-ink，对白 5.74 达标），前面的"系统分析/来源"降成
+     12px 弱色当标签。原来它和标签同字号同色，等于把结论当注脚。 */
+  .ins-sum{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    color:var(--accent-ink);font-size:15px;font-weight:500;line-height:1.45}
+  .ins-body{margin-top:6px;color:var(--ink-2);line-height:1.7}
+  .ins-body>div{margin-top:2px}
   /* 档位徽章：只把字母加粗放大一点，说明文字缩小一号。
      注意这里刻意**克制**——卡片左侧已经有一条按档位着色的色条在表达"他是什么档"，
      徽章如果再做成大字号竖排就是第三次重复表达同一件事了。色条负责"扫一眼就知道"，
@@ -411,9 +442,18 @@ _PAGE = """<!DOCTYPE html>
      原来头像底色= 档位色，和左侧色条、右上徽章**同时**表达同一件事，
      一张卡上三个地方说"他是 A 档"。现在只留色条+ 徽章说档位，
      头像回归它的本职——让人名首字好找。 */
-  .avatar{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;
-    justify-content:center;font-size:17px;font-weight:600;flex:0 0 auto;
-    color:var(--ink-2);background:var(--surface-2)}
+  .avatar{position:relative;overflow:hidden;width:44px;height:44px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:600;
+    flex:0 0 auto;color:var(--ink-2);background:var(--surface-2)}
+  /* v2.0.4：证件照是**叠加层**不是替换层 —— 抽不到 / 被去掉 / 文件丢了都会自动
+     露出下面的"姓首字"，不会出现破图或空圆。 */
+  .avatar .av-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+    background:var(--surface-2)}
+  /* 档案弹窗里的证件照预览（72px 方图，比卡片上那张看得清） */
+  .av-big{position:relative;width:72px;height:72px;border-radius:8px;overflow:hidden;
+    background:var(--surface-2);display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+  .av-big img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+    background:var(--surface-2)}
   .nm{font-size:18px;font-weight:600;letter-spacing:-.01em}
   .meta{font-size:13px;color:var(--ink-3);margin-top:3px}
   .acts{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;line-height:1.5}
@@ -667,7 +707,7 @@ const CAMPUS_MODE = true;
 let GENDER = '';
 // 初筛下拉（v1.7.3）：最低学历（≥门槛）与院校层次（985/211）。
 // 与性别一样，都是普通筛选条件。
-let EDU_MIN = '', UNIV = '';
+let EDU_SET = [], UNIV = '';
 // v1.27：英语四六级（数组，多选）与特定院校（数组，多选）。
 // ⚠️ 这两个变量**必须声明在这里**，不能挪到 `renderPool` 附近的 `let` 区 ——
 // 上面 `refresh()`（第 400 多行）会读它们，声明写在读取者之后就触发
@@ -680,6 +720,9 @@ let CET_F = [], STRONG_F = [];
 //   DATE_FROM / DATE_TO  投递时间段（含当天）
 //   UNIT_F      面试部门（面试单位，数组多选 = 并集）
 let OVERSEAS_F = [], BACHELOR_F = [], UNIT_F = [], DATE_FROM = '', DATE_TO = '';
+/* v2.0.3：投递时间的**预设档**（空=不限 / 7 / 30 / year / custom）。
+   它只负责把 DATE_FROM/DATE_TO 算出来，查询那边一行没动。 */
+let DATE_PRESET = '';
 let STAGE_F = '';          // v1.16.1：阶段筛选（管道"看全部"跳过来时用）
 const PIPE_PAGE = {};     // 管道每列的页码（v1.29.5：阶段名 → 第几页，1 起；每页 15 人，翻页替代"整列展开"）
 // 人才库分页（v1.7.1）：每页 20 人。切档位 / 搜索 / 清空都会把页码拨回第 1 页——
@@ -690,6 +733,33 @@ let POOL_PAGE = 1;const POOL_SIZE = 20;
 // 记在全局变量上，翻页 / 搜索 / 改档位等 refresh 重渲染后不丢。
 let PIPE_OPEN = false;
 function poolPageReset(){ POOL_PAGE = 1; }
+/* v2.0.3（业务方 2026-10-20：投递时间那两个日期框会换行、白占一整行）。
+   改成**预设下拉**：近 7 天 / 近 30 天 / 今年 / 不限 / 自定义…。
+   它只把起止日期算出来写进 DATE_FROM/DATE_TO —— `poolQuery` 与后端一个字都没改，
+   口径仍是"含当天"（上界由后端取次日）。要精确区间选「自定义…」，露出原来的两个框。 */
+function datePreset(v){
+  DATE_PRESET = v;
+  const pad = n => (n < 10 ? '0' : '') + n;
+  const iso = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  const today = new Date();
+  if (v === '7' || v === '30' || v === 'year'){
+    const from = new Date(today);
+    if (v === 'year'){ from.setMonth(0); from.setDate(1); }
+    else from.setDate(today.getDate() - (v === '7' ? 6 : 29));
+    DATE_FROM = iso(from); DATE_TO = iso(today);
+  } else if (v === ''){
+    DATE_FROM = ''; DATE_TO = '';
+  }
+  /* v === 'custom'：保留现值不动，交给界面上露出的两个日期框 */
+  poolPageReset(); refresh();
+}
+/* v2.0.2：学历档位开关（精确多选）。点一下加入、再点取消。
+   不选 = 不限；选了几档就只回这几档的人（不再是"及以上"）。 */
+function eduToggle(v){
+  const i = EDU_SET.indexOf(v);
+  if (i >= 0) EDU_SET.splice(i, 1); else EDU_SET.push(v);
+  poolPageReset(); refresh();
+}
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 // 属性安全转义（v1.25.8）：esc() 只转义 & < > "，不含单引号。当把外部数据
@@ -1430,20 +1500,27 @@ function insightBlock(x){
             : ins.source === 'manual'        ? '手动重算' : '进门即分析';
   const ev = (ins.evidence||[]).slice(0,2)
     .map(e => `[${e.skill}] ${(e.quote||'').slice(0,28)}`).join(' ｜ ');
-  // 底色用 --accent-hi（强调色的最浅一档）。原来这里是 #f2f7ff——上一版遗留的
-  // 冷蓝，和强调色不同色温，洞察块因此比周围明显"偏紫"。
-  return `<div style="margin-top:10px;background:var(--accent-hi);border-left:3px solid var(--accent);
-                      padding:8px 10px;border-radius:0 6px 6px 0">
-    <b>系统自动分析</b> <span class="small">${esc(src)}${ins.model?' · '+esc(ins.model):''}</span>
-    <div style="margin-top:4px">${esc(ins.summary||'')}</div>
-    ${ins.business_direction ? `<div class="small" style="margin-top:4px">业务方向：
-      <b style="color:var(--accent-ink)">${esc(ins.business_direction)}</b></div>` : ''}
-    ${(ins.reasons||[]).length ? `<div class="small">依据：${esc(ins.reasons.join('；'))}</div>` : ''}
-    ${(ins.risks||[]).length ? `<div class="small">风险：${esc(ins.risks.slice(0,2).join('；'))}</div>` : ''}
-    ${ev ? `<div class="small">证据：${esc(ev)}</div>` : ''}
-    ${(x.reasons||[]).length ? `<div class="why-line">推荐理由：${esc(x.reasons.join('；'))}</div>` : ''}
-    ${tierSourceLine(x)}
-  </div>` + '';
+  // v2.0.3（业务方 2026-10-20）：**默认折叠成一行**。原来越整块浅蓝面板（满宽 + 3~4 行），
+  // 每张卡片约 150px，且"卡卡皆蓝"把唯一强调色稀释掉了。
+  // 现在：中性灰底 + 一行摘要（超长省略），点开看全文；只有「规则降级」这一档
+  // 把标签染成 warn 色 —— 那是唯一需要提醒的状态，不该被整块蓝色盖过去。
+  const warn = ins.source === 'rule_fallback';
+  return `<details class="insight-box">
+    <summary>
+      <b>系统分析</b>
+      <span class="ins-src${warn?' warn':''}">${esc(src)}</span>
+      <span class="ins-sum">${esc(ins.summary||'')}</span>
+    </summary>
+    <div class="ins-body">
+      ${ins.model ? `<div>模型：${esc(ins.model)}</div>` : ''}
+      ${ins.business_direction ? `<div>业务方向：<b>${esc(ins.business_direction)}</b></div>` : ''}
+      ${(ins.reasons||[]).length ? `<div>依据：${esc(ins.reasons.join('；'))}</div>` : ''}
+      ${(ins.risks||[]).length ? `<div>风险：${esc(ins.risks.slice(0,2).join('；'))}</div>` : ''}
+      ${ev ? `<div>证据：${esc(ev)}</div>` : ''}
+      ${(x.reasons||[]).length ? `<div class="why-line">推荐理由：${esc(x.reasons.join('；'))}</div>` : ''}
+      ${tierSourceLine(x)}
+    </div>
+  </details>`;
 }
 
 /* 档位来源（v1.12）：原来的「档位依据（纯规则、评分拆解）」面板已删除——
@@ -1550,7 +1627,7 @@ function poolQuery(opt){
   const q = ['tier=' + encodeURIComponent(TAB)
             , 'kw=' + encodeURIComponent(KW)
             , 'gender=' + encodeURIComponent(GENDER)
-            , 'education=' + encodeURIComponent(EDU_MIN)
+            , 'education=' + encodeURIComponent(EDU_SET.join(','))
             , 'univ=' + encodeURIComponent(UNIV)
             , 'stage=' + encodeURIComponent(STAGE_F)
             // v1.27：数组型筛选用逗号拼（后端 split(',') 后按"任一命中"处理）
@@ -1596,15 +1673,17 @@ async function viewPool(){
       <option value="">不限</option>
       ${['男','女','未标注'].map(g=>`<option value="${g}" ${GENDER===g?'selected':''}>${g}（${facets[g]==null?0:facets[g]}）</option>`).join('')}
     </select>`;
-  // 初筛（v1.7.3）：最低学历（≥门槛，"无法判定"不命中但下方会提示人数）
-  // 与院校层次（985 ⊂ 211，选 211 时 985 也算；下拉人数是筛选前口径，对得上共 N 人）。
-  // 两者都是岗位相关硬条件，与性别不同，不需要开关约束。
+  // 学历（v2.0.2，业务方 2026-10-19）：**精确档位多选**。
+  // 原来是"最低学历（≥门槛）"—— 想筛"只要大专"会把硕博一起带出来，用不了。
+  // 现在 4 档各自独立，点一下加入/再点取消；同义档（专科/学士/研究生）由后端
+  // `db.parse_education()` 归并，选"硕士"也认简历里写"研究生"的人。
+  // 用胶囊而不是多选下拉：HR 不会 Ctrl+点，这个位置要一眼能操作。
   const uniF = c.uni_facets || {};
   const eduSel = `<span class="small" style="margin-left:6px">学历</span>
-    <select onchange="EDU_MIN=this.value;poolPageReset();refresh()">
-      ${[['','不限'],['大专','大专及以上'],['本科','本科及以上'],['硕士','硕士及以上'],['博士','博士']]
-        .map(([v,l])=>`<option value="${v}" ${EDU_MIN===v?'selected':''}>${l}</option>`).join('')}
-    </select>`;
+    <span class="edu-chips">${['大专','本科','硕士','博士'].map(v=>
+      `<button class="edu-chip${EDU_SET.includes(v)?' on':''}"
+        onclick="eduToggle('${v}')"
+        title="点一下加入筛选、再点取消（可多选）；不选=不限">${v}</button>`).join('')}</span>`;
   // v1.16.1：阶段筛选。管道里"还有 N 人 · 看全部"跳过来时靠它落地——
   // 后端 /api/candidates 早就支持 stage 参数，只是界面一直没给入口。
   const stageSel = `<span class="small" style="margin-left:6px">阶段</span>
@@ -1655,13 +1734,20 @@ async function viewPool(){
       onchange="UNIT_F=[...this.selectedOptions].map(o=>o.value);poolPageReset();refresh()">
       ${_unitNames.map(v=>`<option value="${esc(v)}" ${UNIT_F.includes(v)?'selected':''}>${esc(v)}（${uF[v]}）</option>`).join('')}
     </select>` : '';
-  // v1.29：投递时间段（**含当天**，后端上界取次日）
+  // v2.0.3：投递时间段改**预设下拉**（原来两个原生日期框跟"阶段/标签"挤同一行会换行，
+  // 白占一整行）。仍含当天；要精确区间选「自定义…」再露出两个日期框。
+  const _dpOpts = [['', '不限'], ['7', '近 7 天'], ['30', '近 30 天'],
+                   ['year', '今年'], ['custom', '自定义…']]
+    .map(([v, l]) => `<option value="${v}" ${DATE_PRESET===v?'selected':''}>${l}</option>`).join('');
   const dateSel = `<span class="small" style="margin-left:6px">投递时间</span>
+    <select onchange="datePreset(this.value)"
+      title="按投递日期筛（含当天）；「自定义…」可指定精确区间">${_dpOpts}</select>
+    ${DATE_PRESET === 'custom' ? `
     <input type="date" value="${esc(DATE_FROM)}" style="width:140px"
       onchange="DATE_FROM=this.value;poolPageReset();refresh()">
     <span class="small">→</span>
     <input type="date" value="${esc(DATE_TO)}" style="width:140px"
-      onchange="DATE_TO=this.value;poolPageReset();refresh()">`;
+      onchange="DATE_TO=this.value;poolPageReset();refresh()">` : ''}`;
   // v1.29：「只看六级」快捷按钮已删除（业务方 2026-10-16：完全没必要）。
   // 四六级本来就是多选下拉，再加一个只筛"六级"的按钮等于**两个入口筛同一个集合**，
   // 而且它会绕过"未提供"那档 —— HR 看到"只剩 8 人"却不知道另外的人是什么情况。
@@ -1682,7 +1768,7 @@ async function viewPool(){
   // 学历"无法判定"的人被门槛挡下时必须说出来，不能让人静默消失
   const ef = c.edu_filter || {};
   const eduWarn = (ef.applied && ef.hidden_unknown > 0)
-    ? `<div class="warn" style="margin-top:8px">有 <b>${ef.hidden_unknown}</b> 人学历无法判定，未计入「${esc(ef.min)}及以上」筛选结果；选「不限」可看到全部。</div>` : '';
+    ? `<div class="warn" style="margin-top:8px">有 <b>${ef.hidden_unknown}</b> 人学历无法判定，未计入「${esc(ef.levels || '')}」的筛选结果；点掉学历档位可看到全部。</div>` : '';
   host.innerHTML = `
   <div class="panel">
     <!-- v1.25.6：工具栏重排——找（搜索/筛选）、收（导入）、析（分析）三簇左对齐连续排列，
@@ -1740,7 +1826,7 @@ async function viewPool(){
           批量按模型重跑
         </button>
         <span style="flex-basis:100%;height:0"></span>
-        <button onclick="KW='';GENDER='';EDU_MIN='';UNIV='';CET_F=[];STRONG_F=[];OVERSEAS_F=[];BACHELOR_F=[];UNIT_F=[];DATE_FROM='';DATE_TO='';poolPageReset();refresh()">清空</button>
+        <button onclick="KW='';GENDER='';EDU_SET=[];UNIV='';CET_F=[];STRONG_F=[];OVERSEAS_F=[];BACHELOR_F=[];UNIT_F=[];DATE_FROM='';DATE_TO='';DATE_PRESET='';poolPageReset();refresh()">清空</button>
         ${gsel}${eduSel}${uniSel}${overseasSel}${bachelorSel}${cetSel}${unitSel}
         ${(c.conflicts||[]).length ? `<div class="warn" style="flex-basis:100%;margin-top:4px">${c.conflicts.map(esc).join('<br>')}</div>` : ''}
     </div>
@@ -1923,24 +2009,40 @@ function cardHtml(x){
   // 档位选项由服务端注入的顺序生成（原来写死 ['A','B','C','D']）
   const tiers = TIER_ORDER.map(k=>`<option value="${k}" ${k===t?'selected':''}>${k} · ${TIER_LABELS[k]}</option>`).join('');
   const stages = STAGES.map(k=>`<option value="${k}" ${k===stage?'selected':''}>${k}</option>`).join('');
+  // v2.0.2（业务方 2026-10-19 第二次反馈）：位置从「档位右边」挪到**「岗位右边」**。
+  // 理由：HR 扫卡片的动线是 名字 → 岗位 → 我要做什么；放在整行最右要横跨一屏才点到。
+  // **只在「全部简历」阶段出这个按钮**；已经有阶段的**不再灰显一份当前阶段** ——
+  // 同一行的阶段标签（stageTag）就在左边几个 chip 处，再放一个灰的等于同一件事写两遍。
+  const _defStage = STAGE_CFG.default_stage || '全部简历';
+  const _firstPass = (STAGES && STAGES[1]) || '初筛通过';
+  const stageAction = (x.application_id && stage === _defStage)
+    ? `<button class="btn-primary stage-go"
+         onclick="setStage(${x.application_id},'${escA(_firstPass)}')"
+         title="把这条投递推进到「${escA(_firstPass)}」；推进后就能用「下载初筛简历」把他的简历打包给用人部门"
+         >推进${escA(_firstPass)}</button>`
+    : '';
   const contact = contactLine(x);
   const scoreTip = (!job && sug)
     ? ` title="档位按「建议岗位 · ${esc(sug.title)}」的 JD 判断：学历不达标判 ${TIER_CFG.hard_shortfall_tier||''}，其余由模型给出"` : '';
   return `<div class="card" style="border-left-color:${fg}">
     <div class="row1">
       <input type="checkbox" class="pickChk" value="${x.id}" style="margin-right:10px">
-      <div class="avatar">${esc((x.name||'?').slice(0,1))}</div>
+      <div class="avatar">${esc((x.name||'?').slice(0,1))}${x.avatar_path === '-' ? ''
+        : `<img class="av-img" alt=""
+             data-base="${withToken('/api/candidates/'+x.id+'/avatar')}"
+             src="${withToken('/api/candidates/'+x.id+'/avatar')}"
+             onerror="avRetry(this)">`}</div>
       <div style="flex:1;min-width:0">
         <!-- v1.29：四六级标签紧跟学校之后（原来排在性别后面）——
              学历/学校/四六级同属「学历背景」，放一起 HR 扫一眼就到位。 -->
-        <div class="nm">${esc(x.name||'未识别')} ${verdictTag} ${eduSchoolTag(x)} ${cetTag(x)} ${stageTag} ${interviewUnitTag(x)} ${rev} ${genderTag} ${jobTag}</div>
+        <div class="nm">${esc(x.name||'未识别')} ${verdictTag} ${eduSchoolTag(x)} ${cetTag(x)} ${stageTag} ${interviewUnitTag(x)} ${rev} ${conf} ${genderTag} ${jobTag}${stageAction}</div>
         ${expBadge(x) ? `<div class="meta" style="margin-top:2px">${expBadge(x)}</div>` : ''}
         <div class="meta" style="margin-top:2px"><b>联系方式</b>：${contact}</div>
         ${noteLine(x)}
       </div>
       <div class="badge"${scoreTip} style="color:${fg};background:${bg}"><b>${t}</b><span>${TIER_LABELS[t]}</span></div>
     </div>
-    <div class="hitrow" style="margin-top:10px;border-top:1px solid var(--line-2);padding-top:10px">${hits}${miss}${conf}</div>
+    ${(hits || miss) ? `<div class="hitrow" style="margin-top:10px;border-top:1px solid var(--line-2);padding-top:10px">${hits}${miss}</div>` : ''}
     ${(()=>{
       /* v1.25.7：技能证据**默认折叠**；灰色技能全集不再展示（那是"核对模式"的信息，
          完整档案里有全量；卡片只留决策所需）。展开仍能看到逐条证据。 */
@@ -2022,6 +2124,50 @@ async function ensureInterviewDict(){
   }catch(e){ /* 拉不到就当纯文本输入，不影响登记 */ }
 }
 
+/* v2.0.4：头像请求第一次会 404 —— 因为**抽图在后台做**（抽图是 CPU 活，放在请求线程里
+   会把 /api/candidates 堵到 9 秒，实测过）。所以 404 的含义是"稍后有"，不是"没有"：
+   2/4/6 秒后各重试一次，三次都没有就摘掉 <img>，露出下面的"姓首字"。 */
+function avRetry(img){
+  const n = (+img.dataset.r || 0) + 1;
+  if (n > 3){ img.remove(); return; }
+  img.dataset.r = n;
+  const base = img.dataset.base || '';
+  const sep = base.indexOf('?') >= 0 ? '&' : '?';
+  setTimeout(()=>{ img.src = base + sep + 'r=' + n + '_' + Date.now(); }, n * 2000);
+}
+/* v2.0.4：档案里的证件照。**必须能换能删** —— 抽图是启发式（见 app/avatar.py），
+   抽到 logo / 组织架构图 / 整页缩略图是会发生的事；没有出口就等于把错图钉死在卡片上。 */
+function avatarBlock(d){
+  const has = d.avatar_path && d.avatar_path !== '-';
+  const pending = !d.avatar_path;            // NULL = 还没抽过（后台正在抽）
+  const base = withToken('/api/candidates/' + d.id + '/avatar');
+  return `<div class="bar" style="gap:12px;align-items:center;margin-bottom:10px">
+    <div class="av-big">
+      <span class="small">${has ? '' : (pending ? '抽取中…' : '无照片')}</span>
+      ${d.avatar_path === '-' ? '' :
+        `<img src="${base}${base.indexOf('?') >= 0 ? '&' : '?'}v=${Date.now()}" alt=""
+             data-base="${base}" onerror="avRetry(this)">`}
+    </div>
+    <div class="small" style="color:var(--ink-3);flex:1;min-width:0">
+      从简历原件自动抽取；不是本人可以重抽或去掉。
+    </div>
+    <span class="vdiv"></span>
+    <button onclick="avatarRefresh(${d.id})">重新抽取</button>
+    <button onclick="avatarClear(${d.id})">去掉</button>
+  </div>`;
+}
+async function avatarRefresh(cid){
+  const r = await api('/api/candidates/'+cid+'/avatar', {method:'POST', body:'{}'});
+  if (r.__http_error || r.error){ toast(r.detail||r.error||'重抽失败','danger'); return; }
+  toast(r.ok ? '已重新抽取证件照' : '这份简历里仍没抽出可用照片', r.ok ? 'ok' : 'warn');
+  refresh(); showDetail(cid);
+}
+async function avatarClear(cid){
+  const r = await api('/api/candidates/'+cid+'/avatar', {method:'DELETE'});
+  if (r.__http_error || r.error){ toast(r.detail||r.error||'去掉失败','danger'); return; }
+  toast('已去掉证件照（卡片回到姓名首字）','ok');
+  refresh(); showDetail(cid);
+}
 async function showDetail(cid){
   const d = await api('/api/candidates/'+cid);
 
@@ -2079,6 +2225,7 @@ async function showDetail(cid){
       ${(d.duplicates||[]).map(x=>`#${x.id} ${esc(x.name)}（${esc(x.reason)}）`).join('；')}
       </div>` : '';
   document.getElementById('mBody').innerHTML = `
+    ${avatarBlock(d)}
     <div class="kv">
       <div class="k">基本信息</div>
       <div style="background:var(--surface-2);border-radius:8px;padding:10px 12px">
@@ -2089,7 +2236,7 @@ async function showDetail(cid){
         <div class="bar" style="flex-wrap:wrap;gap:8px">
           <input id="edName" value="${esc(d.name||'')}" style="width:104px" placeholder="姓名">
           <select id="edEdu" style="width:104px">
-            ${['', '大专', '本科', '硕士', '博士'].map(v =>
+            ${['', '大专', '本科', '硕士', '研究生', '博士'].map(v =>
               `<option value="${v}" ${(d.edu_level||'')===v?'selected':''}>${v||'（学历未识别）'}</option>`).join('')}
           </select>
           <input id="edSchool" value="${esc(d.school||'')}" style="width:168px" placeholder="学校">
@@ -2187,10 +2334,17 @@ async function showDetail(cid){
            ⚠️ 模型没给到最高学历那一段时用 school+edu_level 合成补齐 ——
            否则不少档案这里会"只剩第一学历"（业务方点名的样子）。
            注释里**不要写反引号**（_PAGE 是三引号字符串，会被提前截断）。 */
-        const segs = (d.edu_history||[]).map(h=>({...h}));
+        const _fd = (d.first_degree_school||'').trim();
+        /* v2.0.8（业务方）：**第一学历那一行已经显示了本科院校**（可编辑输入框 + 层次 + 排名），
+           教育经历里若再出现一段"本科：同一所学校"，就是同一件事写两遍 —— 直接去掉那一段。
+           不同校（如专升本）才保留。 */
+        const segs = (d.edu_history||[])
+          .filter(h=>!(_fd && h.degree==='本科' && (h.school||'').trim()===_fd))
+          .map(h=>({...h}));
         if (d.school && d.edu_level &&
             !segs.some(h=>h.degree===d.edu_level && h.school===d.school))
-          segs.push({degree:d.edu_level, school:d.school, major:"", tier:d.uni_tier||null});
+          segs.push({degree:d.edu_level, school:d.school, major:"", tier:d.uni_tier||null,
+                     rank_no:d.uni_rank||null});
         const ord = {本科:0, 硕士:1, 博士:2};
         segs.sort((a,b)=>((ord[a.degree]==null?9:ord[a.degree]) -
                           (ord[b.degree]==null?9:ord[b.degree])));
@@ -2198,12 +2352,15 @@ async function showDetail(cid){
           + `border:1px solid ${t==='强势'?'var(--ok)':'var(--accent-line)'};`
           + `background:var(--accent-soft);border-radius:4px;padding:0 4px;`
           + `font-size:12px;font-weight:600">${esc(t)}</span>`):'';
+        /* v2.0.6（业务方）：每所学校后面显示**软科排名**。985/211 是标签、看不出强弱，
+           名次才是强弱（西电 211 第 40 强于 985 的西北农林第 71）。服务端算好名次下发。 */
+        const rankTag = n => (n ? `<span style="color:var(--ink-3);font-size:12px">软科第 ${n}</span>` : '');
         const rows = segs.map(h=>
           `<div style="margin:2px 0 2px 2px">`
           + `<span style="color:var(--ink-2)">${esc(h.degree||'学历')}：</span>`
           + `<span style="color:var(--accent-ink);font-weight:500">${esc(h.school||'')}</span>`
           + (h.major?`<span style="color:var(--ink-3);font-size:12px">（${esc(h.major)}）</span>`:'')
-          + badge(h.tier) + `</div>`).join('');
+          + badge(h.tier) + ` ` + rankTag(h.rank_no) + `</div>`).join('');
         return `<div class="k">教育经历</div>
       <div>
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px">
@@ -2211,7 +2368,7 @@ async function showDetail(cid){
           <input id="edFD" style="width:220px" placeholder="本科院校"
                  value="${esc(d.first_degree_school||'')}"
                  title="简历没写本科是哪所时在这里补；筛选「本科985/211」按这一所判。留空算「未识别」">
-          ${badge(d.bachelor_tier)}
+          ${badge(d.bachelor_tier)} ${rankTag(d.bachelor_rank)}
         </div>
         ${rows}
       </div>`;
@@ -3034,7 +3191,7 @@ function goAllPool(){
      院校全部清掉，与工具栏「清空」按钮同义，只是额外把 STAGE_F 也清了。
      v1.27：四六级（CET_F）与特定院校（STRONG_F）同样是筛选，也一并清 ——
      漏清的后果与漏清 UNIV 完全一样：环显示"全部 100 人"、列表只剩 3 人。 */
-  STAGE_F = ''; TAB = 'ALL'; KW = ''; GENDER = ''; EDU_MIN = ''; UNIV = '';
+  STAGE_F = ''; TAB = 'ALL'; KW = ''; GENDER = ''; EDU_SET = []; UNIV = '';
   CET_F = []; STRONG_F = [];
   const _kb = document.getElementById('kwBox'); if (_kb) _kb.value = '';
   poolPageReset(); go('pool');
@@ -3222,7 +3379,11 @@ async function viewArchive(){
     return `<div class="card" style="border-left-color:${fg}">
       <div class="row1">
         <input type="checkbox" class="archChk" value="${x.id}" style="margin-right:10px">
-        <div class="avatar">${esc((x.name||'?').slice(0,1))}</div>
+        <div class="avatar">${esc((x.name||'?').slice(0,1))}${x.avatar_path === '-' ? ''
+        : `<img class="av-img" alt=""
+             data-base="${withToken('/api/candidates/'+x.id+'/avatar')}"
+             src="${withToken('/api/candidates/'+x.id+'/avatar')}"
+             onerror="avRetry(this)">`}</div>
         <div style="flex:1;min-width:0">
           <div class="nm">${esc(x.name||'未识别')} ${eduSchoolTag(x)} ${leftTxt}</div>
           <div class="meta">${expBadge(x) ? (expBadge(x) + ' · ') : ''}阶段 ${esc(x.stage||'新投递')} ·
@@ -4922,12 +5083,12 @@ async function viewMail(){
       <div class="k">附件</div><div>
         <!-- v1.29：临时上传附件（录用通知扫描件那类"不属于任何候选人"的材料）。
              库内原件通道**故意不收任意文件**（防"前端指定服务端读哪个文件"），
-             所以另开这条受控通道：只收 PDF/JPG/PNG、≤20MB、不入库。 -->
+              所以另开这条受控通道：支持常见图片/办公文档、≤20MB、不入库。 -->
         <div class="bar" style="margin-top:6px;flex-wrap:wrap;gap:8px">
           <button onclick="document.getElementById('upAttach').click()"
-            title="上传录用通知扫描件等临时材料。只支持 PDF / JPG / PNG，单份 ≤20MB；发出后文件仍保留可追溯">上传附件</button>
+            title="上传图片、PDF、Word、Excel、PPT 等临时材料，单份 ≤20MB；发出后文件仍保留可追溯">上传附件</button>
           <input id="upAttach" type="file" hidden multiple
-                 accept=".pdf,.jpg,.jpeg,.png"
+                 accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.md,.rtf,.odt,.ods,.odp,.wps,.et,.dps,.zip,.rar,.7z,.jpg,.jpeg,.png,.webp,.bmp,.gif,.tif,.tiff,.heic,.heif"
                  onchange="uploadOutbox(this.files)">
           <span class="small" id="upAttMsg"></span>
         </div>
@@ -5795,9 +5956,18 @@ async function sendMailConfirm(){
   const tname = tsel.value ? (tsel.selectedOptions[0].textContent || '') : '';
   const btn = document.getElementById('mailSendBtn');
   if (btn){ btn.disabled = true; btn.textContent = '发送中…'; }
+  function finishSend(r){
+    // 发完清空勾选：留着勾选会让 HR 再点一次「确认发送」时把附件又发一遍。
+    MAIL_ATTS = [];
+    MAIL_OUTBOX = []; renderOutbox(); renderAttPreview();
+    mailSentBanner(true, r.note || '邮件已发送',
+      {to, subject, when: new Date(), from_header: r.from_header || '',
+       attachments: r.attachments || []});
+    toast(r.note || '邮件已发送', (r.attachments_missing||[]).length ? 'warn' : 'ok');
+  }
   let r;
   try {
-    r = await api('/api/mail/send', {method:'POST', body:JSON.stringify({
+    r = await api('/api/mail/send?async=1', {method:'POST', body:JSON.stringify({
       to: to, subject: subject, body: plain, html: html,
       candidate_id: cid ? parseInt(cid,10) : null,
       template_name: tname,
@@ -5816,19 +5986,26 @@ async function sendMailConfirm(){
     toast(errText(r.detail) || r.error || '发送失败','danger');
     return;
   }
-  // 发完清空勾选：留着勾选会让 HR 再点一次「确认发送」时**把附件又发一遍**
-  //（而且那封的内容可能已经改了，重复发附件是实实在在的困扰）。
-  MAIL_ATTS = [];
-  // v1.29：临时附件同理清空（同一个坑）
-  MAIL_OUTBOX = []; renderOutbox(); renderAttPreview();
-  // v1.23.8：发信成功后**在编辑区就地留痕**，不只靠顶部 toast。
-  // 原来只有 `toast('邮件已发送')`，而 #alerts 在页面顶部、发信操作在最下方，
-  // toast 7 秒后还消失——用户盯着编辑器根本看不到，回过神又不知道发没发出去，
-  // 于是会重复点。**发信是不可撤销的动作，必须留下"已发出去"的证据。**
-  mailSentBanner(true, r.note || '邮件已发送',
-    {to, subject, when: new Date(), from_header: r.from_header || '',
-     attachments: r.attachments || []});
-  toast(r.note || '邮件已发送', (r.attachments_missing||[]).length ? 'warn' : 'ok');
+  if (r.task_id){
+    progressModal(r.task_id, {
+      title: '发送邮件',
+      desc: '邮件正在后台发送，请勿重复点击。附件较大时会多等一会儿。',
+      chain: true,
+      onDone: (task) => {
+        closeModal();
+        const sent = task.result || {};
+        if (task.status !== 'done' || !sent.ok){
+          const msg = sent.error || task.message || '发送失败';
+          mailSentBanner(false, msg);
+          toast(msg, 'danger');
+          return;
+        }
+        finishSend(sent);
+      }
+    });
+    return;
+  }
+  finishSend(r);
 }
 
 /* 发信结果横幅：成功=绿、失败=红，都留在编辑区里（不自动消失），

@@ -29,11 +29,12 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 
 from app import auth, db, ingest, search  # noqa: E402
+from app.paths import CONFIG_DIR, DATA_DIR  # noqa: E402
 
-DB_PATH = os.environ.get("TP_DB_PATH") or os.path.join(BASE, "data", "workbench.db")
-JD_PATH = os.path.join(BASE, "config", "jd.json")
-TIERS_PATH = os.path.join(BASE, "config", "tiers.json")
-RESUME_DIR = os.path.join(BASE, "data", "resumes")
+DB_PATH = os.environ.get("TP_DB_PATH") or os.path.join(DATA_DIR, "workbench.db")
+JD_PATH = os.path.join(CONFIG_DIR, "jd.json")
+TIERS_PATH = os.path.join(CONFIG_DIR, "tiers.json")
+RESUME_DIR = os.path.join(DATA_DIR, "resumes")
 
 
 def _load(path: str) -> dict:
@@ -402,6 +403,32 @@ def cmd_refresh_skills(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def cmd_avatar_backfill(args: argparse.Namespace) -> int:
+    """补齐历史头像；只处理未尝试过（avatar_path IS NULL）的候选人。"""
+    import time
+
+    from app import avatar
+
+    avatars_dir = os.path.join(DATA_DIR, "avatars")
+    if args.stop:
+        print(avatar.stop_backfill())
+        return 0
+    state = avatar.start_backfill(DB_PATH, avatars_dir)
+    print(f"[i] 历史头像补扫：总数 {state.get('total', 0)}，"
+          f"已处理 {state.get('done', 0)}")
+    while args.wait and avatar.backfill_status().get("running"):
+        time.sleep(0.8)
+        state = avatar.backfill_status()
+        print(f"    {state.get('done', 0)}/{state.get('total', 0)}"
+              f"，成功 {state.get('found', 0)}，无照片 {state.get('none', 0)}",
+              end="\r", flush=True)
+    state = avatar.backfill_status()
+    print(f"\n[√] 补扫状态：{'运行中' if state.get('running') else '已结束'}"
+          f"｜成功 {state.get('found', 0)}｜无照片 {state.get('none', 0)}"
+          f"｜失败 {state.get('failed', 0)}｜跳过 {state.get('skipped', 0)}")
+    return 0
+
+
 def cmd_majors(args: argparse.Namespace) -> int:
     """查看通用学科目录（专业需求匹配的底座）。"""
     from app.pipeline import majors as mj
@@ -567,6 +594,12 @@ def main() -> int:
     p = sub.add_parser("refresh-skills",
                        help="按「对应岗位」刷新技能清单（修数据，不改档位与分数）")
     p.set_defaults(func=cmd_refresh_skills)
+
+    p = sub.add_parser("avatar-backfill",
+                       help="补齐历史候选人头像（只处理尚未尝试过的）")
+    p.add_argument("--wait", action="store_true", help="等待后台补扫完成")
+    p.add_argument("--stop", action="store_true", help="请求停止当前补扫")
+    p.set_defaults(func=cmd_avatar_backfill)
 
     p = sub.add_parser("majors", help="查看通用学科目录（专业需求匹配的底座）")
     p.add_argument("-q", "--q", default=None, help="关键词过滤，如「材料」")

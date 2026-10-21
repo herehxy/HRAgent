@@ -21,11 +21,21 @@ import smtplib
 import ssl
 from email.header import Header
 from email.mime.application import MIMEApplication
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, parseaddr
 
 from . import mailbox as mb
+
+# 常见但 Windows 注册表/mimetypes 可能缺失的类型。
+for _ext, _type in {
+    ".heic": "image/heic", ".heif": "image/heif",
+    ".webp": "image/webp", ".wps": "application/vnd.ms-works",
+    ".et": "application/vnd.ms-excel", ".dps": "application/vnd.ms-powerpoint",
+    ".7z": "application/x-7z-compressed", ".rar": "application/vnd.rar",
+}.items():
+    mimetypes.add_type(_type, _ext)
 
 #: 常见服务商的发信服务器（与收信预设配对）
 SMTP_PRESETS = [
@@ -67,7 +77,7 @@ def load_smtp(cfg: dict | None = None) -> dict:
         "imap_user": imap_user,
         # 独立口令文件是否已建（没建说明还在用老配置回退读 imap.secret）
         "own_password_file": os.path.exists(
-            os.path.join(mb.BASE, "config", "smtp.secret")),
+            os.path.join(mb.CONFIG_DIR, "smtp.secret")),
     }
 
 
@@ -189,10 +199,27 @@ def _attach_payload(msg, attachments: list[dict]) -> tuple[list[str], list[str]]
     没有 HTML 时也不必降级成纯 MIMEText：有附件就用 mixed 包一个单 text 部件，
     这样 `sendmail` 的字节流在有无附件两种情况下一致，不用分支两套组包逻辑。
 
-    附件内容一律**二进制**（`MIMEApplication`），中文文件名走 RFC 2231 编码
+    附件按真实 MIME 组装（图片 `image/*`、文本 `text/*`、文档 `application/*`），
+    中文文件名走 RFC 2231 编码
     （`email.utils.encode_rfc2231`），否则 Windows 版Outlook / 一些企业邮
     会把 `张三-面试通知.pdf` 显示成乱码或 `=?utf-8?b?...?=`
     """
+    # Windows 的 mimetypes 注册表并不稳定；这些格式显式兜底，
+    # 否则 HEIC/OFD/宏文档会退化成 application/octet-stream。
+    explicit_mime = {
+        ".heic": "image/heic", ".heif": "image/heif",
+        ".jfif": "image/jpeg", ".avif": "image/avif",
+        ".ofd": "application/ofd",
+        ".docm": "application/vnd.ms-word.document.macroEnabled.12",
+        ".dot": "application/msword",
+        ".dotx": "application/vnd.openxmlformats-officedocument.wordprocessingml.template",
+        ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+        ".xlsb": "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
+        ".xltx": "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
+        ".pptm": "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
+        ".pps": "application/vnd.ms-powerpoint",
+        ".ppsx": "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+    }
     ok_names: list[str] = []
     skip_names: list[str] = []
     for att in (attachments or []):
@@ -201,8 +228,23 @@ def _attach_payload(msg, attachments: list[dict]) -> tuple[list[str], list[str]]
         if not name or not isinstance(data, (bytes, bytearray)) or not data:
             skip_names.append(name or "(未命名)")
             continue
-        maintype, subtype = (mimetypes.guess_type(name)[0] or "application/octet-stream").split("/", 1)
-        part = MIMEApplication(bytes(data), _subtype=subtype)
+        ext = os.path.splitext(name)[1].lower()
+        ctype = (explicit_mime.get(ext)
+                 or mimetypes.guess_type(name)[0]
+                 or "application/octet-stream")
+        maintype, subtype = ctype.split("/", 1)
+        if maintype == "image":
+            part = MIMEImage(bytes(data), _subtype=subtype)
+        elif maintype == "text":
+            charset = "utf-8"
+            try:
+                text = bytes(data).decode(charset)
+            except UnicodeDecodeError:
+                text = bytes(data).decode("gb18030", errors="replace")
+            part = MIMEText(text, _subtype=subtype, _charset=charset)
+        else:
+            part = MIMEApplication(bytes(data), _subtype=subtype)
+        part.set_param("name", name, header="Content-Type", charset="utf-8")
         part.add_header("Content-Disposition", "attachment",
                         filename=("utf-8", "", name))
         msg.attach(part)

@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from . import auth, db
+from . import auth, db, stages as stages_mod
 
 
 
@@ -51,13 +51,18 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             if not auth.can(role, need):
                 return _denied(conn, p, operator, role, need)
             aid, stage = int(args["application_id"]), args["stage"]
+            _before = db.get_application(conn, aid) or {}
+            _actual_stage = stages_mod.auto_advance_stage(
+                _before.get("stage"), stage, args.get("outcome"))
             # v1.29：结论标签一起落库。参数是**可选**的——老提案里没有这个键，
             # 传 None 表示"不改结论"（与"把结论清空"用空串区分，见 db.update_application_fields）。
             # ⚠️ 校验放在 db.set_application_stage 里（那里是唯一真源），这里不重复判一遍：
             # 两处各判一次，迟早会出现"这处放行、那处拒绝"。
-            r = db.set_application_stage(conn, aid, stage, args.get("outcome"),
+            r = db.set_application_stage(conn, aid, _actual_stage, args.get("outcome"),
                                          operator, role)
             result["after"] = {"application_id": aid, "stage": r.get("stage") if r else None,
+                               "advanced_to": (_actual_stage
+                                               if _actual_stage != _before.get("stage") else None),
                                "outcome": r.get("outcome") if r else None}
 
         elif tool == "set_tier":

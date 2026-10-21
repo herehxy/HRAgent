@@ -12,6 +12,7 @@ import sys
 
 from ..agent import llm
 from .. import tiers as tiers_mod
+from .. import univ as univ_mod
 from . import normalize as nz
 from . import sanitize
 from .tier import edu_gate, guess_major_family, lock_tier
@@ -35,6 +36,23 @@ _FIT_SYSTEM = (
     + _CALIBER
     # 学历门槛由系统兜底：不让模型去算，否则它会为了"照顾"候选人给出偏高结论
     + f"学历低于岗位门槛由系统直接判 {_HARD}，你**不用管学历**。"
+    # v2.0.5（业务方 2026-10-20）：院校**实力**参与档位，且**第一学历 + 最高学历都要看**。
+    # ⚠️ 关键区分：985/211 是**身份标签**，表达不了强弱（西电 211 但软科第 40，
+    # 强于 985 的西北农林第 71）。强弱用系统算好的「校实力档」，**不由模型猜**。
+    "**院校实力参与档位判断**：简报里『院校（211｜校实力 B 档·软科第 40）』和"
+    "『第一学历院校（985｜校实力 B 档·软科第 39）』都是系统按**固定名单与公开排名**"
+    "算出的确定标签，**不要靠自己的记忆去猜哪所学校强**。"
+    "判强弱看**校实力档 A > B > C > D**；985/211 只是身份标签，档相同时才作参考。"
+    "**两个院校都要看，但分量不同**：第一学历（本科）是**底子**，反映入学时的竞争力，"
+    "单位**更看重**；最高学历院校反映当前水平。综合次序："
+    "本科强+硕士强 > 本科强、硕士一般 ≳ 本科一般、硕士强 > 两者都一般。"
+    "**本科普通、硕士名校**的人，**不能**等同于「本科就是名校」的人 —— "
+    "必须在 risks 里如实写一条『第一学历院校一般』，不许只因为硕士学校好就给高档。"
+    "这条只用于区分『水平相当时谁该排在前面』，**不能**把技能明显不匹配的人抬成 A，"
+    "也**不能**越过学历门槛的硬底线。"
+    "『无排名数据』只表示名单里没有这所学校，**不代表学校差，不要因此降档**，"
+    "按 985/211 标签判断即可。"
+    "⚠️ 这里说的是**院校**，与上面『不用管学历』不冲突：学历门槛仍由系统兜底。"
     "**科研产出要展示**（v1.25.7）：若简历里有论文/专利/荣誉/奖学金，"
     "必须在 highlights 里单独列一条，按简历原文列出（或概述数量与方向），"
     "不要丢弃这部分信息。"
@@ -107,6 +125,18 @@ def _honors_summary(cand: dict) -> str:
         return ""
 
 
+def _school_txt(school: str | None) -> str:
+    """学校 → `校名（985｜校实力 B 档·软科第 40）`。给模型的是**规则算出的确定标签**，
+    不让它凭记忆猜"这所学校强不强"（v2.0.5）。没有排名数据时明说，不当成差。"""
+    if not school or not str(school).strip():
+        return "未识别"
+    tier = univ_mod.uni_tier(school)
+    band = univ_mod.school_band(school)
+    inner = (f"{tier}｜" if tier else "") + (
+        f"校实力 {band[0]} 档·软科第 {band[1]}" if band else "校实力：无排名数据")
+    return f"{school}（{inner}）"
+
+
 def _cand_brief(cand: dict) -> str:
     skills = _names(cand.get("skills"))
     certs = _names(cand.get("certificates"))
@@ -140,7 +170,18 @@ def _cand_brief(cand: dict) -> str:
         raw = raw[:3000]
     return (
         f"姓名:{cand.get('name')}；学历:{edu}；年限:{years}；"
-        f"院校:{cand.get('school')}；专业:{major}"
+        # v2.0.5（业务方 2026-10-20）：**把规则判定的院校层次直接告诉模型**。
+        # 原来只给学校名，模型得靠自己的记忆判断"这所学校强不强" —— 不可靠，
+        # 而且"末流211 vs 上流985"这种它根本没有稳定的概念，于是档位不体现学校。
+        # 现在给的是 `univ.uni_tier()` 按名单算出的**确定标签**（985/211/强势），
+        # 不是让模型猜；『未识别』只表示名单里没有，不代表学校差（规则里已写明不因此降档）。
+        # v2.0.5（业务方 2026-10-20）：**第一学历与最高学历的院校都要看**。
+        # 只给最高学历院校时，模型看不到"本科出身"——而院所/高校普遍认为本科底子更硬。
+        # 两个都按 `univ` 的名单+排名算成确定标签，模型只管比，不许猜。
+        f"院校:{_school_txt(cand.get('school'))}"
+        + (f"；第一学历院校:{_school_txt(cand.get('first_degree_school'))}"
+           if (cand.get("first_degree_school") or "").strip() else "；第一学历院校:未识别")
+        + f"；专业:{major}"
         + (f"（推断专业大类：{family}）" if family else "")
         + (f"（归一专业：{canon}）" if canon and canon != major else "") + "；"
         f"\n技能:{'、'.join(skills) or '未识别'}"

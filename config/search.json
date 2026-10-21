@@ -1,0 +1,15 @@
+{
+  "_说明": [
+    "对外查询（web_search）的配置。**默认关闭**：enabled=false 时助手不会发任何外部请求。",
+    "为什么要单独配：HR 的问题是连着候选人数据的，一旦外发就收不回来。",
+    "护栏在代码里（app/websearch.py 的 guard）：① 必须命中学校名/专业名/行业词，",
+    "② 不能出现候选人姓名/手机号/邮箱/身份证 —— 两关都过才发请求。这段不受本配置影响。",
+    "provider 可选：bocha（博查，中文好）/ tavily / custom（需同时填 endpoint）。",
+    "开之前请确认：本机能否访问外网（装了代理的环境要把该域名加进白名单）。"
+  ],
+  "enabled": false,
+  "provider": "bocha",
+  "api_key": "",
+  "endpoint": "",
+  "timeout": 20
+}

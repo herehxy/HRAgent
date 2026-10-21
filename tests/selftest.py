@@ -1241,6 +1241,47 @@ def main(verbose: bool = True) -> int:
                 c.ok(_jsres.startswith("OK"),
                      "渲染后页面的内联 JS 能通过解析（白屏类问题自检即可拦下）",
                      _jsres[:70])
+                from app import ui_v2 as _ui2_mod
+                _pg2 = _ui2_mod.render_page_v2(auth_enabled=False)
+                _s2 = _pg2.index("<script>") + len("<script>")
+                _pg2js = _pg2[_s2:_pg2.index("</script>", _s2)]
+                _tmpjs2 = os.path.join(work, "_ui_v2_check.js")
+                with open(_tmpjs2, "w", encoding="utf-8") as _fh:
+                    _fh.write(_pg2js)
+                _pr2 = _sp.run([_node, _acorn, _tmpjs2], capture_output=True, text=True)
+                _jsres2 = (_pr2.stdout + _pr2.stderr).strip()
+                os.remove(_tmpjs2)
+                c.ok(_jsres2.startswith("OK"),
+                     "v2 页面渲染后的内联 JS 能通过解析",
+                     _jsres2[:70])
+                c.ok("class=\"iv-split\"" in _pg2
+                     and "<h4>面试安排</h4>" in _pg2
+                     and "<h4>面试结论</h4>" in _pg2,
+                     "v2 面试安排与面试结论同框左右排")
+                c.ok("class=\"edu-band\"" in _pg2
+                     and "class=\"edu-period\"" in _pg2
+                     and _pg2.count('id="edFD"') == 1
+                     and _pg2.count('id="edEdu"') == 1
+                     and "专业未识别" not in _pg2
+                     and _pg2.index("class=\"edu-band\"") < _pg2.index("<h3>档位</h3>"),
+                     "v2 教育经历在姓名下方按时间线展示，空专业/排名不占位")
+                c.ok(_pg2.index("<h3>投递记录（") < _pg2.index("<h3>系统分析</h3>")
+                     and _pg2.index("<h3>系统分析</h3>") < _pg2.index("<h3>技能（")
+                     and _pg2.index("<h3>档位来源与操作记录</h3>")
+                     < _pg2.index("<h3>更多操作</h3>"),
+                     "v2 完整档案按流程事实→判断→能力→材料→审计→操作排列")
+                c.ok("function ensureDlgClose()" in _pg2
+                     and "function plainResponse(raw)" in _pg2
+                     and "ensureDlgClose();" in _pg2,
+                     "v2 弹窗统一提供关闭入口，非 JSON 错误先转成可读文本")
+                c.ok("/api/mail/send?async=1" in _pg2
+                     and "progressModal(r.task_id" in _pg2,
+                     "v2 发信走后台任务轮询，大附件发送不会因 HTTP 断开被误报失败")
+                c.ok("收件人看到的样子" not in _pg2
+                     and "class=\"medit\"" in _pg2
+                     and _pg2.index("<h3>第一步 · 选人、选模板</h3>")
+                     < _pg2.index("<h3>第二步 · 预览与修改</h3>"),
+                     "v2 写邮件：左侧准备材料，右侧完整编辑与发送，不再保留收件人预览栏")
                 c.ok("function doInsertTable()" in _pgjs and "<table>" in _pgjs
                      and "contenteditable" in _pgjs,
                      "邮件正文是所见即所得编辑器，插入表格插的是真表格（不是管道符语法）")
@@ -1462,6 +1503,42 @@ def main(verbose: bool = True) -> int:
                          os.path.basename(_op) if _op else "解析不到文件")
                 finally:
                     srv.DATA_DIR = _odir_save
+                # v2.0.9：附件必须保留真实 MIME，尤其是图片不能变成 application/jpeg；
+                # 同时临时附件入口要覆盖常见办公文档。
+                from email.mime.multipart import MIMEMultipart as _MM
+                from app import mail_send as _ms
+
+                _mmsg = _MM()
+                _mok, _mskip = _ms._attach_payload(_mmsg, [
+                    {"filename": "现场照片.JPG", "data": b"\xff\xd8\xff\xe0fake-jpeg"},
+                    {"filename": "说明.docx", "data": b"fake-docx"},
+                    {"filename": "手机照片.heic", "data": b"fake-heic"},
+                ])
+                _parts = _mmsg.get_payload()
+                c.ok(_mok == ["现场照片.JPG", "说明.docx", "手机照片.heic"]
+                     and not _mskip
+                     and [_p.get_content_type() for _p in _parts]
+                     == ["image/jpeg",
+                         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                         "image/heic"]
+                     and [_p.get_filename() for _p in _parts]
+                     == ["现场照片.JPG", "说明.docx", "手机照片.heic"],
+                     "邮件附件保留原文件名，图片使用 image/* 真实 MIME（不再变 application/jpeg）",
+                     str([(p.get_content_type(), p.get_filename()) for p in _parts]))
+                c.ok({".docx", ".xlsx", ".pptx", ".heic", ".zip"} <= set(srv.OUTBOX_EXTS),
+                     "临时附件支持常见图片、Office 文档与压缩包")
+                _orig_mail_sync = srv._mail_send_sync
+                srv._mail_send_sync = lambda req, session: {
+                    "ok": True, "to": "test@example.com", "attachments": []}
+                _mail_tid = srv._progress_new("自检发送", 1)
+                try:
+                    srv._run_mail_send_task(_mail_tid, object(), {"username": "hr", "role": "hr"})
+                finally:
+                    srv._mail_send_sync = _orig_mail_sync
+                _mail_task = srv._PROGRESS.get(_mail_tid) or {}
+                c.ok(_mail_task.get("status") == "done"
+                     and (_mail_task.get("result") or {}).get("ok") is True,
+                     "后台发信任务完成后回传真实发送结果，前端不再把已发邮件误判为失败")
                 # v1.27：判据不再写死 `"&stage="` —— 那依赖"阶段参数必须手写成
                 # `'&stage=' + ...` 这一种拼接方式；筛选条件收进 `poolQuery()` 后
                 # 是数组元素由 `join('&')` 拼的，源码里就没有这个字面量了，
@@ -1471,6 +1548,48 @@ def main(verbose: bool = True) -> int:
                 c.ok("stage=" in _pgjs and "STAGE_F=this.value" in _pgjs
                      and "'stage=' + encodeURIComponent(STAGE_F)" in _pgjs,
                      "㉓ 人才库真的有阶段筛选入口（否则看全部仍是死路）")
+                # v2.0.2（业务方 2026-10-19）：学历筛选改成**精确档位多选**，
+                # 不再是"≥ 最低学历"—— 旧口径选「大专」会把硕博一起带出来，这个筛选没法用。
+                # 判据要"只命中某一档"：拿库里**最低**那档去查，结果里**不能出现更高档**。
+                # （旧口径下这条必红；"包含某档"这种判据则会假通过。）
+                from urllib.parse import quote as _q
+                _edu_rank = {"大专": 1, "专科": 1, "本科": 2, "学士": 2,
+                             "研究生": 3, "硕士": 3, "博士": 4}
+                _lvname = {1: "大专", 2: "本科", 3: "硕士", 4: "博士"}
+                _, _pb = _asgi(srv.app, "GET", "/api/candidates", {})
+                _pitems = json.loads(_pb).get("items") or []
+                _have = sorted({_edu_rank.get(i.get("edu_level") or "", 0)
+                                for i in _pitems} - {0})
+                if len(_have) >= 2:
+                    _low = _have[0]
+                    _, _eb = _asgi(srv.app, "GET",
+                                   "/api/candidates?education=" + _q(_lvname[_low]), {})
+                    _ej = json.loads(_eb)
+                    _higher = [i for i in (_ej.get("items") or [])
+                               if _edu_rank.get(i.get("edu_level") or "", 0) > _low]
+                    c.ok(not _higher and (_ej.get("edu_filter") or {}).get("applied"),
+                         f"学历筛选是**精确档位**（选「{_lvname[_low]}」不夹带更高学历）",
+                         f"夹带 {len(_higher)} 人；库内档位={_have}")
+                else:
+                    c.ok(True, "学历精确筛选：测试库学历层次单一，跳过比较级校验",
+                         f"档位={_have}")
+                # v2.0.2：人才库卡片的「推进初筛通过」按钮 —— 位置在**岗位 chip 右边**
+                # （业务方 2026-10-19 第二次反馈：放在档位右边要横跨整行才点到）。
+                # **纯前端交互，只能做静态判据**，所以钉的是"定义 + 紧跟在 jobTag 后面 +
+                # 只在全部简历阶段出"三段；`${jobTag}${stageAction}` 连写保证位置别漂回去。
+                c.ok("const stageAction =" in _pgjs
+                     and "${jobTag}${stageAction}" in _pgjs
+                     and "stage-go" in _pgjs
+                     and "stage === _defStage" in _pgjs
+                     and "onclick=\"setStage(${x.application_id}," in _pgjs,
+                     "㊵ 人才库卡片：**岗位右边**有「推进初筛通过」（仅全部简历阶段）")
+                # ⚠️ 这里**不要**用 `${stageAction}</div>` 当"还在档位右边"的判据 ——
+                # 正确位置（`.nm` 行尾）也正好以它结尾，那样写会恒假通过/恒真失败。
+                # 真正能区分的是：旧的灰态样式规则 `stage-go[disabled]` 已经删掉，
+                # 而按钮只出现在 `${jobTag}` 之后（由上面 ㊵ 钉住）。
+                c.ok("stage-go[disabled]" not in _pgjs
+                     and "${jobTag}${stageAction}" in _pgjs,
+                     "㊵b 档位右边不再有第二份按钮（灰态样式已删，阶段看同行的 stageTag）")
                 c.ok("isw.enabled" in _pgjs and "isw.on" not in _pgjs,
                      "⑮a 开关的字段名前后端一致（isw.enabled）",
                      "前端若读 isw.on 会永远显示「关」，看起来改不动")
@@ -1884,6 +2003,80 @@ def main(verbose: bool = True) -> int:
             c.ok(_row_sc["stage"] == "待面试" and _row_sc["stage_changed_at"],
                  "⑯d 改阶段会记 stage_changed_at（停滞待办靠它，否则刚推进的人被当成停滞）",
                  f"stage={_row_sc['stage']} stage_changed_at={_row_sc['stage_changed_at']}")
+            # v2「只改结论」提交的是当前阶段；如果还在「已面试」之前，
+            # 服务端必须把它补推到「已面试」，不能只落标签。
+            for _oc_auto in ("拟录用", "不录用"):
+                _conn_sc3 = db.connect(db_path)
+                _conn_sc3.execute(
+                    "UPDATE applications SET stage='待面试', outcome=NULL WHERE id=?",
+                    (_aid_sc,))
+                _conn_sc3.commit()
+                _conn_sc3.close()
+                _code_auto, _body_auto = _asgi(
+                    srv.app, "POST", f"/api/applications/{_aid_sc}/stage", hr,
+                    json.dumps({"stage": "待面试", "outcome": _oc_auto}).encode())
+                _out_auto = json.loads(_body_auto)
+                _conn_sc4 = db.connect(db_path)
+                _row_auto = _conn_sc4.execute(
+                    "SELECT stage, outcome, interviewed_at FROM applications WHERE id=?",
+                    (_aid_sc,)).fetchone()
+                _conn_sc4.close()
+                c.ok(_code_auto == 200
+                     and _row_auto["stage"] == "已面试"
+                     and _row_auto["outcome"] == _oc_auto
+                     and _row_auto["interviewed_at"]
+                     and _out_auto.get("advanced_to") == "已面试",
+                     f"只改结论：待面试打「{_oc_auto}」→ 自动进「已面试」",
+                     f"HTTP {_code_auto} stage={_row_auto['stage']} "
+                     f"outcome={_row_auto['outcome']}")
+            # 已经在「已面试」之后，改结论只改标签，不能被拉回。
+            _conn_sc3 = db.connect(db_path)
+            _conn_sc3.execute(
+                "UPDATE applications SET stage='已发放offer', outcome=NULL WHERE id=?",
+                (_aid_sc,))
+            _conn_sc3.commit()
+            _conn_sc3.close()
+            _code_late, _body_late = _asgi(
+                srv.app, "POST", f"/api/applications/{_aid_sc}/stage", hr,
+                json.dumps({"stage": "已发放offer", "outcome": "已签约"}).encode())
+            _out_late = json.loads(_body_late)
+            _conn_sc4 = db.connect(db_path)
+            _row_late = _conn_sc4.execute(
+                "SELECT stage, outcome FROM applications WHERE id=?", (_aid_sc,)).fetchone()
+            _conn_sc4.close()
+            c.ok(_code_late == 200 and _row_late["stage"] == "已发放offer"
+                 and _row_late["outcome"] == "已签约"
+                 and not _out_late.get("advanced_to"),
+                 "只改结论：已在「已发放offer」时只改标签，不回退阶段",
+                 f"HTTP {_code_late} stage={_row_late['stage']} "
+                 f"outcome={_row_late['outcome']}")
+            # 助手提案走 actions.apply_proposal，不走阶段接口；同一条规则也要生效。
+            _conn_sc3 = db.connect(db_path)
+            _conn_sc3.execute(
+                "UPDATE applications SET stage='待面试', outcome=NULL WHERE id=?",
+                (_aid_sc,))
+            _pid_auto = db.create_proposal(
+                _conn_sc3, "selftest", "set_stage",
+                {"application_id": _aid_sc, "stage": "待面试", "outcome": "拟录用"},
+                "只改结论应自动进已面试")
+            _conn_sc3.close()
+            _proposal_auto = actions.apply_proposal(
+                db_path, _pid_auto, "approve", "hr", "hr")
+            _conn_sc4 = db.connect(db_path)
+            _row_proposal = _conn_sc4.execute(
+                "SELECT stage, outcome FROM applications WHERE id=?", (_aid_sc,)).fetchone()
+            _conn_sc4.close()
+            c.ok(_proposal_auto.get("ok")
+                 and _row_proposal["stage"] == "已面试"
+                 and _row_proposal["outcome"] == "拟录用",
+                 "只改结论：助手提案确认后同样自动进「已面试」",
+                 f"stage={_row_proposal['stage']} outcome={_row_proposal['outcome']}")
+            _conn_sc5 = db.connect(db_path)
+            _conn_sc5.execute(
+                "UPDATE applications SET stage='待面试', outcome=NULL WHERE id=?",
+                (_aid_sc,))
+            _conn_sc5.commit()
+            _conn_sc5.close()
 
             # ================================================ 阶段模型（v1.29）
             # 用**独立临时库**，不碰上面那批断言依赖的数据（后面的组还要数人数/投递数）
@@ -2198,6 +2391,114 @@ def main(verbose: bool = True) -> int:
             c.ok(_znames == [_ro["filename"]],
                  "简历包：名单表确实被装进 zip（extra 内存通道，不落磁盘、不留残留）",
                  str(_znames))
+
+            # ---- v2.0.4 证件照抽取：**造一个最小 docx** 验，不依赖任何夹具文件 ----
+            # 判据要两边都验：竖构图能抽到 / 横构图与纯文字**不能**硬凑
+            #（抽错一张 logo 挂在卡片上，比没有照片更糟）。
+            from app import avatar as _av
+            from PIL import Image as _PImg
+
+            def _mini_docx(fn, size, color):
+                buf = io.BytesIO()
+                _PImg.new("RGB", size, color).save(buf, "PNG")
+                path = os.path.join(work, fn)
+                with zipfile.ZipFile(path, "w") as z:
+                    z.writestr("word/media/image1.png", buf.getvalue())
+                return path
+
+            _tall = _mini_docx("av_tall.docx", (300, 400), (200, 210, 230))
+            _wide = _mini_docx("av_wide.docx", (900, 200), (10, 10, 10))
+            _tiny = _mini_docx("av_tiny.docx", (40, 50), (10, 10, 10))
+            _txt = os.path.join(work, "av.txt")
+            with open(_txt, "w", encoding="utf-8") as fh:
+                fh.write("姓名：张三\n")
+            c.ok(bool(_av.extract(_tall)), "证件照：竖构图照片能从 docx 里抽出来")
+            c.ok(_av.extract(_wide) is None, "证件照：横构图/横幅不当成照片（不硬凑）")
+            c.ok(_av.extract(_tiny) is None, "证件照：太小的图标不当成照片")
+            c.ok(_av.extract(_txt) is None, "证件照：纯文字简历返回 None")
+            _sq = _av._square(_PImg.new("RGB", (300, 400)), 128)
+            c.ok(_sq.size == (128, 128), "证件照：裁成正方形（圆形头像不变形）", str(_sq.size))
+            # **只看第 1 页**（业务方 2026-10-20 口径）：一个 PDF 里常夹成绩单/证书，
+            # 简历一定是第一个；从第 2 页往后抽会把证书上的图误当证件照。
+            import pymupdf as _pym
+            _two = os.path.join(work, "av_two_pages.pdf")
+            _pbuf = io.BytesIO()
+            _PImg.new("RGB", (300, 400), (190, 200, 220)).save(_pbuf, "PNG")
+            _doc = _pym.open()
+            _doc.new_page().insert_text((72, 72), "resume page 1 (no photo)")
+            _doc.new_page().insert_image(_pym.Rect(72, 72, 272, 472), stream=_pbuf.getvalue())
+            _doc.save(_two)
+            _doc.close()
+            c.ok(_av.extract(_two) is None,
+                 "证件照：照片在**第 2 页**时不抽（只认简历首页，避开成绩单/证书）")
+
+            # v2.0.5 校实力：985/211 是**身份标签**，强弱看排名。
+            # 业务方原话：「西电 211 但是比西北农林 985 厉害」—— 这条判据就是钉这个：
+            # 标签相反的两所学校，实力档必须能给出**正确顺序**（西电 B 档 > 西北农林 C 档）。
+            from app import univ as _univ
+
+            _xd = _univ.school_band("西安电子科技大学")
+            _xn = _univ.school_band("西北农林科技大学")
+            c.ok(bool(_xd) and bool(_xn) and _xd[1] < _xn[1] and _xd[0] != _xn[0],
+                 "校实力：西电(211/第40) 强于 西北农林(985/第71) —— 标签压不过排名",
+                 f"西电={_xd} 西北农林={_xn}")
+            c.ok(_univ.school_rank("西安电子科技大学") == 40
+                 and _univ.school_rank("清华大学") == 1,
+                 "校实力：排名表可查（软科 2025 主榜）")
+            c.ok(_univ.school_band("某某职业技术学院") is None,
+                 "校实力：没进排名表 → 无数据（**不等于差**，调用方不许因此降档）")
+            # v2.0.5：**第一学历与最高学历都要进分析上下文**（业务方："综合考虑两者的院校层次"）。
+            # 只给最高学历院校时模型看不到"本科出身"，而院所普遍认为本科底子更硬。
+            from app.pipeline import analyze as _an
+
+            _br = _an._cand_brief({"name": "x", "edu_level": "硕士",
+                                   "school": "西安电子科技大学",
+                                   "first_degree_school": "太原理工大学"})
+            c.ok("院校:西安电子科技大学（211｜校实力 B 档" in _br
+                 and "第一学历院校:太原理工大学（211｜校实力 D 档" in _br,
+                 "分析上下文：最高学历 + 第一学历的院校实力都给到模型",
+                 _br.split("；专业")[0][-72:])
+            _br2 = _an._cand_brief({"name": "y", "edu_level": "硕士", "school": "清华大学"})
+            c.ok("第一学历院校:未识别" in _br2,
+                 "分析上下文：没有第一学历院校时明说「未识别」，不留空让模型瞎猜")
+
+            # ---- v2.0.7 对外查询护栏：**代码层拦**，这是隐私红线 ----
+            # 只靠提示词说"别把候选人信息发出去"，模型换个说法就绕过去了，
+            # 而数据一旦发出去就收不回来。所以判据必须钉在代码行为上。
+            from app import websearch as _ws
+
+            c.ok(_ws.guard(_ec, "西安电子科技大学 计算机 学科评估") is None,
+                 "对外查询护栏：学校 + 学科类查询 → 放行")
+            _g1 = _ws.guard(_ec, "甲不录用 西安交大 材料")
+            c.ok(bool(_g1) and "候选人" in _g1,
+                 "对外查询护栏：含**库内候选人姓名** → 拒绝", str(_g1))
+            _g2 = _ws.guard(_ec, "王小明 13800138000")
+            c.ok(bool(_g2) and "手机号" in _g2,
+                 "对外查询护栏：含手机号 → 拒绝", str(_g2))
+            _g3 = _ws.guard(_ec, "abc@example.com 学校排名")
+            c.ok(bool(_g3) and "邮箱" in _g3,
+                 "对外查询护栏：含邮箱 → 拒绝", str(_g3))
+            _g4 = _ws.guard(_ec, "今天天气怎么样")
+            c.ok(bool(_g4),
+                 "对外查询护栏：**不是**学校/专业/行业类 → 拒绝（问句词不算话题）", str(_g4))
+            c.ok(_ws.search("西安电子科技大学 排名").get("configured") is False,
+                 "对外查询：**默认未配置 → 一个请求都不发**（要开由 HR 在 search.json 里开）")
+
+            # ---- v2.0.8 教育经历清洗：业务方实地截图里的三种脏样子 ----
+            # ① `在太原理工大学` / `本硕太原理工大学` —— 模型把修饰语当校名抓下来了；
+            # ② 同校清洗后重名 → 只剩一条；
+            # ③ 与"最高学历院校"矛盾的段（旧解析残留）→ 剔除，交给界面用 school 补齐。
+            _eh = db._loads_edu_history(
+                '[{"degree":"本科","school":"在太原理工大学"},'
+                '{"degree":"本科","school":"本硕太原理工大学"},'
+                '{"degree":"硕士","school":"西北工业大学"}]',
+                top_school="西安电子科技大学", top_degree="硕士")
+            c.ok([h["school"] for h in _eh] == ["太原理工大学"],
+                 "教育经历：清洗 `在XX大学` / `本硕XX大学`，同校去重，剔掉与最高学历矛盾的段",
+                 str([(h["degree"], h["school"]) for h in _eh]))
+            c.ok(_univ.uni_tier("本硕太原理工大学") == "211",
+                 "校名入口清洗：**脏 school 也能匹配层次**（否则校实力对它静默失效）")
+
             _ec.close()
 
             # ⑤ 命名模板：六段齐全、缺值 `—` 不省略、非法字符清洗、性别按普通字段
@@ -2224,16 +2525,36 @@ def main(verbose: bool = True) -> int:
                  "学历院校经历：三段（本科/硕士/博士）都在", str([h["degree"] for h in _eh]))
             # 四种"脏数据"各来一条，逐条验证被丢掉：
             #   编造校名（原文没有哈佛）／非法层次（「研究生」不在白名单）／
-            #   缺字段（没有 degree）／重复段（东北大学已出现过）
+            #   缺字段（没有 degree）／同校同层次重复段
             _eh_bad = _xeh_llm([{"degree": "本科", "school": "西安建筑科技大学"},
                                 {"degree": "本科", "school": "哈佛大学"},
                                 {"degree": "研究生", "school": "东北大学"},
                                 {"school": "北京航空航天大学"},
+                                {"degree": "博士", "school": "东北大学"},
                                 {"degree": "博士", "school": "东北大学"}],
                                _eh_text)
-            c.ok([h["school"] for h in _eh_bad] == ["西安建筑科技大学", "东北大学"],
-                 "学历院校经历：编造校名/非法层次/缺字段/重复段**四种脏数据都被丢掉**",
-                 str([h["school"] for h in _eh_bad]))
+            c.ok([(h["degree"], h["school"]) for h in _eh_bad]
+                 == [("本科", "西安建筑科技大学"), ("博士", "东北大学")],
+                 "学历院校经历：同校不同层次保留，编造/非法/缺字段/同层重复被丢掉",
+                 str([(h["degree"], h["school"]) for h in _eh_bad]))
+            from app.pipeline.extract import _find_name as _find_name_test
+
+            _eh_dirty = (
+                "➢ 在本科期间担任材料学院冰花通讯社通讯员\n"
+                "韩林烜HAN LIN XUAN 东北大学硕士研究生在读\n"
+                "2024.09-2027.06 东北大学（推荐免试） 材料科学与工程 硕士\n"
+                "2020.09-2024.06 东北大学 材料成型及控制工程 本科\n")
+            _eh_fixed = _xeh(_eh_dirty)
+            c.ok(_find_name_test(_eh_dirty) == "韩林烜",
+                 "姓名解析：中英文连写时可识别中文姓名，不把学校名当姓名")
+            c.ok(_fds(_eh_dirty) == "东北大学",
+                 "第一学历：带时间段的本科行优先，不误取校园经历里的“材料学院”",
+                 str(_fds(_eh_dirty)))
+            c.ok([(h["degree"], h["school"], h["major"]) for h in _eh_fixed]
+                 == [("本科", "东北大学", "材料成型及控制工程"),
+                     ("硕士", "东北大学", "材料科学与工程")],
+                 "学历经历：本硕同校也各保留一段，并补全带括号写法的专业",
+                 str(_eh_fixed))
             _ehc = db.connect(os.path.join(work, "v129_edu.db"))
             _cid_eh = db.insert_candidate(_ehc, {
                 "identity_key": "v129e:甲", "name": "甲", "edu_level": "博士",

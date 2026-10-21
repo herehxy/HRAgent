@@ -242,15 +242,24 @@ if os.path.isdir(_PACK_DATA):
     finally:
         _con.close()
 
+    # ---- v2.2.0：演示数据改放 **seed/**，安装目录不再夹带"像用户数据"的东西 ----
+    # 为什么改：热更新的铁律是"只换代码、不碰数据"。若演示库继续躺在
+    # `_internal/data/workbench.db`，任何人（或任何脚本）把 `_internal` 整个
+    # 覆盖一遍，就等于连"数据目录"一起换了 —— 规矩写在文档里没意义。
+    # 改后目录职责清晰：
+    #   _internal/seed/data/  = 首次运行用的演示数据种子（程序资源，可被更新）
+    #   _internal/config/     = 配置**模板**（程序资源，可被更新；只补缺失键，不覆盖用户值）
+    #   %LOCALAPPDATA%\HRAgentData\ = 用户的真实数据与配置（更新器绝不碰）
+    # 启动器会把 seed 当作一个 legacy 根迁移到用户目录 → "装完就有演示数据"不变。
     for _name in os.listdir(_pd_root):
         _p = os.path.join(_pd_root, _name)
         if os.path.isdir(_p):
             #目录源会被摊平（实测 archive/*全散到 data/ 根），逐个孙项展开才能保层级
             for _sub in os.listdir(_p):
-                datas.append((os.path.join(_p, _sub), os.path.join("data", _name)))
+                datas.append((os.path.join(_p, _sub), os.path.join("seed", "data", _name)))
         else:
-            datas.append((_p, "data"))
-    print("[spec] 随包分发演示数据：_pack_data/data/* → _internal/data")
+            datas.append((_p, os.path.join("seed", "data")))
+    print("[spec] 随包分发演示数据：_pack_data/data/* → _internal/seed/data（种子，非用户数据）")
 else:
     raise SystemExit(
         "[spec] 找不到 _pack_data —— 先跑 python _prepare_pack_data.py 生成演示数据。"

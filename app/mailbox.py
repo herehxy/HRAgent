@@ -34,8 +34,9 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 from .paths import BASE      # 根目录唯一来源（认 TP_HOME）
+from .paths import CONFIG_DIR
 from .paths import DATA_DIR  # 数据目录（认 TP_DATA_DIR，可能不在 BASE 下）
-CONFIG_PATH = os.path.join(BASE, "config", "mailbox.json")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "mailbox.json")
 
 DEFAULT_CONFIG = {
     "mode": "eml",
@@ -100,13 +101,13 @@ def resolve_dir(value: str) -> str:
 
 # ---------------------------------------------------------------- 配置读写（供界面）
 
-_SECRET_DEFAULT_PATH = os.path.join(BASE, "config", "imap.secret")
+_SECRET_DEFAULT_PATH = os.path.join(CONFIG_DIR, "imap.secret")
 # v1.27：发信口令**独立文件**（config/smtp.secret）。
 # 为什么必须分开：原来收发信共用 imap.secret，于是"收信 A 邮箱、发信 B 邮箱"
 # 这种配置根本配不出来 —— 换发信账号就要把收信账号的授权码顶掉，
 # 而同一个服务商下两者授权码往往还不是同一个（企业邮可分开授权）。
 # 关键：**老配置不迁移**（见 read_smtp_secret 的回退），避免升级即失效。
-_SMTP_SECRET_DEFAULT_PATH = os.path.join(BASE, "config", "smtp.secret")
+_SMTP_SECRET_DEFAULT_PATH = os.path.join(CONFIG_DIR, "smtp.secret")
 
 # UI 可编辑、且允许写回 mailbox.json 的顶层键（白名单，避免误写入口径）
 _EDITABLE_KEYS = {"mode", "eml_dir", "folder_dir", "archive_dir", "attachment_ext",

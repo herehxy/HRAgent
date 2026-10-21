@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from functools import lru_cache
 
 from .paths import CONFIG_DIR as _C          # 根目录唯一来源（认 TP_HOME）
@@ -96,11 +97,133 @@ def uni_tier(school: str | None) -> str | None:
     table = _tiers()
     if not table:
         return None
-    s = _norm(school)
+    # v2.0.8：入口先清洗 —— 库里的 `school` 也可能是脏的（实测 `本硕太原理工大学`）。
+    # 不清洗的后果不只是显示难看：**名单匹配不上 → 层次/实力档全空 → 校实力不参与档位判断**，
+    # 一条脏数据会静默削弱整个"学校排名进档位"的规则。
+    s = _norm(clean_school_name(school))
     t = table.get(s)
     if t:
         return t
     return table.get(_base(s))
+
+
+@lru_cache(maxsize=1)
+def _ranks() -> dict[str, int]:
+    """归一名 → 软科综合排名名次。加载失败返回空表（整体退化为"没有排名数据"）。"""
+    table: dict[str, int] = {}
+    try:
+        with open(_CFG, encoding="utf-8") as f:
+            cfg = json.load(f)
+        for name, r in (cfg.get("rank") or {}).items():
+            try:
+                v = int(r)
+            except (TypeError, ValueError):
+                continue
+            table[_norm(name)] = v
+            table[_base(name)] = v
+        for alias, canonical in (cfg.get("aliases") or {}).items():
+            v = table.get(_norm(canonical))
+            if v:
+                table[_norm(alias)] = v
+    except Exception:                                    # noqa: BLE001
+        return {}
+    return table
+
+
+def school_rank(school: str | None) -> int | None:
+    """学校 → 软科综合排名名次；没进表返回 None。"""
+    if not school or not str(school).strip():
+        return None
+    table = _ranks()
+    if not table:
+        return None
+    s = _norm(clean_school_name(school))
+    return table.get(s) or table.get(_base(s))
+
+
+@lru_cache(maxsize=1)
+def _qs_ranks() -> dict[str, int]:
+    """归一名 → QS 名次。加载失败返回空表（退化为"没有 QS 数据"）。"""
+    table: dict[str, int] = {}
+    try:
+        with open(_CFG, encoding="utf-8") as f:
+            cfg = json.load(f)
+        for name, r in (cfg.get("qs_rank") or {}).items():
+            try:
+                v = int(r)
+            except (TypeError, ValueError):
+                continue
+            table[_norm(name)] = v
+            table[_base(name)] = v
+        # 简称沿用同一张 aliases 表：『南洋理工』『NUS』这类写法也能命中
+        for alias, canonical in (cfg.get("aliases") or {}).items():
+            v = table.get(_norm(canonical))
+            if v:
+                table[_norm(alias)] = v
+        for alias, canonical in (cfg.get("overseas_aliases") or {}).items():
+            v = table.get(_norm(canonical))
+            if v:
+                table[_norm(alias)] = v
+    except Exception:                                    # noqa: BLE001
+        return {}
+    return table
+
+
+def school_qs(school: str | None) -> int | None:
+    """学校 → **QS 世界大学排名**名次；没进表返回 None。
+
+    为什么与 `school_rank`（软科）分开而不是合成一个函数：
+    国内院校看软科、境外院校看 QS，两把尺子**互不覆盖**，混成一个返回值
+    就分不清界面该写"软科第 3"还是"QS 第 17"—— 那会直接误导 HR。
+    境外院校在软科主榜里查不到，若只保留软科，海外背景的人会全部显示"无排名"。
+    """
+    if not school or not str(school).strip():
+        return None
+    table = _qs_ranks()
+    if not table:
+        return None
+    s = _norm(clean_school_name(school))
+    return table.get(s) or table.get(_base(s))
+
+
+#: 名次 → 校实力档。**口径可调**（业务方要改档位边界，只改这一行，不用动提示词）。
+#: 为什么给"档"而不是直接给名次：名次太细，模型判不稳、也不好向 HR 解释；
+#: "B 档"这种离散标签既稳定，又能对上"次顶尖"的直觉。
+RANK_BANDS: tuple[tuple[int, str], ...] = ((20, "A"), (50, "B"), (100, "C"))
+
+
+def school_band(school: str | None) -> tuple[str, int] | None:
+    """学校 → (校实力档 A/B/C/D, 名次)。没进表返回 None ——
+    **这不等于学校差**，只是没有排名数据；调用方**不许**因此降档。"""
+    r = school_rank(school)
+    if not r:
+        return None
+    for limit, band in RANK_BANDS:
+        if r <= limit:
+            return band, r
+    return "D", r
+
+
+#: 校名前面常见的修饰词。模型和正则都会把"在……就读""本硕……"整段当校名抓下来，
+#: 实测脏样本（业务方 2026-10-20 截图）：`在太原理工大学`、`本硕太原理工大学`。
+#: 不清洗的后果有三条：① 名单匹配不上 → 层次/排名全空；② 同一所学校显示成好几条；
+#: ③ HR 看着像系统在乱抓。**长的放前面**，否则"本硕"会先被"本科"之类截断。
+_SCHOOL_LEAD = re.compile(
+    r"^(?:就读于|毕业于|本硕博|本硕连读|本硕|本科|硕士|博士|研究生|来自|在|于)+")
+#: 校名后面常见的尾巴
+_SCHOOL_TAIL = re.compile(r"(?:就读|在读|毕业|学习|期间|深造)+$")
+
+
+def clean_school_name(name: str | None) -> str:
+    """把抓到的"校名"清洗成纯校名。**幂等**：多次调用结果一致。"""
+    t = str(name or "").strip()
+    t = t.strip("：:，,。.、;；（）()【】[] \t")
+    prev = None
+    while prev != t:                       # 反复剥，处理"在本科XX大学"这种叠加
+        prev = t
+        t = _SCHOOL_LEAD.sub("", t).strip()
+    t = _SCHOOL_TAIL.sub("", t).strip()
+    return t.strip("：:，,。.、;；（）()【】[] \t")
 
 
 @lru_cache(maxsize=1)

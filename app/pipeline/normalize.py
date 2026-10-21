@@ -18,8 +18,8 @@ import os
 import re
 
 DEFAULT_PATH = os.path.join(
-    __import__("app.paths", fromlist=["BASE"]).BASE,
-    "config", "ontology.json",
+    __import__("app.paths", fromlist=["CONFIG_DIR"]).CONFIG_DIR,
+    "ontology.json",
 )
 
 _ASCII_SHORT = re.compile(r"^[A-Za-z0-9+#\-\.]{1,3}$")
