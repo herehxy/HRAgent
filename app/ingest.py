@@ -188,19 +188,34 @@ from .pipeline.tier import grade
 CONFIDENTIAL_HINTS = ("涉密", "机密", "秘密", "军工", "军品", "武器装备", "保密资格", "国防")
 
 
+def _lp_size(path: str) -> int:
+    """长路径安全的 os.path.getsize（>260 字符在 Windows 上会直接抛 206）。"""
+    from .paths import lp_size
+    return lp_size(path)
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
 def archive_file(cfg: dict, filename: str, data: bytes) -> tuple[str, int]:
-    """把附件写入原件区（按 年-月 分目录，文件名带内容哈希前缀，只增不改）。"""
+    """把附件写入原件区（按 年-月 分目录，文件名带内容哈希前缀，只增不改）。
+
+    v2.2.4：文件名按**整条路径预算**压短（`fit_name`）。
+    为什么：附件原名动辄 150+ 字符（微信转来的附件尤其长），
+    加上数据根与年-月目录就逼近 Windows 的 260 字符上限——
+    一旦越线，写文件直接报 WinError 206，简历就"收进来了但没有原件"。
+    压短后原名仍完整存在数据库 `file_name` 字段里，界面显示不受影响。
+    """
+    from .paths import fit_name, lp_exists, lp_makedirs, lp_open
     digest = sha256_bytes(data)
     folder = os.path.join(mb.resolve_dir(cfg.get("archive_dir", "data/archive")),
                           datetime.now().strftime("%Y-%m"))
-    os.makedirs(folder, exist_ok=True)
+    lp_makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"{digest[:16]}_{mb.safe_filename(filename)}")
-    if not os.path.exists(path):
-        with open(path, "wb") as fh:
+    path = os.path.join(folder, fit_name(folder, os.path.basename(path)))
+    if not lp_exists(path):
+        with lp_open(path, "wb") as fh:
             fh.write(data)
     return path, len(data)
 
@@ -1293,7 +1308,7 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
                 break
             base = os.path.basename(path)
             try:
-                size = os.path.getsize(path)
+                size = _lp_size(path)
             except OSError as exc:
                 report["failed"] += 1
                 report["details"].append({"file": base, "status": "failed",

@@ -88,6 +88,20 @@ _PAGE = """<!DOCTYPE html>
        和状态绿对比度只有 1.02~1.09，肉眼分不出，两套几乎一样的绿反而更乱。
        而且 A 档语义就是"最优/推荐"，与状态绿"没问题"本来就同向，共用合理。 */
     --tier-b:#146b9e; --tier-b-soft:#e8f1f8;
+    /* 输入框与遮罩（v2.3.0 前端整理，2026-10-23）：
+       不再用"白底 + 1px 灰框"界定控件范围 —— 密集表单里几十个框线会互相打架，
+       观感也硬。改成**浅填充底 + 透明边框**：范围由底色块界定，
+       聚焦时底色转白 + 一圈低透明度柔光（不是 2px 深蓝硬边）。
+       为什么新开变量而不改 --line / --accent：那两个是全站资产（分隔线、主色），
+       动了会连带改掉表格、侧栏、徽章 —— 本次只整理弹窗与输入框两类组件。
+       对比度：--field(#f2f3f5) 对 --surface(#fff) 1.09，肉眼可辨但不抢；
+       hover(#eceef1) 再深一档，作为"鼠标在这里"的唯一信号；
+       --field-line 对 --field 1.12 —— 聚焦描边只做"补一点边界"，不做视觉主角。 */
+    --field:#f2f3f5; --field-hover:#eceef1; --field-line:#dbe6fb;
+    /* 弹窗遮罩：原来 rgba(29,33,41,.45) 是硬隔离，靠"压暗"表达层级。
+       降到 .28 并配 2px 模糊 —— 靠失焦而不是靠压暗，观感轻得多，
+       同时背景仍明显不可读（模糊 + 半透明双重削弱），不会误以为可点。 */
+    --scrim:rgba(31,35,41,.28);
     /* 圆角：飞书比之前稍圆（卡片 8px / 控件 6px）。
        微圆角在中文界面里容易显得"像素对齐"，飞书用略圆的角来软化密集信息。 */
     --r-card:8px; --r-ctl:6px; --r-chip:4px;
@@ -185,16 +199,48 @@ _PAGE = """<!DOCTYPE html>
   .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;line-height:1.5}
   .vdiv{width:1px;height:22px;background:var(--line);display:inline-block;flex:none}
   .glbl{font-size:13px;color:var(--ink-3);flex:none}
-  input,select,textarea{padding:7px 12px;border:1px solid var(--line);border-radius:var(--r-ctl);
-    font-size:14px;color:var(--ink);background:var(--surface);font-family:inherit}
+  /* 输入控件（v2.3.0 重做）：**去框线，改填充底**。
+     原来是 `border:1px solid var(--line)` + 白底 —— 在白卡片上就是一个灰方框，
+     一屏十几个框时线条互相抢。现在改为"浅灰底块 + 透明边框"：
+     控件范围由**底色块**界定，边框只在聚焦时补一点极浅蓝。
+     ⚠️ 这是全局选择器，全站输入框/下拉/多行都走这里（岗位表单、字典添加、
+        顶部搜索、看板跳页…）。它们只依赖 padding/flex，改底与边不影响布局。 */
+  input,select,textarea{padding:7px 12px;border:1px solid transparent;
+    border-radius:var(--r-ctl);font-size:14px;color:var(--ink);
+    background:var(--field);font-family:inherit;
+    transition:background-color .14s ease,border-color .14s ease}
+  textarea{line-height:1.7}
+  input:hover,select:hover,textarea:hover{background:var(--field-hover)}
+  /* 聚焦：底色转白（"被激活"）+ 极浅描边 + 3px 低透明度柔光。
+     不用 2px 实心 outline 的原因：那是**强对比框线**，在浅底上是一圈硬边，
+     正是本次要去掉的东西。底色由灰转白是第二重信号，不只靠颜色。
+     可访问性没收损：柔光 + 底色变化 + 描边三者叠加，焦点位置仍一眼可辨。 */
+  input:focus,select:focus,textarea:focus{outline:none;background:var(--surface);
+    border-color:var(--field-line);box-shadow:0 0 0 3px rgba(51,112,255,.12)}
+  /* 禁用：比静止更浅、文字褪灰 —— 原来禁用与可用长得一样，很容易填进只读框 */
+  input:disabled,select:disabled,textarea:disabled{background:#f7f8f9;
+    color:#a8adb5;cursor:not-allowed}
+  input::placeholder,textarea::placeholder{color:#a0a5ad}
+  /* 校验失败：浅红底 + 同族浅边（不用高饱和红框）。
+     颜色**不是唯一信号** —— 字段旁必须有就地文案，这条在业务侧调用时保证。 */
+  input.is-bad,select.is-bad,textarea.is-bad{background:#fff5f4;border-color:#f0cdc9}
+  input.is-bad:focus,select.is-bad:focus,textarea.is-bad:focus{
+    border-color:#e8b4ae;box-shadow:0 0 0 3px rgba(201,58,46,.12)}
+  /* 聊天输入框：它自己在一个容器里，跟着改填充底会出现"灰底套在框里"的双层感，
+     所以单独恢复白底、不给 hover 变色（容器的聚焦态由 JS 控制）。 */
+  #chatInput{background:var(--surface)}
+  #chatInput:hover{background:var(--surface)}
   button{padding:6px 14px;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--surface);
     font-size:14px;color:var(--ink);cursor:pointer;font-family:inherit}
   /* Gate 26/39：交互元素必须八态齐全。这里补齐最关键的 focus-visible——
      原来键盘 Tab 过去**完全看不见焦点**，对键盘用户等于不可用。
-     focus 用 outline 而不是 border（border 会改变几何、引起布局跳动）。 */
-  button:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-visible,
-  [tabindex]:focus-visible,.tab:focus-visible,.navitem:focus-visible{
-    outline:2px solid var(--focus);outline-offset:1px}
+     focus 用 outline 而不是 border（border 会改变几何、引起布局跳动）。
+
+     ⚠️ v2.3.0：input/select/textarea **从这条里拿掉了** —— 它们改用
+     "底色转白 + 柔光"的聚焦表达（见上面的输入控件段）。这里若继续给它们
+     加 2px 实心 outline，会把柔光盖掉，又变回强对比硬边框。 */
+  button:focus-visible,[tabindex]:focus-visible,.tab:focus-visible,
+  .navitem:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
   button:active{transform:translateY(.5px)}
   button:hover{color:var(--accent);border-color:var(--accent-line);background:var(--accent-hi)}
   button:disabled{opacity:.5;cursor:not-allowed}
@@ -460,11 +506,61 @@ _PAGE = """<!DOCTYPE html>
   .why{font-size:14px;color:var(--ink-2);margin-top:10px;line-height:1.75}
   .ev{font-size:13px;color:var(--ink-3);background:var(--surface-2);border-left:2px solid var(--line-2);
     padding:5px 9px;margin:4px 0;border-radius:0 4px 4px 0}
-  .modal{position:fixed;inset:0;background:rgba(29,33,41,.45);display:none;align-items:center;
-    justify-content:center;padding:22px;z-index:20}
-  .modal.on{display:flex}
-  .sheet{background:var(--surface);border-radius:var(--r-card);max-width:920px;width:100%;max-height:calc(88vh / var(--z));
-    overflow:auto;padding:22px 24px}
+  /* ===== 弹窗（v2.3.0 整理）=============================================
+     本次三处结构性改动，都是为了解决「打断成本 > 注意力收益」：
+     ① **去边框**：容器不再画 1px 线，层级靠双层阴影（贴边 + 抬升）。
+        原来 .sheet 是无边框也无阴影，全靠遮罩硬对比"浮起来"，观感生硬。
+     ② **三段式**：hd 固定 / bd 自己滚 / ft 固定。原来 overflow:auto 在
+        .sheet 上 —— 正文一长，**标题跟着滚走**，用户滚到中间就不知道
+        自己在看哪个弹窗了。
+     ③ **遮罩柔化**：.45 纯色压暗 → .28 + 2px 模糊。靠失焦隔离，
+        不用靠压暗，背景仍明显不可读（模糊+半透明双重削弱）。
+
+     ⚠️ 高度一律 calc(88vh / var(--z))，与 :root 的 --z 同步。
+     body 有 zoom 时 88vh 是视觉像素，会高出整整一个 zoom 倍（.layout 已踩过）。 */
+  .modal{position:fixed;inset:0;background:var(--scrim);display:none;
+    align-items:center;justify-content:center;padding:22px;z-index:20;
+    -webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px)}
+  .modal.on{display:flex;animation:scrimIn .18s ease-out}
+  .sheet{background:var(--surface);border-radius:12px;width:100%;
+    max-height:calc(88vh / var(--z));overflow:hidden;
+    display:flex;flex-direction:column;
+    box-shadow:0 1px 2px rgba(31,35,41,.04), 0 12px 32px rgba(31,35,41,.14);
+    animation:sheetIn .18s ease-out}
+  /* 尺寸分档：按内容复杂度选，不再所有弹窗都吃 920px。
+     确认框用 920px 是"内容和容器不匹配"的典型 —— 一句话飘在大白块里。 */
+  .sheet--sm{max-width:min(400px,calc(100vw - 32px))}   /* 确认、单行结果 */
+  .sheet--md{max-width:min(520px,calc(100vw - 32px))}   /* 标准结果、进度（默认） */
+  .sheet--lg{max-width:min(720px,calc(100vw - 32px))}   /* 上传明细、导入报告 */
+  .sheet--xl{max-width:min(920px,calc(100vw - 32px))}   /* 档案详情 */
+  .sheet-hd{flex:none;display:flex;align-items:center;justify-content:space-between;
+    gap:12px;padding:18px 22px 14px}
+  .sheet-hd .sheet-title{font-size:17px;font-weight:600;letter-spacing:-.01em;
+    min-width:0;overflow-wrap:anywhere}
+  .sheet-bd{flex:1;min-height:0;overflow-y:auto;padding:0 22px 20px;
+    overscroll-behavior:contain}
+  .sheet-ft{flex:none;display:flex;gap:10px;justify-content:flex-end;
+    padding:0 22px 20px}
+  /* 入场/出场只动 opacity 与 transform，不碰 width/height/margin（会触发重排）。
+     出场比入场快（120ms）：关窗时用户已经在想下一件事，等动画是纯损耗。 */
+  @keyframes scrimIn{from{opacity:0}to{opacity:1}}
+  @keyframes sheetIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .modal.closing{animation:scrimOut .12s ease-in forwards}
+  .modal.closing .sheet{animation:sheetOut .12s ease-in forwards}
+  @keyframes scrimOut{from{opacity:1}to{opacity:0}}
+  @keyframes sheetOut{from{opacity:1;transform:none}to{opacity:0;transform:translateY(4px)}}
+  /* 尊重系统"减少动效"：归零时长而不是只缩短，避免前庭敏感用户仍然看到位移 */
+  @media (prefers-reduced-motion:reduce){
+    .modal.on,.sheet,.modal.closing,.modal.closing .sheet{animation:none}
+  }
+  /* 窄屏（<600px）降级为底部面板：居中小窗在手机上够不着、键盘一弹就被顶飞。
+     只圆上面两角、贴底、限制高度，是移动端弹窗的主流形态。 */
+  @media (max-width:600px){
+    .modal{padding:0;align-items:flex-end}
+    .sheet{border-radius:16px 16px 0 0;max-width:none;
+      max-height:min(calc(76vh / var(--z)),620px)}
+    .sheet-hd{padding-top:16px}
+  }
   .progtrack{height:10px;background:var(--surface-2);border-radius:6px;overflow:hidden;margin:12px 0 8px}
   .progfill{height:100%;background:var(--accent);border-radius:6px;transition:width .3s ease}
   /* v1.24.20：不确定时长的等待态。总耗时未知时**不要假装有百分比**
@@ -642,11 +738,24 @@ _PAGE = """<!DOCTYPE html>
   </div></main>
 </div>
 
-<div class="modal" id="modal" onclick="if(event.target===this)closeModal()">
-  <div class="sheet"><div class="flexbetween" style="margin-bottom:14px">
-    <div style="font-size:18px;font-weight:600" id="mTitle">详情</div>
-    <div class="bar"><span id="mHeadBtn"></span><button onclick="closeModal()">关闭</button></div></div>
-    <div id="mBody"></div></div>
+<!-- 弹层（v2.3.0）：全部弹窗复用这一个容器（详情/进度/确认/上传）。
+     无障碍三件套：role=dialog + aria-modal + aria-labelledby 指向标题。
+     tabindex="-1" 让容器本身可聚焦 —— 正文没有可聚焦元素时（纯文本结果），
+     焦点要落在容器上，否则会漏到背景页。
+     遮罩点击走 modalScrimClose()：门控型弹窗（进度条）与危险态不允许点外关闭，
+     原来无条件 closeModal() → 进度还在跑，用户一点外面就"关掉了"，以为取消了。 -->
+<div class="modal" id="modal" role="dialog" aria-modal="true"
+     aria-labelledby="mTitle" tabindex="-1"
+     onclick="if(event.target===this)modalScrimClose()">
+  <div class="sheet sheet--xl" id="mSheet">
+    <div class="sheet-hd">
+      <div class="sheet-title" id="mTitle">详情</div>
+      <div class="bar"><span id="mHeadBtn"></span>
+        <button type="button" onclick="closeModal()" aria-label="关闭">关闭</button></div>
+    </div>
+    <div class="sheet-bd" id="mBody"></div>
+    <div class="sheet-ft" id="mFoot" style="display:none"></div>
+  </div>
 </div>
 
 <!-- 居中提示层（v1.24.9）：所有 toast 提示都落在这里，不再往页面顶部塞。
@@ -981,15 +1090,22 @@ function resultModal(opts){
   const kind = o.kind || 'info';
   const color = kind==='ok' ? 'var(--ok)' : (kind==='danger' ? 'var(--bad)' : (kind==='warn' ? 'var(--warn)' : 'var(--accent)'));
   setModalTitle(o.title || '完成');
+  /* v2.3.0：按钮移到独立底栏（#mFoot）—— 正文超出时按钮**固定可见**，
+     不用滚到底才能点"知道了"。原来按钮写在 mBody 里跟着一起滚。
+     ⚠️ 拼接时**不要留换行缩进**：外层有 white-space:pre-wrap，
+     模板里的换行与缩进会被原样显示成正文前面的一大段空白（实测标题下方空 70px）。 */
   document.getElementById('mBody').innerHTML =
-    `<div style="line-height:1.8;white-space:pre-wrap">
-       <div style="font-size:15px;color:${color};font-weight:600;margin-bottom:8px">${o.headline || ''}</div>
-       <div>${o.body || ''}</div>
-     </div>
-     <div class="bar" style="margin-top:18px;justify-content:flex-end">
-       <button class="btn-primary" onclick="closeModal()">${esc(o.okText || '知道了')}</button>
-     </div>`;
-  document.getElementById('modal').classList.add('on');
+    `<div style="line-height:1.8;white-space:pre-wrap"><div style="font-size:15px;color:${color};font-weight:600;margin-bottom:8px">${o.headline || ''}</div><div>${o.body || ''}</div></div>`;
+  /* 尺寸：默认 md(520)。上传明细/导入报告这类要逐条看的传 size:'lg'。
+     危险态（失败/不可逆）禁点遮罩关闭 —— 结果必须被看到，不能被误触抹掉。 */
+  openModal({ size: o.size || 'md', lock: kind === 'danger' });
+  /* v2.3.0：按钮在独立底栏 —— 正文超出时按钮**固定可见**，
+     不用滚到底才能点"知道了"（原来按钮写在 mBody 里跟着一起滚）。
+     必须在 openModal 之后填：openModal 会先清空底栏，防止上个弹窗的按钮残留。 */
+  const foot = document.getElementById('mFoot');
+  foot.style.display = '';
+  foot.innerHTML =
+    `<button type="button" class="btn-primary" onclick="closeModal()">${esc(o.okText || '知道了')}</button>`;
 }
 
 /* 居中进度弹窗（v1.24.9）：带真实进度条。
@@ -1010,12 +1126,22 @@ function progressModal(taskId, opts){
        <div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">${esc(o.desc || '正在处理，请稍候')}</div>
        <div class="progtrack"><div class="progfill" id="progFill" style="width:0%"></div></div>
        <div class="progmeta" id="progMeta">准备中…</div>
-       ${o.stoppable ? `<div class="bar" style="margin-top:14px;justify-content:flex-end">
-         <button id="progStopBtn" onclick="progressStop('${escA(taskId)}')"
-                 title="读完正在处理的这一份就停下；已处理的全部保留，下次从停下的地方继续">停止（读完当前文件后停下）</button>
-       </div>` : ''}
      </div>`;
-  document.getElementById('modal').classList.add('on');
+  /* v2.3.0：**门控型弹窗** —— lock=true，Esc 与点遮罩都不关闭。
+     任务在后台跑着，界面"关掉了"但任务没停，是最容易让人误判"已取消"的状态。
+     要离开只能点"停止"或等它自己完成。 */
+  openModal({ size: o.size || 'md', lock: true });
+  /* 停止按钮进底栏：正文再长它也不会被挤到滚动区外面。
+     必须在 openModal 之后填（openModal 会先清空底栏）。 */
+  const foot = document.getElementById('mFoot');
+  if (o.stoppable){
+    foot.style.display = '';
+    foot.innerHTML =
+      `<div class="bar" style="justify-content:flex-end">
+         <button type="button" id="progStopBtn" onclick="progressStop('${escA(taskId)}')"
+                 title="读完正在处理的这一份就停下；已处理的全部保留，下次从停下的地方继续">停止（读完当前文件后停下）</button>
+       </div>`;
+  }
   const fill = document.getElementById('progFill');
   const meta = document.getElementById('progMeta');
   const tick = async () => {
@@ -2519,7 +2645,7 @@ async function showDetail(cid){
   JD_MULTI.ivunit = String(d.interview_unit||'').split(/[、,，]+/).map(s=>s.trim()).filter(Boolean);
   multiRender('ivunit', 'dlIvUnit', '选面试单位（可多选）或直接输入', '、');
   window.CUR_SNAP = _formSnapshot(d);
-  document.getElementById('modal').classList.add('on');
+  openModal({ size:'xl' });
 }
 
 /* 字段抽取方式（v1.23.4）：模型抽取 vs 规则降级。
@@ -2577,12 +2703,113 @@ function setModalTitle(title, headHtml){
   document.getElementById('mTitle').textContent = title;
   document.getElementById('mHeadBtn').innerHTML = headHtml || '';
 }
-function closeModal(){
-  document.getElementById('modal').classList.remove('on');
-  // v1.24.11：关闭后按需接续下一个动作（如收取完成 → 自动分析进度）
-  const f = __afterClose; __afterClose = null;
-  if (f){ try{ f(); }catch(e){} }
+/* ===== 弹窗开合的**唯一入口**（v2.3.0）================================
+   原来全站 12 处都是 `document.getElementById('modal').classList.add('on')`
+   各写一遍，于是"记录触发元素 / 移入焦点 / 选尺寸档 / 设门控锁"四件事
+   散落在每一处，只可能漏，不可能全对（实测：role/aria/Esc/焦点陷阱全缺）。
+   收敛成一个入口后，新加弹窗不可能再漏掉这四项。 */
+/* ⚠️ 三个状态量用 var 不用 let：`let` 有暂时性死区（TDZ），
+   而 openModal/closeModal 的定义位置在本行**之前**（resultModal 在 1100 行
+   就引用它们）。函数声明会 hoisting 所以能调用，但 let 变量在声明前被读会抛
+   ReferenceError —— 本项目踩过同一个坑（`__ingesting` 声明在读取者之后，
+   整页白屏）。var 会先 hoist 成 undefined，最坏只是初值不对，不会炸。 */
+var __modalReturn = null;    // 打开前的焦点元素，关闭时归还
+var __modalLocked = false;   // 门控型/危险态：禁止 Esc 与点遮罩关闭
+var __closeToken = 0;        // 关闭动画期间又被打开时的防误杀令牌
+
+function _focusables(){
+  const box = document.getElementById('mSheet');
+  if (!box) return [];
+  const sel = 'a[href],button:not([disabled]),input:not([disabled]),' +
+              'select:not([disabled]),textarea:not([disabled]),' +
+              '[tabindex]:not([tabindex="-1"])';
+  return Array.prototype.filter.call(
+    box.querySelectorAll(sel),
+    el => el.offsetParent !== null || el === document.activeElement);
 }
+
+function openModal(opts){
+  const o = opts || {};
+  const modal = document.getElementById('modal');
+  const sheet = document.getElementById('mSheet');
+  if (!modal || !sheet) return;
+  // 只在"从关闭态打开"时记录触发元素：弹窗链原地切换（进度→结果）不该覆盖成
+  // 上一个弹窗里的按钮，否则关闭后焦点会还到一个已经不存在的地方。
+  if (!modal.classList.contains('on')) __modalReturn = document.activeElement;
+  __closeToken++;                       // 作废尚未执行的关闭回调
+  modal.classList.remove('closing');
+  sheet.className = 'sheet sheet--' + (o.size || 'xl');
+  __modalLocked = !!o.lock;
+  /* 底栏默认清空：底栏是共用的（全站一个 #modal），不清就会把上一个弹窗的
+     "保存更正"之类按钮残留到下一个弹窗上。需要底栏的调用方在 openModal
+     之后自己填（resultModal / progressModal 就是这么做的）。 */
+  const foot = document.getElementById('mFoot');
+  if (foot){ foot.style.display = 'none'; foot.innerHTML = ''; }
+  modal.classList.add('on');
+  // 焦点移入：优先第一个可聚焦元素；纯文本结果没有可聚焦元素时落到容器
+  // （容器 tabindex="-1"，可聚焦但不进 Tab 序列）。
+  requestAnimationFrame(() => {
+    const f = _focusables();
+    if (f.length){ try{ f[0].focus(); }catch(e){} }
+    else { try{ sheet.focus(); }catch(e){} }
+  });
+}
+
+/* 点遮罩关闭：门控型（进度条）与危险态不响应。
+   原来无条件 closeModal() —— 导入还在跑，用户点一下外面弹窗就没了，
+   但任务没停、也没有任何"还在跑"的痕迹，等于把状态藏起来了。 */
+function modalScrimClose(){
+  if (__modalLocked) return;
+  closeModal();
+}
+
+function closeModal(){
+  const modal = document.getElementById('modal');
+  if (!modal || !modal.classList.contains('on')) return;
+  const my = ++__closeToken;
+  const finish = () => {
+    if (my !== __closeToken) return;    // 这期间被 openModal 抢先了，别关
+    modal.classList.remove('on', 'closing');
+    __modalLocked = false;
+    // 焦点归还触发元素：键盘用户关闭后不该被丢到 <body> 再从头 Tab 一遍
+    const back = __modalReturn; __modalReturn = null;
+    if (back && typeof back.focus === 'function'){
+      try{ back.focus(); }catch(e){}
+    }
+    // v1.24.11：关闭后按需接续下一个动作（如收取完成 → 自动分析进度）
+    const f = __afterClose; __afterClose = null;
+    if (f){ try{ f(); }catch(e){} }
+  };
+  const reduce = !!(window.matchMedia &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  if (reduce){ finish(); return; }
+  modal.classList.add('closing');
+  setTimeout(finish, 120);              // 与 CSS 的出场动画时长一致
+}
+
+/* Esc 关闭 + Tab 焦点陷阱（v2.3.0）。
+   两件事都必须在**document 级**监听：弹窗内容每次都是新的 DOM，
+   绑定在容器上会在 innerHTML 重写后丢处理器。 */
+document.addEventListener('keydown', (ev) => {
+  const modal = document.getElementById('modal');
+  if (!modal || !modal.classList.contains('on')) return;
+  if (ev.key === 'Escape'){
+    if (__modalLocked) return;          // 门控型：Esc 也不放行（要显式点按钮）
+    ev.preventDefault();
+    closeModal();
+    return;
+  }
+  if (ev.key !== 'Tab') return;
+  const f = _focusables();
+  if (!f.length){ ev.preventDefault(); return; }
+  const first = f[0], last = f[f.length - 1];
+  const active = document.activeElement;
+  if (ev.shiftKey && (active === first || !modal.contains(active))){
+    ev.preventDefault(); last.focus();
+  } else if (!ev.shiftKey && (active === last || !modal.contains(active))){
+    ev.preventDefault(); first.focus();
+  }
+});
 
 /* 人工更正档案字段：识别错/识别不出的兜底口子。
    姓名错会连带污染去重与检索；学校/专业错会让"专业方向判定"跟着错。
@@ -2707,7 +2934,7 @@ function askConfirm(opts){
       closeModal();
       resolve(v);
     };
-    document.getElementById('modal').classList.add('on');
+    openModal({ size:'sm' });
   });
 }
 
@@ -2771,7 +2998,10 @@ async function interview(cid){
 async function doUpload(files){
   const arr = Array.from(files||[]).filter(f =>
     /[.](jpe?g|png|bmp|webp|pdf|docx?|txt)$/i.test(f.name));
-  if (!arr.length){ resultModal({title:'上传', kind:'warn', body:'没有可上传的文件（支持图片 / PDF / Word / txt）'}); return; }
+  /* v2.3.0 弹窗减法：这是**字段级校验**，不需要阻断 —— 用户此时只是选错了文件，
+     弹一个必须点"知道了"才能继续的窗户，纯属打断。就地 toast 即可。
+     （判断口径见 docs/前端弹窗与输入框优化方案.md 的决策树） */
+  if (!arr.length){ toast('没有可上传的文件（支持图片 / PDF / Word / txt）','warn'); return; }
   // v1.24.20：原本只弹一个 toast 就开始传。
   // toast 3.5 秒自动消失，而多份文件的裸字节上传常常要十几秒——
   // 之后界面就完全没反馈了，和"导入弹窗不动"是同一类毛病。
@@ -2787,7 +3017,7 @@ async function doUpload(files){
      <div class="bar" style="margin-top:18px;justify-content:flex-end">
        <button class="btn-primary" onclick="closeModal()">关掉（后台继续传）</button>
      </div>`;
-  document.getElementById('modal').classList.add('on');
+  openModal({ size:'md', lock:true });
   let ok = 0, fail = 0;
   const failedNames = [];
   const fill = document.getElementById('upFill');
@@ -2804,17 +3034,24 @@ async function doUpload(files){
       if (r.ok && !j.error){ ok++; } else { fail++; failedNames.push(f.name + '：' + (j.error||'上传失败')); }
     }catch(e){ fail++; failedNames.push(f.name + '：网络错误'); }
   }
-  // 完成提示：成功/部分失败/全部失败 三种状态分开说，并列出失败文件
-  resultModal({
-    title: '上传完成',
-    kind: fail ? (ok ? 'warn' : 'danger') : 'ok',
-    headline: fail ? (ok ? '部分文件未上传成功' : '全部文件上传失败') : '上传成功',
-    body: `共 ${arr.length} 份：成功 ${ok} 份` + (fail ? `，失败 ${fail} 份` : '，全部已入库')
-      + (failedNames.length
-          ? `<div style="margin-top:10px;color:var(--bad);font-size:13px">失败明细：<br>`
-            + failedNames.map(n => esc(n)).join('<br>') + '</div>'
-          : '')
-  });
+  /* 完成提示（v2.3.0 弹窗减法）：
+     - 有失败 → 弹窗（要逐条看哪份失败、为什么，可能要去修文件名或格式）
+     - 全部成功 → toast（纯结果反馈，用户接着做下一件事，不该被拦一次） */
+  if (!fail){
+    toast(`上传完成：**${ok} 份**已入库。`, 'ok');
+  } else {
+    resultModal({
+      title: '上传完成',
+      kind: ok ? 'warn' : 'danger',
+      headline: ok ? '部分文件未上传成功' : '全部文件上传失败',
+      size: 'lg',                    // 失败明细可能十几行，用宽档
+      body: `共 ${arr.length} 份：成功 ${ok} 份，失败 ${fail} 份`
+        + (failedNames.length
+            ? `<div style="margin-top:10px;color:var(--bad);font-size:13px">失败明细：<br>`
+              + failedNames.map(n => esc(n)).join('<br>') + '</div>'
+            : '')
+    });
+  }
   await refresh();
 }
 
@@ -3223,7 +3460,7 @@ async function pipeOverdueSet(){
        <button class="btn-primary" onclick="pipeOverdueSave()">保存</button>
        <button onclick="closeModal()">取消</button>
      </div>`;
-  document.getElementById('modal').classList.add('on');
+  openModal({ size:'md' });
 }
 async function pipeOverdueSave(){
   const el = document.getElementById('odDays');
@@ -3657,12 +3894,13 @@ async function reanalyzeBatch(){
     btn.disabled = false;
     refresh();
   }
-  // 用居中弹窗报告最终结果（不再用顶部 toast）
+  /* v2.3.0 弹窗减法：只有"部分失败"需要弹窗（要逐条看谁失败了、为什么）。
+     "全部完成"与"没有需要重跑的人"都是纯状态反馈 —— 用 toast，
+     不打断用户继续做下一件事。 */
   if (fail) resultModal({title:'批量重跑完成', kind:'warn',
     headline:'部分失败', body:`成功 ${done} 人，失败 ${fail} 人。<br>失败的点开档案看具体原因。`});
-  else if (done) resultModal({title:'批量重跑完成', kind:'ok',
-    headline:'全部完成', body:`${done} 人已改为模型抽取。`});
-  else resultModal({title:'批量重跑', kind:'info', body:'没有需要重跑的人了。'});
+  else if (done) toast(`批量重跑完成：**${done} 人**已改为模型抽取。`,'ok');
+  else toast('没有需要重跑的人了。','info');
 }
 
 async function analyzePendingBatch(){
@@ -3695,11 +3933,12 @@ async function analyzePendingBatch(){
     btn.disabled = false;
     if (!taskId) refresh();
   }
-  // 最终结果：有 taskId 时进度弹窗已展示结果；否则直接弹结果
+  /* 最终结果：有 taskId 时进度弹窗已展示结果；否则直接报
+     v2.3.0 弹窗减法："部分失败"要弹窗（要逐条核对），"全部完成"改 toast。 */
   if (!taskId){
     if (fail) resultModal({title:'分析完成', kind:'warn', headline:'部分失败',
       body:`成功 ${done} 人，失败 ${fail} 人。`});
-    else if (done) resultModal({title:'分析完成', kind:'ok', headline:'全部完成', body:`${done} 人已分析。`});
+    else if (done) toast(`分析完成：**${done} 人**已分析。`,'ok');
   }
 }
 /* 复核（v1.14.1）：认可系统这次给的建议档，**不改档位**。
@@ -4015,7 +4254,7 @@ async function openProposals(){
            </div>
          </div>`).join('')
     : '<div class="small">没有待确认的提案。</div>';
-  document.getElementById('modal').classList.add('on');
+  openModal({ size:'lg' });
 }
 
 /* 弹窗版提案处理：先确认、后提交；askConfirm 会顶掉本列表，所以结束后重开列表。 */
@@ -4308,7 +4547,7 @@ async function showRecycle(){
     <div class="bar" style="margin-top:12px">
       <button class="btn-primary" onclick="restoreAll()">全部恢复</button>
       <button onclick="closeModal()">关闭</button></div>`;
-  document.getElementById('modal').classList.add('on');
+  openModal({ size:'xl' });
   window.__recycle = (r.items||[]).map(x=>x.name);
 }
 async function restoreFiles(names){
@@ -4612,7 +4851,7 @@ async function editJd(jid){
   if (d.__http_error){ toast(d.detail||'读取失败','danger'); return; }
   setModalTitle((d.job.title||'岗位') + ' · 岗位 JD');
   document.getElementById('mBody').innerHTML = jdEditorHtml(jid, d.jd||{}, d.job||{});
-  document.getElementById('modal').classList.add('on');
+  openModal({ size:'lg' });
   // 多值组件要在 DOM 到位后初始化（顺序反了就是"控件是空的"——踩过）
   JD_MULTI = {
     must: ((d.jd||{}).must||{}).skills_required || [],
@@ -4682,7 +4921,7 @@ async function regradeJob(jid, apply){
   setModalTitle('重新分析 · 按当前 JD 重算已有投递');
   document.getElementById('mBody').innerHTML =
     `<div class="note">正在按当前 JD 重算该岗位下的投递…（从简历原文重跑规则通道，不调模型，结果可重复）</div>`;
-  document.getElementById('modal').classList.add('on');
+  openModal({ size:'lg' });
   const r = await api('/api/jobs/'+jid+'/regrade',
     {method:'POST', body:JSON.stringify({apply: !!apply})});
   if (r.__http_error || r.error){
@@ -5538,7 +5777,7 @@ function insertTableDialog(id){
     <div class="small" style="margin-top:10px">插入后直接在格子里打字（第一行是表头）。
       要调版式：把光标放进表格，用工具栏的<b>＋行/－行/＋列/－列</b>改形状，
       用<b>合并→</b>做跨列（如整行标题、标签+内容），满意后点<b>表格美化</b>一键统一样式。</div>`;
-  document.getElementById('modal').classList.add('on');
+  openModal({ size:'md' });
 }
 
 function _tableHtml(rows, cols){
@@ -5794,7 +6033,7 @@ function saveCurrentAsTemplate(){
       <button class="btn-primary" onclick="doSaveAsTemplate()">保存模板</button>
       <button onclick="closeModal()">取消</button>
       <span class="small" id="tplSaveMsg"></span></div>`;
-  document.getElementById('modal').classList.add('on');
+  openModal({ size:'md' });
 }
 
 async function doSaveAsTemplate(){

@@ -43,10 +43,24 @@ def _sha256(path: str) -> str:
 
 
 def layout(root: str) -> dict[str, str] | None:
-    """识别一个旧版根目录的数据/配置布局。"""
+    """识别一个旧版根目录的数据/配置布局。
+
+    候选布局（按可信度）：
+      1. `<root>/data` + `<root>/config`   —— 源码版 / 免安装版根目录
+      2. `<root>/_internal/data` + `<root>/_internal/config` —— **v2.0.0 及更早**
+         的分发形态：解压即用，库与原件在 `_internal/` 里。
+      3. `<root>` 本身是数据目录（库里就放在根上）
+
+    ⚠️ 候选 2 是实测踩出来的：2.0.0 的用户手里是一个解压出来的文件夹，
+    里面是 `HRAgent工作台/_internal/data/workbench.db`。安装器让用户手选旧目录时，
+    用户选的是**外层**（`HRAgent工作台`），而旧版 layout() 只认 `<root>/data` ——
+    于是迁移直接报"没有在旧版目录找到 workbench.db"，用户以为数据丢了。
+    """
     base = os.path.abspath(str(root or ""))
     candidates = [
         (os.path.join(base, "data"), os.path.join(base, "config")),
+        (os.path.join(base, "_internal", "data"),
+         os.path.join(base, "_internal", "config")),
         (base, os.path.join(os.path.dirname(base), "config")),
     ]
     for data_dir, config_dir in candidates:
@@ -63,25 +77,132 @@ def has_profile(user_home: str) -> bool:
     return os.path.isfile(profile_db(user_home))
 
 
+#: 补搬原件时只动这几类 —— 简历原件、证件照。不碰库、不碰配置、
+#: 不搬 inbox/outbox（邮件正文与附件可能有几百 MB，且库里没它们的索引意义）。
+SUPPLEMENT_ITEMS = ("archive", "avatars")
+
+
+def supplement_originals(legacy_root: str, user_home: str, *,
+                         log=print) -> dict:
+    """把旧目录里**用户目录还没有的**简历原件补过来。库与配置一律不动。
+
+    为什么需要它（真实场景）：
+      `migrate_profile()` 在目标已有数据库时直接 `FileExistsError`（拒绝覆盖），
+      这是对的 —— 不能拿旧库盖掉用户正在用的库。但那条规则会连带把**原件**
+      也挡在门外：老用户先装过 v2.x（用户目录有库），后来又回了 2.0.0 解压版
+      用了一段时间（新简历原件落在 `_internal/data/archive`），再升级时
+      库不迁 → 原件也不搬 → 界面表现是「列表里有人，但点开取不到原件」。
+
+      更严重的后果是**没法重新分析**：分析要读简历原文，原件不在就等于
+      这几十个人再也跑不了模型。所以这条补搬链必须存在。
+
+    语义：
+      · 只复制「目标不存在」的文件（不覆盖任何已有原件）
+      · 只动 SUPPLEMENT_ITEMS 这几类目录
+      · 不复制 master.key —— 两个环境的密钥可能不同，混进来反而解不开
+      · **跳过种子目录**（`_internal/seed`）：那是演示数据，
+        补进用户的真实库里会出现"凭空多出几个人"的错觉
+    """
+    result = {"copied": 0, "root": None, "skipped_seed": False}
+    root = os.path.abspath(str(legacy_root or ""))
+    if not root or not os.path.isdir(root):
+        return result
+    if "seed" in [p.lower() for p in os.path.normpath(root).split(os.sep)]:
+        result["skipped_seed"] = True
+        return result
+    old = layout(root)
+    if not old:
+        return result
+
+    target_data = os.path.join(os.path.abspath(user_home), "data")
+    copied = 0
+    conflicts: list[str] = []
+    for name in SUPPLEMENT_ITEMS:
+        src = os.path.join(old["data"], name)
+        if not _lp_isdir(src):
+            continue
+        dst = os.path.join(target_data, name)
+        copied += _copy_tree_if_missing(src, dst, conflicts)
+
+    if copied:
+        result["copied"] = copied
+        result["root"] = root
+        log(f"[supplement] 已有库不动，补搬缺失原件 {copied} 个：{root} → {target_data}")
+    return result
+
+
+
+# ---------------------------------------------------------------- 长路径（Windows）
+#
+# 这个文件会被**单独复制**成独立脚本（tools/hra_profile_migrate.py），
+# 所以不能 import app.paths——长路径工具就地实现一份。
+#
+# 为什么迁移必须处理长路径：旧数据里存的是**绝对路径**（旧数据根 + 长文件名），
+# 迁移到新数据根后整条路径会变长；附件原名又是 150+ 字符的那种，
+# 两者一叠加就可能越过 Windows 的 260 字符上限——
+# 拷贝直接报 WinError 206，于是"迁移完成了但原件没跟过来"，
+# 界面点"在线查看简历"就是 404（文件其实在旧目录里）。
+
+_PATH_BUDGET = 240
+
+
+def _lp(path: str) -> str:
+    """超长路径补 \\\\?\\ 前缀（Windows 扩展长路径）。"""
+    if os.name != "nt" or not path:
+        return path
+    try:
+        p = os.path.abspath(str(path))
+    except (OSError, ValueError):
+        p = os.path.normpath(os.path.join(os.getcwd(), str(path)))
+    if p.startswith("\\\\?\\"):
+        return p
+    if p.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + p[2:]
+    if len(p) <= _PATH_BUDGET:
+        return p
+    return "\\\\?\\" + p
+
+
+def _lp_isfile(path: str) -> bool:
+    return os.path.isfile(_lp(path))
+
+
+def _lp_isdir(path: str) -> bool:
+    return os.path.isdir(_lp(path))
+
+
+def _lp_exists(path: str) -> bool:
+    return os.path.exists(_lp(path))
+
+
+def _lp_makedirs(path: str, exist_ok: bool = True) -> None:
+    os.makedirs(_lp(path), exist_ok=exist_ok)
+
+
+def _lp_walk(path: str):
+    return os.walk(_lp(path))
+
+
 def _copy_file_if_missing(src: str, dst: str, conflicts: list[str]) -> bool:
-    if not os.path.isfile(src):
+    if not _lp_isfile(src):
         return False
-    if os.path.exists(dst):
+    if _lp_exists(dst):
         conflicts.append(dst)
         return False
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copy2(src, dst)
+    _lp_makedirs(os.path.dirname(dst), exist_ok=True)
+    # 拷长路径必须两端都带 @@BS@@?@@BS@@ 前缀，否则 shutil 内部会踩 206。
+    shutil.copy2(_lp(src), _lp(dst))
     return True
 
 
 def _copy_tree_if_missing(src: str, dst: str, conflicts: list[str]) -> int:
     copied = 0
-    if not os.path.isdir(src):
+    if not _lp_isdir(src):
         return copied
-    for current, dirs, files in os.walk(src):
+    for current, dirs, files in _lp_walk(src):
         rel = os.path.relpath(current, src)
         target_dir = dst if rel == "." else os.path.join(dst, rel)
-        os.makedirs(target_dir, exist_ok=True)
+        _lp_makedirs(target_dir, exist_ok=True)
         dirs[:] = [d for d in dirs if d not in ("__pycache__",)]
         for name in files:
             if name.endswith((".pyc", ".pyo")):
@@ -239,6 +360,96 @@ def _write_marker(user_home: str, payload: dict) -> None:
         fh.write("\n")
 
 
+def _is_under(path: str, root: str) -> bool:
+    """`path` 是否在 `root` 之下（Windows 下大小写不敏感）。"""
+    try:
+        p = os.path.normcase(os.path.abspath(path))
+        r = os.path.normcase(os.path.abspath(root))
+    except (OSError, ValueError):
+        return False
+    return p == r or p.startswith(r + os.sep)
+
+
+#: `mailbox.json` 里存目录的键。绝对路径落在这里 → 换机/换目录后必然失效。
+CONFIG_DIR_KEYS = ("eml_dir", "folder_dir", "archive_dir")
+
+
+def normalize_config_paths(config_dir: str, new_data: str,
+                            old_data: str | None = None) -> list[str]:
+    """把 `mailbox.json` 里指向**旧位置**的目录改成当前数据根下的同名子目录。
+
+    为什么必须修（实测）：迁移只改写了**数据库**里的路径（`rewrite_db_paths`），
+    但 `mailbox.json` 的 `eml_dir` / `folder_dir` / `archive_dir` 原样复制过来了。
+    2.0.0 的用户如果把来源目录设成了绝对路径（界面上"保存路径"就写绝对路径），
+    升级后这个值仍指向**旧安装目录**（甚至旧电脑）：
+      · 来源目录取不到 → 「在线预览」全部 404，界面显示"目录不存在"；
+      · 收信目录取不到 → 邮件收不到；
+      · 旧目录一旦被删/换机，这些路径彻底失效。
+
+    判定规则（宁可不动也不乱动）：
+      · 路径在 `old_data` 之下 → 明确是旧数据根，改成新数据根下的同名子目录；
+      · 路径**已存在**且不在 old_data 之下 → 是用户自己指定的位置（外接盘等），
+        原样保留；
+      · 路径**不存在**但含 `/data/` 段 → 是旧机器留下的残骸，改成新数据根下的
+        同名子目录（对应库内 `normalize_existing_data_paths` 的口径）。
+
+    返回被改动的说明列表（每条一句人话），便于在日志/界面上说清楚。
+    """
+    import json
+
+    notes: list[str] = []
+    path = os.path.join(os.path.abspath(config_dir), "mailbox.json")
+    if not os.path.isfile(path):
+        return notes
+    try:
+        with open(path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        return notes
+    if not isinstance(cfg, dict):
+        return notes
+
+    new_data = os.path.abspath(new_data)
+    changed = False
+    for key in CONFIG_DIR_KEYS:
+        value = cfg.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        value = value.strip()
+        if not os.path.isabs(value):
+            continue                       # 相对路径（data/xxx）本来就跟着数据根走
+        if _is_under(value, new_data):
+            continue                       # 已经指向当前数据根
+        replacement = None
+        if old_data and _is_under(value, os.path.abspath(old_data)):
+            suffix = os.path.relpath(value, os.path.abspath(old_data))
+            replacement = os.path.join(new_data, suffix)
+        elif not _lp_isdir(value):
+            marker = value.replace("\\", "/").lower().rfind("/data/")
+            if marker >= 0:
+                suffix = value.replace("\\", "/")[marker + 6:]
+                replacement = os.path.join(new_data, suffix.replace("/", os.sep))
+        if replacement is None:
+            continue
+        cfg[key] = replacement
+        changed = True
+        notes.append(f"{key}：{value} → {replacement}")
+
+    if changed:
+        backup = path + ".bak_pathfix-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+        try:
+            shutil.copy2(path, backup)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(cfg, fh, ensure_ascii=False, indent=2)
+                fh.write("\n")
+            os.replace(tmp, path)
+        except OSError:
+            return []
+        notes.append(f"（原文件已备份：{os.path.basename(backup)}）")
+    return notes
+
+
 def migrate_profile(legacy_root: str, user_home: str, *, log=print) -> dict:
     """把旧版档案复制到独立用户目录。目标已有数据库时绝不动它。"""
     old = layout(legacy_root)
@@ -286,6 +497,12 @@ def migrate_profile(legacy_root: str, user_home: str, *, log=print) -> dict:
     if key_before and key_before != key_after:
         raise RuntimeError("迁移校验失败：master.key 未原样复制")
 
+    # 配置里的目录也要跟着搬家（库里的路径改了，mailbox.json 的没改 →
+    # 来源目录仍指向旧位置，「在线预览」就全取不到）。
+    config_notes = normalize_config_paths(
+        os.path.join(target, "config"), os.path.join(target, "data"),
+        old_data=old["data"])
+
     marker = {
         "schema": 1,
         "migrated_at": _now(),
@@ -293,6 +510,7 @@ def migrate_profile(legacy_root: str, user_home: str, *, log=print) -> dict:
         "target_root": target,
         "counts": after,
         "rewritten_paths": rewritten,
+        "rewritten_config_paths": config_notes,
         "copied_data_files": copied_data,
         "copied_config_files": copied_config,
         "conflicts_skipped": len(conflicts),
@@ -302,6 +520,8 @@ def migrate_profile(legacy_root: str, user_home: str, *, log=print) -> dict:
     _write_marker(target, marker)
     log(f"[migrate] 完成：{json.dumps(after, ensure_ascii=False)}，"
         f"路径改写 {rewritten} 处；旧目录保持原样")
+    for note in config_notes:
+        log(f"[migrate]   配置路径：{note}")
     return marker
 
 
@@ -323,13 +543,13 @@ def seed_config(template_dir: str, config_dir: str, *, log=print) -> dict:
     config_dir = os.path.abspath(config_dir)
     created: list[str] = []
     merged: list[str] = []
-    if not os.path.isdir(template_dir):
+    if not _lp_isdir(template_dir):
         return {"created": created, "merged": merged}
-    os.makedirs(config_dir, exist_ok=True)
-    for current, dirs, files in os.walk(template_dir):
+    _lp_makedirs(config_dir, exist_ok=True)
+    for current, dirs, files in _lp_walk(template_dir):
         rel = os.path.relpath(current, template_dir)
         target_dir = config_dir if rel == "." else os.path.join(config_dir, rel)
-        os.makedirs(target_dir, exist_ok=True)
+        _lp_makedirs(target_dir, exist_ok=True)
         dirs[:] = [d for d in dirs if d not in ("__pycache__",)]
         for name in files:
             if name in CONFIG_TEMPLATE_EXCLUDE or name.endswith((".pyc", ".pyo")):
@@ -337,8 +557,8 @@ def seed_config(template_dir: str, config_dir: str, *, log=print) -> dict:
             source = os.path.join(current, name)
             destination = os.path.join(target_dir, name)
             relname = os.path.relpath(destination, config_dir)
-            if not os.path.exists(destination):
-                shutil.copy2(source, destination)
+            if not _lp_exists(destination):
+                shutil.copy2(_lp(source), _lp(destination))
                 created.append(relname)
                 continue
             if name.lower().endswith(".json"):

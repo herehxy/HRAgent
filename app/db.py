@@ -461,10 +461,100 @@ def _init_schema(conn: sqlite3.Connection) -> dict | None:
     """
     migration = _migrate_v01(conn)
     _ensure_columns(conn)
-    conn.executescript(SCHEMA)
+    _ensure_schema_columns(conn)      # v2.2.4：按 SCHEMA 补齐缺的列
+    _exec_schema(conn)
     _ensure_columns(conn)
     conn.commit()
     return migration
+
+
+def _exec_schema(conn: sqlite3.Connection) -> None:
+    """执行 SCHEMA，但**建索引失败不许炸**。
+
+    为什么：SCHEMA 末尾的 `CREATE INDEX ... ON 表(列)` 在旧库缺列时会失败。
+    索引只是查询加速，缺列时跳过它就行 —— 但原来 `executescript` 一失败
+    整个程序就起不来（"no such column: candidate_id"，启动直接中止）。
+    建表失败仍然要炸：那是真出错了。
+    """
+    for stmt in SCHEMA.split(";"):
+        st = stmt.strip()
+        if not st:
+            continue
+        try:
+            conn.execute(st)
+        except sqlite3.Error as exc:
+            up = st.upper()
+            if up.startswith("CREATE INDEX"):
+                continue                  # 索引建不出来：跳过，不影响启动
+            raise
+
+
+#: SCHEMA 里每张表应有的列：{表名: [(列名, 可用于 ALTER ADD COLUMN 的定义)]}。
+#: 解析一次缓存起来。
+_SCHEMA_COLUMNS: dict | None = None
+
+_CREATE_TABLE_RE = re.compile(
+    r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)\s*\((.*?)\n\);",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _schema_columns() -> dict:
+    """从 SCHEMA 解析出"每张表应该有哪些列"。
+
+    为什么需要：SCHEMA 末尾是一堆 `CREATE INDEX ... ON 表(列)`。
+    旧库里那张表要是**缺这一列**（版本更老时还没有），
+    建索引就会炸 "no such column"，**整个程序起不来**（实测）。
+    先按 SCHEMA 把列补齐，索引才建得出来。
+    """
+    global _SCHEMA_COLUMNS
+    if _SCHEMA_COLUMNS is not None:
+        return _SCHEMA_COLUMNS
+    out: dict = {}
+    for m in _CREATE_TABLE_RE.finditer(SCHEMA):
+        table = m.group(1)
+        body = m.group(2)
+        cols = []
+        for raw in body.split("\n"):
+            line = raw.strip().rstrip(",")
+            if not line:
+                continue
+            up = line.upper()
+            # 表级约束，不是列
+            if up.startswith(("PRIMARY KEY", "UNIQUE", "FOREIGN KEY", "CHECK",
+                              "CONSTRAINT")):
+                continue
+            mm = re.match(r"(\w+)\s+(.*)$", line)
+            if not mm:
+                continue
+            name, decl = mm.group(1), mm.group(2).strip()
+            # SQLite 不允许 ADD COLUMN 带 PRIMARY KEY / UNIQUE
+            if "PRIMARY KEY" in decl.upper() or "UNIQUE" in decl.upper():
+                continue
+            cols.append((name, decl))
+        if cols:
+            out[table] = cols
+    _SCHEMA_COLUMNS = out
+    return out
+
+
+def _ensure_schema_columns(conn: sqlite3.Connection) -> None:
+    """按 SCHEMA 给已存在的表补齐缺失的列。"""
+    for table, cols in _schema_columns().items():
+        try:
+            have = {str(r[1]).lower()
+                    for r in conn.execute(f'PRAGMA table_info("{table}")')}
+        except sqlite3.Error:
+            continue
+        if not have:
+            continue                      # 表还不存在 → 交给 executescript 建
+        for name, decl in cols:
+            if name.lower() in have:
+                continue
+            try:
+                conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {decl}')
+            except sqlite3.Error:
+                pass                      # 补不上就算了，索引会跳过它
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:

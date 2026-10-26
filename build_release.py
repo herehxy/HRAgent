@@ -4,8 +4,14 @@
 
 1. **绝不能带真实凭据**。安装目录 `_internal/config/` 里躺着
    `secrets.json`（模型 API Key）、`mailbox.json`（HR 邮箱账号）、
-   `imap.secret`（邮箱授权码）、`master.key`（库内联系方式加密主密钥）——打包前一律剔除，
+   `imap.secret`（**收信**授权码）、`smtp.secret`（**发信**口令/客户端专用密码）、
+   `master.key`（库内联系方式加密主密钥）——打包前一律剔除，
    只保留 `*.example.json` 作模板。
+
+   ⚠️ `smtp.secret` 是 v1.27 随「收发信分离」新增的文件。当时**四处清单都没同步**
+   （本文件 `SECRETS`、`HRAgentWebapp.spec` 的 datas 白名单、`repo_src/.gitignore`、
+   `_write_pack_secret.py`），后果是 HR 在运行库里填过的**发信口令会被原样打进
+   分发包**——拿到包的人能用他的企业邮箱发信。**以后再加密钥文件，四处一起改。**
 
 2. **master.key 必须与样例数据配套**。库里电话/邮箱是用 master.key 加密的：
    带旧库配新 key（或反过来）都会解不出来、联系人显示成乱码。所以流程做成
@@ -43,8 +49,8 @@ CFG = os.path.join(REL, "_internal", "config")
 DB = os.path.join(DATA, "workbench.db")
 
 #: 打包前必须删掉的凭据/密钥（示例文件保留）
-SECRETS = ["secrets.json", "mailbox.json", "imap.secret", "master.key", "tp.secret",
-           "model.key", "auth.json"]
+SECRETS = ["secrets.json", "mailbox.json", "imap.secret", "smtp.secret", "master.key",
+           "tp.secret", "model.key", "auth.json"]
 
 ZIP_NAME = "HRAgent工作台-Windows版-v1.8.9-含10份样例数据.zip"
 
@@ -245,6 +251,9 @@ def main() -> int:
     _feat = os.path.join(os.path.dirname(os.path.abspath(__file__)), "功能清单.md")
     if os.path.exists(_feat):
         shutil.copy2(_feat, os.path.join(REL, "功能清单.md"))
+    _pdf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "智能简历工作台-功能清单.pdf")
+    if os.path.exists(_pdf):
+        shutil.copy2(_pdf, os.path.join(REL, "智能简历工作台-功能清单.pdf"))
 
     # ---- 9) 打 zip（中文名用 UTF-8 flag，Win10+ 资源管理器能正确解压）----
     out = os.path.join(ROOT, ZIP_NAME)

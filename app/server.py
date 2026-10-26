@@ -105,6 +105,7 @@ from .paths import BASE      # 根目录唯一来源（认 TP_HOME）
 from .paths import DATA_DIR  # 数据目录（认 TP_DATA_DIR，可能不在 BASE 下）
 from .paths import cfg as _cfg_path
 from .paths import resolve_data_path
+from . import paths as _paths
 from .version import VERSION as PRODUCT_VERSION
 # 允许用 TP_DB_PATH 指向另一个库：演练、验收、接口实测时不必动真实人才库
 DB_PATH = os.environ.get("TP_DB_PATH") or os.path.join(DATA_DIR, "workbench.db")
@@ -605,12 +606,14 @@ def _store_upload_and_ingest(body: bytes, safe: str, jd, tiers,
     inbox = _os.path.join(DATA_DIR, "inbox")
     _os.makedirs(inbox, exist_ok=True)
     stamp = _t.strftime("%Y%m%d_%H%M%S")
-    dest = _os.path.join(inbox, f"{stamp}_{safe}")
+    # 文件名按整条路径预算压短：附件原名可能 150+ 字符，
+    # 不压就逼近 Windows 的 260 上限，写盘直接报 WinError 206。
+    dest = _os.path.join(inbox, _paths.fit_name(inbox, f"{stamp}_{safe}"))
     i = 1
-    while _os.path.exists(dest):
-        dest = _os.path.join(inbox, f"{stamp}_{i}_{safe}")
+    while _paths.lp_exists(dest):
+        dest = _os.path.join(inbox, _paths.fit_name(inbox, f"{stamp}_{i}_{safe}"))
         i += 1
-    with open(dest, "wb") as fh:
+    with _paths.lp_open(dest, "wb") as fh:
         fh.write(body)
     rep = _ing.ingest_dir(inbox, jd, tiers, DB_PATH, job_id=None,
                           use_llm=use_llm, llm_conf=conf)
@@ -1328,10 +1331,12 @@ def api_candidate_avatar(cid: int, token: str | None = None,
     if rel == avatar_mod.NONE_MARK:
         raise HTTPException(status_code=404, detail="这份简历里没有可用的证件照")
     path = _abs_stored(rel)
-    if not os.path.isfile(path):
+    # 存在性判断走 long_path：超长路径（>260）在 Windows 上 os.path.isfile
+    # 会静默返回 False，症状是"照片还在、页面说没有"。
+    if not _paths.lp_isfile(path):
         raise HTTPException(status_code=404, detail="照片文件已不在磁盘上")
     # 私有缓存：同一次浏览里不重复请求，但换人/换图能立刻生效
-    return FileResponse(path, media_type="image/jpeg",
+    return FileResponse(_paths.long_path(path), media_type="image/jpeg",
                         headers={"Cache-Control": "private, max-age=300"})
 
 
@@ -2155,11 +2160,11 @@ def _purge_expired(conn=None, actor: str = "system", role: str = "system",
         deleted, failed = [], []
         for rel in out["files"]:
             src = _abs_stored(rel)
-            if not os.path.exists(src):
+            if not _paths.lp_exists(src):
                 failed.append(rel)
                 continue
             try:
-                os.remove(src)
+                _paths.lp_remove(src)
                 deleted.append(rel)
             except OSError:
                 failed.append(rel)
@@ -3171,12 +3176,23 @@ def api_document_file(did: int, inline: int = 0, token: str | None = None,
     real = os.path.realpath(path)
     if not _inside_allowed_root(real):
         raise HTTPException(status_code=403, detail="原件路径超出允许范围，已拒绝")
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail=f"原件不在磁盘上：{path}")
+    # 存在性判断走 long_path：超长路径（>260）在 Windows 上 os.path.isfile
+    # 会静默返回 False —— 症状是"原件明明在磁盘上，页面却说不在"。
+    # 这正是"带旧数据 + 点在线查看简历就报错"的根因。
+    if not _paths.lp_isfile(path):
+        # 同样的口径：说清"缺什么"。原件不在，多半是**换机/换目录**之后
+        # 库里的旧绝对路径失效（数据已随迁移搬到新数据根，但这条记录没跟上）。
+        detail = f"原件不在磁盘上：{path}"
+        if not os.path.isdir(os.path.dirname(path)):
+            detail = (f"原件所在目录不存在：{os.path.dirname(path)}"
+                      "（换机器或换目录后旧路径会失效，请在「导入与来源」"
+                      "里重新指定来源目录）")
+        raise HTTPException(status_code=404, detail=detail)
 
     name = d.get("file_name") or os.path.basename(real)
     disposition = "inline" if inline else "attachment"
-    return FileResponse(real, filename=name,
+    # 发送用带 @@BS@@?@@BS@@ 前缀的路径（超长也能读）；越界检查仍用未加前缀的 real。
+    return FileResponse(_paths.long_path(real), filename=name,
                         content_disposition_type=disposition,
                         media_type=d.get("mime") or _mime_of(name),
                         headers=_FILE_SAFE_HEADERS)
@@ -3209,7 +3225,14 @@ def _source_file_path(name: str) -> str:
     real = os.path.realpath(os.path.join(folder, base))
     if os.path.dirname(real) != folder:
         raise HTTPException(status_code=403, detail="文件不在允许的来源目录内，已拒绝")
-    if not os.path.isfile(real):
+    if not _paths.lp_isfile(real):
+        # 说清"缺什么"而不是只说"文件不存在"：来源目录本身不在了，
+        # 是一回事（改配置里的路径即可）；文件被移走是另一回事。
+        if not os.path.isdir(folder):
+            raise HTTPException(
+                status_code=404,
+                detail=f"来源目录不存在：{folder}（请在「系统配置 → 导入与来源」"
+                       f"里重新指定来源目录，或把简历放回该目录）")
         raise HTTPException(status_code=404, detail=f"文件不存在：{base}")
     return real
 
@@ -3247,9 +3270,9 @@ def _zip_response(pairs: list[tuple[str, str]], zip_name: str,
     total = 0
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for path, name in pairs:
-            if not os.path.isfile(path):
+            if not _paths.lp_isfile(path):
                 continue
-            total += os.path.getsize(path)
+            total += _paths.lp_size(path)
             if total > MAX_BUNDLE_BYTES:
                 raise HTTPException(status_code=400,
                                     detail="所选文件合计超过 500MB，请分批下载")
@@ -3291,7 +3314,7 @@ def api_source_file(name: str, inline: int = 0, token: str | None = None,
                      "", base, s["username"], s["role"])
     finally:
         conn.close()
-    return FileResponse(real, filename=base,
+    return FileResponse(_paths.long_path(real), filename=base,
                         content_disposition_type="inline" if inline else "attachment",
                         media_type=_mime_of(base),
                         headers=_FILE_SAFE_HEADERS)
@@ -3353,10 +3376,12 @@ def api_sources_bundle(req: BundleReq,
                 if not _inside_allowed_root(real):
                     skipped.append(f"{d.get('file_name') or did}（路径越界，已拒绝）")
                     continue
-                if not os.path.isfile(path):
+                if not _paths.lp_isfile(path):
                     skipped.append(f"{d.get('file_name') or did}（原件不在磁盘上）")
                     continue
-                pairs.append((real, d.get("file_name") or os.path.basename(real)))
+                # 用带前缀的路径入 zip：超长路径 zipfile 也能写进去
+                pairs.append((_paths.long_path(real),
+                              d.get("file_name") or os.path.basename(real)))
         finally:
             conn.close()
 
@@ -3426,7 +3451,7 @@ def _docs_referencing(conn, real: str) -> list[dict]:
             if not raw:
                 continue
             full = _abs_stored(raw)
-            if os.path.realpath(full) == real:
+            if _paths.long_path(os.path.realpath(full)) == _paths.long_path(real):
                 out.append(dict(r))
                 break
     return out
@@ -5443,9 +5468,9 @@ def _outbox_path(outbox_id: str) -> str | None:
     # v1.29.10：磁盘上的文件名是 `id + 扩展名`（id 本身不含扩展名）——原实现
     # 按 `id` 直接找，**永远找不到文件**：表现就是"带附件的邮件发不出去
     # （提示：临时附件已不在暂存区）"，业务方实测两次。
-    if not os.path.exists(p):
+    if not _paths.lp_exists(p):
         for _e in OUTBOX_EXTS:
-            if os.path.exists(p + _e):
+            if _paths.lp_exists(p + _e):
                 p = p + _e
                 break
     # 双保险：拼完再确认它确实在 outbox 目录内（防将来改动引入穿越）

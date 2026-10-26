@@ -76,6 +76,17 @@ _PAGE = r"""<!DOCTYPE html>
   --bad:#c93a2e;  --bad-soft:#ffefee;  --bad-line:#f5cfcb;
   /* 档位色：与状态色**分开一套**（B 档不用主蓝，主蓝对白 4.28 不够） */
   --tier-b:#146b9e; --tier-b-soft:#e8f1f8;
+  /* 输入控件与弹窗遮罩（v2.3.0 前端整理，2026-10-23）：
+     原先是"白底 + 1px --line-2(#c9cdd4) 框" + "聚焦时整圈主蓝实线"。
+     --line-2 是全站**强分隔线**，用在输入框上等于每个控件都画了一圈重线；
+     聚焦再叠一圈饱和蓝，密集表单里视线全被框线牵走。
+     改成：**浅填充底 + 透明边框**，聚焦时底色转白 + 浅蓝描边 + 柔光。
+     为什么不直接改 --line-2：它是卡片/表格/分栏共用的分隔线资产，
+     动它会连带改掉整个界面的骨架。这里只新增输入框专用的一组值。 */
+  --field:#f2f3f5; --field-hover:#eceef1; --field-line:#dbe6fb;
+  /* 遮罩：.36 压暗 → .28 + 2px 模糊。靠失焦隔离而不是靠压暗，
+     背景仍明显不可读（模糊+半透明双重削弱），观感轻很多。 */
+  --scrim:rgba(31,35,41,.28);
   --r:8px; --r-s:6px;
 }
 *{box-sizing:border-box}
@@ -328,20 +339,41 @@ button{cursor:pointer}
 .btn.sm{height:26px;padding:0 10px;font-size:13px}
 .cedit{background:var(--surface-2);border-radius:var(--r-s);padding:8px 10px;margin-bottom:4px}
 .cinput{display:flex;align-items:flex-start;gap:8px;flex:1;min-width:0;flex-wrap:wrap}
+/* v2.3.0：**去框线，改填充底**。
+   原来 border 用 --line-2（强分隔线 #c9cdd4），每个字段都是一圈重线；
+   聚焦再叠一圈饱和主蓝。密集表单里十几圈线互相打架，观感很硬。
+   现在：浅灰底块界定范围 + 透明边框，聚焦时底色转白（"被激活"）、
+   补一条极浅蓝描边 + 3px 低透明度柔光。 */
 .cinput input,.cinput select,.cinput textarea{
-  flex:1;min-width:180px;height:34px;padding:0 10px;border:1px solid var(--line-2);
-  border-radius:var(--r-s);background:var(--surface);font:inherit;outline:none}
-.cinput textarea{height:auto;padding:8px 10px;line-height:1.6;resize:vertical}
+  flex:1;min-width:180px;height:34px;padding:0 10px;border:1px solid transparent;
+  border-radius:var(--r-s);background:var(--field);font:inherit;outline:none;
+  transition:background-color .14s ease,border-color .14s ease}
+.cinput textarea{height:auto;padding:8px 10px;line-height:1.7;resize:vertical}
+.cinput input:hover,.cinput select:hover,.cinput textarea:hover{background:var(--field-hover)}
 .cinput input:focus,.cinput select:focus,.cinput textarea:focus{
-  border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  background:var(--surface);border-color:var(--field-line);
+  box-shadow:0 0 0 3px rgba(51,112,255,.12)}
 .crow{display:flex;align-items:flex-start;gap:10px;margin:6px 0}
 .crow > label{width:86px;flex:none;font-size:13px;color:var(--ink-3);padding-top:7px}
 .crow input,.crow select,.crow textarea{
-  flex:1;min-width:0;height:34px;padding:0 10px;border:1px solid var(--line-2);
-  border-radius:var(--r-s);background:var(--surface);font:inherit;outline:none}
-.crow textarea{height:auto;padding:8px 10px;line-height:1.6;resize:vertical}
+  flex:1;min-width:0;height:34px;padding:0 10px;border:1px solid transparent;
+  border-radius:var(--r-s);background:var(--field);font:inherit;outline:none;
+  transition:background-color .14s ease,border-color .14s ease}
+.crow textarea{height:auto;padding:8px 10px;line-height:1.7;resize:vertical}
+.crow input:hover,.crow select:hover,.crow textarea:hover{background:var(--field-hover)}
 .crow input:focus,.crow select:focus,.crow textarea:focus{
-  border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  background:var(--surface);border-color:var(--field-line);
+  box-shadow:0 0 0 3px rgba(51,112,255,.12)}
+/* 禁用与校验失败（v2.3.0 补齐）：原来禁用和可用长得一样，很容易往只读框里填。
+   错误态不用高饱和红框，用浅红底 + 同族浅边；颜色不作为唯一信号，
+   字段旁必须同时给就地文案（调用侧保证）。 */
+.cinput input:disabled,.crow input:disabled,
+.cinput select:disabled,.crow select:disabled,
+.cinput textarea:disabled,.crow textarea:disabled{
+  background:#f7f8f9;color:#a8adb5;cursor:not-allowed}
+.cinput input.is-bad,.crow input.is-bad,
+.cinput select.is-bad,.crow select.is-bad,
+.cinput textarea.is-bad,.crow textarea.is-bad{background:#fff5f4;border-color:#f0cdc9}
 .ck{display:inline-flex;align-items:center;gap:6px;font-size:14px;padding-top:7px}
 .ck input{width:15px;height:15px;accent-color:var(--accent)}
 .archbar{flex:none;height:44px;align-items:center;gap:8px;padding:0 16px;
@@ -988,14 +1020,34 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
    为什么不用浏览器原生 confirm()：原生那个是浏览器画的框，样式、字号、按钮文案都不可控，
    换台机器/换个浏览器长得就不一样，而且它挡住整个应用、看不出正在确认的是哪件事。
    HR 看到"网页弹出的框"而不是"这个系统的框"。 */
-.mask{position:fixed;inset:0;z-index:60;background:rgba(31,35,41,.36);display:none;
-  align-items:center;justify-content:center}
-.mask.on{display:flex}
-.dlg{background:var(--surface);border-radius:10px;box-shadow:0 16px 48px rgba(31,35,41,.20);
-  padding:22px 24px;width:min(560px,calc(100% - 48px))}
+.mask{position:fixed;inset:0;z-index:60;background:var(--scrim);display:none;
+  align-items:center;justify-content:center;padding:22px;
+  -webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px)}
+.mask.on{display:flex;animation:maskIn .18s ease-out}
+/* v2.3.0 弹窗容器：**三段式**（标题固定 / 正文滚动 / 底栏固定）。
+   原来 .dlg 整体没有 overflow，宽体才加 overflow-y:auto —— 于是宽体弹窗
+   正文一长，**标题跟着滚走**，用户滚到中间就不知道在看哪个弹窗。
+   现在容器 overflow:hidden，只有 .dlg .db 滚；h3 与 .dbar 是 flex:none。 */
+.dlg{background:var(--surface);border-radius:12px;
+  box-shadow:0 1px 2px rgba(31,35,41,.04), 0 12px 32px rgba(31,35,41,.14);
+  padding:20px 24px 18px;width:min(520px,calc(100vw - 32px));
+  /* ⚠️ 这里直接写 88vh，**不要**写成 calc(88vh / var(--z))：
+     v2 页面没有 body{zoom}（用 grid + 100vh 布局），:root 里也就没有 --z。
+     写 var() 会在计算值阶段整条声明失效 → max-height 落回 none →
+     长内容把弹窗撑出屏幕。旧版 ui.py 才有 zoom/--z 那一套。 */
+  max-height:88vh;
+  display:flex;flex-direction:column;overflow:hidden;
+  animation:dlgIn .18s ease-out}
+/* 尺寸分档：内容复杂度决定宽度，不再"一个 520 走天下、宽体才 940"。
+   sm 400 确认型 / md 520 标准 / lg 720 明细与报告 / xl 940 富文本与档案 */
+.dlg.sm{width:min(400px,calc(100vw - 32px))}
+.dlg.md{width:min(520px,calc(100vw - 32px))}
+.dlg.lg{width:min(720px,calc(100vw - 32px))}
+.dlg.xl{width:min(940px,calc(100vw - 32px))}
 /* 宽体弹窗（编辑邮件模板用）：560px 装不下富文本编辑器 —— 正文区只剩一条缝，
-   工具栏还要换行，等于没法排版。宽到 940px 并限高，内容超出在弹窗内滚动。 */
-.dlg.wide{width:min(940px,calc(100% - 48px));max-height:calc(100vh - 56px);overflow-y:auto}
+   工具栏还要换行，等于没法排版。宽到 940px 并限高，内容超出在弹窗内滚动。
+   ⚠️ .wide 是历史类名，等价于 .xl（很多调用点按名加，保留兼容）。 */
+.dlg.wide{width:min(940px,calc(100vw - 32px))}
 .dlg.wide .crow{display:block}
 .dlg.wide .crow > label{display:block;width:auto;margin-bottom:4px;padding-top:0}
 /* ⚠️ `.cinput` 是 flex 容器，只有 input/select/textarea 才带 `flex:1`；
@@ -1006,13 +1058,51 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
 .dlg.wide .cinput > .richeditor{width:100%;box-sizing:border-box;
   min-height:300px;max-height:46vh;overflow-y:auto}
 .dlg.wide .cinput > input,.dlg.wide .cinput > select{width:100%;box-sizing:border-box}
-.dlg h3{margin:0 0 12px;font-size:18px;font-weight:600;position:relative;padding-right:26px}
+.dlg h3{margin:0 0 12px;font-size:18px;font-weight:600;position:relative;padding-right:26px;
+  flex:none}
 .dlg-x{position:absolute;right:0;top:-2px;font-size:21px;font-weight:400;color:var(--ink-3);
   cursor:pointer;line-height:1;padding:2px 5px;border-radius:4px}
 .dlg-x:hover{color:var(--ink);background:var(--surface-2)}
+/* 关闭按钮的键盘焦点：浏览器默认会给一圈 **黑色硬框**（outline:auto），
+   在白弹窗上非常抢眼。改成浅蓝底 + 柔光 —— 焦点依然明确可辨，
+   但不再是"强对比框线"。这条只影响键盘导航，鼠标点击不触发。 */
+.dlg-x:focus-visible{outline:none;background:var(--accent-soft);
+  color:var(--accent-ink);box-shadow:0 0 0 2px rgba(51,112,255,.20)}
 .btn.busy{border-color:var(--accent-line);color:var(--accent-ink);background:var(--accent-soft)}
-.dlg .db{line-height:1.8;font-size:15px;white-space:pre-wrap;color:var(--ink)}
-.dlg .dbar{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
+/* 正文是**唯一**滚动区（v2.3.0）：flex:1 + min-height:0 才能让它在容器里收缩；
+   只写 overflow-y:auto 而不给 min-height:0 时，flex 子项的默认 min-height:auto
+   会让它撑到内容高度、把底栏顶出屏幕（经典 flex 滚动失效）。 */
+.dlg .db{line-height:1.8;font-size:15px;white-space:pre-wrap;color:var(--ink);
+  flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-right:2px}
+.dlg .dbar{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;flex:none}
+/* 弹窗内的输入框（askText 用）：与全局输入控件同一套"填充底 + 柔光聚焦"。
+   它不在 .cinput/.crow 里，所以要单独给一遍。 */
+.dlg-input{border:1px solid transparent;border-radius:var(--r-s);
+  background:var(--field);color:var(--ink);outline:none;
+  transition:background-color .14s ease,border-color .14s ease}
+.dlg-input:hover{background:var(--field-hover)}
+.dlg-input:focus{background:var(--surface);border-color:var(--field-line);
+  box-shadow:0 0 0 3px rgba(51,112,255,.12)}
+/* 入场/出场只动 opacity 与 transform（不碰 width/height/margin，避免重排）。
+   出场比入场快：关窗时用户已经在想下一件事，等动画是纯损耗。 */
+@keyframes maskIn{from{opacity:0}to{opacity:1}}
+@keyframes dlgIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes maskOut{from{opacity:1}to{opacity:0}}
+@keyframes dlgOut{from{opacity:1;transform:none}to{opacity:0;transform:translateY(4px)}}
+.mask.closing{animation:maskOut .12s ease-in forwards}
+.mask.closing .dlg{animation:dlgOut .12s ease-in forwards}
+/* 尊重系统"减少动效"：直接关掉，而不是只缩短时长 ——
+   前庭敏感用户对位移特别敏感，缩短到 60ms 仍然会晃。 */
+@media (prefers-reduced-motion:reduce){
+  .mask.on,.dlg,.mask.closing,.mask.closing .dlg{animation:none}
+}
+/* 窄屏（<600px）降级为底部面板：居中小窗在手机上够不着，键盘一弹还会被顶飞。
+   只圆上面两角、贴底、限制高度 —— 移动端弹窗的主流形态。 */
+@media (max-width:600px){
+  .mask{padding:0;align-items:flex-end}
+  .dlg,.dlg.sm,.dlg.md,.dlg.lg,.dlg.xl,.dlg.wide{
+    width:100%;border-radius:16px 16px 0 0;max-height:76vh}
+}
 /* ---- 按钮变体：**全部照搬原版**（ui.py 的同名规则）----
    原版的规矩（业务方 2026-10-14 定）：
      · 导入/收取组 = **浅蓝底深蓝字**（btn-primary）且**加大一档**（btn-lg）——每日常用动作；
@@ -1044,6 +1134,39 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
   .detail.swap > *, .pulse{animation:none!important}
   .row,.bar{transition:none!important}
 }
+
+/* ===== v2.3.0 输入控件统一：**填充底 + 无框线** ==========================
+   为什么放在样式表末尾：这十几种控件（顶部搜索、各类筛选下拉、可编辑值、
+   教育字段、聊天输入、跳页框、面试单位）各自在文件中段有自己的 border 定义，
+   逐个去改要动 20 多条规则，容易漏、也容易把按钮和浮层一起卷进来。
+   同特异性下**后出现者胜**，所以这里用**完全相同的选择器**再声明一次，
+   只覆盖 border 与 background —— padding / height / font 一律沿用原值，不改几何。
+
+   ⚠️ 最初只改了 `.cinput input` / `.crow input`（表单里的字段），
+   结果用户打开页面第一眼看到的顶部搜索框、筛选下拉**依然全是框线** ——
+   那才是"看不出改了什么"的真正原因。改样式前先想"用户第一眼看哪里"。 */
+.search,.sel,.vsel,.stagesel,.pgjump,.chatinput textarea,
+.cval .ced,.mrow input,.mrow select,.edu-field input,.edu-field select,
+#madd_ivunit{
+  border:1px solid transparent;background:var(--field);
+  transition:background-color .14s ease,border-color .14s ease}
+.search:hover,.sel:hover,.vsel:hover,.stagesel:hover,.pgjump:hover,
+.chatinput textarea:hover,.cval .ced:hover,.mrow input:hover,.mrow select:hover,
+.edu-field input:hover,.edu-field select:hover,#madd_ivunit:hover{
+  background:var(--field-hover)}
+.search:focus,.sel:focus,.vsel:focus,.stagesel:focus,.pgjump:focus,
+.chatinput textarea:focus,.cval .ced:focus,.mrow input:focus,.mrow select:focus,
+.edu-field input:focus,.edu-field select:focus,#madd_ivunit:focus{
+  outline:none;background:var(--surface);border-color:var(--field-line);
+  box-shadow:0 0 0 3px rgba(51,112,255,.12)}
+
+/* 富文本编辑区（简历更正、邮件模板本身）**不用填充底**：
+   它是"一张纸"，写东西的地方应该是白底；灰底会让正文看起来像禁用态。
+   只把原来的 --line-2 强框线换成极浅的 --line，边界还在但不抢视线。 */
+#mBody,.richeditor{border:1px solid var(--line);background:var(--surface)}
+#mBody:focus,.richeditor:focus{
+  outline:none;border-color:var(--field-line);
+  box-shadow:0 0 0 3px rgba(51,112,255,.12)}
 </style>
 </head>
 <body>
@@ -1155,7 +1278,7 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
 </div>
 </div>
 <div class="toast" id="toast"></div>
-<div class="mask" id="mask"><div class="dlg" role="dialog" aria-modal="true"><h3 id="dlgTitle"></h3><div class="db" id="dlgBody"></div><div class="db" id="edDlgBody" style="display:none"></div><div class="dbar"><button class="btn" id="dlgNo"></button><button class="btn primary" id="dlgYes"></button></div></div></div>
+<div class="mask" id="mask"><div class="dlg md" id="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgTitle" tabindex="-1"><h3 id="dlgTitle"></h3><div class="db" id="dlgBody"></div><div class="db" id="edDlgBody" style="display:none"></div><div class="dbar"><button class="btn" id="dlgNo"></button><button class="btn primary" id="dlgYes"></button></div></div></div>
 
 <script>
 var STAGE_CFG = __V2_STAGES__;
@@ -2831,6 +2954,58 @@ var __progTimer = null;
 var __ingestTask = null;   /* {taskId, label, source, phase:'fetch'|'insight'} */
 var __ingesting = false;
 
+/* ===== 弹窗状态与开合入口（v2.3.0）=================================
+   v2 原来只有 role="dialog" + aria-modal，缺 Esc、焦点陷阱、焦点归还；
+   遮罩点击是**无条件关闭**——进度条还在跑，点一下外面窗就没了，
+   但任务没停，界面也没有任何"还在跑"的痕迹，等于把状态藏起来了。
+   这里把四件事收到一个入口，新加弹窗不可能漏。 */
+var __dlgReturn = null;   // 打开前的焦点元素，关闭时归还
+var __dlgLocked = false;  // 门控型/危险态：Esc 与点遮罩都不关
+var __dlgToken = 0;       // 关闭动画期间又被打开时，作废旧的关闭回调
+
+function _dlgFocusables(){
+  var box = document.getElementById('dlg');
+  if(!box) return [];
+  var sel = 'a[href],button:not([disabled]),input:not([disabled]),' +
+            'select:not([disabled]),textarea:not([disabled]),' +
+            '[tabindex]:not([tabindex="-1"])';
+  return Array.prototype.filter.call(box.querySelectorAll(sel), function(el){
+    return el.offsetParent !== null || el === document.activeElement;
+  });
+}
+
+/* 所有弹窗打开都该走这里。opts: {size:'sm'|'md'|'lg'|'xl', lock:bool}
+   ⚠️ 不传 size 时：若容器上已有历史类名 .wide（editTpl 提前加的），
+   按 xl 处理；否则用 md。这样老的 `.wide` 调用点不用改。 */
+function openDlg(opts){
+  var o = opts || {};
+  var mask = document.getElementById('mask');
+  var dlg = document.getElementById('dlg');
+  if(!mask || !dlg) return;
+  var wasOpen = mask.classList.contains('on');
+  /* 只在"从关闭态打开"时记录触发元素：弹窗链原地切换（进度→结果）
+     不该把返回值覆盖成上一个弹窗里的按钮（那个按钮可能已经被 innerHTML 冲掉）。 */
+  if(!wasOpen) __dlgReturn = document.activeElement;
+  __dlgToken++;
+  mask.classList.remove('closing');
+  var size = o.size || (dlg.classList.contains('wide') ? 'xl' : 'md');
+  dlg.className = 'dlg ' + size;
+  __dlgLocked = !!o.lock;
+  mask.classList.add('on');
+  /* 焦点移入：优先第一个可聚焦元素；纯文本结果没有可聚焦元素时落到容器
+     （容器 tabindex="-1"，可聚焦但不进 Tab 序列）。 */
+  requestAnimationFrame(function(){
+    var f = _dlgFocusables();
+    if(f.length){ try{ f[0].focus(); }catch(e){} }
+    else { try{ dlg.focus(); }catch(e){} }
+  });
+}
+
+/* 点遮罩关闭：门控型（进度条）与危险态不响应 */
+function dlgScrimClose(){
+  if(__dlgLocked) return;
+  closeProgDlg();
+}
 function ensureDlgClose(){
   var t = document.getElementById('dlgTitle');
   if(!t) return;
@@ -2842,15 +3017,23 @@ function ensureDlgClose(){
     t.appendChild(x);
   }
   x.title = '关闭';
+  /* 关闭按钮必须是**可聚焦的按钮**且有可访问名（原来是个 <b>，
+     键盘 Tab 到不了、读屏也读不出"这是关闭"）。 */
+  x.setAttribute('role', 'button');
+  x.setAttribute('tabindex', '0');
+  x.setAttribute('aria-label', '关闭');
+  x.onkeydown = function(ev){
+    if(ev.key === 'Enter' || ev.key === ' '){ ev.preventDefault(); closeProgDlg(); }
+  };
   x.onclick = function(){ closeProgDlg(); };
   var m = document.getElementById('mask');
   if(m){
     m.onclick = function(ev){
-      if(ev.target === ev.currentTarget) closeProgDlg();
+      if(ev.target === ev.currentTarget) dlgScrimClose();
     };
   }
 }
-function openProgDlg(title, html){
+function openProgDlg(title, html, opts){
   var t = document.getElementById('dlgTitle');
   t.textContent = title;
   var b = document.getElementById('edDlgBody');
@@ -2859,62 +3042,129 @@ function openProgDlg(title, html){
   document.getElementById('dlgBody').style.display = 'none';
   document.getElementById('dlgNo').style.display = 'none';
   document.getElementById('dlgYes').style.display = 'none';
-  var mask = document.getElementById('mask');
-  mask.classList.add('on');
+  /* 尺寸与门控锁统一走 openDlg（原来这里直接 mask.classList.add('on')，
+     于是"尺寸档/锁/焦点"三件事根本没地方设） */
+  openDlg(opts);
   ensureDlgClose();
 }
 function closeProgDlg(){
   if(__progTimer){ clearInterval(__progTimer); __progTimer = null; }
-  /* 宽体样式是"这一屏专属"的，关窗必须摘掉，否则下一个普通弹窗也会被撑成 940px */
-  var wide = document.querySelector('#mask .dlg.wide');
-  if(wide) wide.classList.remove('wide');
-  var b = document.getElementById('edDlgBody');
-  if(b){ b.style.display = 'none'; b.innerHTML = ''; }
-  document.getElementById('dlgBody').style.display = '';
-  document.getElementById('dlgNo').style.display = '';
-  document.getElementById('dlgYes').style.display = '';
-  var bar = document.querySelector('#mask .dbar');
-  if(bar) bar.style.display = '';
   var mask = document.getElementById('mask');
-  mask.classList.remove('on');
-  mask.onclick = null;
-  var title = document.getElementById('dlgTitle');
-  var x = title ? title.querySelector('.dlg-x') : null;
-  if(x) x.remove();
+  if(!mask || !mask.classList.contains('on')) return;
+  var my = ++__dlgToken;
+  var finish = function(){
+    if(my !== __dlgToken) return;      // 这期间被 openDlg 抢先了，别关
+    /* 宽体样式是"这一屏专属"的，关窗必须摘掉，否则下一个普通弹窗也会被撑成 940px。
+       openDlg 会把 className 重置成 'dlg <size>'，这里再兜一次遗留。 */
+    var wide = document.querySelector('#mask .dlg.wide');
+    if(wide) wide.classList.remove('wide');
+    var b = document.getElementById('edDlgBody');
+    if(b){ b.style.display = 'none'; b.innerHTML = ''; }
+    document.getElementById('dlgBody').style.display = '';
+    document.getElementById('dlgNo').style.display = '';
+    document.getElementById('dlgYes').style.display = '';
+    var bar = document.querySelector('#mask .dbar');
+    if(bar) bar.style.display = '';
+    mask.classList.remove('on', 'closing');
+    mask.onclick = null;
+    __dlgLocked = false;
+    var title = document.getElementById('dlgTitle');
+    var x = title ? title.querySelector('.dlg-x') : null;
+    if(x) x.remove();
+    /* 焦点归还触发元素：键盘用户关闭后不该被丢到 <body> 再从头 Tab 一遍 */
+    var back = __dlgReturn; __dlgReturn = null;
+    if(back && typeof back.focus === 'function'){
+      try{ back.focus(); }catch(e){}
+    }
+  };
+  var reduce = !!(window.matchMedia &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  if(reduce){ finish(); return; }
+  mask.classList.add('closing');
+  setTimeout(finish, 120);             // 与 CSS 出场动画时长一致
 }
+
+/* Esc 关闭 + Tab 焦点陷阱（v2.3.0）。
+   必须挂在 document 上：弹窗内容每次 innerHTML 重写，绑在容器上会丢处理器。 */
+document.addEventListener('keydown', function(ev){
+  var mask = document.getElementById('mask');
+  if(!mask || !mask.classList.contains('on')) return;
+  /* askText 自己的输入框已经处理了 Esc（取消），别让它被关两次 */
+  if(ev.key === 'Escape'){
+    if(__dlgLocked) return;
+    if(ev.defaultPrevented) return;
+    ev.preventDefault();
+    if(window.__dlgResolve){ closeDlg(false); return; }
+    closeProgDlg();
+    return;
+  }
+  if(ev.key !== 'Tab') return;
+  var f = _dlgFocusables();
+  if(!f.length){ ev.preventDefault(); return; }
+  var first = f[0], last = f[f.length - 1];
+  var active = document.activeElement;
+  if(ev.shiftKey && (active === first || !mask.contains(active))){
+    ev.preventDefault(); last.focus();
+  } else if(!ev.shiftKey && (active === last || !mask.contains(active))){
+    ev.preventDefault(); first.focus();
+  }
+});
 function resultModal(opts){
   var o = opts || {};
   var kind = o.kind || 'info';
   var color = kind === 'ok' ? 'var(--ok)'
             : (kind === 'danger' ? 'var(--bad)'
             : (kind === 'warn' ? 'var(--warn)' : 'var(--accent)'));
+  /* v2.3.0：正文只放内容，按钮进**固定底栏**（#dlgYes）。
+     原来按钮拼在 body 里，正文一长就跟着滚走 —— 用户得先滚到底才能点"知道了"。
+     尺寸默认 md(520)：一句话的结果不该飘在 940px 的大白块里。
+     危险态（失败/不可逆）加锁：结果必须被看到，点遮罩不能抹掉。 */
   openProgDlg(o.title || '完成',
     '<div style="line-height:1.8;white-space:pre-wrap">' +
       '<div style="font-size:15px;color:' + color + ';font-weight:600;margin-bottom:8px">' +
         esc(o.headline || '') + '</div>' +
       '<div>' + (o.body || '') + '</div>' +
-    '</div>' +
-    '<div class="bar" style="margin-top:18px;justify-content:flex-end">' +
-      '<button class="btn primary" onclick="closeProgDlg()">' + esc(o.okText || '知道了') + '</button></div>');
+    '</div>',
+    {size: o.size || 'md', lock: kind === 'danger'});
+  var yes = document.getElementById('dlgYes');
+  if(yes){
+    yes.style.display = '';
+    yes.textContent = o.okText || '知道了';
+    yes.className = 'btn primary';
+    yes.onclick = function(){ closeProgDlg(); };
+  }
 }
 /* 居中进度弹窗：真实进度条 + 可停止 */
 function progressModal(taskId, opts){
   var o = opts || {};
   if(!taskId){ resultModal({title: o.title || '处理中', body: o.body || '', kind: 'info'}); return; }
   if(__progTimer){ clearInterval(__progTimer); __progTimer = null; }
+  /* v2.3.0：**门控型弹窗**，lock=true —— 任务在后台真的还在跑，
+     界面上"关掉了"但任务没停，是最容易让人误判"已取消"的状态。
+     要离开只能点"停止"或等它自己完成。 */
   openProgDlg(o.title || '处理中…',
     '<div>' +
       '<div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">' +
         esc(o.desc || '正在处理，请稍候') + '</div>' +
       '<div class="progtrack"><div class="progfill" id="progFill" style="width:0%"></div></div>' +
       '<div class="progmeta" id="progMeta">准备中…</div>' +
-      (o.stoppable
-        ? '<div class="bar" style="margin-top:14px;justify-content:flex-end">' +
-          '<button class="btn" id="progStopBtn" onclick="progressStop(\'' + esc(taskId) + '\')" ' +
-          'title="读完正在处理的这一份就停下；已处理的全部保留，下次从停下的地方继续">' +
-          '停止（读完当前文件后停下）</button></div>'
-        : '') +
-    '</div>');
+    '</div>',
+    {size: o.size || 'md', lock: true});
+  /* 停止按钮也进底栏（左侧，次要动作）——正文再长它也不会被挤到滚动区外面 */
+  if(o.stoppable){
+    var no = document.getElementById('dlgNo');
+    if(no){
+      no.style.display = '';
+      /* ⚠️ 不要给这个元素另起 id（原来试过设成 progStopBtn，然后为了不留残留
+         又 removeAttribute('id') —— 结果第二次打开弹窗时 getElementById('dlgNo')
+         就已经返回 null，整条开窗链路直接抛 TypeError）。
+         共用元素只按它本来的 id 找，下面的完成分支与 progressStop 已同步改成 dlgNo。 */
+      no.textContent = '停止（读完当前文件后停下）';
+      no.className = 'btn';
+      no.title = '读完正在处理的这一份就停下；已处理的全部保留，下次从停下的地方继续';
+      no.onclick = function(){ progressStop(taskId); };
+    }
+  }
   var fill = document.getElementById('progFill');
   var meta = document.getElementById('progMeta');
   var stopped = false;
@@ -2951,7 +3201,7 @@ function progressModal(taskId, opts){
     if(r.status === 'done' || r.status === 'error'){
       stopped = true;
       clearInterval(__progTimer); __progTimer = null;
-      var sb = document.getElementById('progStopBtn');
+      var sb = document.getElementById('dlgNo');
       if(sb) sb.disabled = true;
       if(o.chain){ if(o.onDone) o.onDone(r); return; }
       var okAll = !r.failed;
@@ -2978,7 +3228,7 @@ function progressModal(taskId, opts){
 }
 async function progressStop(taskId){
   var r = await api('/api/tasks/' + taskId + '/stop', {method:'POST'});
-  var sb = document.getElementById('progStopBtn');
+  var sb = document.getElementById('dlgNo');
   if(sb){ sb.disabled = true; sb.textContent = '已请求停止（读完当前文件后停下）'; }
   toast(r.__err ? ('停止失败：' + r.__err) : '已请求停止');
 }
@@ -3140,7 +3390,9 @@ async function doUpload(files){
     return /[.](jpe?g|png|bmp|webp|pdf|docx?|txt)$/i.test(f.name);
   });
   if(!arr.length){
-    resultModal({title:'上传', kind:'warn', body:'没有可上传的文件（支持图片 / PDF / Word / txt）'});
+    /* v2.3.0 弹窗减法：字段级校验不需要阻断 —— 用户只是选错了文件，
+       弹一个必须点"知道了"才能继续的窗纯属打断。就地 toast 即可。 */
+    toast('没有可上传的文件（支持图片 / PDF / Word / txt）', 'warn');
     return;
   }
   /* 给出可数的进度：多份文件的裸字节上传常常十几秒，只弹一个 toast 之后界面就没反馈了*/
@@ -3187,17 +3439,23 @@ async function doUpload(files){
     }catch(e){ fail++; failedNames.push(f.name + '：网络错误'); }
   }
   if(fill) fill.style.width = '100%';
-  resultModal({
-    title: '上传完成',
-    kind: fail ? (ok ? 'warn' : 'danger') : 'ok',
-    headline: fail ? (ok ? '部分文件未上传成功' : '全部文件上传失败') : '上传成功',
-    body: '共 ' + arr.length + ' 份：成功 ' + ok + ' 份'
-      + (fail ? ('，失败 ' + fail + ' 份') : '，全部已入库')
-      + (failedNames.length
-          ? '<div style="margin-top:10px;color:var(--bad);font-size:13px">失败明细：<br>'
-            + failedNames.map(function(n){ return esc(n); }).join('<br>') + '</div>'
-          : '')
-  });
+  /* v2.3.0 弹窗减法：**只有失败才弹窗**（要逐条看哪份失败、为什么）。
+     全部成功是纯结果反馈 → toast，用户接着做下一件事，不该被拦一次。 */
+  if(!fail){
+    toast('上传完成：**' + ok + ' 份**已入库。', 'ok');
+  } else {
+    resultModal({
+      title: '上传完成',
+      kind: ok ? 'warn' : 'danger',
+      headline: ok ? '部分文件未上传成功' : '全部文件上传失败',
+      size: 'lg',                     // 失败明细可能十几行
+      body: '共 ' + arr.length + ' 份：成功 ' + ok + ' 份，失败 ' + fail + ' 份'
+        + (failedNames.length
+            ? '<div style="margin-top:10px;color:var(--bad);font-size:13px">失败明细：<br>'
+              + failedNames.map(function(n){ return esc(n); }).join('<br>') + '</div>'
+            : '')
+    });
+  }
   var inp = document.getElementById('upFile');
   if(inp) inp.value = '';
   await load();
@@ -4018,7 +4276,8 @@ function askConfirm(opts){
       if(ev.target === ev.currentTarget) closeDlg(false);
     };
     window.__dlgResolve = resolve;
-    document.getElementById('mask').classList.add('on');
+    /* 确认型用最小档 400px：一句话确认不该飘在 520px 的框里 */
+    openDlg({size: 'sm'});
     yes.focus();
   });
 }
@@ -4029,8 +4288,7 @@ function askText(title, def, ph){
     if(editorBody){ editorBody.style.display = 'none'; editorBody.innerHTML = ''; }
     document.getElementById('dlgBody').style.display = '';
     document.getElementById('dlgBody').innerHTML =
-      '<input id="dlgInput" style="width:100%;height:34px;padding:0 10px;' +
-      'border:1px solid var(--line-2);border-radius:var(--r-s);font:inherit" ' +
+      '<input id="dlgInput" class="dlg-input" style="width:100%;height:34px;padding:0 10px;font:inherit" ' +
       'placeholder="' + esc(ph || '') + '" value="' + esc(def || '') + '">' +
       '<span class="hint" style="display:block;margin-top:8px">回车确定，Esc 取消</span>';
     document.getElementById('dlgNo').textContent = '取消';
@@ -4042,19 +4300,27 @@ function askText(title, def, ph){
     var inp = document.getElementById('dlgInput');
     inp.addEventListener('keydown', function(ev){
       if(ev.key === 'Enter') done(inp.value.trim() || true);
-      if(ev.key === 'Escape') done(null);
+      /* preventDefault 是给全局 Esc 监听器看的信号："这一层已经处理过了"，
+         否则同一个 Esc 会走两遍关闭流程（两次递增关闭令牌，先发起的那次被作废）。 */
+      if(ev.key === 'Escape'){ ev.preventDefault(); done(null); }
     });
     document.getElementById('mask').onclick = function(ev){
       if(ev.target === ev.currentTarget) done(null);
     };
     window.__dlgResolve = resolve;
-    document.getElementById('mask').classList.add('on');
+    openDlg({size: 'sm'});
     setTimeout(function(){ inp.focus(); inp.select(); }, 30);
   });
 }
-document.addEventListener('keydown', function(ev){
-  if(ev.key === 'Escape' && document.getElementById('mask').classList.contains('on')) closeDlg(false);
-});
+/* Esc 关闭弹窗的监听器**只保留上面那一个**（v2.3.0）。
+   这里原来还有一份：
+       document.addEventListener('keydown', function(ev){
+         if(ev.key === 'Escape' && mask.classList.contains('on')) closeDlg(false);
+       });
+   两份同时存在时，一次 Esc 会调两次 closeProgDlg —— 两次各自递增关闭令牌，
+   先发起的那次就被判为"过期"而放弃，行为变得不可预测；
+   而且旧的那份无条件 closeDlg(false)，会绕过门控锁（进度条按 Esc 就没了）。
+   同一件事只在一处实现，新加条件才不可能漏。 */
 
 /* ============================================================
    分析看板：原版的"投递进度环"搬回来 + 几张**不重复**的维度图
@@ -4295,6 +4561,11 @@ function anaRenderCustom(){
     /* 条件区：只渲染用户勾选的维度。
        选项排成**网格**而不是 flex-wrap —— 原来用 flex 换行，每行能放几个全看字数，
        "面试单位"只有一个选项时独占一整行，看起来就是散的（业务方 2026-10-21 截图）。 */
+  var condHtml = SEL.map(function(k){
+    var c = ANA_CONDS.filter(function(item){ return item.k === k; })[0];
+    if(!c) return '';
+    var opts = anaCondOpts(c);
+    if(!opts.length) return '';
     return '<div class="anagrp"><span class="anagname">' + esc(c.label) + '</span>' +
       '<div class="anackgrid">' + opts.map(function(v){
         var on = (ANA.conds[c.k] || []).indexOf(v) >= 0;
@@ -4302,6 +4573,7 @@ function anaRenderCustom(){
           '<input type="checkbox" ' + (on ? 'checked' : '') +
           ' onchange="anaCond(\'' + c.k + '\',' + jq(v) + ',this.checked)"> ' + esc(v) + '</label>';
       }).join('') + '</div></div>';
+  }).filter(Boolean).join('');
   box.innerHTML =
     '<div class="anacondhead">' +
       '<span class="anacount"><b class="num">' + items.length + '</b> 人符合条件' +
@@ -4328,7 +4600,7 @@ function anaCond(key, val, on){
 }
 /* 只负责**拉数据**（概览面板里用），不再自己占一个视图 */
 async function anaLoad(){
-  if(ANA.items.length){ anaRenderCustom(); return; }
+  if(ANA.items.length){ setTimeout(anaRenderCustom, 0); return; }
   /* ⚠️ 这里**不要**加 `page_size`（2026-10-21 修复）。
      `/api/candidates` 的分页参数是"人才库界面的阅读方式"，**不传就是全量** ——
      这是后端刻意保留的兼容口径（`server.py:778-781`：「两者都不传（或传 0）时

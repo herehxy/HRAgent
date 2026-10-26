@@ -33,14 +33,46 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPEC = os.path.join(ROOT, "HRAgentWebapp.spec")
-DIST = os.path.join(ROOT, "dist", "HRAgent工作台")
-RELEASE = os.path.join(ROOT, "release")
+
+#: 构建输出根。**可以指到别的盘**（--out-root）：
+#: 2026-10-21 实测 C 盘被占满（0 字节可用），构建到一半就"磁盘空间不足"；
+#: 而 D 盘还有 145GB。把 dist/build/release 指到 D 盘就绕开了，
+#: 而且**不需要删任何东西**（删东西容易被安全机制拦，也容易误删用户数据）。
+OUT_ROOT = ROOT
+DIST = os.path.join(OUT_ROOT, "dist", "HRAgent工作台")
+RELEASE = os.path.join(OUT_ROOT, "release")
+BUILD_DIR = os.path.join(OUT_ROOT, "build")
 APP_NAME = "HRAgent工作台"
 PY = sys.executable
 
 #: 更新包里绝对不许出现的东西（相对路径任一段命中即中止构建）
 FORBIDDEN_SEG = {"data"}
 FORBIDDEN_SUFFIX = (".db", ".key", ".secret", ".sqlite", ".sqlite3")
+
+
+#: 判定"这是不是程序自己的数据目录"（而不是第三方库自带的 data 子目录）。
+#: ⚠️ 这条规则我连踩三次：① 把 seed/ 误杀（应放行）
+#:                   ② 把 config/ 误杀（应放行）
+#:                   ③ 把 cv2/data/ 误杀（第三方库自带的 data 目录，应放行）
+#: 教训：**按"路径段"判还不够，得看深度**——
+#: 保护的是**程序顶层**的数据目录（`data/xxx` 或 `_internal/data/xxx`），
+#: 库目录内部的 data（`_internal/cv2/data/xxx`）是第三方包的一部分，必须放行。
+
+def _seg(rel):
+    return rel.replace("\\", "/").split("/")
+
+
+def is_program_data_dir(rel: str) -> bool:
+    """是不是"程序自己的数据目录"（顶层 data/ 或 _internal/data/）。
+
+    只按**深度**判：data 段出现在第 0 或第 1 位才算（`data/x`、`_internal/data/x`）；
+    更深的位置（`_internal/cv2/data/x`）是第三方包自带的，必须放行。
+    """
+    segs = _seg(rel)
+    if "seed" in segs:
+        return False
+    idx = [i for i, s in enumerate(segs) if s == "data"]
+    return any(i <= 1 for i in idx)
 
 
 def is_seed(rel: str) -> bool:
@@ -55,8 +87,19 @@ def is_seed(rel: str) -> bool:
 
 
 def _is_data_path(rel: str) -> bool:
-    """路径里含 data 段 → 属于"数据"，更新时只加不删。"""
-    return any(seg in FORBIDDEN_SEG for seg in rel.replace("\\", "/").split("/"))
+    """是不是程序自己的数据目录 → 更新时只加不删（库自带的 data 目录要放行）。"""
+    return is_program_data_dir(rel)
+
+
+def _in_config_dir(rel: str) -> bool:
+    """路径里含 config / config_template **段** → 配置目录（模板），可更新。
+
+    ⚠️ 必须按**路径段**判，不能按前缀判：程序目录是 `_internal/`，
+    配置的真实路径是 `_internal/config/xxx` —— 按 "config/" 前缀判会把
+    合法的配置模板误杀（我为此连踩两次：先是 seed/，后是 config/）。
+    """
+    segs = rel.replace("\\", "/").split("/")
+    return "config" in segs or "config_template" in segs
 
 
 def log(msg: str) -> None:
@@ -108,12 +151,35 @@ def read_version() -> str:
 def build_main() -> None:
     """构建主程序（onedir）。"""
     log("[1/6] 构建主程序…")
-    retire(os.path.join(ROOT, "dist"))
-    retire(os.path.join(ROOT, "build"))
-    run([PY, "-m", "PyInstaller", SPEC, "--noconfirm", "--clean"])
+    os.makedirs(OUT_ROOT, exist_ok=True)
+    retire(os.path.join(OUT_ROOT, "dist"))
+    retire(BUILD_DIR)
+    run([PY, "-m", "PyInstaller", SPEC, "--noconfirm", "--clean",
+         "--distpath", os.path.join(OUT_ROOT, "dist"),
+         "--workpath", BUILD_DIR])
     if not os.path.isfile(os.path.join(DIST, "HRAgent工作台.exe")):
         raise SystemExit("[×] 主程序没构建出来")
     log(f"    ✓ {DIST}")
+
+
+def vendor_migrate_module() -> str:
+    """把产品自己的 profile_migrate.py 拷进 tools/_vendor/（供安装器加载）。
+
+    为什么：安装器要能做"旧数据迁移"，而迁移逻辑**必须只有一份** ——
+    另写一份必然分叉（行数校验、路径改写、主密钥校验全都要跟着改）。
+    该模块只依赖标准库 → 可以脱离主程序独立跑，按文件路径 import 即可。
+    拷贝在**构建期自动做**（不是手工拷），所以不会与源码分叉。
+    """
+    src = os.path.join(ROOT, "repo_src", "app", "profile_migrate.py")
+    dst_dir = os.path.join(ROOT, "tools", "_vendor")
+    os.makedirs(dst_dir, exist_ok=True)
+    shutil.copy2(src, os.path.join(dst_dir, "profile_migrate.py"))
+    # 关键：再拷一份成**同目录模块** —— PyInstaller 会自动把 import 到的模块
+    # 打进 exe，不依赖 --add-data 的路径解析（onefile 解压到临时目录，
+    # 路径判断容易出岔子：早前用 add-data 时模块就"不可用"了）。
+    shutil.copy2(src, os.path.join(ROOT, "tools", "hra_profile_migrate.py"))
+    print(f"    · 迁移模块已就位：tools/hra_profile_migrate.py（+ _vendor/ 兜底）")
+    return dst_dir
 
 
 def build_tool(script: str, out_name: str, py: str = None) -> str:
@@ -124,19 +190,19 @@ def build_tool(script: str, out_name: str, py: str = None) -> str:
     用它们打出来的 exe 一点就崩 → 单独建了 `envs/pack`（基于系统 3.12）来打。
     """
     log(f"    · 构建 {out_name}…")
-    work = os.path.join(ROOT, "build", "tools")
+    work = os.path.join(BUILD_DIR, "tools")
     os.makedirs(work, exist_ok=True)
     cmd = [py or PY, "-m", "PyInstaller", "--onefile", "--noconfirm", "--clean",
            "--name", out_name,
            "--icon", os.path.join(ROOT, "app.ico"),
-           "--distpath", os.path.join(ROOT, "build", "toolbin"),
+           "--distpath", os.path.join(BUILD_DIR, "toolbin"),
            "--workpath", work,
            "--specpath", work,
            "--hidden-import", "tkinter", "--hidden-import", "tkinter.filedialog",
            "--hidden-import", "tkinter.messagebox", "--hidden-import", "tkinter.ttk",
            os.path.join(ROOT, "tools", script)]
     run(cmd)
-    exe = os.path.join(ROOT, "build", "toolbin", out_name + ".exe")
+    exe = os.path.join(BUILD_DIR, "toolbin", out_name + ".exe")
     if not os.path.isfile(exe):
         raise SystemExit(f"[×] {out_name} 没构建出来")
     return exe
@@ -150,7 +216,7 @@ README = """HRAgent 企业人才库工作台（Windows 版）
 一、安装
 --------------
 方式 A（推荐）：双击 `HRAgent安装器.exe` → 选安装目录 → 「开始安装」。
-方式 B：直接解压 `HRAgent工作台-Windows版-{ver}.zip` 到任意目录，双击
+方式 B：直接解压 `HRAgent工作台-Windows版-v{ver}.zip` 到任意目录，双击
         `HRAgent工作台.exe`（**别只拷 exe**，_internal 是程序本体）。
 
 安装后：桌面有快捷方式，双击即用，浏览器会自动打开工作台。
@@ -172,10 +238,17 @@ README = """HRAgent 企业人才库工作台（Windows 版）
 3. 更新器只替换程序文件，并会核对：更新前后你的数据目录**一个字节都没变**。
    出问题会自动回滚，旧文件备份在 `<安装目录>\\_update_backup\\`。
 
-四、怎么换成 v4-pro（不带图片）
+四、首次使用要先填两样东西
 -------------------------------
-`deepseek-flash` 支持发图片；`deepseek-v4-pro` 是纯文本、更快更便宜。
-在「系统配置 → 模型与密钥」里改模型名即可（两个模型 DeepSeek 官方都在售）。
+**为了不把你的凭据连同软件一起发出去，这个包里不附带任何密钥。**
+首次打开请到「系统配置」里填：
+
+  1. 大模型密钥（API Key）——「系统配置 → 模型与密钥」。
+     填好后智能助手、简历解析、语义找人才能用。
+  2. 邮箱授权码 ——「系统配置 → 收信配置」。
+     不填就只能手动投简历，收不到 HR 邮箱里的简历。
+
+  档位阈值、单位字典等其余配置包里已带好（采集自你自己的设置），开箱即用。
 
 五、几条设计约定
 ----------------
@@ -211,9 +284,19 @@ def assemble_release(version: str, tools: dict) -> str:
     return rel
 
 
-def zip_dir(src: str, out: str, extra: dict | None = None) -> int:
-    """把目录打成 zip（中文名用 UTF-8 flag，Win10+ 资源管理器能正确解压）。"""
+def zip_dir(src: str, out: str, extra: dict | None = None, flat: bool = False) -> int:
+    """把目录打成 zip（中文名用 UTF-8 flag，Win10+ 资源管理器能正确解压）。
+
+    ⚠️ flat 决定包内结构，**两种用途不一样**：
+    · flat=True（程序包，给安装器用）→ 文件在**根**。安装器自己建安装目录，
+      装完 exe 就在目录根下。早前误用了"带一层文件夹"的结构，结果装出来是
+      `<安装目录>\\HRAgent工作台\\HRAgent工作台.exe`（多一层）→ 快捷方式找不到 exe、
+      旧数据迁移找不到 legacy 根，整条安装链全废。
+    · flat=False（免安装版）→ 保留源目录名那层文件夹，解压出来是个目录，
+      比一堆文件散在桌面上友好。
+    """
     total = 0
+    base_dir = src if flat else os.path.dirname(src)
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for base, dirs, files in os.walk(src):
             dirs[:] = [d for d in dirs if d != "__pycache__"]
@@ -222,7 +305,8 @@ def zip_dir(src: str, out: str, extra: dict | None = None) -> int:
                         or name.endswith("-wal") or name.endswith("-shm")):
                     continue
                 full = os.path.join(base, name)
-                z.write(full, os.path.relpath(full, os.path.dirname(src)))
+                rel = os.path.relpath(full, base_dir).replace(os.sep, "/")
+                z.write(full, rel)
                 total += os.path.getsize(full)
         for arc, data in (extra or {}).items():
             z.writestr(arc, data)
@@ -274,11 +358,10 @@ def make_update_package(baseline: str, new_dir: str, out: str, version: str,
             raise SystemExit(f"[×] 更新包差异里出现了库文件，已中止：{rel}")
         if os.path.basename(rel).lower() == "master.key":
             raise SystemExit(f"[×] 更新包差异里出现了 PII 主密钥，已中止：{rel}")
-        if rel.lower().endswith((".secret", ".key")) and not rel.startswith(
-                ("config/", "config_template/")):
+        if rel.lower().endswith((".secret", ".key")) and not _in_config_dir(rel):
             raise SystemExit(f"[×] 更新包差异里出现了密钥文件（不在配置目录内），已中止：{rel}")
     creds = [r for r in changed if r.lower().endswith((".secret", ".key"))
-              and r.startswith(("config/", "config_template/"))]
+              and _in_config_dir(r)]
     if creds:
         print(f"    [!] 更新包含配置凭据 {creds} —— 与完整包口径一致，"
               f"外发前请确认收件人可信")
@@ -309,13 +392,26 @@ def main() -> int:
     ap.add_argument("--baseline", default=os.path.join(ROOT, "dist_win", APP_NAME),
                     help="更新包的基线目录（上一版程序目录）")
     ap.add_argument("--no-update-pkg", action="store_true", help="不打更新包")
+    ap.add_argument("--no-portable", action="store_true",
+                    help="不打免安装版（省 170MB 磁盘 —— C 盘吃紧时用）")
+    ap.add_argument("--no-program-pkg", action="store_true",
+                    help="不打程序包（省 170MB 磁盘；更新包不依赖它）")
+    ap.add_argument("--out-root", dest="out_root", default=ROOT,
+                    help="构建输出根目录（dist/build/release 放这里；C 盘满时指到别的盘）")
     ap.add_argument("--tool-python", dest="tool_python",
                     default=r"C:\Users\admin\.workbuddy\binaries\python\envs\pack\Scripts\python.exe",
                     help="构建安装器/更新器用的解释器（必须带 tkinter）")
     args = ap.parse_args()
 
+    global OUT_ROOT, DIST, RELEASE, BUILD_DIR
+    if args.out_root:
+        OUT_ROOT = os.path.abspath(args.out_root)
+        DIST = os.path.join(OUT_ROOT, "dist", "HRAgent工作台")
+        RELEASE = os.path.join(OUT_ROOT, "release")
+        BUILD_DIR = os.path.join(OUT_ROOT, "build")
     version = read_version()
     log(f"═══ HRAgent v{version} 构建 ═══")
+    log(f"[i] 输出目录：{OUT_ROOT}")
 
     if not args.skip_pyinstaller:
         build_main()
@@ -324,6 +420,7 @@ def main() -> int:
         raise SystemExit("[×] 没有 dist，先跑一次完整构建")
 
     log("[3/6] 构建安装器与更新器…")
+    vendor_migrate_module()
     tools = {
         "HRAgent安装器.exe": build_tool("hra_installer.py", "HRAgent安装器", args.tool_python),
         "HRAgent更新器.exe": build_tool("hra_updater.py", "HRAgent更新器", args.tool_python),
@@ -332,14 +429,17 @@ def main() -> int:
     rel = assemble_release(version, tools)
 
     # 程序包（给安装器）
-    pkg = os.path.join(RELEASE, f"HRAgent程序包-v{version}.zip")
-    total = zip_dir(rel, pkg)
-    log(f"[5/6] 程序包：{os.path.basename(pkg)}（{total / 1024 / 1024:.1f} MB 原始 / "
-        f"{os.path.getsize(pkg) / 1024 / 1024:.1f} MB 压缩）")
+    if args.no_program_pkg:
+        log("[5/6] 程序包：跳过（--no-program-pkg，省磁盘）")
+    else:
+        pkg = os.path.join(RELEASE, f"HRAgent程序包-v{version}.zip")
+        total = zip_dir(rel, pkg, flat=True)       # 程序包：文件在根（安装器自己建目录）
+        log(f"[5/6] 程序包：{os.path.basename(pkg)}（{total / 1024 / 1024:.1f} MB 原始 / "
+            f"{os.path.getsize(pkg) / 1024 / 1024:.1f} MB 压缩）")
 
     # 免安装版
     full = os.path.join(RELEASE, f"HRAgent工作台-Windows版-v{version}.zip")
-    zip_dir(rel, full)
+    zip_dir(rel, full)                             # 免安装版：保留一层文件夹
     log(f"    免安装版：{os.path.basename(full)}（{os.path.getsize(full) / 1024 / 1024:.1f} MB）")
 
     if not args.no_update_pkg:
