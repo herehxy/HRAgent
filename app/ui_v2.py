@@ -6634,17 +6634,11 @@ async function sysAct(act){
     return;
   }
   if(act === 'newTpl'){
-    var name = await askText('新模板名称', '', '例如 面试邀请（院标准版式）');
-    if(!name || name === true) return;
-    var subject = await askText('邮件主题', '', '例如 西北有色金属研究院面试邀请');
-    if(!subject || subject === true) return;
-    var body2 = await askText('正文（可用 {姓名} {岗位} 这样的变量）', '', '正文');
-    if(body2 === true) body2 = '';
-    var r4 = await api('/api/mail/templates', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name: name, subject: subject, body: body2})});
-    toast(r4.__err ? ('新建失败：' + r4.__err) : ('已新建模板：' + name));
-    initSys();
+    /* 直接打开**完整编辑器**（2026-10-28）：原来是三个连续的 askText 弹窗
+       （名称 → 主题 → 正文），一个个弹、还要在单行文本框里写正文 ——
+       而下面这个按钮旁边就有带富文本的编辑页，两条路径体验完全不一致。
+       现在统一走 editTpl(0)（isNew = true），一次弹全。 */
+    editTpl(0);
   }
 }
 /* 编辑邮件模板：POST /api/mail/templates 带 id 就是更新
