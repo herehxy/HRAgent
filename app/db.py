@@ -3597,21 +3597,35 @@ def get_mail_template(conn: sqlite3.Connection, tid: int) -> dict | None:
 
 
 def upsert_mail_template(conn: sqlite3.Connection, name: str, scene: str,
-                         subject: str, body: str, tid: int | None = None) -> int:
-    """新增或更新模板。模板名唯一——重名时报错优于静默覆盖别人写的模板。"""
+                         subject: str, body: str, tid: int | None = None,
+                         kind: str | None = None) -> int:
+    """新增或更新模板。模板名唯一——重名时报错优于静默覆盖别人写的模板。
+
+    `kind` = 模板用途：`interview_invite` / `offer` / `other`。
+    **由使用者显式选**（界面上「用途」一栏，默认 other），不按模板名猜：
+    模板名随时会改（「录用通知」改成「录用函-2026」），按名字匹配的话
+    改个名"发信自动回写录用时间"就静默失效了（db 里那一列的存在理由同此）。
+    `kind=None` 表示"这次不动用途"，避免老调用点把它刷成 other。
+    """
     now_ = now()
     if tid:
-        conn.execute(
-            """UPDATE mail_templates SET name=?, scene=?, subject=?, body=?, updated_at=?
-               WHERE id=?""",
-            (name, scene, subject, body, now_, int(tid)))
+        if kind is None:
+            conn.execute(
+                """UPDATE mail_templates SET name=?, scene=?, subject=?, body=?, updated_at=?
+                   WHERE id=?""",
+                (name, scene, subject, body, now_, int(tid)))
+        else:
+            conn.execute(
+                """UPDATE mail_templates SET name=?, scene=?, subject=?, body=?, kind=?,
+                       updated_at=? WHERE id=?""",
+                (name, scene, subject, body, kind, now_, int(tid)))
         conn.commit()
         return int(tid)
     cur = conn.execute(
         """INSERT INTO mail_templates (name, scene, subject, body, enabled,
-                                       created_at, updated_at)
-           VALUES (?,?,?,?,1,?,?)""",
-        (name, scene, subject, body, now_, now_))
+                                       created_at, updated_at, kind)
+           VALUES (?,?,?,?,1,?,?,?)""",
+        (name, scene, subject, body, now_, now_, kind or "other"))
     conn.commit()
     return cur.lastrowid
 

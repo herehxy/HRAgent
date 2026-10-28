@@ -1,4 +1,4 @@
 """Product version shared by the UI, build scripts, and updater manifests."""
 
-VERSION = "4.0.3"
+VERSION = "4.0.4"
 BUILD_CHANNEL = "prod"

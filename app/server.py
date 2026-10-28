@@ -5699,6 +5699,9 @@ class MailTemplateReq(BaseModel):
     scene: str | None = None
     subject: str | None = None
     body: str | None = None
+    #: 模板用途：interview_invite / offer / other。
+    #: **显式选，不按名字猜** —— 决定了"发出去之后自动回写什么"（面试信息 / 录用时间）。
+    kind: str | None = None
 
 
 class SmtpReq(BaseModel):
@@ -5811,10 +5814,16 @@ def api_mail_template_save(req: MailTemplateReq,
         if existing:
             raise HTTPException(status_code=400,
                                 detail=f"已有同名模板「{name}」，换个名字或直接编辑那一条")
+        kind = (req.kind or "").strip() or None
+        if kind is not None and kind not in ("interview_invite", "offer", "other"):
+            raise HTTPException(status_code=400,
+                                detail="模板用途只能是 interview_invite / offer / other")
         tid = db.upsert_mail_template(conn, name, (req.scene or "其他通知").strip(),
-                                      req.subject or "", req.body or "", req.id)
+                                      req.subject or "", req.body or "", req.id, kind)
+        _kind_txt = {"interview_invite": "（面试邀约，发送后回写面试信息）",
+                     "offer": "（录用通知，发送后记录录用函时间并推进阶段）"}.get(kind or "", "")
         db.add_audit(conn, "settings", f"mail_template#{tid}", "update", "",
-                     f"保存邮件模板「{name}」", s["username"], s["role"])
+                     f"保存邮件模板「{name}」{_kind_txt}", s["username"], s["role"])
         return {"ok": True, "id": tid, "template": db.get_mail_template(conn, tid)}
     finally:
         conn.close()

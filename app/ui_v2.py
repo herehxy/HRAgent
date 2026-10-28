@@ -682,6 +682,7 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
 .profile-layout > .profile-wide,
 .profile-layout > .dupwarn,
 .profile-layout > .quality,
+.profile-layout > .srcbar,
 .profile-layout > .edu-band{grid-column:1/-1}
 .profile-head .dmeta{font-size:15px}
 .profile-layout{font-size:15px}
@@ -704,10 +705,13 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
 .dmain{flex:1;min-width:0}
 .dtop{display:flex;align-items:center;gap:16px}
 .dtop .dname{flex:none;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 证件照是"认人"的第一眼信息，52px 只够看出有人脸（2026-10-28 放大到 96px）。
+   用圆角方框而不是圆形：证件照多是竖版白底证件照，圆形会把头顶和衣领裁掉；
+   圆角方框能保留整张脸和肩线，也更像人事档案里的照片位。 */
 .av-lg{
-  width:52px;height:52px;border-radius:50%;overflow:hidden;position:relative;flex:none;
+  width:96px;height:96px;border-radius:10px;overflow:hidden;position:relative;flex:none;
   background:var(--surface);border:1px solid var(--line);color:var(--ink-3);
-  font-size:18px;font-weight:600;display:flex;align-items:center;justify-content:center;
+  font-size:30px;font-weight:600;display:flex;align-items:center;justify-content:center;
 }
 .av-lg img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .dname{font-size:24px;font-weight:650;letter-spacing:-.01em;line-height:1.25}
@@ -718,6 +722,14 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
    padding 与字号都收一档 —— 原来每个框撑得很开，一行信息占半屏还留大片空白。 */
 .dmeta .edv{background:var(--surface);border-color:var(--line-2);
   color:var(--accent-ink);font-weight:600;padding:1px 7px;font-size:13px}
+/* 头部第二行（阶段 / 结论 / 数据质量）：与联系方式那行拉开一点距离，
+   字号更小 —— 它们是"扫一眼"的标签，不该和电话邮箱抢注意力。 */
+.dmeta.dmeta2{margin-top:7px}
+.dmeta.dmeta2 .chipl{font-size:12.5px;padding:1px 8px}
+.dmeta.dmeta2 .stagechip{background:var(--surface);border-color:var(--line-2);
+  color:var(--ink-2);font-weight:600}
+.dmeta.dmeta2 .offerchip{background:var(--ok-soft);border-color:var(--ok-line);
+  color:var(--ok);font-weight:600}
 .dmeta .edv:hover{background:var(--accent-soft);border-color:var(--accent-line)}
 .dmeta .edv.empty{color:var(--ink-3);font-weight:400}
 /* 岗位标签做成可点：看起来是标签，点下去是"改岗位" */
@@ -840,6 +852,71 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
 #detail .auditbox{font-size:14px}
 #detail .auditbox th{font-size:13px}
 #detail .auditbox td{font-size:14px;padding:6px 11px}
+
+/* ---------- 详情页：投递来源一行 + 面试与录用一行（2026-10-28） ----------
+   两块改动都出于同一个理由：**右栏是"判断一个人"的地方，视线要能顺着一条线走完**
+   「是谁 → 材料从哪来 → 怎么判的 → 走到哪一步」，而不是在页面上下反复找。 */
+/* 底色用**浅鼠尾草绿**，不是状态绿（--ok 那套表示"命中/通过"）：
+   这一行的语义是"材料来源"，需要一个和正文灰、和状态色都不撞的第三种色，
+   同时又要足够浅，不抢档位那一处的强调。
+   对比度：#2f5a33 on #eef4ec ≈ 7.5:1；按钮文字同色，hover 反白。 */
+.srcbar{display:flex;align-items:center;gap:12px;margin:14px 0 0;padding:9px 12px;
+  background:#eef4ec;border:1px solid #dbe7d8;border-radius:var(--r);
+  font-size:13.5px;min-width:0}
+.srcbar > .srck{flex:none;color:#4b7a51;font-weight:600}
+.srcbar > .srcmail{display:flex;align-items:baseline;gap:8px;min-width:0;flex:1 1 auto;
+  overflow:hidden;white-space:nowrap}
+/* 邮件主题是这一行里信息量最大的，必须让它先拿到宽度：
+   flex:1 1 auto + min-width 保证它不会被发件人/文件名挤成几个字。 */
+.srcbar .srcsub{color:#2f5a33;font-weight:600;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;flex:1 1 auto;min-width:180px}
+.srcbar .srcmeta{color:#5c7a60;flex:none;font-size:13px;max-width:18ch;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srcbar > .srcfile{flex:none;display:inline-flex;align-items:center;gap:6px;
+  border-left:1px solid #cfe0cc;padding-left:12px;min-width:0}
+.srcbar > .srcfile .fn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:#3c6b41;max-width:20ch}
+/* 按钮跟着这一行的绿走：默认白底绿字，hover 反白。
+   不用 btn.primary（那是蓝色的"主操作"语义），这里只是同一族里的次级动作。 */
+.srcbar .btn{height:26px;padding:0 9px;font-size:13px;background:#fff;
+  border:1px solid #bcd4b9;color:#2f5a33;border-radius:var(--r-s)}
+.srcbar .btn:hover{background:#2f5a33;border-color:#2f5a33;color:#fff}
+
+.ivsec{margin-top:20px}
+.ivrow{display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap}
+.ivrow + .ivrow{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+.ivrow .fld{display:inline-flex;flex-direction:column;align-items:flex-start;gap:4px}
+.ivrow .fl{font-size:13.5px;color:var(--ink-3);white-space:nowrap}
+/* 面试单位**独占一整行**：它要能并排放下三个单位名 + 一个"继续添加"输入框，
+   宽度不够就只能在框里换行，反而更难读。其余四项（日期/时段/方式/结论）
+   在下一行并排 —— 这样不论窗口多宽，这块永远是整齐的两行，不会因为
+   结论的提示文字长而被挤到第三行。 */
+.ivrow .fld-wide{flex:1 1 100%;min-width:100%;align-self:stretch}
+.ivrow input,.ivrow select{height:34px;padding:0 9px;font-size:14.5px;
+  border:1px solid var(--line-2);border-radius:var(--r-s);background:var(--surface);color:var(--ink)}
+.ivrow input[type="date"]{width:152px}
+.ivrow input[type="datetime-local"]{width:196px}
+.ivrow #ivSlot{width:130px}
+.ivrow #ivMode{width:118px}
+.ivrow #obStatus{width:118px}
+/* 面试单位：一个框里能并排放下三个单位名（每个约 5-7 字）+ 一个"继续添加"输入 */
+.ivrow .multi{width:100%;min-height:34px;padding:4px 6px;gap:6px;
+  border:1px solid var(--line-2);border-radius:var(--r-s);background:var(--surface)}
+.ivrow .multi input{height:26px;border:0;background:transparent;padding:0 4px;min-width:150px;flex:1}
+.ivrow .multi input:focus{outline:none}
+/* 结论 = 徽标 + 下拉 + 「清空结论」，三者同一行（见 outcomeField 的说明） */
+.ivrow .ivout{display:inline-flex;align-items:center;gap:8px;min-height:34px}
+.ivrow .ivout .btn{height:34px;padding:0 11px}
+.ivrow .mchip{font-size:13.5px;padding:3px 8px;border-radius:4px;background:var(--accent-soft);
+  color:var(--accent-ink);border:1px solid var(--accent-line);white-space:nowrap}
+
+/* 「quiet」区块：证据类内容压小一号，把强调留给档位 */
+#detail .sec.quiet{margin-top:16px}
+#detail .sec.quiet > h3{font-size:13px;letter-spacing:.04em}
+#detail .sec.quiet .sum{font-size:14px;font-weight:500;line-height:1.6}
+#detail .sec.quiet .ev{font-size:13px;line-height:1.6;padding:6px 9px;margin-top:6px}
+#detail .sec.quiet .ev b{font-size:13px}
+#detail .sec.quiet .skill span{font-size:13px;padding:2px 9px}
 .skill .hit{color:var(--ok);background:var(--ok-soft);border-color:var(--ok-line)}
 .skill .miss{color:var(--warn);background:var(--warn-soft);border-color:var(--warn-line)}
 .skill .plain{color:var(--ink-2);background:var(--ground);border-color:var(--line)}
@@ -2507,7 +2584,14 @@ function openDetail(d){
     .map(function(x){ return x.trim(); }).filter(Boolean);
   var box = document.getElementById('detail');
   box.classList.remove('comparing');
+  /* 换人 → 回到最上方（2026-10-28）。原来沿用上一个人的滚动位置：
+     从第 1 个人（看到底）切到第 2 个人，右栏还停在半截，每次都得手动往上滚。
+     用 data-cid 判断"是不是真的换人了"——面试字典异步到货后会再走一遍 openDetail，
+     那次不该把人已经滚到的位置再拉回顶部。 */
+  var switched = box.dataset.cid !== String(d.id);
   box.innerHTML = fullDetail(d);
+  box.dataset.cid = String(d.id);
+  if(switched) box.scrollTop = 0;
   multiRenderIvUnit();
   /* ⚠️ **绑定必须放在渲染之后、且每次渲染都要重绑**：
      面试字典是异步加载的，到货后会再渲染一次右栏 —— innerHTML 一换，
@@ -2768,6 +2852,37 @@ function fullDetail(d){
     return '<div class="ev"><b>' + esc(k) + '</b>：' + esc(rows.join('；')) + '</div>';
   }).join('') || '<div class="hint">无</div>';
 
+  /* 投递来源（2026-10-28）：来源邮件 + 简历原件合成**一行**，放在档位上方。
+     这两件事回答的是同一个问题——"这份档案从哪来的"，原来分两块沉在页面最底部，
+     HR 判断"要不要推进"时得来回滚动才能对上是谁怎么投的。 */
+  var srcMail = d.source_mail || {};
+  var srcDocs = d.resume_documents || [];
+  var srcDoc0 = srcDocs[0] || null;
+  var srcRow = '<div class="srcbar">' +
+    '<span class="srck">投递来源</span>' +
+    '<span class="srcmail">' +
+      (srcMail.subject
+        ? '<span class="srcsub" title="' + esc(srcMail.subject) + '">' + esc(srcMail.subject) + '</span>' +
+          (srcMail.from
+            ? '<span class="srcmeta" title="' + esc(srcMail.from) + '">' + esc(srcMail.from) + '</span>' : '') +
+          /* 日期去掉年份：一行里"09-21 21:28"够用了，标题比年份重要 */
+          (srcMail.received_at
+            ? '<span class="srcmeta">' + esc(String(srcMail.received_at).slice(5, 16)) + '</span>' : '')
+        : '<span class="srcmeta">文件夹导入</span>') +
+    '</span>' +
+    (srcDoc0
+      ? '<span class="srcfile">' +
+          '<span class="fn" title="' + esc(srcDoc0.file_name || '') + '">' +
+            esc(srcDoc0.file_name || '简历原件') + '</span>' +
+          (srcDocs.length > 1 ? '<span class="srcmeta">共 ' + srcDocs.length + ' 份</span>' : '') +
+          (srcDoc0.archived_path
+            ? '<button class="btn" onclick="openDoc(' + srcDoc0.id + ',1)">在线打开</button>' +
+              '<button class="btn" onclick="openDoc(' + srcDoc0.id + ',0)">下载</button>'
+            : '<span class="srcmeta">未留档</span>') +
+        '</span>'
+      : '<span class="srcfile"><span class="srcmeta">无简历原件</span></span>') +
+  '</div>';
+
   /* 档案操作条独立于个人信息：横跨右侧详情栏，滚动时固定在右上角。 */
   var actionBar = '<div class="detail-toolbar"><div class="dact">' +
     '<button class="btn" onclick="copyBasicInfo()" ' +
@@ -2816,6 +2931,30 @@ function fullDetail(d){
         ? '<span class="chipl" style="color:var(--ok);border-color:var(--ok-line)">已发邮件 ' +
           esc(String(emailState.count || 0)) + ' 次</span>' : '') +
     '</div>' +
+    /* 第二行：**判断类标签**（阶段 / 结论 / 数据质量）。
+       这些正是左侧列表里扫人时看的那几个标签，点进来却要往下翻到「面试与录用」
+       才知道走到哪一步。放在联系方式下面那行正好原本是空的。 */
+    (function(){
+      var tags = '';
+      if(d.application_id && stage){
+        tags += '<span class="chipl stagechip" title="当前阶段">' + esc(stage) + '</span>';
+      }
+      tags += outcomeChip(d.outcome || '', stage);
+      /* 录用函已发（系统内发出会自动记时间；线下发的可以手填）—— 有就挂个标，
+         免得"到底发没发"要去翻审计。 */
+      if(d.offer_sent_at){
+        tags += '<span class="chipl offerchip" title="录用函发出时间">录用函 ' +
+          esc(String(d.offer_sent_at).slice(5, 10).replace('-', '/')) + '</span>';
+      }
+      if(parseFailed){
+        tags += '<span class="chipl flagbad" title="简历原文未能解析，需打开原件人工核对">' +
+          '简历读不出</span>';
+      }else if(missingFields.length){
+        tags += '<span class="chipl flagwarn" title="没抽到：' + esc(missingFields.join('、')) +
+          '">缺 ' + esc(missingFields.join('、')) + '</span>';
+      }
+      return tags ? '<div class="dmeta dmeta2">' + tags + '</div>' : '';
+    })() +
     '</div>' +   /* .dmain 结束 */
     '</div>' +   /* .dhead 结束 */
     '<div class="profile-layout">' +
@@ -2841,12 +2980,15 @@ function fullDetail(d){
        四六级/性别/电话/邮箱都挪到姓名下面那排（展示即可点改），姓名本身点标题就能改；
        再留一个区块等于同一批字段出现两次。复制按钮已挪到右上操作区。 */
 
+    /* 投递来源一行（见上面 srcRow 的说明）：位置在档位正上方 ——
+       HR 的阅读顺序是"这个人是谁 → 材料从哪来 → 怎么判的 → 走到哪一步了"。 */
+    srcRow +
+
     /* ---- 档位（2026-10-21 挪位：从教育经历下方移到「面试与录用」正上方）----
        理由：档位是"这个人的判断结论"，面试与录用是"这个人的过程事实"，
        两者挨在一起看才是完整判断链；放在教育经历下面反而被夹在中间。 */
-    '<div class="sec tier-sec" style="margin-top:14px"><h3>档位</h3>' +
-      '<div class="bar2">' + tierSeg(d) +
-      '<span class="hint" style="font-size:13px">改档即时生效，留审计</span></div></div>' +
+    '<div class="sec tier-sec" style="margin-top:16px"><h3>档位</h3>' +
+      '<div class="bar2">' + tierSeg(d) + '</div></div>' +
 
     /* 更多操作放在档位正下方（业务方 2026-10-21）。
        这几个动作（面试提纲 / 指定岗位 / 证件照）都是"我接下来要对这个人做什么"，
@@ -2867,55 +3009,50 @@ function fullDetail(d){
    日期/时段/方式连标签都没有，根本看不出是干什么的）。
    ⚠️ 字段 id 一个都不能改 —— `formSnapshot`/`formDiff` 按 id 取值，
    「保存更正」靠它们判断"哪几项被改过"。 */
-    '<div class="sec profile-wide"><h3>面试与录用' +
+    /* 面试与录用（2026-10-28 重排）：**一行排完**。
+       原来拆成「面试安排 / 面试结论」左右两栏、三个组标题、控件 12px 字，
+       面试单位的输入框窄到放不下三个单位名。现在是一整行：单位占主要宽度，
+       其余四项按内容宽度跟随；标签 13.5px、控件 34px 高。
+       ⚠️ 字段 id 一个都不能改 —— `formSnapshot`/`formDiff` 按 id 取值，
+       「保存更正」靠它们判断"哪几项被改过"。 */
+    '<div class="sec profile-wide ivsec"><h3>面试与录用' +
       (d.application_id ? '' : '（还没有投递记录）') + '</h3>' +
-      /* 面试安排与面试结论同框左右排：左边记录事实，右边记录判断。 */
-      '<div class="fgroup iv-split">' +
-        '<div class="iv-col"><h4>面试安排</h4>' +
-          '<div class="frow">' +
-            '<span class="fld"><span class="fl">面试单位</span>' +
-              '<div class="multi" id="multi_ivunit"></div>' +
-              '<input type="hidden" id="ivUnit" value="' + esc(d.interview_unit || '') + '">' +
-            '</span>' +
-          '</div>' +
-          '<div class="frow">' +
-            '<span class="fld"><span class="fl">面试日期</span>' +
-              '<input id="ivDate" type="date" style="width:150px" value="' +
-                esc(String(d.interview_date || '').slice(0, 10)) + '"></span>' +
-            '<span class="fld"><span class="fl">时段</span>' +
-              '<input id="ivSlot" list="dlIvSlot" style="width:126px" placeholder="如 09:30-10:30" ' +
-                'value="' + esc(d.interview_slot || '') + '"></span>' +
-            '<datalist id="dlIvSlot">' + (IDICT.slots || []).map(function(x){
-              return '<option value="' + esc(x) + '"></option>'; }).join('') + '</datalist>' +
-            '<span class="fld"><span class="fl">方式</span>' +
-              '<input id="ivMode" list="dlIvMode" style="width:110px" placeholder="如 现场面试" ' +
-                'value="' + esc(d.interview_mode || '') + '"></span>' +
-            '<datalist id="dlIvMode">' + (IDICT.modes || []).map(function(x){
-              return '<option value="' + esc(x) + '"></option>'; }).join('') + '</datalist>' +
-          '</div>' +
-        '</div>' +
-        '<div class="iv-col"><h4>面试结论</h4>' +
-          '<div class="frow">' + outcomeField(d) + '</div>' +
-        '</div>' +
+      '<div class="ivrow">' +
+        '<span class="fld fld-wide"><span class="fl">面试单位</span>' +
+          '<div class="multi" id="multi_ivunit"></div>' +
+          '<input type="hidden" id="ivUnit" value="' + esc(d.interview_unit || '') + '">' +
+        '</span>' +
+        '<span class="fld"><span class="fl">面试日期</span>' +
+          '<input id="ivDate" type="date" value="' +
+            esc(String(d.interview_date || '').slice(0, 10)) + '"></span>' +
+        '<span class="fld"><span class="fl">时段</span>' +
+          '<input id="ivSlot" list="dlIvSlot" placeholder="09:30-10:30" ' +
+            'value="' + esc(d.interview_slot || '') + '"></span>' +
+        '<datalist id="dlIvSlot">' + (IDICT.slots || []).map(function(x){
+          return '<option value="' + esc(x) + '"></option>'; }).join('') + '</datalist>' +
+        '<span class="fld"><span class="fl">方式</span>' +
+          '<input id="ivMode" list="dlIvMode" placeholder="现场面试" ' +
+            'value="' + esc(d.interview_mode || '') + '"></span>' +
+        '<datalist id="dlIvMode">' + (IDICT.modes || []).map(function(x){
+          return '<option value="' + esc(x) + '"></option>'; }).join('') + '</datalist>' +
+        '<span class="fld"><span class="fl">结论</span>' + outcomeField(d) + '</span>' +
       '</div>' +
-      /* ③ 录用与入职 */
-      '<div class="fgroup"><h4>录用与入职</h4>' +
-        '<div class="frow">' +
-          '<span class="fld"><span class="fl">入职情况</span>' +
-            '<select id="obStatus" style="width:120px">' +
-              ['', '未入职', '已入职', '放弃'].map(function(v){
-                return opt(v, d.onboard_status, v || '未填'); }).join('') +
-            '</select></span>' +
-          '<span class="fld"><span class="fl">录用函发出</span>' +
-            '<input id="obOffer" type="datetime-local" style="width:190px" value="' +
-              esc(String(d.offer_sent_at || '').replace(' ', 'T').slice(0, 16)) + '"></span>' +
-          '<span class="fld"><span class="fl">签约</span>' +
-            '<input id="obSigned" type="date" style="width:150px" value="' +
-              esc(String(d.signed_at || '').slice(0, 10)) + '"></span>' +
-          '<span class="fld"><span class="fl">入职期限</span>' +
-            '<input id="obDeadline" type="date" style="width:150px" value="' +
-              esc(String(d.onboard_deadline || '').slice(0, 10)) + '"></span>' +
-        '</div>' +
+      /* 录用与入职：第二行，与面试事实之间一条细线 —— 它是"面试之后"的事。 */
+      '<div class="ivrow">' +
+        '<span class="fld"><span class="fl">入职情况</span>' +
+          '<select id="obStatus">' +
+            ['', '未入职', '已入职', '放弃'].map(function(v){
+              return opt(v, d.onboard_status, v || '未填'); }).join('') +
+          '</select></span>' +
+        '<span class="fld"><span class="fl">录用函发出</span>' +
+          '<input id="obOffer" type="datetime-local" value="' +
+            esc(String(d.offer_sent_at || '').replace(' ', 'T').slice(0, 16)) + '"></span>' +
+        '<span class="fld"><span class="fl">签约</span>' +
+          '<input id="obSigned" type="date" value="' +
+            esc(String(d.signed_at || '').slice(0, 10)) + '"></span>' +
+        '<span class="fld"><span class="fl">入职期限</span>' +
+          '<input id="obDeadline" type="date" value="' +
+            esc(String(d.onboard_deadline || '').slice(0, 10)) + '"></span>' +
       '</div>' +
     '</div>' +
 
@@ -2936,27 +3073,19 @@ function fullDetail(d){
       }).join('') : '<div class="hint">无</div>') +
     '</div>' +
 
-    '<div class="sec"><h3>系统分析</h3>' +
+    /* 系统分析与技能属于**证据**，不是**结论**：整页只有档位是"用力"的地方，
+       这两块压小一号（`quiet`），否则每块都在喊，等于没人喊。 */
+    '<div class="sec quiet"><h3>系统分析</h3>' +
       (ins.summary ? '<div class="sum">' + esc(ins.summary) + '</div>'
                    : '<div class="hint">还没有分析结论</div>') +
       ((ins.reasons || []).length ? '<div class="ev">依据：' + esc(ins.reasons.join('；')) + '</div>' : '') +
       ((ins.risks || []).length ? '<div class="ev">风险：' + esc(ins.risks.join('；')) + '</div>' : '') +
+      /* 隐私剔除明细挪到这里：它解释的正是"模型凭什么判"，跟着分析结论走才对得上 */
+      sensLine +
     '</div>' +
 
-    '<div class="sec"><h3>技能（命中＝岗位要求且原文有出处）</h3>' + skillHtml + evHtml + '</div>' +
-
-    /* ---- 来源邮件（**在简历原件上方**）：投递邮件主题本身就是应聘意向的表达，
-       归档出来 HR 不用翻邮箱就能对上这份简历是谁、怎么投的 ---- */
-    ((d.source_mail && d.source_mail.subject) ?
-      '<div class="sec"><h3>来源邮件</h3>' +
-        '<div class="doc" style="display:block;border:0;padding:0">' +
-          '<div style="font-size:14px;color:var(--ink-2)">标题：' +
-            '<b style="color:var(--ink)">' + esc(d.source_mail.subject) + '</b>' +
-            (d.source_mail.from ? ('<span class="hint">　· ' + esc(d.source_mail.from) + '</span>') : '') +
-            (d.source_mail.received_at ?
-              ('<span class="hint">　· ' + esc(String(d.source_mail.received_at).slice(0, 16)) + '</span>') : '') +
-          '</div></div>' +
-      '</div>' : '') +
+    '<div class="sec quiet"><h3>技能</h3>' +
+      skillHtml + evHtml + '</div>' +
 
     /* ---- 原文与抽取质量：HR 核对字段时必须能看到模型/规则读到的原始材料 ---- */
     '<div class="sec profile-wide"><h3>简历原文与抽取质量</h3>' +
@@ -2974,10 +3103,11 @@ function fullDetail(d){
       '</pre></details>' +
     '</div>' +
 
-    /* ---- 附件 ---- */
-    '<div class="sec"><h3>简历原件</h3>' + sensLine + docRows(d.resume_documents) + '</div>' +
+    /* 简历原件已上移到「投递来源」那一行（见 srcRow）；
+       这里只剩"同一封邮件里的其他附件"，多数档案没有，所以保持安静。 */
     ((d.other_documents || []).length
-      ? '<div class="sec"><h3>其他附件</h3>' + docRows(d.other_documents) + '</div>' : '') +
+      ? '<div class="sec quiet"><h3>其他附件（' + d.other_documents.length + '）</h3>' +
+        docRows(d.other_documents) + '</div>' : '') +
     /* 操作记录（2026-10-20 补齐；2026-10-21 去掉「档位来源」—— 业务方只要操作记录）。
        审计调 `/api/audit` 按候选人过滤，v2 之前**零调用** —— 谁在什么时候改了
        档位/阶段/复核，界面上查不到，HR 不敢在生产上用。异步拉，不阻塞档案渲染。 */
@@ -3231,6 +3361,21 @@ async function setReview(aid, undo){
   await load(); if(CUR) await pick(CUR);
 }
 async function setStage(aid, stage){
+  /* 手工推进到「已发放offer」时**先确认一次**（2026-10-28）。
+     在系统里发录用函会自动写「录用函发出时间」并推进阶段；但如果录用函是
+     线下发的（纸质/别的邮箱），HR 只能手动改阶段 —— 这时档案上没有任何
+     录用函记录，而"录用函发送时间"是后面所有时限的起算点，漏了会影响后续。
+     不拦死，只让人确认一次；确认后照常推进并留审计。 */
+  var cur = CUR_DETAIL || {};
+  if(stage === '已发放offer' && !cur.offer_sent_at){
+    var ok = await askConfirm({
+      title: '还没有录用函记录',
+      body: '这个人在系统里没有「录用函发出时间」。\n\n' +
+            '如果是线下发出的（纸质、或用别的邮箱发的），继续推进后请在本档案的' +
+            '「面试与录用 → 录用函发出」里补上日期。\n\n仍要推进到「已发放offer」吗？',
+      okText: '继续推进', cancelText: '先去补记录'});
+    if(!ok) return;
+  }
   var r = await api('/api/applications/' + aid + '/stage',
     {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({stage: stage})});
   if(r.__err){ toast(r.__err); return; }
@@ -4911,6 +5056,37 @@ function askText(title, def, ph){
     setTimeout(function(){ inp.focus(); inp.select(); }, 30);
   });
 }
+/* 从一组选项里挑一个（单选）。
+   为什么不用 askText：让 HR **凭记忆敲出岗位全名**，敲错一个字就"没有叫这个名字的岗位"，
+   而正确做法是把已有的选择摆出来。`options` = [{value, label}]。 */
+function askSelect(title, options, ph){
+  return new Promise(function(resolve){
+    document.getElementById('dlgTitle').textContent = title;
+    var editorBody = document.getElementById('edDlgBody');
+    if(editorBody){ editorBody.style.display = 'none'; editorBody.innerHTML = ''; }
+    document.getElementById('dlgBody').style.display = '';
+    document.getElementById('dlgBody').innerHTML =
+      '<select id="dlgSelect" style="width:100%;height:36px;padding:0 9px;font-size:14.5px;' +
+      'border:1px solid var(--line-2);border-radius:var(--r-s);background:var(--surface)">' +
+      (ph ? '<option value="">' + esc(ph) + '</option>' : '') +
+      (options || []).map(function(o){
+        return '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>';
+      }).join('') + '</select>';
+    document.getElementById('dlgNo').textContent = '取消';
+    var yes = document.getElementById('dlgYes');
+    yes.textContent = '确定'; yes.className = 'btn primary';
+    function done(v){ closeDlg(v || null); }
+    yes.onclick = function(){ done(document.getElementById('dlgSelect').value || null); };
+    document.getElementById('dlgNo').onclick = function(){ done(null); };
+    document.getElementById('mask').onclick = function(ev){
+      if(ev.target === ev.currentTarget) done(null);
+    };
+    window.__dlgResolve = resolve;
+    document.getElementById('mask').classList.add('on');
+    var sel = document.getElementById('dlgSelect');
+    setTimeout(function(){ sel.focus(); }, 30);
+  });
+}
 document.addEventListener('keydown', function(ev){
   if(ev.key === 'Escape' && document.getElementById('mask').classList.contains('on')) closeDlg(false);
 });
@@ -6434,6 +6610,18 @@ async function editTpl(id){
       '<input class="ced" id="tplName" value="' + esc(t.name || '') + '"></div></div>' +
     '<div class="crow"><label>场景</label><div class="cinput">' +
       '<input class="ced" id="tplScene" value="' + esc(t.scene || '') + '"></div></div>' +
+    /* 用途必须显式选（2026-10-28）：它决定"这封发出去之后系统回写什么"。
+       按模板名猜是行不通的 —— 名字随时会改，改完就静默失效。
+       默认「其他通知」= 不回写任何东西。 */
+    '<div class="crow"><label>用途</label><div class="cinput">' +
+      '<select class="ced" id="tplKind" style="width:280px">' +
+        [['other', '其他通知（不回写档案）'],
+         ['interview_invite', '面试邀约（回写面试单位/日期/时段/方式）'],
+         ['offer', '录用通知（记录录用函时间并推进到已发放offer）']].map(function(o){
+          return '<option value="' + o[0] + '"' +
+            ((t.kind || 'other') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+        }).join('') +
+      '</select></div></div>' +
     '<div class="crow"><label>主题</label><div class="cinput">' +
       '<input class="ced" id="tplSubject" value="' + esc(t.subject || '') + '"></div></div>' +
     /* 正文改用**富文本编辑器**（业务方 2026-10-21：原版是富文本 + 表格工具条，
@@ -6477,6 +6665,7 @@ async function saveTpl(id){
   var r = await api('/api/mail/templates', {method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({id: id, name: name, scene: g('tplScene').trim(),
+                          kind: g('tplKind') || 'other',
                           subject: g('tplSubject'), body: ed ? ed.innerHTML : ''})});
   if(r.__err){ toast(r.__err); return; }
   closeProgDlg();
@@ -7126,12 +7315,17 @@ function outcomeField(d){
   var title = autoAdvance
     ? '面试结论（选择后会从当前阶段自动推进到「已面试」）'
     : '面试结论（只改标签，不改变当前阶段）';
-  return badge + '<select id="ivOutcome" class="vsel" title="' + esc(title) + '">' +
+  /* 徽标 / 下拉 / 「清空结论」三点必须**同一行**：`结论` 这一格在 .ivrow 里是
+     纵向 flex，直接平铺的话按钮会掉到下拉下面单独占一行（2026-10-28 修）。 */
+  return '<span class="ivout">' + badge +
+    '<select id="ivOutcome" class="vsel" title="' + esc(title) + '">' +
     opts.map(function(v){
       return '<option value="' + esc(v) + '"' + (cur === v ? ' selected' : '') + '>' +
         (v || '未判') + '</option>';
     }).join('') + '</select>' +
-    '<button class="btn sm" onclick="clearOutcome()">清空结论</button>';
+    /* 「清空结论」是**撤销一个已经做过的判断**，用危险动作的红（白底灰边红字，
+       hover 才变红底）—— 与「覆盖一切条件」同族，不该和普通次要按钮长一样。 */
+    '<button class="btn sm btn-danger" onclick="clearOutcome()">清空结论</button></span>';
 }
 /* ---------- 改结论标签：前序阶段会补推，后续阶段只改标签 ----------
    业务方 2026-10-20 16:0x：「我阶段没打错，我可能也会点错，标签应该可以修改」。
@@ -7299,12 +7493,21 @@ async function adoptSuggestedJob(cid){
 }
 async function openAssignJob(cid){
   var j = await api('/api/jobs');
+  /* v4.0.4 修：原来用 askText 让 HR **手打岗位全名**，而「岗位管理」里建出来的岗位
+     一个都没列出来 —— 看上去就是"不弹我建的岗位"。改成把在招岗位摆成下拉。
+     停用的岗位不列（归岗只对在招岗位有意义），但空列表时的提示要说清去哪儿建。 */
   var items = (j.items || []).filter(function(x){ return x.active; });
-  if(!items.length){ toast('没有在招岗位'); return; }
-  var name = await askText('指定岗位', '', '从岗位名里选一个，或直接输入');
-  if(!name || name === true) return;
-  var hit = items.filter(function(x){ return x.title === name; })[0];
-  if(!hit){ toast('没有叫「' + name + '」的在招岗位'); return; }
+  if(!items.length){
+    toast('还没有在招岗位，请先在「岗位管理」里新建', 'warn');
+    return;
+  }
+  var pick = await askSelect('指定岗位', items.map(function(x){
+    return {value: String(x.id),
+            label: x.title + (x.applications_count ? '（在池 ' + x.applications_count + ' 人）' : '')};
+  }), '选择一个在招岗位');
+  if(!pick) return;
+  var hit = items.filter(function(x){ return String(x.id) === String(pick); })[0];
+  if(!hit) return;
   var r = await api('/api/candidates/' + cid + '/assign-job', {method:'POST',
     headers:{'Content-Type':'application/json'}, body: JSON.stringify({job_id: hit.id})});
   if(r.__err){ toast(r.__err); return; }
