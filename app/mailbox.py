@@ -90,12 +90,20 @@ def resolve_dir(value: str) -> str:
     相对路径里以 `data/` 开头的（eml_dir / folder_dir / archive_dir 的默认值
     都是这个形态），要走 DATA_DIR 而不是 BASE——数据目录可能被挪到用户可写
     位置（TP_DATA_DIR，见 app/paths.py），若仍按 BASE 拼就会又落回只读的
-    包内 `data/`，出现"能读不能写"。其余相对路径按 BASE 拼，行为不变。
+    包内 `data/`，出现"能读不能写"。
+
+    `config/` 开头同理要走 CONFIG_DIR：`imap.password_file` 的默认值就是
+    `config/imap.secret`，而打包后 BASE 是 `_internal`，按 BASE 拼会得到
+    `_internal/config/imap.secret`——那个文件不存在，于是"邮箱配好了却取不到
+    口令"。其余相对路径按 BASE 拼，行为不变。
     """
     if os.path.isabs(value):
         return value
-    if value.replace("\\", "/").startswith("data/"):
+    normalized = value.replace("\\", "/")
+    if normalized.startswith("data/"):
         return os.path.join(DATA_DIR, value[5:].replace("/", os.sep))
+    if normalized.startswith("config/"):
+        return os.path.join(CONFIG_DIR, value[7:].replace("/", os.sep))
     return os.path.join(BASE, value)
 
 
@@ -284,8 +292,17 @@ def preview_imap(host: str, port: int, ssl_on: bool, user: str, password: str,
         if typ != "OK":
             return {"ok": False, "error": f"登录成功但无法打开文件夹「{folder or 'INBOX'}」"}
         total = _imap_count(data)
+        # ---- v3.1.2：把"为什么这个数"摊开给 HR 看 ----
+        # 业务方反馈"有的邮箱显示 1000 封、有的只有 700 封，总数都不对"。
+        # 三个数含义不同，混在一起就会互相矛盾：
+        #   · exists   —— SELECT 的 EXISTS，**这个文件夹里全部邮件**（含已读/无附件）
+        #   · all_ids  —— SEARCH ALL 的结果数，正常应与 exists 相同；
+        #                 不等说明服务器对"可搜索范围"有限制（少见）
+        #   · resume   —— 其中**带简历附件**的封数，这才是"能收到多少人"
+        # 把三者都返回，界面就能写清"共 1000 封，其中 700 封带简历附件"。
         typ, box = conn.search(None, "ALL")
         ids = (box[0].split() if typ == "OK" and box and box[0] else [])
+        searchable = len(ids)
         recent = ids[-int(limit):] if ids else []
         mails: list[dict] = []
         for num in reversed(recent):
@@ -304,9 +321,22 @@ def preview_imap(host: str, port: int, ssl_on: bool, user: str, password: str,
                 })
             except Exception:
                 continue
+        # 预览的这几封里带简历附件的数量（只是抽样，不是全量统计）
+        _resume_in_sample = sum(1 for m in mails if m.get("has_resume"))
+        _note = ""
+        if searchable and searchable != total:
+            _note = (f"（注意：服务器报告可搜索 {searchable} 封，与文件夹总数 {total} 封"
+                     f"不一致 —— 通常不影响收取）")
         return {"ok": True, "account": f"{user} @ {host}", "folder": folder or "INBOX",
-                "total": total, "mails": mails,
-                "message": f"连接成功：{folder or 'INBOX'} 共 {total} 封，已列出最近 {len(mails)} 封"}
+                "total": total,
+                "searchable": searchable,
+                "resume_in_sample": _resume_in_sample,
+                "sample_size": len(mails),
+                "mails": mails,
+                "message": (f"连接成功：{folder or 'INBOX'} 共 {total} 封"
+                            f"（这是**这个文件夹里的全部邮件**，含已读、无附件的）；"
+                            f"下面列出最近 {len(mails)} 封，其中 {_resume_in_sample} 封带简历附件。"
+                            + _note)}
     except Exception as exc:
         return {"ok": False, "error": f"登录失败：{type(exc).__name__}: {exc}"}
     finally:
@@ -404,9 +434,26 @@ _OTHER_HINTS = ("作品", "作品集", "成绩单", "学位证", "毕业证", "�
 def classify_attachment(filename: str, total: int = 1) -> str:
     """判断一个附件是简历还是其他材料。返回 'resume' / 'other'。
 
-    `total` = 这封邮件的附件总数（判定多附件时的兜底口径，见上方说明）。
-    纯规则、**不调模型**：这决定的是"要不要给人建档"，误判代价不对称，
-    模型的不确定性在这里没有优势。规则也便于 HR 理解为什么某个附件被单列出来。
+    ⚠️ v3.1.1：`total` 现在**真的参与判定**了（以前收下参数却没用）。
+
+    为什么改：一封邮件带 `张三.pdf` + `张三-详细版.pdf` 时，两个都不命中
+    `_OTHER_HINTS`、都带 .pdf 扩展名 → 都被判成简历 → **建出两个人**。
+    HR 的反馈很直接：「同一个人的多份附件应该挂在一个人下面」。
+
+    新口径（`total > 1` 即"这封邮件带了多个附件"）：
+      · 命中 `_OTHER_HINTS` → other（确定不是简历）
+      · 命中 `_RESUME_HINTS` → resume（明确写了"简历"）
+      · 其余 → **other**：多附件邮件里的第二份起，默认当作补充材料。
+
+    这与原来"宁可多建一个人"的取向相反，是**刻意**的：
+    原取向的理由是"把真简历误判成附件等于丢件"，但那发生在"一封邮件里
+    只有一份文件、它却不是简历"的极端情况；而实际数据里更常见的是
+    "一份简历 + 若干补充材料"，误判的代价是人才库里凭空多出几个
+    "解析失败的新人"，且会污染统计、去重和岗位计数。
+    补充材料归档后在档案的「其他附件」里能看到，不会真的丢。
+
+    `total == 1`（单附件裸投）保持原样：只要不命中 `_OTHER_HINTS` 就当简历 ——
+    这是最常见也最不能出错的情况。
     """
     name = (filename or "").lower()
     if any(h in name for h in _OTHER_HINTS):
@@ -414,7 +461,11 @@ def classify_attachment(filename: str, total: int = 1) -> str:
     if any(h in name for h in _RESUME_HINTS):
         return "resume"
     # 无扩展名/未知类型（如 `1`、`image`）：不猜，当附件
-    if not name.rsplit(".", 1)[-1] in ("pdf", "doc", "docx", "txt", "md", "rtf"):
+    ext = name.rsplit(".", 1)[-1] if "." in name else ""
+    if ext not in ("pdf", "doc", "docx", "txt", "md", "rtf"):
+        return "other"
+    # 多附件邮件里，第二份及以后默认是补充材料（见 docstring）
+    if total > 1:
         return "other"
     return "resume"
 
@@ -456,10 +507,27 @@ def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:
             "mime": part.get_content_type(),
             "data": data,
         })
-    # 先抽完再定kind：`classify_attachment` 需要知道本封邮件共有几个附件
+    # 先抽完再定 kind：`classify_attachment` 需要知道本封邮件共有几个附件。
+    #
+    # ⚠️ v3.1.1：**一封邮件最多只认一份简历**。
+    # 逐个调用 `classify_attachment` 时它看不到"这是第几份"，于是
+    # `张三.pdf` + `张三-详细版.pdf` 两份都被判成简历 → 建出两个人。
+    # 这里按顺序走一遍，第一个被判为 resume 的留下，之后即使也命中
+    # "简历"字样，只要本封已经有一份了就不再建档（避免重复）。
     _total = len(out)
+    _has_resume = False
     for _a in out:
-        _a["kind"] = classify_attachment(_a["filename"], _total)
+        _kind = classify_attachment(_a["filename"], _total)
+        if _kind == "resume" and _has_resume:
+            _kind = "other"        # 本封已经有简历了，这份当补充材料
+        elif _kind == "resume":
+            _has_resume = True
+        _a["kind"] = _kind
+    # 如果整封邮件一个 resume 都没有（全是"成绩单/证书"），
+    # 退回原口径：**第一份**当简历 —— 否则这封邮件就完全没人可建档，
+    # 附件散落在"未挂人"状态，比多建一个人更糟。
+    if out and not _has_resume:
+        out[0]["kind"] = "resume"
     return out
 
 
@@ -509,6 +577,13 @@ def fetch_eml(cfg: dict) -> list[dict]:
 # ---------------------------------------------------------------- imap 模式
 
 def _imap_password(imap_cfg: dict) -> str | None:
+    """取 IMAP 口令：环境变量 → mailbox.json 指定的文件 → 默认 imap.secret。
+
+    最后一档回退不能省：`password_file` 只在 mailbox.json 里写了才生效，
+    而界面保存配置时会把它从白名单外剔除（`_EDITABLE_KEYS` 不含它），
+    老库/手工编辑过的 mailbox.json 也可能整条缺失。没有这一档，
+    "config/imap.secret 明明存在、界面也显示已配置"，收信却报"未取到口令"。
+    """
     env_key = imap_cfg.get("password_env", "TP_IMAP_PASSWORD")
     if os.environ.get(env_key):
         return os.environ[env_key]
@@ -517,8 +592,10 @@ def _imap_password(imap_cfg: dict) -> str | None:
         full = resolve_dir(path)
         if os.path.exists(full):
             with open(full, encoding="utf-8") as fh:
-                return fh.read().strip()
-    return None
+                value = fh.read().strip()
+                if value:
+                    return value
+    return read_secret()
 
 
 def iter_imap(cfg: dict, cursor: str | None = None, limit: int = 200):
@@ -541,9 +618,10 @@ def iter_imap(cfg: dict, cursor: str | None = None, limit: int = 200):
         raise RuntimeError("未配置 IMAP 服务器（config/mailbox.json -> imap.host）")
     password = _imap_password(ic)
     if not password:
+        secret_path = resolve_dir(ic.get("password_file") or "config/imap.secret")
         raise RuntimeError(
             f"未取到邮箱口令：请设置环境变量 {ic.get('password_env', 'TP_IMAP_PASSWORD')} "
-            f"或写入 {ic.get('password_file')}（该文件不应提交到版本库）")
+            f"或把授权码写入 {secret_path}（该文件不应提交到版本库）")
 
     ctx = ssl.create_default_context()
     if ic.get("ssl", True):
@@ -554,13 +632,36 @@ def iter_imap(cfg: dict, cursor: str | None = None, limit: int = 200):
         conn.login(ic.get("user", ""), password)
         folder = ic.get("folder", "INBOX")
         conn.select(folder, readonly=bool(ic.get("readonly", True)))
+        # ---- 邮箱里一共有多少封（用于界面显示，与"这次要拉几封"是两件事）----
+        # v3.1.2：原来只发一个 `total`，值是**本次待拉数**，界面却当"邮箱总数"
+        # 显示。于是"第一次收 800 封、第二次收 3 封"看起来像邮箱里的邮件
+        # 忽多忽少 —— 实际是增量拉取正常工作。现在两个数分开报。
+        try:
+            _t, _d = conn.uid("search", None, "ALL")
+            mailbox_total = len([u for u in ((_d[0] if _d else b"") or b"").split() if u]) \
+                if _t == "OK" else 0
+        except Exception:                                    # noqa: BLE001
+            mailbox_total = 0
+
         start = (int(cursor) + 1) if (cursor or "").isdigit() else 1
+        # **先报总数，再报本次待拉数** —— 顺序不能反：
+        # 调用方收到 `total` 时要能立刻拼出"邮箱共 N 封，本次新增 M 封"，
+        # 否则消息里只有一个数字，又回到"看起来忽多忽少"的老问题。
+        yield ("mailbox_total", mailbox_total)
         typ, data = conn.uid("search", None, f"UID {start}:*")
         if typ != "OK":
             yield ("total", 0)
             return
         uids = [u for u in (data[0] or b"").split() if u]
-        # ⚠️ 必须取**最旧**的一批（uids[:limit]），不能取最新的（uids[-limit:]）。
+        # ⚠️ **必须在这里过滤掉"回显"的那一封**（v3.1.2 修）。
+        # RFC 3501 6.4.8：`UID n:*` 里当 n **大于**邮箱最大 UID 时，
+        # 服务器仍会返回**最大 UID 那一封**（`*` 指"当前最大值"，
+        # 而 range 两端都含）。后果：游标已经推进到最新之后，
+        # **每次点「收取」都会把最后一封重新拉一遍、重新入库一次** ——
+        # 带附件的邮件会被反复解析，邮件台账 processed 计数也一直涨。
+        # 判据很简单：UID 小于 start 的一律不是"新邮件"。
+        uids = [u for u in uids if u.isdigit() and int(u) >= start]
+        # 取**最旧**的一批（uids[:limit]），不能取最新的（uids[-limit:]）。
         # UID 升序返回，首次接入存量邮箱时 cursor 为空 → start=1 → 返回全部；
         # 若只保留最新 limit 封、又把游标推到最大 UID，最旧的一批简历就
         # **永久漏收**（下次 start = max+1 直接空结果）。取最旧 + 游标停在
@@ -595,6 +696,8 @@ def fetch_imap(cfg: dict, cursor: str | None = None, limit: int = 200) -> tuple[
         if kind == "mail":
             mails.append(item)
             newest = item.get("uid") or newest
+        # "total" / "mailbox_total" 是给逐封进度模式用的统计事件，
+        # 一次性版只关心邮件本身，忽略即可（v3.1.2 新增了后者）。
     return mails, newest
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pathlib
 import sys
 
+sys.stdout.reconfigure(errors="replace")
 
 path = pathlib.Path(sys.argv[1])
 start = int(sys.argv[2])

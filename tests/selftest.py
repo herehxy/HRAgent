@@ -1225,8 +1225,13 @@ def main(verbose: bool = True) -> int:
             # （文件里看着是反斜杠加 n）运行时会被解析成真换行——按原文检查时 JS 合法，
             # 浏览器拿到的却是"单引号字符串跨行"→ 整页白屏（本机实测踩过一次）。
             import subprocess as _sp
-            _node = r"C:\Program Files\nodejs\node.exe"
-            _acorn = r"C:\Users\admin\.workbuddy\binaries\node\workspace\parse.js"
+            # 本机 node/acorn 路径不写死：换个开发机就跑不通，而且会把本机用户名
+            # 带进公开仓库。用环境变量给，没给就跳过这一段（它是可选的语法检查）。
+            _node = os.environ.get("HRA_NODE") or r"C:\Program Files\nodejs\node.exe"
+            _acorn = os.environ.get("HRA_ACORN", "")
+            if not _acorn:
+                _acorn = os.path.join(os.path.expanduser("~"), ".workbuddy",
+                                      "binaries", "node", "workspace", "parse.js")
             if os.path.exists(_node) and os.path.exists(_acorn):
                 from app import ui as _ui_mod
                 _pg = _ui_mod.render_page(auth_enabled=False)

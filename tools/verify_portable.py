@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ARCHIVE = ROOT / "release_prod" / "HRAgent工作台-v2.2.2-便携版.zip"
+ARCHIVE = ROOT / "release_prod" / "HRAgent工作台-v2.2.3-便携版.zip"
 TEST = ROOT / "_prod_portable_test"
 
 

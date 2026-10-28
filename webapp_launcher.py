@@ -34,6 +34,10 @@ PORT_TRIES = 10
 # 为什么加这一段：业务方那台电脑上“端口冲突”是**天天出现**的，
 # 10 个连续端口全占/被保留的概率并不低（见 _bind_reason 的说明）。
 PORT_TRIES_WIDE = 100
+#: 等 uvicorn 真正开始监听的超时（秒）。见主循环里的说明：
+#: 必须大于 FastAPI 启动钩子的最坏耗时，否则会留下"被放弃但仍在跑"的实例
+#: （uvicorn 先跑 lifespan 再绑端口，且 should_exit 在 startup 期间不生效）。
+STARTUP_WAIT = float(os.environ.get("TP_STARTUP_WAIT") or 90)
 APP_ID = "HRAgent"
 
 
@@ -46,6 +50,29 @@ def _base_dir() -> str:
     """
     meipass = getattr(sys, "_MEIPASS", None)
     return meipass or os.path.dirname(os.path.abspath(__file__))
+
+
+def _configure_ca_env(base: str) -> None:
+    """Point OpenSSL at the CA bundle shipped in the package.
+
+    The PyInstaller runtime on this machine has no usable system cert store;
+    setting the environment path lets urllib/ssl work without overriding any
+    global SSL context.
+    """
+    candidates = [
+        os.path.join(base, "cacert.pem"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cacert.pem"),
+        os.path.join(base, "certifi", "cacert.pem"),
+        os.path.join(base, "_internal", "cacert.pem"),
+        os.path.join(base, "_internal", "certifi", "cacert.pem"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            os.environ.setdefault("SSL_CERT_FILE", path)
+            os.environ.setdefault("REQUESTS_CA_BUNDLE", path)
+            print(f"[i] 使用包内证书：{path}")
+            return
+    print("[!] 包内证书不存在，保留系统证书设置")
 
 
 def _bootstrap_path() -> str:
@@ -65,12 +92,28 @@ def _load_bootstrap() -> dict:
 
 
 def _save_bootstrap(updates: dict) -> dict:
+    """记住"上次用哪个数据目录/端口"。**写不进去不许影响启动**。
+
+    v3.1.15（打包验证时发现）：`%APPDATA%\\HRAgent\\` 在某些机器上写不了
+    —— 漫游配置文件被策略锁住、企业杀软拦未签名 exe 的写操作、或 APPDATA
+    指向只读位置。原来这里直接抛 `PermissionError`，而它是在
+    `_prepare_profile` 里**迁移成功之后**被调用的，于是：
+        数据已经搬好了 → 只是记不住这回事 → 整个启动被判为失败 → 退出。
+    用户看到的是"装好了却打不开"，而真正能用的数据其实已经就位。
+
+    这里只是一份"备忘"（下次优先用哪个目录/端口），丢了顶多下次重新探测一次，
+    没有任何理由因为它挡住启动。所以吞掉 OSError 并打印一行。
+    """
     from app.profile_migrate import atomic_write_json
 
     data = _load_bootstrap()
     data.update(updates or {})
     data["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    atomic_write_json(_bootstrap_path(), data)
+    try:
+        atomic_write_json(_bootstrap_path(), data)
+    except OSError as exc:
+        print(f"[!] 记不住启动参数（不影响使用）：{type(exc).__name__}: {exc}")
+        print(f"    位置：{_bootstrap_path()}（可能被安全策略限制/只读）")
     return data
 
 
@@ -79,15 +122,70 @@ def _default_user_home() -> str:
     return os.path.join(root, "HRAgentData")
 
 
+def _home_usable(path: str) -> bool:
+    """这个"用户数据根"现在能不能真的用？
+
+    为什么必须验（v3.1.11，现场事故）：
+    `bootstrap.json` 里的 `user_home` 是**上次运行时**记下的绝对路径。
+    便携版曾经跑在 `D:\\Desktop\\v3`，用户后来把目录删了 / 换成另一台电脑
+    （盘符不存在）—— 而 `_resolve_user_home` 原样信任它。
+    结果：安装版启动时 `os.makedirs` 直接抛 OSError，
+    被 `_prepare_profile` 报成一个 MessageBox，**而弹窗在后台、托盘和浏览器都还没起**
+    —— 用户看到的就是"双击没反应 / 只有后台"。
+
+    判据（任一不满足就当不可用，退回默认目录）：
+      · 盘符存在（Windows 上没有 D 盘时 makedirs 会抛 WinError 3/53）
+      · 能建目录、能写文件（只读盘 / 权限受限的目录同样起不来）
+    """
+    try:
+        parent = os.path.dirname(os.path.abspath(path)) or path
+        # 盘符不存在时 isdir(parent) 为 False，且再往上一定也不存在
+        if not os.path.isdir(parent) and not os.path.isdir(path):
+            # 允许"父目录不存在但可以创建"的情况：逐级往上找到第一个存在的
+            probe = parent
+            for _ in range(8):
+                up = os.path.dirname(probe)
+                if up == probe:
+                    break
+                probe = up
+                if os.path.isdir(probe):
+                    break
+            else:
+                return False
+            if not os.path.isdir(probe):
+                return False
+        os.makedirs(path, exist_ok=True)
+        probe_file = os.path.join(path, ".write_probe")
+        with open(probe_file, "w", encoding="utf-8") as fh:
+            fh.write("ok")
+        os.remove(probe_file)
+        return True
+    except OSError:
+        return False
+
+
 def _resolve_user_home(cli_value: str | None,
                        portable_home: str | None = None) -> str:
-    return os.path.abspath(
-        os.environ.get("TP_USER_HOME")
-        or cli_value
-        or portable_home
-        or _load_bootstrap().get("user_home")
-        or _default_user_home()
-    )
+    """决定用户数据根。**记录值不可信**——必须验一遍再用（见 `_home_usable`）。"""
+    explicit = (os.environ.get("TP_USER_HOME") or cli_value or portable_home)
+    if explicit:
+        return os.path.abspath(explicit)
+
+    recorded = _load_bootstrap().get("user_home")
+    if recorded:
+        cand = os.path.abspath(str(recorded))
+        if _home_usable(cand):
+            return cand
+        fallback = _default_user_home()
+        print(f"[!] 记录的数据目录不可用：{cand}")
+        print(f"    改用默认目录：{fallback}（原目录里的数据不会被改动）")
+        try:
+            _save_bootstrap({"user_home": fallback, "stale_user_home": cand})
+        except Exception:                                    # noqa: BLE001
+            pass
+        return fallback
+
+    return _default_user_home()
 
 
 def _redirect_stdio_to_log(data_dir: str):
@@ -121,20 +219,16 @@ def _ensure_db() -> str:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     from app import profile_migrate
     profile_migrate.normalize_existing_data_paths(db_path, data_dir)
-    # 配置里的目录也一起修：2.0.0 的用户把来源目录设成了绝对路径，
-    # 升级后仍指向旧安装目录 → 「在线预览」全部取不到（界面显示"目录不存在"）。
-    # 放在每次启动都跑：用户可能是**先升级、后换机器/换目录**，
-    # 迁移当时没修上，这一次补上。
-    config_dir = os.environ.get("TP_CONFIG_DIR") or os.path.join(
-        os.path.dirname(data_dir), "config")
-    for note in profile_migrate.normalize_config_paths(config_dir, data_dir):
-        print(f"[i] 配置路径已修正：{note}")
 
     conn = db.connect(db_path)
     try:
+        # 注意：这里在**启动时**就跑，不只是登录时。老库（v3.0.2 及以前）
+        # 只有 `hr` 账号，`ensure_seed_users` 会把它提升为管理员 ——
+        # 必须赶在第一个 HTTP 请求之前完成，否则登录进来的人没有管理权限。
         created = auth.ensure_seed_users(conn)
         if created:
-            print(f"[√] 已创建 HR 账号：{', '.join(created)}（初始口令 change-me）")
+            print(f"[√] 已创建管理员账号：{', '.join(created)}（初始口令 change-me，"
+                  f"首次登录后请立即修改）")
     finally:
         conn.close()
     return db_path
@@ -267,14 +361,16 @@ def _prepare_profile(base: str, args) -> str:
     portable_home = None
     if frozen and not (explicit_user_home or args.data_dir or args.migrate_from):
         marker = os.path.join(program_dir, "portable.flag")
-        if (os.path.isfile(marker)
-                or profile_migrate.has_profile(program_dir)):
+        installed_mode = os.path.isfile(os.path.join(program_dir, "installed.flag"))
+        if os.path.isfile(marker):
             portable_home = program_dir
             print(f"[i] 便携模式：使用程序目录内的 data/config：{program_dir}")
     user_home = (
         _resolve_user_home(args.data_dir, portable_home)
         if managed_profile else base
     )
+    if portable_home:
+        user_home = portable_home
 
     if managed_profile:
         os.environ["TP_USER_HOME"] = user_home
@@ -294,7 +390,7 @@ def _prepare_profile(base: str, args) -> str:
         or _load_bootstrap().get("legacy_source")
     )
     legacy = None
-    if requested_legacy:
+    if requested_legacy and not profile_migrate.has_profile(user_home):
         legacy = os.path.abspath(requested_legacy)
         if not profile_migrate.layout(legacy):
             raise ValueError(f"不是有效的旧版数据目录：{legacy}")
@@ -305,41 +401,39 @@ def _prepare_profile(base: str, args) -> str:
             legacy = candidates[0]
 
     migrated = False
-    has_target = profile_migrate.has_profile(user_home)
-    exe_dir_ = os.path.dirname(os.path.abspath(sys.executable))
-    if managed_profile and not has_target:
-        # 用户目录还没有库 → 找候选根（含 `_internal/data`，即 2.0.0 的形态）
-        # 并整体迁移：库 + 原件 + 密钥 + 配置路径改写。
-        if not legacy:
-            cands = profile_migrate.candidate_legacy_roots(base, exe_dir_)
-            legacy = cands[0] if cands else None
-        if legacy:
+    if (managed_profile and legacy
+            and not profile_migrate.has_profile(user_home)):
+        try:
             profile_migrate.migrate_profile(legacy, user_home)
             migrated = True
-    elif managed_profile and has_target:
-        # 用户目录**已有档案** → 库绝不动（迁移会覆盖，代价太大）。
-        # 但原件可能还留在旧安装目录里：典型路径是先装过 v2.x（库在用户目录），
-        # 又回 2.0.0 解压版用了一段时间（新简历原件落在 `_internal/data/archive`），
-        # 再升级到新版 —— 这时库不迁，原件也就跟着留在旧目录，
-        # 界面表现是「列表里有人，点开取不到原件」，更严重的是
-        # **没有原件就无法重新分析**（分析要读原文）。
-        # 所以：只补「目标不存在」的原件，不覆盖、不碰库。
-        print("[i] 目标用户目录已有档案，未覆盖库；检查旧目录里有没有遗漏的原件…")
-        for _cand in profile_migrate.candidate_legacy_roots(base, exe_dir_):
-            _r = profile_migrate.supplement_originals(_cand, user_home)
-            if _r.get("copied"):
-                break
+        except Exception as exc:      # noqa: BLE001
+            # 绝不能静默失败：用户会看到一个空库，以为数据丢了。
+            # 旧目录始终只读，这里失败不会损坏任何东西，只是没迁成。
+            print(f"[!] 旧版数据自动迁移失败：{type(exc).__name__}: {exc}")
+            print(f"    旧目录：{legacy}")
+            print(f"    目标：{user_home}")
+            print("    可改用安装包迁移，或手工复制 data/ 与 config/。")
+            _message(
+                "检测到旧版 HRAgent 数据，但自动迁移未完成：\n"
+                f"{type(exc).__name__}: {exc}\n\n"
+                f"旧目录（未改动）：\n{legacy}\n\n"
+                "程序将以空档案启动。请改用安装包完成迁移，"
+                "或手工把旧目录的 data 与 config 复制到新目录。",
+                error=True,
+            )
+    elif managed_profile and legacy and profile_migrate.has_profile(user_home):
+        print("[i] 目标用户目录已有档案，跳过旧版迁移，未覆盖任何数据")
 
     template = os.path.join(base, "config_template")
     if not os.path.isdir(template):
         template = os.path.join(base, "config")
     profile_migrate.seed_config(template, os.path.join(user_home, "config"))
 
-    if args.migrate_from and profile_migrate.has_profile(user_home) and not migrated:
-        raise FileExistsError(
-            "目标用户目录已有档案，拒绝自动覆盖："
-            + profile_migrate.profile_db(user_home)
-        )
+    if migrated:
+        _save_bootstrap({"user_home": user_home, "legacy_source": ""})
+    if args.migrate_from and not migrated:
+        if not profile_migrate.has_profile(user_home):
+            raise RuntimeError("旧版迁移未执行：目标目录尚未建立可用档案")
     return user_home
 
 
@@ -355,7 +449,9 @@ def _load_tray_image(base: str):
 
     png = os.path.join(base, "icon_tray.png")
     if os.path.exists(png):
-        im = Image.open(png).convert("RGB")  # 不透明，避开托盘 alpha 位图坑
+        # 必须保留 alpha：图标的四个圆角是透明的，转成 RGB 会把它们填成黑块，
+        # 在浅色任务栏上就是四个黑角。pystray 的 win32 后端接受 RGBA。
+        im = Image.open(png).convert("RGBA")
         print(f"[i] 托盘图：icon_tray.png {im.size}")
         return im
 
@@ -371,7 +467,7 @@ def _load_tray_image(base: str):
             im = best
         except Exception:
             pass
-        im = im.convert("RGB")
+        im = im.convert("RGBA")     # 同上：保住透明圆角
         print(f"[i] 托盘图：app.ico 最大帧 {im.size}")
         return im
 
@@ -395,7 +491,11 @@ class TrayApp:
 
     # -- 菜单动作
     def _open_ui(self, icon=None, item=None):
-        webbrowser.open(self.url)
+        # 用多级降级的 _open_url，而不是裸 webbrowser.open ——
+        # 后者在现场那台机器上会静默失败（见 _open_url 的说明）。
+        # `once=False`：这是**用户明确点的**，上次开过也要再开一次
+        # （比如他把标签页关了，想重新打开）。
+        _open_url(self.url, once=False)
 
     def _open_data(self, icon=None, item=None):
         os.makedirs(self.data_dir, exist_ok=True)
@@ -470,8 +570,11 @@ class TrayApp:
         )
         self.icon = pystray.Icon("HRAgent工作台", _load_tray_image(self.base),
                                  "HRAgent 工作台", menu)
-        # 起托盘后自动开一次浏览器，并提示服务已就绪
-        threading.Timer(1.2, self._open_ui).start()
+        # ⚠️ **这里绝对不要再打开浏览器**（v3.1.14 修）。
+        # main() 里已经在起托盘之前打开过一次了；这里再调一次、
+        # 或者再挂个 Timer 调一次，用户就会看到**两三个浏览器窗口**——
+        # 现场实测：一次启动弹了三个。打开浏览器只允许有**一个**入口，
+        # 就是 main() 里那一处。
         threading.Timer(1.5, lambda: self.icon.notify(
             f"HRAgent 工作台已启动\n{self.url}", "HRAgent")).start()
         print(f"[√] HRAgent 工作台已启动：{self.url}")
@@ -717,10 +820,275 @@ def _os_pick_port():
         return None
 
 
+def _patch_pystray_msgfilter() -> None:
+    """绕过 pystray 里那句会失败的 `ChangeWindowMessageFilterEx`（v3.1.4）。
+
+    现场实测（2026-10-27）：这台机器上托盘完全起不来，日志是
+        File "pystray\\_win32.py", line 257, in _create_window
+        PermissionError: [WinError 5] 拒绝访问
+    而单独用 ctypes 测 `CreateWindowEx` 是**成功**的（hwnd 非 0），
+    所以卡住的不是建窗口，而是紧接着那一句：
+        win32.ChangeWindowMessageFilterEx(hwnd, WM_TASKBARCREATED, MSGFLT_ALLOW, None)
+
+    这句的用途（见 pystray 源码注释）是"**以提权身份运行时**也要能收到
+    WM_TASKBARCREATED 广播"。它对**非提权进程毫无必要** —— 非提权进程本来
+    就能收到广播。而某些安全策略会直接拒绝这个调用（ACCESS_DENIED）。
+
+    所以：把它包一层，失败就**静默跳过**。代价只在"以管理员身份运行且
+    需要重建托盘图标"这一种场景下才可能体现（explorer 重启后图标不自动回来），
+    而这台机器上原本是"托盘完全不出现"，两害相权取其轻。
+    """
+    try:
+        from pystray import _win32 as _p
+        _orig = _p.win32.ChangeWindowMessageFilterEx
+
+        def _safe(hwnd, msg, action, pdata):
+            try:
+                return _orig(hwnd, msg, action, pdata)
+            except Exception as exc:                     # noqa: BLE001
+                print(f"[i] 跳过 ChangeWindowMessageFilterEx（{type(exc).__name__}: "
+                      f"{exc}）；非提权进程不需要它")
+                return True
+
+        _p.win32.ChangeWindowMessageFilterEx = _safe
+    except Exception as exc:                             # noqa: BLE001
+        print(f"[i] 托盘补丁未生效（不影响其它功能）：{exc}")
+
+
+#: 本次进程是否已经"把地址交给浏览器"。见 `_open_url` 的说明：
+#: 交付动作**不可重试**（重试就是再开一个窗口），所以只允许发生一次。
+_BROWSER_OPENED = False
+
+
+def _open_url(url: str, *, once: bool = True) -> bool:
+    """打开浏览器，**最多只把地址交付一次**。
+
+    为什么"最多一次"是硬要求（v3.1.15 现场反馈：一次启动弹出三个浏览器窗口）：
+    Chrome / Edge 都是**单实例**程序。已经有一个在跑时，新进程会把 URL 交给
+    已有实例，然后自己**立刻退出**。而那个退出码并不可靠 ——
+    现场见过 `rc=0`、`rc=21`、`rc=4294930433`（0xFFFFC0FF）。
+
+    原来的写法把"非 0 退出"当成失败，于是依次去试下一个浏览器、
+    再试 `os.startfile`、再试 `cmd start` —— **但每一次尝试其实都已经
+    把页面送出去了**。三个窗口是这么来的。
+
+    现在的策略：**任何一次尝试只要没抛异常，就认为已交付，立刻停止**。
+    代价从"每次多开几个窗口"换成"极少数机器上可能没打开"——
+    后者用户可以点托盘菜单「打开工作台」重来（那条路径 `once=False`），
+    前者是每天都在烦人的。
+
+    `once=False`：托盘菜单手动点"打开工作台"时用 —— 用户明确要求，
+    再来一次是对的。
+    """
+    global _BROWSER_OPENED
+    if once and _BROWSER_OPENED:
+        print("[i] 本次启动已经打开过浏览器，跳过重复打开")
+        return True
+
+    import subprocess
+
+    # ① 交给 Windows 默认浏览器（ShellExecute）。这是最不容易重复的一条：
+    #    它不创建我们自己的子进程，也不会因为"浏览器已在运行"而报错。
+    if os.name == "nt":
+        try:
+            os.startfile(url)                    # noqa: S606
+            _BROWSER_OPENED = True
+            print(f"[i] 已交给默认浏览器打开：{url}")
+            return True
+        except Exception as exc:                 # noqa: BLE001
+            print(f"    · os.startfile 失败：{type(exc).__name__}: {exc}")
+
+    # ② 直接启动**一个**浏览器（不遍历候选列表：遍历就是重复交付）
+    for exe in _browser_candidates()[:1]:
+        try:
+            subprocess.Popen([exe, url],
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            _BROWSER_OPENED = True
+            print(f"[i] 已用 {os.path.basename(exe)} 打开：{url}")
+            return True
+        except Exception as exc:                 # noqa: BLE001
+            print(f"    · 启动 {os.path.basename(exe)} 失败：{type(exc).__name__}: {exc}")
+
+    # ③ webbrowser（跨平台兜底）
+    try:
+        if webbrowser.open(url, new=2):
+            _BROWSER_OPENED = True
+            print("[i] 已用 webbrowser 打开")
+            return True
+    except Exception as exc:                     # noqa: BLE001
+        print(f"    · webbrowser 失败：{type(exc).__name__}: {exc}")
+
+    return False
+
+
+def _browser_candidates() -> list[str]:
+    """系统里**确实存在**的浏览器可执行文件，按偏好排序。
+
+    Chrome 优先（现场用的就是它），其次 Edge（Windows 10/11 必装）。
+    只返回真实存在的路径 —— 不猜、不写死盘符。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for env, pattern in (
+        ("PROGRAMFILES", r"Google\Chrome\Application\chrome.exe"),
+        ("PROGRAMFILES(X86)", r"Google\Chrome\Application\chrome.exe"),
+        ("LOCALAPPDATA", r"Google\Chrome\Application\chrome.exe"),
+        ("PROGRAMFILES(X86)", r"Microsoft\Edge\Application\msedge.exe"),
+        ("PROGRAMFILES", r"Microsoft\Edge\Application\msedge.exe"),
+    ):
+        root = os.environ.get(env)
+        if not root:
+            continue
+        p = os.path.join(root, pattern)
+        key = os.path.normcase(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        if os.path.isfile(p):
+            out.append(p)
+    return out
+
+
 def _candidate_ports() -> list:
-    """候选端口顺序：首选段（8756~8765）→ 扩展段（8766~8865）。"""
-    return (list(range(PORT, PORT + PORT_TRIES))
-            + list(range(PORT + PORT_TRIES, PORT + PORT_TRIES + PORT_TRIES_WIDE)))
+    """候选端口顺序：**上次成功的端口** → 首选段（8756~8765）→ 扩展段（8766~8865）。
+
+    为什么把"上次成功的端口"提到最前（v3.0.1）：
+    端口冲突在这类现场很常见，一旦 8756 被别的程序长期占着，每次启动都要先
+    探一遍 8756 才能落到 8757。探测本身不贵（一次 bind），但**地址会变**——
+    用户收藏的 `127.0.0.1:8757` 下次可能变成 8758，书签全失效。
+    记住上次能用的那个，地址就稳定了；它一旦不可用，后面的顺序与原来完全一致，
+    所以这是纯增益，不改变任何既有行为。
+    """
+    seq = list(range(PORT, PORT + PORT_TRIES)) \
+        + list(range(PORT + PORT_TRIES, PORT + PORT_TRIES + PORT_TRIES_WIDE))
+    try:
+        last = int(_load_bootstrap().get("last_port") or 0)
+    except (TypeError, ValueError):
+        last = 0
+    if last and last in seq:
+        seq.remove(last)
+        seq.insert(0, last)
+    return seq
+
+
+def _remember_port(port: int) -> None:
+    """记住这次成功监听的端口（供下次启动优先使用）。失败不影响启动。"""
+    try:
+        if int(_load_bootstrap().get("last_port") or 0) != int(port):
+            _save_bootstrap({"last_port": int(port)})
+    except Exception:                                     # noqa: BLE001
+        pass
+
+
+def _find_existing_instance(max_probes: int = 8):
+    """找"本程序已经在跑"的实例，返回 (url, 版本戳, 端口) 或 None。
+
+    ⚠️ **必须扫全部候选端口**（v3.1.11 修）。原来只扫 8756~8765 且探到第 2 个
+    占用端口就 break —— 两个后果在真实日志里同时出现过：
+
+      · 实例一旦因为端口顺延漂到 8766 以上（现场日志里出现过 8771/8780），
+        再双击就**永远找不到它**，于是又起一份新的；
+      · 每份新实例都跑一遍启动钩子（`refresh_skills` 写 8600+ 行技能），
+        几个进程一起抢 SQLite 写锁 —— 现场一份日志里
+        `database is locked` 出现 **76 次**。
+
+    探测成本：`_bind_test` 一次 bind+close 约 0.1ms，110 个端口也就十几毫秒；
+    只有"绑不上"的端口才值得发一次 HTTP（0.6s 超时），所以用 `max_probes` 兜住上界。
+
+    ⚠️ v3.1.12 二次修正（这条很容易再踩）：**不能用"bind 能绑上"判断端口空闲**。
+    uvicorn 绑监听套接字时带 `SO_REUSEADDR`，而 Windows 的行为是
+    "先绑的那个设了 SO_REUSEADDR，后绑的即使不设也能绑成功"
+    （这正是 `SO_EXCLUSIVEADDRUSE` 存在的原因）。实测：第一个实例监听 18900 时，
+    `_bind_test(18900)` 返回**成功**，于是这里把它当成空闲端口跳过 ——
+    第二个实例照样启动，两边抢同一个库。
+
+    所以改成**并发探测 `/api/meta`**：不依赖 bind，只认服务自报的身份。
+    110 个端口 × 0.4 秒超时、16 路并发 → 冷启动（一个服务都没有）时
+    全是 ECONNREFUSED，通常 1 秒内跑完；有实例时第一个命中就返回。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    ports = list(_candidate_ports())[:120]
+    if not ports:
+        return None
+
+    # 第一阶段：**快速扫哪些端口有人在听**（connect 一下就知道，关掉的端口
+    # 会立刻回 RST，110 个端口总共几毫秒）。这一步把 110 个候选砍到 0~2 个。
+    suspects = _listening_ports(ports)
+    if not suspects:
+        return None
+
+    # 第二阶段：只对"有人在听"的那几个做 HTTP 身份确认（每个最多 ~4 秒）。
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="probe-inst") as pool:
+        futures = {pool.submit(_is_our_instance, p): p for p in suspects}
+        try:
+            for fut in as_completed(futures, timeout=12):
+                try:
+                    build = fut.result()
+                except Exception:                        # noqa: BLE001
+                    continue
+                if build is None:
+                    continue
+                return f"http://127.0.0.1:{futures[fut]}", build, futures[fut]
+        except Exception:                                # noqa: BLE001
+            pass
+    return None
+
+
+def _listening_ports(ports: list[int], timeout: float = 0.12,
+                     budget: float = 3.0) -> list[int]:
+    """这些端口里，**有人在听**的是哪些。
+
+    只做 TCP connect，不发 HTTP —— 目的就是把"110 个候选"砍成"真的开着的那几个"，
+    后面才值得花时间去做身份确认（一次 HTTP 比一次 connect 贵几十倍）。
+
+    返回值的取舍（宁可多探别漏掉）：
+      · connect 成功(0)            → 有人在听，收下
+      · ECONNREFUSED(10061/61)     → 明确没人听，跳过
+      · 网络不可达(10051/10050/…）  → 跳过
+      · **其它（超时/被过滤）**      → 收下：某些安全软件会接管 connect，
+                                     对它返回"既不连上也不拒绝"，跳过就会漏掉实例
+
+    `budget` 是**总时间预算**：被过滤的端口每个都要等满 `timeout`，
+    110 个就是十几秒（实测把启动拖到 60 秒开外）。超预算就停手，
+    用已经收集到的候选继续 —— 找实例本来就是"尽力而为"，
+    拖垮启动比偶尔漏一个更糟（漏了也只是多起一个实例，而启动慢是每次双击都难受）。
+    """
+    import socket
+    import struct
+
+    deadline = time.monotonic() + budget
+    out: list[int] = []
+    for p in ports:
+        if time.monotonic() > deadline:
+            break
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            # 探测连接 close 时直接发 RST，不在对方 accept 队列里留半开连接
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                             struct.pack("ii", 1, 0))
+            except OSError:
+                pass
+            s.settimeout(timeout)
+            rc = s.connect_ex(("127.0.0.1", p))
+        except OSError:
+            out.append(p)
+            continue
+        finally:
+            try:
+                s.close()
+            except OSError:
+                pass
+        if rc == 0:
+            out.append(p)
+        elif rc in (10061, 61):                # ECONNREFUSED
+            continue
+        elif rc in (10051, 10050, 10065, 51, 50, 65):   # 网络不可达
+            continue
+        else:
+            out.append(p)                      # 超时/被过滤 → 也去确认一下
+    return out
 
 
 def _open_existing_instance() -> bool:
@@ -728,32 +1096,17 @@ def _open_existing_instance() -> bool:
 
     识别方式与 v2.0.3 一致：`/api/meta` 必带 session/tiers/ui_build 三个键。
     """
-    # 本程序**一次只监听一个端口**，所以"是不是我还在跑"最多探 2 个占用端口就够。
-    # 挨个探 10 个的话，每个 HTTP 探测都要等满超时（0.6 秒）→ 6 秒起步，
-    # 业务方那台电脑端口一多，启动就慢得像"没反应"（实测 40 多秒）。
-    _probed = 0
-    for _p in range(PORT, PORT + PORT_TRIES):
-        # 提前退出条件必须用**严格 bind**，不能用 _port_busy 的 connect 探测：
-        # 装了安全/过滤软件的机器上，connect 对空闲端口也返回 10035，
-        # 会被误判成"有人占着"→ 白白多探几个端口，每次都等超时（启动变慢）。
-        if _bind_test(_p, reuse=False)[0]:
-            break                      # 这个端口确实空着，后面不可能有我们的实例
-        if _probed >= 2:
-            break                      # 探过两个都不是我们 → 不可能是我们的实例
-        _probed += 1
-        _build = _is_our_instance(_p)
-        if _build is None:
-            continue                   # 被别的程序占着，交给后面的顺延逻辑
-        _url = f"http://127.0.0.1:{_p}"
-        print(f"[i] 已有实例在运行（端口 {_p}，前端版本戳 {_build[:12]}），"
-              "直接打开浏览器，不再启动第二份")
-        if not os.environ.get("TP_NO_BROWSER"):
-            try:
-                webbrowser.open(_url)
-            except Exception as exc:
-                print(f"    （打开浏览器失败：{exc}，请手动访问 {_url}）")
-        return True
-    return False
+    hit = _find_existing_instance()
+    if not hit:
+        return False
+    _url, _build, _p = hit
+    print(f"[i] 已有实例在运行（端口 {_p}，前端版本戳 {str(_build)[:12]}），"
+          "直接打开浏览器，不再启动第二份")
+    if not os.environ.get("TP_NO_BROWSER"):
+        if not _open_url(_url):
+            _message("工作台已经在运行，但没能自动打开浏览器。\n\n"
+                     f"请手动访问：\n{_url}")
+    return True
 
 
 def _port_check_report() -> None:
@@ -873,20 +1226,40 @@ def _is_our_instance(port: int) -> str | None:
     用户看到的就是"端口冲突 / 打不开 / 数据好像不对"。
     桌面程序的正确行为是**单实例**：已经在跑就把浏览器指过去，自己退出。
 
-    识别方式：`/api/meta` 必带 session/tiers/ui_build 三个键 —— 只认这个特征，
-    别的程序占了端口不会被误判成"已有实例"（那种情况仍走顺延）。
+    ⚠️ v3.1.12（现场事故）：原来只探 `/api/meta`、超时 0.6 秒。
+    而 `/api/meta` 742 人库实测 **585~1584 ms**（它要装配岗位/本体/邮箱配置），
+    于是"已有实例"**永远认不出来** —— 每次双击都起新实例，端口一路吃到 8782，
+    每份都在跑启动钩子抢写锁（现场日志 `database is locked` 76 次）。
+
+    现在：**先探新增的 `/api/ping`**（O(1)、不查库、几毫秒）。
+    只有"ping 有响应但不是本程序"时才退回 `/api/meta`（那才是旧版本实例）——
+    **连不上就直接判否**，不做无谓的二次等待：110 个端口逐个多等 2 秒，
+    启动就会被拖到几十秒（实测改之前这一条就吃掉 64 秒）。
     """
     import json
     import urllib.request
 
     # ⚠️ 必须绕开系统代理：本机装了代理时，连 127.0.0.1 会被代理拦成 502
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(f"http://127.0.0.1:{port}/api/meta", timeout=0.6) as r:
+
+    def _read(path: str, timeout: float):
+        with opener.open(f"http://127.0.0.1:{port}{path}", timeout=timeout) as r:
             if r.status != 200:
                 return None
-            data = json.loads(r.read().decode("utf-8", "replace"))
-    except Exception:
+            return json.loads(r.read().decode("utf-8", "replace"))
+
+    # ① 新端点：几毫秒就能答，专为"本机有没有人在跑"设计
+    try:
+        data = _read("/api/ping", 1.2)
+    except Exception:                                    # noqa: BLE001
+        return None          # 连不上/超时 → 这里不是我们的服务，别再等 /api/meta
+    if isinstance(data, dict) and data.get("product") == "HRAgent":
+        return str(data.get("ui_build") or "")
+
+    # ② 有响应但格式不对 → 可能是**旧版本**实例（还没有 /api/ping），确认一次
+    try:
+        data = _read("/api/meta", 2.0)
+    except Exception:                                    # noqa: BLE001
         return None
     if isinstance(data, dict) and {"session", "tiers", "ui_build"} <= set(data):
         return str(data.get("ui_build") or "")
@@ -937,6 +1310,7 @@ def _parse_args(argv: list[str] | None = None):
 
 def main(argv: list[str] | None = None) -> int:
     base = _base_dir()
+    _configure_ca_env(base)
     os.chdir(base)
     args = _parse_args(argv)
     if args.no_browser:
@@ -987,7 +1361,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         args.migrate_from = chosen
 
-    if _open_existing_instance():
+    if not args.migrate_from and _open_existing_instance():
         return 0
 
     try:
@@ -1022,10 +1396,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[i] 已有实例在运行（PID={_pid}，端口 {_p}），"
               "直接打开浏览器，不再启动第二份")
         if not os.environ.get("TP_NO_BROWSER"):
-            try:
-                webbrowser.open(_url)
-            except Exception as exc:
-                print(f"    （打开浏览器失败：{exc}，请手动访问 {_url}）")
+            # 统一走 `_open_url`：它带"只交付一次"的闸门，
+            # 而裸 `webbrowser.open` 既可能静默失败，也不受闸门约束。
+            if not _open_url(_url):
+                print(f"    （打开浏览器失败，请手动访问 {_url}）")
         return 0
 
     if _open_existing_instance():
@@ -1105,7 +1479,21 @@ def main(argv: list[str] | None = None) -> int:
 
         # 必须等它**真的开始监听**再起托盘。预检只是预检：起托盘的时间点上
         # 服务必须已在监听，否则"托盘在、浏览器打不开"，用户无从判断问题在哪。
-        deadline = time.time() + 12
+        #
+        # ⚠️ v3.0.2：这个超时**必须**大于启动钩子的最坏耗时，否则会出人命——
+        # uvicorn 是 `await lifespan.startup()` **之后**才绑端口
+        # （uvicorn/server.py:116 → 182 → 205 才置 started），
+        # 而 `should_exit=True` 只有在 `main_loop()` 里才生效：
+        # startup 还没跑完时设它，线程根本不会退出，`join(3)` 超时返回，
+        # 主线程却以为"这个端口失败了"，去试下一个 —— 被放弃的线程跑完照样绑端口成功。
+        # 实测 743 人库的钩子要 42 秒，而这里只等 12 秒：
+        # 110 个候选端口 × 15 秒 ≈ 27 分钟"双击没反应"，
+        # 且每个被放弃的实例都在跑全量 refresh_skills 抢写锁 → 用户点开档案 500。
+        #
+        # 现在钩子已改为后台线程（server.py 的 _startup_purge_task），正常 1-2 秒就 started；
+        # 这里的 90 秒是给"钩子里还有别的慢活"留的余量 —— 宁可多等，
+        # 也不能再出现"放弃了却还在后台跑"的实例。
+        deadline = time.time() + STARTUP_WAIT
         while time.time() < deadline:
             if getattr(server, "started", False):
                 break
@@ -1140,7 +1528,7 @@ def main(argv: list[str] | None = None) -> int:
         server = uvicorn.Server(config)
         worker = threading.Thread(target=server.run, name="uvicorn", daemon=True)
         worker.start()
-        deadline = time.time() + 12
+        deadline = time.time() + STARTUP_WAIT
         while time.time() < deadline:
             if getattr(server, "started", False):
                 break
@@ -1154,20 +1542,66 @@ def main(argv: list[str] | None = None) -> int:
     url = f"http://127.0.0.1:{port}"
     _write_instance_file(os.environ.get("TP_DATA_DIR") or
                          os.path.join(user_home, "data"), port)
+    # 记住这个端口：下次启动优先用它，地址不会因为端口顺延而漂移。
+    # 放在"已监听"之后——只有真的起来了才值得记。
+    _remember_port(port)
+    # ---- v3.1.4：**正常启动也要打开浏览器**，而且不能只信 webbrowser ----
+    # 原来只有"检测到已有实例"那两条路径会打开浏览器，
+    # 真正冷启动的这条路径**从来不打开** —— 只起一个托盘图标。
+    # 用户双击后看不到页面，第一反应是"没启动"，于是再双击一次 → 起第二个实例。
+    #
+    # ⚠️ 光调 `webbrowser.open()` 不够：现场实测（2026-10-27）它**静默失败** ——
+    # 不抛异常、也不打开。那台机器 http 默认程序是
+    # `ChromeHTML.OLKXVNBPXRE35W2LOOBV35NKFE`（带哈希后缀，说明 Chrome 注册异常），
+    # `webbrowser` 走 `os.startfile` 时被 shell 拒绝但没报错。
+    # 所以这里改成**逐级降级**，每一级失败都试下一级，最后一定给出可点的地址。
+    if not os.environ.get("TP_NO_BROWSER"):
+        if not _open_url(url):
+            print(f"    （自动打开浏览器失败，请手动访问 {url}）")
+            # v3.1.8：**自动打开失败时必须让人看得见地址**。
+            # 只写日志等于没说 —— 用户看不到日志，只会认为"双击没反应"。
+            _message(
+                "HRAgent 工作台已启动。\n\n"
+                "系统没能自动打开浏览器（可能被安全软件拦截）。\n"
+                f"请手动打开浏览器，访问：\n\n{url}\n\n"
+                "（复制上面的地址粘贴到浏览器地址栏即可。）"
+            )
     print(f"[√] 端口 {port} 已监听，开始起托盘")
 
     try:
+        _patch_pystray_msgfilter()
         TrayApp(base, server, url).run()
     except Exception as exc:
+        # 托盘只是入口之一：服务已经在监听，浏览器也已经打开过。
+        # 这里**不能返回非零**——安装器把非零退出码当成"装坏了"并回滚提示，
+        # 用户会以为整个程序不能用，而实际上打开网址就能干活。
+        #
+        # ⚠️ v3.1.4：现场实测这台机器上托盘**必然失败**——
+        # `pystray` 建窗口时 `CreateWindowEx` 返回 NULL，随后
+        # `ChangeWindowMessageFilterEx` 报 `[WinError 5] 拒绝访问`。
+        # 会话是交互式的（SessionId=1、explorer 在跑），所以不是"服务账户"
+        # 的问题，而是安全策略拦了建窗口。托盘这条路在这类机器上走不通。
+        #
+        # 因此降级路径必须**足够明确**：不能只往日志写一行就了事，
+        # 用户看不到日志。这里弹一个窗，把地址直接摆出来。
         print(f"[×] 托盘启动失败（{type(exc).__name__}: {exc}），退化为纯服务模式")
         traceback.print_exc()
-        print(f"    请直接访问 {url}，关闭本窗口退出。")
+        print(f"    服务仍在运行，请直接访问 {url}；关闭本窗口即退出。")
+        _message(
+            "HRAgent 工作台已启动，但**系统托盘图标没能创建**。\n\n"
+            f"请用浏览器打开这个地址使用：\n{url}\n\n"
+            "（这台机器的安全策略不允许创建托盘窗口。\n"
+            "  功能不受影响，只是没有右下角那个图标。\n"
+            "  关掉这个提示后，程序会继续在后台运行；\n"
+            "  要退出请在本窗口按 Ctrl+C，或用任务管理器结束进程。）"
+        )
         try:
             worker.join()
         except KeyboardInterrupt:
-            server.should_exit = True
-            worker.join(timeout=5)
-        return 1
+            pass
+        server.should_exit = True
+        worker.join(timeout=5)
+        return 0
 
     server.should_exit = True
     worker.join(timeout=5)

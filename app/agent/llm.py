@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 
@@ -257,7 +258,11 @@ def status() -> dict:
             out["error"] = f"服务可达，但未安装模型 {want}（可用：{', '.join(models) or '无'}）"
             out["hint"] = f"把「模型名」改成可用清单里的一个（如 {models[0]}），或先拉取该模型。"
     except (urllib.error.URLError, ValueError, KeyError, OSError) as exc:
+        import traceback
+        detail = traceback.format_exc()
         out["error"] = f"模型服务不可达：{exc}"
+        out["traceback"] = detail
+        print(detail, file=sys.stderr)
         if net.is_loopback(out.get("base_url") or ""):
             out["hint"] = ("地址是回环地址，请确认本地模型服务已启动"
                            "（Ollama：`ollama serve`；已装模型用 `ollama list` 查）。")

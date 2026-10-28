@@ -216,7 +216,7 @@ README = """HRAgent 企业人才库工作台（Windows 版）
 一、安装
 --------------
 方式 A（推荐）：双击 `HRAgent安装器.exe` → 选安装目录 → 「开始安装」。
-方式 B：直接解压 `HRAgent工作台-Windows版-v{ver}.zip` 到任意目录，双击
+方式 B：直接解压 `HRAgent工作台-Windows版-{ver}.zip` 到任意目录，双击
         `HRAgent工作台.exe`（**别只拷 exe**，_internal 是程序本体）。
 
 安装后：桌面有快捷方式，双击即用，浏览器会自动打开工作台。
@@ -238,17 +238,10 @@ README = """HRAgent 企业人才库工作台（Windows 版）
 3. 更新器只替换程序文件，并会核对：更新前后你的数据目录**一个字节都没变**。
    出问题会自动回滚，旧文件备份在 `<安装目录>\\_update_backup\\`。
 
-四、首次使用要先填两样东西
+四、怎么换成 v4-pro（不带图片）
 -------------------------------
-**为了不把你的凭据连同软件一起发出去，这个包里不附带任何密钥。**
-首次打开请到「系统配置」里填：
-
-  1. 大模型密钥（API Key）——「系统配置 → 模型与密钥」。
-     填好后智能助手、简历解析、语义找人才能用。
-  2. 邮箱授权码 ——「系统配置 → 收信配置」。
-     不填就只能手动投简历，收不到 HR 邮箱里的简历。
-
-  档位阈值、单位字典等其余配置包里已带好（采集自你自己的设置），开箱即用。
+`deepseek-flash` 支持发图片；`deepseek-v4-pro` 是纯文本、更快更便宜。
+在「系统配置 → 模型与密钥」里改模型名即可（两个模型 DeepSeek 官方都在售）。
 
 五、几条设计约定
 ----------------
@@ -398,9 +391,8 @@ def main() -> int:
                     help="不打程序包（省 170MB 磁盘；更新包不依赖它）")
     ap.add_argument("--out-root", dest="out_root", default=ROOT,
                     help="构建输出根目录（dist/build/release 放这里；C 盘满时指到别的盘）")
-    ap.add_argument("--tool-python", dest="tool_python",
-                    default=r"C:\Users\admin\.workbuddy\binaries\python\envs\pack\Scripts\python.exe",
-                    help="构建安装器/更新器用的解释器（必须带 tkinter）")
+    ap.add_argument("--tool-python", dest="tool_python", default=sys.executable,
+                    help="构建安装器/更新器用的解释器（必须带 tkinter；默认用当前解释器）")
     args = ap.parse_args()
 
     global OUT_ROOT, DIST, RELEASE, BUILD_DIR

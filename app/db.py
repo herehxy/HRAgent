@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_cand_bidx   ON candidates(phone_bidx, email_bidx);
 CREATE INDEX IF NOT EXISTS idx_cand_merged ON candidates(merged_into);
+-- v3.0.3：列表与归档页都在筛 archived_at，但这一列**没有索引**。
+-- EXPLAIN 实测：`WHERE archived_at IS NOT NULL`（归档页）是纯全表扫描（SCAN c）；
+-- `IS NULL`（人才库列表）则去借 idx_cand_merged —— 能用，但那是巧合，
+-- 一旦 merged_into 的选择性变化就会退化。两处都该有自己的索引。
+CREATE INDEX IF NOT EXISTS idx_cand_archived ON candidates(archived_at);
 
 -- ---------- 投递（N 次） ----------
 CREATE TABLE IF NOT EXISTS applications (
@@ -98,6 +103,20 @@ CREATE TABLE IF NOT EXISTS applications (
 CREATE INDEX IF NOT EXISTS idx_app_cand ON applications(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_app_job  ON applications(job_id, id);
 CREATE INDEX IF NOT EXISTS idx_app_stage ON applications(stage);
+-- v3.0.3：`_LATEST_APP_JOIN` 的子查询是
+--   SELECT id FROM applications WHERE candidate_id=? ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT 1
+-- 只有 (candidate_id) 单列索引时，取完还要为每个人建一次临时 B 树排序
+-- （EXPLAIN 实测 "USE TEMP B-TREE FOR ORDER BY"）。加上 applied_at 让它
+-- 直接按索引顺序取第一条：743 人时省的是毫秒，人一多就是线性放大。
+CREATE INDEX IF NOT EXISTS idx_app_cand_applied ON applications(candidate_id, applied_at DESC, id DESC);
+-- v3.0.3：真正和查询**逐字对齐**的表达式索引。
+-- 项目里有 5 处用同一个"取某人最新一条投递"的子查询：
+--   ORDER BY COALESCE(applied_at, '') DESC, id DESC LIMIT 1
+-- 注意排序键是 `COALESCE(applied_at,'')` 而**不是** `applied_at`：
+-- 上一条索引按裸列排序，SQLite 对不上这个表达式，仍会建临时 B 树。
+-- 必须把 COALESCE 原样写进索引，索引才可能被当作"已排好序"直接取 LIMIT 1。
+CREATE INDEX IF NOT EXISTS idx_app_latest
+    ON applications(candidate_id, COALESCE(applied_at, '') DESC, id DESC);
 
 -- ---------- 附件（原件与解析分离） ----------
 CREATE TABLE IF NOT EXISTS documents (
@@ -122,8 +141,25 @@ CREATE TABLE IF NOT EXISTS skills (
     canonical_name TEXT UNIQUE,
     aliases TEXT,                          -- JSON 数组
     category TEXT,                         -- 材料/工艺/表征/软件/管理/其他
-    parent_id INTEGER
+    parent_id INTEGER,
+    -- v3.0.2：单调递增的修订号。别名是**追加**（UPDATE），行数与 MAX(id) 都不变，
+    -- 光靠 (COUNT(*), MAX(id)) 判断索引失效会漏掉它 —— 加了别名却搜不到。
+    -- 这一列专门给 `_skill_alias_index` 当版本戳，由触发器维护。
+    rev INTEGER NOT NULL DEFAULT 1
 );
+-- 别名索引的版本戳：任何对 `aliases` 的 UPDATE 都让计数器 +1。
+-- 为什么必须写到库里（而不是进程内变量）：写入可能来自另一个连接/线程，
+-- 进程内计数器看不到别人的改动，照样会读到陈旧索引。
+CREATE TABLE IF NOT EXISTS meta_counters (
+    k TEXT PRIMARY KEY,
+    v INTEGER NOT NULL DEFAULT 0
+);
+CREATE TRIGGER IF NOT EXISTS trg_skills_alias_rev
+AFTER UPDATE OF aliases ON skills
+FOR EACH ROW
+BEGIN
+    UPDATE meta_counters SET v = v + 1 WHERE k = 'skills_alias_rev';
+END;
 CREATE TABLE IF NOT EXISTS candidate_skills (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     candidate_id INTEGER NOT NULL,
@@ -468,25 +504,68 @@ def _init_schema(conn: sqlite3.Connection) -> dict | None:
     return migration
 
 
+def _split_schema(sql: str) -> list[str]:
+    """把 SCHEMA 切成单条语句，**但不切断 CREATE TRIGGER 的 BEGIN…END 体**。
+
+    为什么不能用 `SCHEMA.split(";")`（v3.0.2 修）：触发器的函数体里本来就有 `;`
+        CREATE TRIGGER ... FOR EACH ROW
+        BEGIN
+            UPDATE meta_counters SET v = v + 1 WHERE k = '...';   ← 这个分号
+        END;
+    粗暴按 `;` 切会把 `BEGIN … UPDATE …` 和 `END` 拆成两条，
+    执行时抛 `cannot commit - no transaction is active`（实测），**启动直接失败**。
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    in_trigger = False
+    for line in sql.splitlines():
+        buf.append(line)
+        head = " ".join(buf).strip().upper()
+        if not in_trigger and head.startswith("CREATE TRIGGER"):
+            in_trigger = True
+        if in_trigger:
+            # 触发器以单独一行 END; 收尾
+            if line.strip().upper().startswith("END"):
+                out.append("\n".join(buf).strip())
+                buf = []
+                in_trigger = False
+            continue
+        if line.rstrip().endswith(";"):
+            stmt = "\n".join(buf).strip()
+            if stmt and stmt != ";":
+                out.append(stmt)
+            buf = []
+    tail = "\n".join(buf).strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
 def _exec_schema(conn: sqlite3.Connection) -> None:
-    """执行 SCHEMA，但**建索引失败不许炸**。
+    """执行 SCHEMA，但**建索引/触发器失败不许炸**。
 
     为什么：SCHEMA 末尾的 `CREATE INDEX ... ON 表(列)` 在旧库缺列时会失败。
     索引只是查询加速，缺列时跳过它就行 —— 但原来 `executescript` 一失败
     整个程序就起不来（"no such column: candidate_id"，启动直接中止）。
     建表失败仍然要炸：那是真出错了。
     """
-    for stmt in SCHEMA.split(";"):
-        st = stmt.strip()
-        if not st:
-            continue
+    for st in _split_schema(SCHEMA):
         try:
             conn.execute(st)
         except sqlite3.Error as exc:
             up = st.upper()
             if up.startswith("CREATE INDEX"):
                 continue                  # 索引建不出来：跳过，不影响启动
+            if up.startswith("CREATE TRIGGER"):
+                continue                  # v3.0.2：触发器建不出来也不该拦住启动
             raise
+    # v3.0.2：给别名修订计数器补初值。**必须用 INSERT OR IGNORE**（幂等）——
+    # 这条记录被触发器引用，缺了它 `_skill_alias_index` 会拿不到版本戳。
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO meta_counters (k, v) VALUES ('skills_alias_rev', 0)")
+    except sqlite3.Error:
+        pass
 
 
 #: SCHEMA 里每张表应有的列：{表名: [(列名, 可用于 ALTER ADD COLUMN 的定义)]}。
@@ -816,10 +895,24 @@ def get_department(conn: sqlite3.Connection, did: int) -> dict | None:
 
 
 def list_departments(conn: sqlite3.Connection, include_inactive: bool = True) -> list[dict]:
+    """部门列表（含该部门下的岗位数）。
+
+    v3.0.3：岗位数改成**一条 GROUP BY**，不再每个部门各查一次 COUNT。
+    这个函数在 `/api/meta` 里每个页面加载都会跑一次。
+    """
     rows = [_row(r) for r in conn.execute("SELECT * FROM departments ORDER BY id").fetchall()]
+    if not rows:
+        return []
+    counts: dict[int, int] = {}
+    try:
+        for r in conn.execute(
+                "SELECT dept_id, COUNT(*) AS n FROM jobs "
+                "WHERE dept_id IS NOT NULL GROUP BY dept_id").fetchall():
+            counts[int(r["dept_id"])] = int(r["n"])
+    except sqlite3.Error:
+        counts = {}
     for d in rows:
-        d["jobs_count"] = conn.execute(
-            "SELECT COUNT(*) AS n FROM jobs WHERE dept_id = ?", (d["id"],)).fetchone()["n"]
+        d["jobs_count"] = counts.get(int(d["id"]), 0)
     return rows if include_inactive else [d for d in rows if d.get("active", 1)]
 
 
@@ -931,8 +1024,44 @@ def get_job(conn: sqlite3.Connection, jid: int) -> dict | None:
 
 
 def list_jobs(conn: sqlite3.Connection, include_inactive: bool = True) -> list[dict]:
-    rows = [_enrich_job(conn, _row(r))
-            for r in conn.execute("SELECT * FROM jobs ORDER BY id").fetchall()]
+    """岗位列表（含部门名/部门是否停用/未归档投递数）。
+
+    v3.0.3 性能：**批量查，不再逐岗位查**。
+    原来每个岗位都要 `_enrich_job` 跑两次查询（取部门 + 数投递），
+    是典型 N+1；而这个函数在每次列表请求、`_jd_map`（5 秒缓存到期）、
+    `/api/jobs` 三处都会跑。现在一条 LEFT JOIN + 一条聚合就能拿全。
+    """
+    rows = [_row(r) for r in conn.execute("SELECT * FROM jobs ORDER BY id").fetchall()]
+    if not rows:
+        return []
+    # 部门表一次取全（几十条，可忽略）
+    depts = {d["id"]: d for d in (
+        _row(r) for r in conn.execute("SELECT * FROM departments").fetchall())}
+    # 每个岗位的未归档投递数：一条 GROUP BY，代替 N 条 COUNT(*)
+    # v1.8.9 口径不变：只数**未归档**的投递，界面数字与点进去看到的人数一致。
+    counts: dict[int, int] = {}
+    try:
+        for r in conn.execute(
+                """SELECT a.job_id AS jid, COUNT(*) AS n FROM applications a
+                   JOIN candidates c ON c.id = a.candidate_id
+                   WHERE COALESCE(c.archived_at, '') = '' AND a.job_id IS NOT NULL
+                   GROUP BY a.job_id""").fetchall():
+            counts[int(r["jid"])] = int(r["n"])
+    except sqlite3.Error:
+        counts = {}
+    for j in rows:
+        j["department_name"] = ""
+        j["department_active"] = True
+        if j.get("dept_id"):
+            d = depts.get(j["dept_id"])
+            if d:
+                j["department_name"] = d.get("name") or ""
+                j["department_active"] = bool(d.get("active", 1))
+            else:
+                j["department_name"] = j.get("dept") or ""
+        else:
+            j["department_name"] = j.get("dept") or ""
+        j["applications_count"] = counts.get(int(j["id"]), 0)
     if include_inactive:
         return rows
     # 部门停用 → 其下岗位一并视为不可投递：否则会出现「部门已关，简历还往这个部门的岗位里归」
@@ -2640,7 +2769,19 @@ def list_documents(conn: sqlite3.Connection, candidate_id: int | None = None,
 # ============================================================
 
 def upsert_skill(conn: sqlite3.Connection, canonical: str, category: str = "其他",
-                 aliases: list[str] | None = None) -> int:
+                 aliases: list[str] | None = None, commit: bool = True) -> int:
+    """建/取技能本体条目。`aliases` 是**追加**语义（并集，不覆盖）。
+
+    `commit=False` 给**批量**调用方用（v3.0.3）：一个人身上十几项技能，
+    每项各提交一次就是十几次 fsync 级写事务，而每次提交之间写锁都短暂释放——
+    后台线程与用户操作因此反复抢锁。批量方在循环外自己提交一次即可。
+
+    ⚠️ 别名追加走 `UPDATE`：行数与 `MAX(id)` 都不变。
+    `_skill_alias_index` 的版本戳因此不能只看 (COUNT, MAX(id))，
+    必须靠 `trg_skills_alias_rev` 触发器维护的计数（见那里的说明）。
+    改这一段时要保证 **事务真的提交**，否则触发器写入的计数只有当前连接可见，
+    别的连接（含后台线程）仍会读陈旧索引。
+    """
     row = conn.execute("SELECT id, aliases FROM skills WHERE canonical_name = ?", (canonical,)).fetchone()
     if row:
         if aliases:
@@ -2652,32 +2793,105 @@ def upsert_skill(conn: sqlite3.Connection, canonical: str, category: str = "其�
             if len(merged) != len(existing):
                 conn.execute("UPDATE skills SET aliases = ? WHERE id = ?",
                              (json.dumps(merged, ensure_ascii=False), row["id"]))
-                conn.commit()
+                if commit:
+                    conn.commit()
         return row["id"]
     cur = conn.execute(
         "INSERT INTO skills (canonical_name, aliases, category) VALUES (?,?,?)",
         (canonical, json.dumps(aliases or [], ensure_ascii=False), category),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.lastrowid
 
 
 def find_skill(conn: sqlite3.Connection, name: str) -> dict | None:
-    """按本体名或别名精确查找。"""
+    """按本体名或别名精确查找。
+
+    v3.0.2 性能：别名不再靠"全表扫描 + 逐行 json 解码"。
+    原实现未命中 canonical_name 时会 `SELECT * FROM skills` 把整张表
+    取出来、对每行 `_decode` 一次（606 行 × json.loads），单次 1.8 ms。
+    而 `persist_skills` 对**每一项技能**都调一次（一次 refresh_skills 约 1 万次）
+    → 光这一步就 18 秒，是启动慢 35 秒的一半。
+
+    现在：
+      · 命中 canonical_name 仍走 UNIQUE 索引（一条 SQL，最快路径）；
+      · 别名走进程内索引，版本戳含**别名修订计数器**，所以追加别名也会失效——
+        不能只用 (COUNT(*), MAX(id))：别名是 UPDATE，行数与最大 id 都不变
+        （实测踩到过：追加「新别名B」后 find_skill 仍返回 None）。
+    """
     row = conn.execute("SELECT * FROM skills WHERE canonical_name = ?", (name,)).fetchone()
     if row:
         return _decode(dict(row))
+    idx = _skill_alias_index(conn)
+    hit = idx.get(name)
+    return dict(hit) if hit else None
+
+
+#: 别名索引缓存：db_path → (版本戳, {别名或本体名: 行 dict})
+_SKILL_ALIAS_CACHE: dict[str, tuple[tuple, dict[str, dict]]] = {}
+
+
+def _skill_alias_index(conn: sqlite3.Connection) -> dict[str, dict]:
+    """`skills` 表的别名索引（含本体名），按表版本戳自动失效。
+
+    ⚠️ **版本戳必须能感知别名变更**。Alias 是"追加"语义
+    （`upsert_skill` 用 `UPDATE skills SET aliases = ?`），
+    行数不变、`MAX(id)` 也不变 —— 最初用 `(COUNT(*), MAX(id))` 做版本戳，
+    结果**加了别名却查不到**（实测：追加「新别名B」后 `find_skill` 仍返回 None）。
+    这个 bug 当时触发不到（唯一调用点不传 aliases），但 `upsert_skill` 是公开接口，
+    将来谁带别名调用就会静默失效。
+
+    现在版本戳 = `(COUNT(*), MAX(id), meta_counters.skills_alias_rev)`：
+    第三项由 `trg_skills_alias_rev` 触发器在 `UPDATE OF aliases` 时 +1，
+    跨连接/跨线程都能看到（不像进程内计数器）。
+    插入新技能靠 `COUNT/MAX(id)` 就能发现，触发器只管别名更新。
+
+    额外成本：多查一张单行表，实测 22.5 µs → 43.6 µs。相对它替代掉的
+    全表扫描（1820 µs/次）仍然快 40 倍，可以接受。
+    """
+    try:
+        ver_row = conn.execute(
+            """SELECT (SELECT COUNT(*) FROM skills) AS n,
+                      (SELECT COALESCE(MAX(id), 0) FROM skills) AS m,
+                      (SELECT v FROM meta_counters WHERE k = 'skills_alias_rev') AS r"""
+        ).fetchone()
+        ver = (int(ver_row["n"]), int(ver_row["m"]), int(ver_row["r"] or 0))
+    except sqlite3.Error:
+        # 触发器/计数器还没建好（老库首次打开）：退化为"每次都重建"，
+        # 正确性优先于那点性能 —— 宁可慢，不能返回陈旧结果。
+        ver = None
+    key = ""
+    try:
+        for r in conn.execute("PRAGMA database_list").fetchall():
+            if r["name"] == "main":
+                key = os.path.abspath(r["file"] or "")
+                break
+    except sqlite3.Error:
+        key = ""
+    if ver is not None:
+        cached = _SKILL_ALIAS_CACHE.get(key)
+        if cached and cached[0] == ver:
+            return cached[1]
+    idx: dict[str, dict] = {}
     for r in conn.execute("SELECT * FROM skills").fetchall():
         d = _decode(dict(r))
-        if name in (d.get("aliases") or []):
-            return d
-    return None
+        idx.setdefault(d["canonical_name"], d)
+        for a in (d.get("aliases") or []):
+            idx.setdefault(a, d)
+    if ver is not None:
+        _SKILL_ALIAS_CACHE[key] = (ver, idx)
+    return idx
 
 
 def link_skill(conn: sqlite3.Connection, candidate_id: int, skill_id: int,
                level: str | None = None, evidence: str | None = None,
-               from_doc_id: int | None = None, source: str = "rule") -> None:
-    """挂技能到候选人。**没有原文片段时 verified=0**（不计入岗位命中）。"""
+               from_doc_id: int | None = None, source: str = "rule",
+               commit: bool = True) -> None:
+    """挂技能到候选人。**没有原文片段时 verified=0**（不计入岗位命中）。
+
+    `commit=False`：批量挂载时由调用方统一提交（理由见 `upsert_skill`）。
+    """
     verified = 1 if (evidence or "").strip() else 0
     conn.execute(
         """INSERT INTO candidate_skills
@@ -2691,7 +2905,8 @@ def link_skill(conn: sqlite3.Connection, candidate_id: int, skill_id: int,
              source = excluded.source""",
         (candidate_id, skill_id, level, evidence, verified, from_doc_id, source, now()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def candidate_skill_rows(conn: sqlite3.Connection, candidate_id: int,
@@ -2837,6 +3052,8 @@ AUDIT_LABEL = {
     "auto_end_stage": "系统自动结束了投递", "purge": "清理了到期数据",
     "delete": "删除了数据", "clear": "清空了数据", "remove": "移入了回收站",
     "restore": "从回收站恢复", "archive_pinned": "归档了原件",
+    # v3.0.3 账号管理
+    "create": "新建了", "update": "修改了", "set_password": "重置了口令",
     "import_domain": "导入了领域词表", "send": "发送了邮件",
     "chat_clear": "清空了对话", "chat_restore": "恢复了对话", "chat_purge": "清理了对话记录",
     "update": "修改了", "edit_settings": "修改了系统设置", "edit_config": "修改了配置",
@@ -2913,6 +3130,7 @@ AUDIT_ENTITY_LABEL = {
     "proposal": "提案", "settings": "系统设置", "source_file": "来源文件",
     "ontology": "领域词表", "chat": "对话", "bundle": "打包", "feedback": "反馈",
     "insight": "分析", "interview_dict": "面试字典", "mailbox": "邮箱配置",
+    "user": "账号",
 }
 
 
@@ -4176,8 +4394,55 @@ def get_user(conn: sqlite3.Connection, username: str) -> dict | None:
 
 
 def list_users(conn: sqlite3.Connection) -> list[dict]:
+    """账号列表。**不返回密码哈希与盐**——这两个字段没有任何界面用途。"""
     return [_decode(dict(r)) for r in conn.execute(
         "SELECT id, username, display_name, role, active, created_at FROM users ORDER BY id").fetchall()]
+
+
+def set_user_password(conn: sqlite3.Connection, username: str, password: str) -> bool:
+    """改口令。改完**必须清掉该用户的全部会话**（见 `delete_user_sessions`）——
+    否则旧 token 还能用到过期，等于改了密码没生效。"""
+    from .crypto import hash_password
+
+    if not get_user(conn, username):
+        return False
+    pw, salt = hash_password(password)
+    conn.execute("UPDATE users SET password_hash = ?, salt = ? WHERE username = ?",
+                 (pw, salt, username))
+    conn.commit()
+    return True
+
+
+def set_user_active(conn: sqlite3.Connection, username: str, active: bool) -> bool:
+    """启用/停用账号。停用后 `authenticate` 会直接拒绝（见 auth.authenticate）。"""
+    if not get_user(conn, username):
+        return False
+    conn.execute("UPDATE users SET active = ? WHERE username = ?",
+                 (1 if active else 0, username))
+    conn.commit()
+    return True
+
+
+def set_user_role(conn: sqlite3.Connection, username: str, role: str) -> bool:
+    if not get_user(conn, username):
+        return False
+    conn.execute("UPDATE users SET role = ? WHERE username = ?", (role, username))
+    conn.commit()
+    return True
+
+
+def delete_user_sessions(conn: sqlite3.Connection, username: str) -> int:
+    """踢掉某人所有会话（改密 / 停用 / 改角色后调用）。返回清掉的条数。"""
+    cur = conn.execute("DELETE FROM sessions WHERE username = ?", (username,))
+    conn.commit()
+    return cur.rowcount or 0
+
+
+def count_active_admins(conn: sqlite3.Connection) -> int:
+    """还能登录的管理员数量。**防止把最后一个管理员停用/降级导致没人能管账号。**"""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1").fetchone()
+    return int(row["n"]) if row else 0
 
 
 def create_session(conn: sqlite3.Connection, username: str, role: str, ttl_hours: int = 12) -> str:

@@ -76,17 +76,6 @@ _PAGE = r"""<!DOCTYPE html>
   --bad:#c93a2e;  --bad-soft:#ffefee;  --bad-line:#f5cfcb;
   /* 档位色：与状态色**分开一套**（B 档不用主蓝，主蓝对白 4.28 不够） */
   --tier-b:#146b9e; --tier-b-soft:#e8f1f8;
-  /* 输入控件与弹窗遮罩（v2.3.0 前端整理，2026-10-23）：
-     原先是"白底 + 1px --line-2(#c9cdd4) 框" + "聚焦时整圈主蓝实线"。
-     --line-2 是全站**强分隔线**，用在输入框上等于每个控件都画了一圈重线；
-     聚焦再叠一圈饱和蓝，密集表单里视线全被框线牵走。
-     改成：**浅填充底 + 透明边框**，聚焦时底色转白 + 浅蓝描边 + 柔光。
-     为什么不直接改 --line-2：它是卡片/表格/分栏共用的分隔线资产，
-     动它会连带改掉整个界面的骨架。这里只新增输入框专用的一组值。 */
-  --field:#f2f3f5; --field-hover:#eceef1; --field-line:#dbe6fb;
-  /* 遮罩：.36 压暗 → .28 + 2px 模糊。靠失焦隔离而不是靠压暗，
-     背景仍明显不可读（模糊+半透明双重削弱），观感轻很多。 */
-  --scrim:rgba(31,35,41,.28);
   --r:8px; --r-s:6px;
 }
 *{box-sizing:border-box}
@@ -144,13 +133,26 @@ button{cursor:pointer}
 /* ---------------- 两栏 ---------------- */
 /* ---------------- 第二行：动作 + 频道 ---------------- */
 .top2{
-  flex:none;min-height:44px;display:flex;align-items:center;gap:8px;padding:4px 16px;
+  flex:none;min-height:44px;display:flex;align-items:center;gap:6px;padding:5px 12px;
   background:var(--surface);border-bottom:1px solid var(--line);
-  /* 空间不够时**换行**，不要横向溢出。
-     原来没有 wrap，按钮一律挤在一行：1150px 窗口下最后几个按钮直接跑到视口外，
-     "全选"被压成竖排两行，末尾的入口点不到（业务方 2026-10-21 截图反馈）。 */
-  flex-wrap:wrap;
+  /* 业务方 2026-10-27：**必须一行**，不许换行到第二排。
+     之前是 flex-wrap:wrap，1150px 窗口下确实不会溢出，代价是最后几个按钮
+     （"批量按模型重跑""分析待分析的人"）掉到第二行，整条工具栏变两行高。
+     现在改成 nowrap + 紧凑尺寸（见下面的 .top2 .btn-lg），1920 窗口下
+     整条约 1420px、可用 1724px，一行放得下还剩 300px。
+     再窄的窗口才退化为横向滚动——仍然是一行，只是可以左右拖。 */
+  flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;
+  scrollbar-width:thin;
 }
+/* 这一条栏里的按钮比别处**小一档**：btn-lg 的 9px/18px 是给详情页那种
+   稀疏布局定的，13 个按钮并排时每个省 10px 就是 130px。
+   语义色（蓝=收进来 / 绿=发出去）和字重一概不动，只收紧内边距与字号。 */
+.top2 .btn-lg{padding:7px 10px;font-size:13px;letter-spacing:-.01em}
+/* 计数型按钮（归档勾选（0）/ 对比档案（0/10））的数字用等宽：
+   数字变化时按钮宽度不跳，右边的按钮不会跟着左右滑。 */
+.top2 .btn{font-variant-numeric:tabular-nums}
+.top2::-webkit-scrollbar{height:6px}
+.top2::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:3px}
 /* 岗位管理页自己的那条栏。**不复用 .top2**：那一组"非人才库视图让位"规则
    （`body.v-org .top2{display:none!important}`）会把它一起隐藏掉。*/
 .jobbar{
@@ -169,6 +171,14 @@ button{cursor:pointer}
   box-shadow:0 8px 22px rgba(24,28,32,.10);max-width:820px;
 }
 .morePanel.on{display:flex}
+/* 「批量维护」是**动作菜单**，不是筛选面板：竖排、每项占满宽度、不换行。
+   复用 .morePanel 的浮层外观（边框/阴影/圆角），只覆盖布局。 */
+#batchPanel{flex-direction:column;flex-wrap:nowrap;gap:2px;padding:5px;min-width:170px;
+  max-width:none;top:38px}
+#batchPanel .btn{width:100%;text-align:left;border-color:transparent;background:transparent;
+  padding:8px 10px;font-size:13.5px}
+#batchPanel .btn:hover{background:var(--accent-soft);border-color:transparent;
+  color:var(--accent-ink)}
 /* 面板里所有筛选框**同宽同字号**（业务方 2026-10-21：四楞八样的宽度和字号看着乱）。
    `.sel` 原来由文字长度决定宽度，勾选式下拉又自带 min/max-width —— 统一成一把尺子。 */
 .morePanel .sel,.morePanel .msel > .msbtn{
@@ -198,9 +208,18 @@ button{cursor:pointer}
 /* ---------------- 左侧栏（模块切换） ---------------- */
 .side{background:var(--nav);border-right:1px solid var(--line);
   padding:16px 10px;overflow-y:auto;display:flex;flex-direction:column}
-.sbrand{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600;
-  padding:0 8px 14px;letter-spacing:.02em}
-.sbrand i{width:9px;height:9px;border-radius:2px;background:var(--accent);flex:none}
+/* 品牌区 = 应用图标 + 产品名。图标用内联 data URI：
+   这个页面是**单文件内联**的（JS/CSS 全在 HTML 里，见 render_page_v2），
+   再挂一个 /logo.png 请求只会多一次往返，还会在服务刚起时闪一下空图。
+   base64 是 icon_tray.png 缩到 96px 的版本，四角已透明，浅色侧栏上不露白边。 */
+.sbrand{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:600;
+  padding:2px 8px 16px;letter-spacing:.01em;line-height:1.25}
+.sbrand img{width:26px;height:26px;flex:none;display:block;
+  border-radius:7px;box-shadow:0 1px 2px rgba(24,28,32,.14)}
+.sbrand span{display:flex;flex-direction:column;min-width:0}
+.sbrand b{font-weight:650;color:var(--ink);white-space:nowrap}
+.sbrand small{font-size:11.5px;font-weight:400;color:var(--ink-3);
+  white-space:nowrap;letter-spacing:.02em;margin-top:1px}
 .sgroup{font-size:12px;color:var(--ink-3);padding:10px 12px 5px;letter-spacing:.04em}
 .side button{
   display:block;width:100%;text-align:left;border:0;background:transparent;
@@ -339,41 +358,20 @@ button{cursor:pointer}
 .btn.sm{height:26px;padding:0 10px;font-size:13px}
 .cedit{background:var(--surface-2);border-radius:var(--r-s);padding:8px 10px;margin-bottom:4px}
 .cinput{display:flex;align-items:flex-start;gap:8px;flex:1;min-width:0;flex-wrap:wrap}
-/* v2.3.0：**去框线，改填充底**。
-   原来 border 用 --line-2（强分隔线 #c9cdd4），每个字段都是一圈重线；
-   聚焦再叠一圈饱和主蓝。密集表单里十几圈线互相打架，观感很硬。
-   现在：浅灰底块界定范围 + 透明边框，聚焦时底色转白（"被激活"）、
-   补一条极浅蓝描边 + 3px 低透明度柔光。 */
 .cinput input,.cinput select,.cinput textarea{
-  flex:1;min-width:180px;height:34px;padding:0 10px;border:1px solid transparent;
-  border-radius:var(--r-s);background:var(--field);font:inherit;outline:none;
-  transition:background-color .14s ease,border-color .14s ease}
-.cinput textarea{height:auto;padding:8px 10px;line-height:1.7;resize:vertical}
-.cinput input:hover,.cinput select:hover,.cinput textarea:hover{background:var(--field-hover)}
+  flex:1;min-width:180px;height:34px;padding:0 10px;border:1px solid var(--line-2);
+  border-radius:var(--r-s);background:var(--surface);font:inherit;outline:none}
+.cinput textarea{height:auto;padding:8px 10px;line-height:1.6;resize:vertical}
 .cinput input:focus,.cinput select:focus,.cinput textarea:focus{
-  background:var(--surface);border-color:var(--field-line);
-  box-shadow:0 0 0 3px rgba(51,112,255,.12)}
+  border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .crow{display:flex;align-items:flex-start;gap:10px;margin:6px 0}
 .crow > label{width:86px;flex:none;font-size:13px;color:var(--ink-3);padding-top:7px}
 .crow input,.crow select,.crow textarea{
-  flex:1;min-width:0;height:34px;padding:0 10px;border:1px solid transparent;
-  border-radius:var(--r-s);background:var(--field);font:inherit;outline:none;
-  transition:background-color .14s ease,border-color .14s ease}
-.crow textarea{height:auto;padding:8px 10px;line-height:1.7;resize:vertical}
-.crow input:hover,.crow select:hover,.crow textarea:hover{background:var(--field-hover)}
+  flex:1;min-width:0;height:34px;padding:0 10px;border:1px solid var(--line-2);
+  border-radius:var(--r-s);background:var(--surface);font:inherit;outline:none}
+.crow textarea{height:auto;padding:8px 10px;line-height:1.6;resize:vertical}
 .crow input:focus,.crow select:focus,.crow textarea:focus{
-  background:var(--surface);border-color:var(--field-line);
-  box-shadow:0 0 0 3px rgba(51,112,255,.12)}
-/* 禁用与校验失败（v2.3.0 补齐）：原来禁用和可用长得一样，很容易往只读框里填。
-   错误态不用高饱和红框，用浅红底 + 同族浅边；颜色不作为唯一信号，
-   字段旁必须同时给就地文案（调用侧保证）。 */
-.cinput input:disabled,.crow input:disabled,
-.cinput select:disabled,.crow select:disabled,
-.cinput textarea:disabled,.crow textarea:disabled{
-  background:#f7f8f9;color:#a8adb5;cursor:not-allowed}
-.cinput input.is-bad,.crow input.is-bad,
-.cinput select.is-bad,.crow select.is-bad,
-.cinput textarea.is-bad,.crow textarea.is-bad{background:#fff5f4;border-color:#f0cdc9}
+  border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .ck{display:inline-flex;align-items:center;gap:6px;font-size:14px;padding-top:7px}
 .ck input{width:15px;height:15px;accent-color:var(--accent)}
 .archbar{flex:none;height:44px;align-items:center;gap:8px;padding:0 16px;
@@ -497,15 +495,20 @@ button{cursor:pointer}
 .main{min-width:0;height:100vh;display:flex;flex-direction:column;overflow:hidden}
 
 /* ---------------- 写邮件 ---------------- */
-/* 非人才库视图：整条工具栏与主区都让位给该视图自己的内容 */
-body.v-mail .top,body.v-mail .top2,body.v-mail .pipe,body.v-mail .wrap,
-body.v-org  .top,body.v-org  .top2,body.v-org  .pipe,body.v-org  .wrap,
+/* 非人才库视图：整条工具栏与主区都让位给该视图自己的内容。
+   ⚠️ `.tabbar` 必须一起隐藏：它是人才库的档次筛选条（全部 / A / B / C /
+   信息缺失 / 未复核），只对人才库列表有意义。漏掉它时，写邮件、岗位管理、
+   归档、系统、对话五个页面顶部都会挂一条点了没反应的筛选条。 */
+body.v-mail .top,body.v-mail .top2,body.v-mail .tabbar,body.v-mail .pipe,body.v-mail .wrap,
+body.v-org  .top,body.v-org  .top2,body.v-org  .tabbar,body.v-org  .pipe,body.v-org  .wrap,
 /* ⚠️ 类名必须和 setView 里 `document.body.className = 'v-' + v` 生成的**完全一致**：
    视图名是 archive → 类名是 v-archive（曾写成 v-arch，导致归档页里人才库主区还在）。 */
-body.v-archive .top,body.v-archive .top2,body.v-archive .pipe,body.v-archive .wrap,
-body.v-sys  .top,body.v-sys  .top2,body.v-sys  .pipe,body.v-sys  .wrap,
-body.v-chat .top,body.v-chat .top2,body.v-chat .pipe,body.v-chat .wrap{display:none!important}
-#mailView,#orgView,#archView,#sysView,#chatView{display:none;flex:1;min-height:0;overflow:hidden}
+body.v-archive .top,body.v-archive .top2,body.v-archive .tabbar,body.v-archive .pipe,body.v-archive .wrap,
+body.v-sys  .top,body.v-sys  .top2,body.v-sys  .tabbar,body.v-sys  .pipe,body.v-sys  .wrap,
+body.v-users .top,body.v-users .top2,body.v-users .tabbar,body.v-users .pipe,body.v-users .wrap,
+body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-chat .wrap{display:none!important}
+#mailView,#orgView,#archView,#sysView,#usersView,#chatView{display:none;flex:1;min-height:0;overflow:hidden}
+#usersView.on{display:block;overflow-y:auto}
 /* 写邮件：左侧准备材料，右侧专心编辑正文。去掉收件人预览后，编辑区获得主要宽度。 */
 #mailView.on{display:grid;grid-template-columns:minmax(360px,.82fr) minmax(560px,1.18fr)}
 #orgView.on{display:grid;grid-template-columns:330px 1fr}
@@ -1020,34 +1023,14 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
    为什么不用浏览器原生 confirm()：原生那个是浏览器画的框，样式、字号、按钮文案都不可控，
    换台机器/换个浏览器长得就不一样，而且它挡住整个应用、看不出正在确认的是哪件事。
    HR 看到"网页弹出的框"而不是"这个系统的框"。 */
-.mask{position:fixed;inset:0;z-index:60;background:var(--scrim);display:none;
-  align-items:center;justify-content:center;padding:22px;
-  -webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px)}
-.mask.on{display:flex;animation:maskIn .18s ease-out}
-/* v2.3.0 弹窗容器：**三段式**（标题固定 / 正文滚动 / 底栏固定）。
-   原来 .dlg 整体没有 overflow，宽体才加 overflow-y:auto —— 于是宽体弹窗
-   正文一长，**标题跟着滚走**，用户滚到中间就不知道在看哪个弹窗。
-   现在容器 overflow:hidden，只有 .dlg .db 滚；h3 与 .dbar 是 flex:none。 */
-.dlg{background:var(--surface);border-radius:12px;
-  box-shadow:0 1px 2px rgba(31,35,41,.04), 0 12px 32px rgba(31,35,41,.14);
-  padding:20px 24px 18px;width:min(520px,calc(100vw - 32px));
-  /* ⚠️ 这里直接写 88vh，**不要**写成 calc(88vh / var(--z))：
-     v2 页面没有 body{zoom}（用 grid + 100vh 布局），:root 里也就没有 --z。
-     写 var() 会在计算值阶段整条声明失效 → max-height 落回 none →
-     长内容把弹窗撑出屏幕。旧版 ui.py 才有 zoom/--z 那一套。 */
-  max-height:88vh;
-  display:flex;flex-direction:column;overflow:hidden;
-  animation:dlgIn .18s ease-out}
-/* 尺寸分档：内容复杂度决定宽度，不再"一个 520 走天下、宽体才 940"。
-   sm 400 确认型 / md 520 标准 / lg 720 明细与报告 / xl 940 富文本与档案 */
-.dlg.sm{width:min(400px,calc(100vw - 32px))}
-.dlg.md{width:min(520px,calc(100vw - 32px))}
-.dlg.lg{width:min(720px,calc(100vw - 32px))}
-.dlg.xl{width:min(940px,calc(100vw - 32px))}
+.mask{position:fixed;inset:0;z-index:60;background:rgba(31,35,41,.36);display:none;
+  align-items:center;justify-content:center}
+.mask.on{display:flex}
+.dlg{background:var(--surface);border-radius:10px;box-shadow:0 16px 48px rgba(31,35,41,.20);
+  padding:22px 24px;width:min(560px,calc(100% - 48px))}
 /* 宽体弹窗（编辑邮件模板用）：560px 装不下富文本编辑器 —— 正文区只剩一条缝，
-   工具栏还要换行，等于没法排版。宽到 940px 并限高，内容超出在弹窗内滚动。
-   ⚠️ .wide 是历史类名，等价于 .xl（很多调用点按名加，保留兼容）。 */
-.dlg.wide{width:min(940px,calc(100vw - 32px))}
+   工具栏还要换行，等于没法排版。宽到 940px 并限高，内容超出在弹窗内滚动。 */
+.dlg.wide{width:min(940px,calc(100% - 48px));max-height:calc(100vh - 56px);overflow-y:auto}
 .dlg.wide .crow{display:block}
 .dlg.wide .crow > label{display:block;width:auto;margin-bottom:4px;padding-top:0}
 /* ⚠️ `.cinput` 是 flex 容器，只有 input/select/textarea 才带 `flex:1`；
@@ -1058,51 +1041,13 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
 .dlg.wide .cinput > .richeditor{width:100%;box-sizing:border-box;
   min-height:300px;max-height:46vh;overflow-y:auto}
 .dlg.wide .cinput > input,.dlg.wide .cinput > select{width:100%;box-sizing:border-box}
-.dlg h3{margin:0 0 12px;font-size:18px;font-weight:600;position:relative;padding-right:26px;
-  flex:none}
+.dlg h3{margin:0 0 12px;font-size:18px;font-weight:600;position:relative;padding-right:26px}
 .dlg-x{position:absolute;right:0;top:-2px;font-size:21px;font-weight:400;color:var(--ink-3);
   cursor:pointer;line-height:1;padding:2px 5px;border-radius:4px}
 .dlg-x:hover{color:var(--ink);background:var(--surface-2)}
-/* 关闭按钮的键盘焦点：浏览器默认会给一圈 **黑色硬框**（outline:auto），
-   在白弹窗上非常抢眼。改成浅蓝底 + 柔光 —— 焦点依然明确可辨，
-   但不再是"强对比框线"。这条只影响键盘导航，鼠标点击不触发。 */
-.dlg-x:focus-visible{outline:none;background:var(--accent-soft);
-  color:var(--accent-ink);box-shadow:0 0 0 2px rgba(51,112,255,.20)}
 .btn.busy{border-color:var(--accent-line);color:var(--accent-ink);background:var(--accent-soft)}
-/* 正文是**唯一**滚动区（v2.3.0）：flex:1 + min-height:0 才能让它在容器里收缩；
-   只写 overflow-y:auto 而不给 min-height:0 时，flex 子项的默认 min-height:auto
-   会让它撑到内容高度、把底栏顶出屏幕（经典 flex 滚动失效）。 */
-.dlg .db{line-height:1.8;font-size:15px;white-space:pre-wrap;color:var(--ink);
-  flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-right:2px}
-.dlg .dbar{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;flex:none}
-/* 弹窗内的输入框（askText 用）：与全局输入控件同一套"填充底 + 柔光聚焦"。
-   它不在 .cinput/.crow 里，所以要单独给一遍。 */
-.dlg-input{border:1px solid transparent;border-radius:var(--r-s);
-  background:var(--field);color:var(--ink);outline:none;
-  transition:background-color .14s ease,border-color .14s ease}
-.dlg-input:hover{background:var(--field-hover)}
-.dlg-input:focus{background:var(--surface);border-color:var(--field-line);
-  box-shadow:0 0 0 3px rgba(51,112,255,.12)}
-/* 入场/出场只动 opacity 与 transform（不碰 width/height/margin，避免重排）。
-   出场比入场快：关窗时用户已经在想下一件事，等动画是纯损耗。 */
-@keyframes maskIn{from{opacity:0}to{opacity:1}}
-@keyframes dlgIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-@keyframes maskOut{from{opacity:1}to{opacity:0}}
-@keyframes dlgOut{from{opacity:1;transform:none}to{opacity:0;transform:translateY(4px)}}
-.mask.closing{animation:maskOut .12s ease-in forwards}
-.mask.closing .dlg{animation:dlgOut .12s ease-in forwards}
-/* 尊重系统"减少动效"：直接关掉，而不是只缩短时长 ——
-   前庭敏感用户对位移特别敏感，缩短到 60ms 仍然会晃。 */
-@media (prefers-reduced-motion:reduce){
-  .mask.on,.dlg,.mask.closing,.mask.closing .dlg{animation:none}
-}
-/* 窄屏（<600px）降级为底部面板：居中小窗在手机上够不着，键盘一弹还会被顶飞。
-   只圆上面两角、贴底、限制高度 —— 移动端弹窗的主流形态。 */
-@media (max-width:600px){
-  .mask{padding:0;align-items:flex-end}
-  .dlg,.dlg.sm,.dlg.md,.dlg.lg,.dlg.xl,.dlg.wide{
-    width:100%;border-radius:16px 16px 0 0;max-height:76vh}
-}
+.dlg .db{line-height:1.8;font-size:15px;white-space:pre-wrap;color:var(--ink)}
+.dlg .dbar{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
 /* ---- 按钮变体：**全部照搬原版**（ui.py 的同名规则）----
    原版的规矩（业务方 2026-10-14 定）：
      · 导入/收取组 = **浅蓝底深蓝字**（btn-primary）且**加大一档**（btn-lg）——每日常用动作；
@@ -1133,45 +1078,196 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
 @media (prefers-reduced-motion: reduce){
   .detail.swap > *, .pulse{animation:none!important}
   .row,.bar{transition:none!important}
+  /* 登录页（v3.2）：位移/缩放/抖动全部去掉，**只留淡入淡出**。
+     为什么还留淡入：它不引起前庭反应（没有位移），却仍然是"从无到有"的
+     必要提示；全砍掉就退回原来的硬切了。星图的逐帧动画由 JS 侧关掉
+     （见 startLoginNet 里的 NET_REDUCED 判断），这里管不到 canvas 内容。 */
+  .loginwrap.enter .loginbox,.loginbox.shake,.loginerr.on{animation-name:loginFade!important}
+  .loginbox.leaving{animation-name:loginFadeOut!important}
+  .loginbtn.busy .loginico circle{animation:none!important}
+  .loginbtn.done .loginico path{animation:none!important;stroke-dashoffset:0}
+  body > .side,body > .main{transition:opacity .2s ease!important}
+  body.locked > .side,body.locked > .main{transform:none!important}
 }
+@keyframes loginFade{from{opacity:0}to{opacity:1}}
+@keyframes loginFadeOut{from{opacity:1}to{opacity:0}}
 
-/* ===== v2.3.0 输入控件统一：**填充底 + 无框线** ==========================
-   为什么放在样式表末尾：这十几种控件（顶部搜索、各类筛选下拉、可编辑值、
-   教育字段、聊天输入、跳页框、面试单位）各自在文件中段有自己的 border 定义，
-   逐个去改要动 20 多条规则，容易漏、也容易把按钮和浮层一起卷进来。
-   同特异性下**后出现者胜**，所以这里用**完全相同的选择器**再声明一次，
-   只覆盖 border 与 background —— padding / height / font 一律沿用原值，不改几何。
+/* ---------------- 登录页（v3.0.3） ---------------- */
+/* 只负责"拦住界面"。刻意不用卡片堆叠的营销式排版：这是一个每天要用、
+   且只在登录时出现一次的东西，越平静越好。 */
+/* 登录页背景：西北有色金属研究院大楼（v3.1.3）。
+   三层叠出"融合"效果，而不是把图片压暗了事：
+     ① 底图 —— 固定、cover、轻微放大，避免边缘露白；
+     ② 白色蒙版 —— 从左上到右下由 .93 → .72 渐变，
+        让登录框所在的中央区域更亮、四周稍暗，视线自然收到中间；
+     ③ 一层极淡的品牌蓝斜向光晕，把画面和企业色连起来。
+   `background-attachment:fixed` 在小窗口下会有滚动残影，这里不用它。 */
+.loginwrap{
+  position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;
+  overflow:hidden;                 /* 星图 canvas 贴边，不让它把页面撑出滚动条 */
+  transition:opacity .28s ease;    /* 退场时整层淡出，与登录框的放大同时进行 */
+  background:
+    linear-gradient(135deg, rgba(255,255,255,.93) 0%, rgba(255,255,255,.78) 45%,
+                    rgba(238,244,255,.72) 100%),
+    radial-gradient(circle at 72% 28%, rgba(51,112,255,.10), transparent 58%),
+    url("/login-bg.jpg") center 42% / cover no-repeat,
+    linear-gradient(160deg, #eef2f8 0%, #e6ecf6 100%);   /* 图缺失时的兜底 */
+}
+/* 窄屏（手机/小窗）：图会显得太挤，改成从顶部对齐并加深蒙版 */
+@media (max-width: 720px){
+  .loginwrap{background-position:center top, 72% 28%, center top, center;}
+  .loginwrap{background-blend-mode:normal;}
+}
+/* 没登录：把整个应用区藏起来（遮罩之下的内容不该被看到/被读屏念出来）。
+   用 opacity+transform 而不是原来的 visibility:hidden —— 后者是硬切，
+   登录成功后没法淡入（见上面 body.locked 那条）。 */
+.loginwrap[hidden]{display:none}
+/* 人才星图（v3.2）：登录框之下的一层 canvas。
+   注意层级：canvas 是 .loginwrap 的**子元素**，所以它一定画在 .loginwrap
+   自己的背景（照片 + 白色渐变蒙版）**之上**——元素背景永远在子元素下面。
+   换句话说，粒子是直接压在白色蒙版上画的，不会被蒙版压淡；
+   "若隐若现"是靠代码里那几个低 alpha 值（点 .5、线 .3）做出来的，
+   不是靠遮罩。改 alpha 时心里要有这个数。
+   语义上它不是随便的科技感——这是个人才库，"点与点连成网"就是人才关系网。
+   为什么用 canvas 而不是一堆 DOM 点：60 个点 + 每帧连线，DOM 方案要写
+   上千个元素并每帧改样式，在这类办公机（集显/远程桌面）上必掉帧。 */
+#loginNet{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0}
 
-   ⚠️ 最初只改了 `.cinput input` / `.crow input`（表单里的字段），
-   结果用户打开页面第一眼看到的顶部搜索框、筛选下拉**依然全是框线** ——
-   那才是"看不出改了什么"的真正原因。改样式前先想"用户第一眼看哪里"。 */
-.search,.sel,.vsel,.stagesel,.pgjump,.chatinput textarea,
-.cval .ced,.mrow input,.mrow select,.edu-field input,.edu-field select,
-#madd_ivunit{
-  border:1px solid transparent;background:var(--field);
-  transition:background-color .14s ease,border-color .14s ease}
-.search:hover,.sel:hover,.vsel:hover,.stagesel:hover,.pgjump:hover,
-.chatinput textarea:hover,.cval .ced:hover,.mrow input:hover,.mrow select:hover,
-.edu-field input:hover,.edu-field select:hover,#madd_ivunit:hover{
-  background:var(--field-hover)}
-.search:focus,.sel:focus,.vsel:focus,.stagesel:focus,.pgjump:focus,
-.chatinput textarea:focus,.cval .ced:focus,.mrow input:focus,.mrow select:focus,
-.edu-field input:focus,.edu-field select:focus,#madd_ivunit:focus{
-  outline:none;background:var(--surface);border-color:var(--field-line);
-  box-shadow:0 0 0 3px rgba(51,112,255,.12)}
+/* ---- 登录框动效（v3.2）----
+   三段，各回答一个问题：
+     入场  "界面出来了"  → 淡入 + 上浮 8px（只动 opacity/transform，走合成层）
+     失败  "口令不对"    → 横向轻抖，不用读字也知道错在哪
+     成功  "进去了"      → 框放大淡出 + 整层淡出 + 应用区从 97% 推开
+   入场只做一次（靠 .loginwrap.enter 类控制），401 把登录页叫回来时不重播 ——
+   会话过期被弹回来时用户是着急的，这时候再让他等 280ms 是帮倒忙。 */
+@keyframes loginIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes loginShake{
+  0%,100%{transform:none}
+  18%{transform:translateX(-5px)} 38%{transform:translateX(5px)}
+  58%{transform:translateX(-3px)} 78%{transform:translateX(3px)}
+}
+@keyframes loginOut{
+  from{opacity:1;transform:none}
+  to{opacity:0;transform:scale(1.04)}
+}
+/* 登录框：在照片背景上要"浮起来"—— 用近乎不透明的白 + 更深的投影，
+   不用 backdrop-filter（部分老显卡/远程桌面下会糊成一片）。 */
+.loginbox{
+  position:relative;z-index:1;      /* 压在星图之上 */
+  width:min(340px,calc(100vw - 48px));padding:30px 28px 24px;
+  background:rgba(255,255,255,.97);border:1px solid rgba(255,255,255,.9);
+  border-radius:var(--r);
+  box-shadow:0 18px 48px rgba(24,32,48,.18), 0 2px 8px rgba(24,32,48,.06);
+}
+.loginwrap.enter .loginbox{animation:loginIn .3s cubic-bezier(.2,.7,.3,1) both}
+.loginbox.shake{animation:loginShake .24s cubic-bezier(.36,.07,.19,.97) both}
+.loginbox.leaving{animation:loginOut .17s ease-in both;pointer-events:none}
+.loginwrap.leaving{opacity:0}
+/* 应用区：登录成功后从 97% 推开到 100%，和登录层的淡出叠在一起，
+   观感是"推门进去"而不是"页面刷新了一下"。 */
+body > .side,body > .main{transition:opacity .3s ease,transform .3s cubic-bezier(.2,.7,.3,1)}
+body.locked > .side,body.locked > .main{opacity:0;transform:scale(.985);transform-origin:50% 40%}
+.loginbrand{display:flex;align-items:center;gap:8px;font-size:17px;font-weight:650;
+  color:var(--ink);letter-spacing:.01em}
+.logindot{width:9px;height:9px;border-radius:2px;background:var(--accent);flex:none}
+.loginsub{font-size:12.5px;color:var(--ink-3);margin:3px 0 22px;letter-spacing:.02em}
+.loginlabel{display:block;font-size:12.5px;color:var(--ink-2);margin-bottom:5px}
+.logininput{
+  width:100%;box-sizing:border-box;height:38px;padding:0 11px;margin-bottom:14px;
+  border:1px solid var(--line-2);border-radius:var(--r-s);background:var(--ground);
+  font:inherit;font-size:14px;color:var(--ink);outline:none;
+  transition:border-color .14s ease,box-shadow .14s ease,background .14s ease;
+}
+.logininput:focus{border-color:var(--accent);background:var(--surface);
+  box-shadow:0 0 0 3px var(--accent-soft)}
+.loginerr{min-height:18px;font-size:12.5px;color:var(--bad);margin:-4px 0 10px}
+/* 错误行淡入：抖完之后"错在哪"再出现。用 .on 类触发而不是直接挂在元素上 ——
+   挂在元素上只会在页面加载时播一次，之后每次改 textContent 都不会重播。 */
+.loginerr.on{animation:loginIn .16s ease-out both}
+.loginbtn{width:100%;height:38px;font-size:14.5px;
+  display:flex;align-items:center;justify-content:center;gap:7px}
+/* 按钮里的"忙碌"图标（v3.2）：旋转环 → 对勾，用同一条 SVG 路径做 morph。
+   **不用文字"登录中…"代替它**：文字每换一次长度，按钮内容就会左右跳一下；
+   这里固定 14px 见方，只在里面换形状。 */
+.loginico{width:14px;height:14px;flex:none;display:none}
+.loginico circle,.loginico path{
+  fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round;
+}
+/* r=6 → 周长 37.7；留 26 实线 + 12 空白，转起来才看得出方向 */
+.loginico circle{stroke-dasharray:26 12;opacity:.9;
+  transform-box:fill-box;transform-origin:50% 50%}
+/* 对勾路径长 8.6，dasharray 给 14 保证完全盖住 */
+.loginico path{stroke-dasharray:14;stroke-dashoffset:14}
+.loginbtn.busy .loginico{display:block}
+.loginbtn.busy .loginico circle{animation:spin .72s linear infinite}
+.loginbtn.done .loginico{display:block}
+.loginbtn.done .loginico circle{display:none}
+.loginbtn.done .loginico path{animation:drawCheck .22s ease-out forwards}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes drawCheck{to{stroke-dashoffset:0}}
+.loginhint{margin-top:14px;font-size:11.5px;color:var(--ink-3);text-align:center}
+/* 首次使用提示：与普通脚注**同一副样子**（灰、小、居中），
+   只是允许换行 —— 账号和口令挤在一行会糊成一片。
+   刻意不做高亮块：登录框里只该有一个视觉重点（那个登录按钮）。 */
+#loginFirstHint{
+  margin-top:14px;font-size:11.5px;line-height:1.7;
+  color:var(--ink-3);text-align:center;white-space:pre-line;
+}
+/* 顶栏上的"当前用户 + 退出"（登录模式才出现） */
+.whoami{display:flex;align-items:center;gap:8px;flex:none;margin-left:6px;
+  font-size:12.5px;color:var(--ink-3);white-space:nowrap}
+.whoami b{color:var(--ink);font-weight:600}
+.whoami button{border:0;background:transparent;color:var(--ink-3);cursor:pointer;
+  font:inherit;font-size:12.5px;padding:2px 4px;border-radius:4px}
+.whoami button:hover{background:var(--surface-2);color:var(--ink)}
 
-/* 富文本编辑区（简历更正、邮件模板本身）**不用填充底**：
-   它是"一张纸"，写东西的地方应该是白底；灰底会让正文看起来像禁用态。
-   只把原来的 --line-2 强框线换成极浅的 --line，边界还在但不抢视线。 */
-#mBody,.richeditor{border:1px solid var(--line);background:var(--surface)}
-#mBody:focus,.richeditor:focus{
-  outline:none;border-color:var(--field-line);
-  box-shadow:0 0 0 3px rgba(51,112,255,.12)}
+/* ---------------- 账号管理（v3.0.3） ---------------- */
+.uwrap{max-width:920px;padding:24px 28px 40px}
+.uhead{display:flex;align-items:baseline;justify-content:space-between;
+  gap:12px;margin-bottom:12px}
+.uhead h3{margin:0;font-size:16px;font-weight:600;color:var(--ink)}
+.utable{width:100%;border-collapse:collapse;font-size:13.5px}
+.utable th{text-align:left;font-weight:600;font-size:12px;color:var(--ink-3);
+  letter-spacing:.04em;padding:7px 10px;border-bottom:1px solid var(--line)}
+.utable td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+.utable tr.off td{opacity:.55}
+.usub{font-size:11.5px;color:var(--ink-3);margin-top:2px}
+.utag{display:inline-block;font-size:10.5px;padding:1px 5px;border-radius:3px;
+  margin-left:6px;vertical-align:1px}
+.utag.me{background:var(--accent-soft);color:var(--accent-ink)}
+.utag.off{background:var(--bad-soft);color:var(--bad)}
+.pmtable td{font-size:12px}
+/* 表头竖排：13 个权限横着放不下，写成两字一列竖着读反而清楚 */
+.pmcol{display:inline-block;width:22px;text-align:center;font-size:11px;
+  color:var(--ink-3);line-height:1.15;vertical-align:bottom;
+  writing-mode:vertical-rl;letter-spacing:1px;padding-bottom:4px}
+.pmask{display:inline-block;width:22px;text-align:center;font-size:13px;
+  color:var(--line-2)}
+.pmask.on{color:var(--ok);font-weight:700}
+
+/* 只读角色：把"会改数据"的入口藏起来。
+   **这是体验层的减法，不是安全边界** —— 服务端每个写接口都有 require()。
+   藏掉的是那些对只读用户毫无意义、点了一定失败的按钮。 */
+body.readonly .top2 .btn-primary,          /* 收取/导入/上传 */
+body.readonly #btnArch,body.readonly #btnCompare,body.readonly .allbox,
+body.readonly #btnBatch,
+body.readonly .detail-toolbar .btn.primary,  /* 保存更正 */
+body.readonly .detail-toolbar [onclick*="avatarRefresh"],
+body.readonly .seg button,                   /* 档位按钮 */
+body.readonly .stagesel,
+body.readonly [data-act]{display:none!important}
 </style>
 </head>
 <body>
 <aside class="side">
-  <div class="sbrand"><i></i>人才库</div>
+  <!-- 品牌区：应用图标 + 产品名。原来的写法是一个 9px 蓝色小方块 + "人才库"，
+       那个方块是占位符（`.sbrand i`），跟 exe 图标毫无关系；而"人才库"又是
+       下面第一个导航项的名字，顶上一遍、导航里一遍，读起来像重复了。
+       现在换成真正的应用图标 + 产品名 + 一行说明（业务方 2026-10-27）。 -->
+  <div class="sbrand">
+    <img src="__BRAND_ICON__" alt="">
+    <span><b>HRAgent 工作台</b><small>西北有色院 · 人事</small></span>
+  </div>
   <div class="sgroup">招聘</div>
   <button data-view="pool" class="on">人才库</button>
   <button data-view="chat">智能助手</button>
@@ -1180,6 +1276,9 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
   <button data-view="org">岗位管理</button>
   <button data-view="archive">归档</button>
   <button data-view="sys">系统配置</button>
+  <!-- 账号管理只对 admin 显示（v3.0.3）。权限不足时点进去也是 403，
+       但**入口就不该出现** —— 让人点一个"你没权限"的按钮是坏体验。 -->
+  <button data-view="users" id="navUsers" hidden>账号管理</button>
   <!-- 构建时间由服务端注入：改了代码后如果这里的时间没变，说明浏览器还在跑旧页面 -->
   <div class="sfoot">v2 预览 · __V2_BUILD__</div>
 </aside>
@@ -1231,6 +1330,8 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
     </div>
   </div>
   <button class="btn" id="btnOverview" onclick="showOverview()">概览 · 待办</button>
+  <!-- 当前登录者（只有登录模式才有内容，本机模式保持空） -->
+  <div class="whoami" id="whoami"></div>
   <div class="count" id="count"></div>
 </div>
 
@@ -1255,14 +1356,24 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
        放在工具栏里既占位置、也让人以为它管的是别的东西。 -->
   <span class="vdiv"></span>
   <button class="btn btn-primary btn-lg" id="btnProp" onclick="toggleProps()">待确认提案</button>
-  <button class="btn btn-lg" onclick="batchReanalyze()">批量按模型重跑</button>
-  <button class="btn btn-lg" onclick="analyzePending()">分析待分析的人</button>
+  <!-- 「批量按模型重跑」「分析待分析的人」收进菜单（业务方 2026-10-27 要求
+       工具栏必须一行）。这两个是**运维动作**，不是日常动作：一个花钱重跑
+       全部模型、一个给历史漏分析的补课，一天也用不上一次，却各占 112px，
+       正是它们把工具栏顶到第二行。菜单里保留原文案，行为一字不改。 -->
+  <div class="more" id="moreBatch">
+    <button class="btn btn-lg" id="btnBatch" onclick="toggleBatchMenu()">批量维护 ▾</button>
+    <div class="morePanel" id="batchPanel">
+      <button class="btn" onclick="toggleBatchMenu();batchReanalyze()">批量按模型重跑</button>
+      <button class="btn" onclick="toggleBatchMenu();analyzePending()">分析待分析的人</button>
+    </div>
+  </div>
 </div>
 <div class="tabbar"><div class="tabs" id="tabs"></div></div>
 
 <div id="mailView"></div>
 <div id="orgView"></div>
 <div id="sysView"></div>
+<div id="usersView"></div>
 <div id="chatView"></div>
 <div id="archView"></div>
 
@@ -1278,7 +1389,40 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
 </div>
 </div>
 <div class="toast" id="toast"></div>
-<div class="mask" id="mask"><div class="dlg md" id="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgTitle" tabindex="-1"><h3 id="dlgTitle"></h3><div class="db" id="dlgBody"></div><div class="db" id="edDlgBody" style="display:none"></div><div class="dbar"><button class="btn" id="dlgNo"></button><button class="btn primary" id="dlgYes"></button></div></div></div>
+<div class="mask" id="mask"><div class="dlg" role="dialog" aria-modal="true"><h3 id="dlgTitle"></h3><div class="db" id="dlgBody"></div><div class="db" id="edDlgBody" style="display:none"></div><div class="dbar"><button class="btn" id="dlgNo"></button><button class="btn primary" id="dlgYes"></button></div></div></div>
+
+<!-- 登录页（v3.0.3）。只有 AUTH_ENABLED=true 时才显示；本机模式整块不出现。
+     刻意做成**全屏遮罩**而不是独立路由：这个页面本身是单文件内联的，
+     多一个 URL 就多一处要跟缓存/刷新较劲的地方。 -->
+<div class="loginwrap" id="loginWrap" hidden>
+  <!-- 人才星图（v3.2）：canvas 必须在 .loginbox **之前**，这样它自然落在下面；
+       CSS 里再给它 z-index:0 / 登录框 z-index:1 兜一层。 -->
+  <canvas id="loginNet" aria-hidden="true"></canvas>
+  <form class="loginbox" id="loginForm" autocomplete="on">
+    <div class="loginbrand"><i class="logindot"></i>HRAgent 工作台</div>
+    <div class="loginsub">西北有色院 · 人事</div>
+    <label class="loginlabel" for="loginUser">账号</label>
+    <input id="loginUser" class="logininput" autocomplete="username" required>
+    <label class="loginlabel" for="loginPass">口令</label>
+    <input id="loginPass" class="logininput" type="password" autocomplete="current-password" required>
+    <div class="loginerr" id="loginErr"></div>
+    <!-- 忙碌/成功图标（v3.2）：同一条 SVG，圆环转 → 对勾画出来。
+         平时 display:none，只占 14px，不参与布局计算。 -->
+    <button class="btn primary loginbtn" type="submit" id="loginBtn">
+      <svg class="loginico" viewBox="0 0 16 16" aria-hidden="true">
+        <circle cx="8" cy="8" r="6"></circle>
+        <path d="M4.6 8.3l2.3 2.3 4.5-4.8"></path>
+      </svg>
+      <span id="loginBtnText">登录</span>
+    </button>
+    <!-- 首次使用提示（v3.1.3）：原来这里只有"忘记口令请联系管理员"，
+         而**管理员自己也不知道初始口令是什么** —— 双击打开、看到登录页、
+         输不进去，第一反应是"程序坏了"。首次部署必须把默认账号写出来。
+         口令改过之后这行会自动消失（服务端按 must_change_password 决定是否下发）。 -->
+    <div class="loginhint" id="loginFirstHint" hidden></div>
+    <div class="loginhint">忘记口令请联系系统管理员重置。</div>
+  </form>
+</div>
 
 <script>
 var STAGE_CFG = __V2_STAGES__;
@@ -1298,6 +1442,8 @@ var ITEMS = [], CUR = null, CUR_DETAIL = null;
 var AUTH_ENABLED = __V2_AUTH__;
 var TOKEN = (function(){ try { return localStorage.getItem('tp_token') || ''; }
                         catch(e){ return ''; } })();
+/*: 当前登录者（`/api/me` 的结果）。本机模式下保持 null，界面不显示"当前用户"。 */
+var ME = null;
 function hdr(extra){
   var h = {'Content-Type':'application/json'};
   if(extra) for(var k in extra) if(Object.prototype.hasOwnProperty.call(extra, k)) h[k] = extra[k];
@@ -1350,6 +1496,13 @@ async function api(path, opt){
            __err: '服务端返回了非 JSON 响应（HTTP ' + r.status + '）'};
     }
     if(!r.ok && !j.__err) j.__err = j.detail || ('HTTP ' + r.status);
+    /* 401 = 没登录 / 会话过期 / 被管理员踢下线。统一回到登录页。
+       **不能只靠登录时的判断**：会话 12 小时过期，HR 开着页面过夜就会遇到。 */
+    if(r.status === 401 && AUTH_ENABLED){
+      setToken('');
+      ME = null;
+      if(!LOGIN_SHOWN) showLogin('登录已失效，请重新登录');
+    }
     return j;
   }catch(e){ return {__err: String(e)}; }
 }
@@ -1552,6 +1705,14 @@ function pipePage(stage, delta){
 function toggleMore(){
   document.getElementById('morePanel').classList.toggle('on');
 }
+/* 「批量维护」动作菜单。与「更多筛选」同一套开合规矩（点外面/按 Esc 收起），
+   但两者互斥：两个浮层同时开着会叠在一起，看起来像坏了。 */
+function toggleBatchMenu(){
+  var p = document.getElementById('batchPanel');
+  var m = document.getElementById('morePanel');
+  if(m) m.classList.remove('on');
+  p.classList.toggle('on');
+}
 /* 「更多筛选」是浮层：点**空白处**就该收起（业务方 2026-10-21 反馈）。
    只点按钮才能关的话，用户想关的时候得先瞄准那个按钮——面板还挡住半个页面。
    两条常见做法一起上：① 点浮层外任意处关闭；② Esc 关闭。
@@ -1563,10 +1724,20 @@ document.addEventListener('click', function(ev){
   if(panel.contains(ev.target) || (more && more.contains(ev.target))) return;
   panel.classList.remove('on');
 }, true);
+/* 「批量维护」同一套规矩：点面板外或按 Esc 收起，点面板内不关。 */
+document.addEventListener('click', function(ev){
+  var panel = document.getElementById('batchPanel');
+  if(!panel || !panel.classList.contains('on')) return;
+  var btn = document.getElementById('btnBatch');
+  if(panel.contains(ev.target) || (btn && btn.contains(ev.target))) return;
+  panel.classList.remove('on');
+}, true);
 document.addEventListener('keydown', function(ev){
   if(ev.key !== 'Escape') return;
   var panel = document.getElementById('morePanel');
   if(panel) panel.classList.remove('on');
+  var batch = document.getElementById('batchPanel');
+  if(batch) batch.classList.remove('on');
 });
 function clearFilters(){
   ['kw','fEdu','fStage','fTier','fGender','fUniv','fBachelor','fCet','fDate','fOutcome',
@@ -1662,8 +1833,18 @@ function jobChip(x){
 }
 function rowHtml(x){
   var t = x.tier_effective || '';
+  /* 头像**懒加载**（v3.0.1，性能）：一页 25 行，如果每行都在 HTML 里直接写
+     `<img src=...>`，浏览器会立刻并发 25 个 `/api/candidates/<id>/avatar`。
+     实测 1440px 窗口、25 行里 16 人有照片 → 16 个请求排成一队共 **1471ms**，
+     而服务是单进程线程池，这些请求把 `/api/candidates` 和点击详情全堵在后面
+     —— 这就是"切换候选人很慢"的直接原因。
+     改成 `data-src` + IntersectionObserver：只有**真正滚进视口**的行才发请求，
+     而且按行依次发，不抢带宽。`loading="lazy"` 不够：它对 fetch 优先级无效，
+     在同一个 viewport 里的 25 张图仍然会一起发。 */
   var av = x.avatar_path === '-' ? ''
-    : '<img alt="" src="/api/candidates/' + x.id + '/avatar" onerror="this.remove()">';
+    : '<img alt="" data-avatar="' + x.id + '"' +
+      ' src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"' +
+      ' onerror="this.remove()">';
   var sub = [x.edu_level, x.school].filter(Boolean).join(' · ') || '学历未识别';
   var qual = '';
   if(x.parse_failed){
@@ -1768,6 +1949,29 @@ function msFacet(wrapId, fac){
     sp.textContent = p[1] + (c === undefined ? '' : '（' + c + '）');
   });
 }
+/* 列表事件**委托在 #list 上，只绑一次**（v3.0.3 性能）。
+   原来 renderList 每次都给 25 行各绑 2 个监听器（行点击 + checkbox），
+   等于每次渲染创建 50 个闭包。而 renderList 会在 load / pick / showOverview
+   三处被调用 —— 只是"点一个人换个高亮"也要重建 50 个监听器，纯属浪费。
+   委托的另一个好处：行是 innerHTML 重建的，委托不受重建影响。 */
+function bindListOnce(){
+  var el = document.getElementById('list');
+  if(!el || el.__bound){ return; }
+  el.__bound = true;
+  el.addEventListener('click', function(ev){
+    var chk = ev.target.closest ? ev.target.closest('.chk') : null;
+    if(chk){ ev.stopPropagation(); return; }        /* 勾选框自己处理，不算"选人" */
+    var row = ev.target.closest ? ev.target.closest('.row') : null;
+    if(row && row.dataset.id){ pick(Number(row.dataset.id)); }
+  });
+  el.addEventListener('change', function(ev){
+    var c = ev.target;
+    if(!c || c.type !== 'checkbox' || !c.dataset.id){ return; }
+    SEL[c.dataset.id] = c.checked;
+    syncSel();
+  });
+}
+
 function renderList(){
   var el = document.getElementById('list');
   var total = (PAGE && PAGE.total != null) ? PAGE.total : ITEMS.length;
@@ -1775,17 +1979,132 @@ function renderList(){
     '共 <b class="num">' + total + '</b> 人';
   if(!ITEMS.length){ el.innerHTML = '<div class="empty">没有符合条件的候选人</div>'; return; }
   el.innerHTML = ITEMS.map(rowHtml).join('');
-  Array.prototype.forEach.call(el.querySelectorAll('.row'), function(r){
-    r.addEventListener('click', function(){ pick(Number(r.dataset.id)); });
-  });
-  Array.prototype.forEach.call(el.querySelectorAll('.chk input'), function(c){
-    c.addEventListener('click', function(ev){ ev.stopPropagation(); });
-    c.addEventListener('change', function(){
-      SEL[c.dataset.id] = c.checked; syncSel();
-    });
-  });
+  bindListOnce();
+  hydrateAvatars(el);
   var all = document.getElementById('chkAll');
   if(all){ all.checked = ITEMS.length > 0 && ITEMS.every(function(x){ return SEL[x.id]; }); }
+}
+/* 只切换列表里的高亮行，不重建列表（v3.0.3）。
+   pick() 原来第一件事就是 renderList()，而那会重写 25 行 HTML、
+   重置头像队列（已经加载好的头像全丢）、并且发生在一个网络请求之前 ——
+   用户在"点击 → 详情出现"这段时间里看到的就是列表整块闪一下。 */
+function highlightRow(id){
+  var el = document.getElementById('list');
+  if(!el) return;
+  var old = el.querySelector('.row.on');
+  if(old) old.classList.remove('on');
+  if(id == null) return;
+  var now = el.querySelector('.row[data-id="' + id + '"]');
+  if(now){ now.classList.add('on'); }
+  else { renderList(); }      /* 不在当前页（比如从搜索/对比跳进来）才退回整块重渲染 */
+}
+
+/* 头像懒加载：行滚进视口才去取图（见 rowHtml 里的说明）。
+   同一批里**一次只发一个**请求，前一个结束再发下一个——单进程服务扛不住
+   25 个并发连接同时排队。滚出去的会取消，不浪费请求。 */
+var AV_QUEUE = [], AV_BUSY = false, AV_PENDING = [];
+/* 为什么不用 IntersectionObserver：它在**不活跃的标签页 / 无头渲染**里
+   根本不回调（实测本机 Chromium 里 observe 之后一次都不触发），
+   表现就是"头像永远不出现"。用 getBoundingClientRect 主动判定：
+   视口判定是同步、可靠的，滚动时再扫一遍即可。 */
+/* 判定"这一行现在看得见吗"必须用**列表容器自己的可视区**，不能用窗口。
+   列表是 `overflow-y:auto` 的独立滚动容器：25 行加起来 1700 多像素，
+   而窗口只有 900。用 window.innerHeight 判会把第 8 行以后全判成"在视口外"
+   （实测 top=1104 > 900），于是滚到哪儿都不加载——头像永远不出现。
+   容器 rect 与元素 rect 同一坐标系，直接比就是对的。 */
+function avInView(im){
+  var b = im.getBoundingClientRect();
+  if(b.width === 0 && b.height === 0) return false;
+  /* 判定容器要和这张图**属于同一个滚动体系**：列表里的图用 #list，
+     详情里的图用 #detail（它自己也滚动）。用错容器会出现两种情况之一：
+     列表后面的行永远不加载，或者详情页的头像永远不出现。 */
+  var box = im.closest ? (im.closest('#list') || im.closest('#detail')) : null;
+  var vb = box ? box.getBoundingClientRect() : null;
+  if(!vb || vb.height === 0){
+    vb = {top: 0, bottom: window.innerHeight || document.documentElement.clientHeight};
+  }
+  var pad = 200;                    /* 提前两行加载，滚动时不会看到"空白再补上" */
+  return b.bottom > vb.top - pad && b.top < vb.bottom + pad;
+}
+function hydrateAvatars(root){
+  var imgs = (root || document).querySelectorAll('img[data-avatar]');
+  if(!imgs.length) return;
+  /* **合并**而不是覆盖（v3.0.3）：列表和详情各自调一次，覆盖会让先注册的
+     那批（比如列表里还没滚到的行）永远丢失，表现为"列表滚下去头像不出现"。 */
+  var keep = AV_PENDING.filter(function(im){ return im.isConnected && !im.__avDone; });
+  AV_PENDING = keep.concat(Array.prototype.slice.call(imgs));
+  /* 必须**补两次延迟扫描**：renderList 是紧接着 innerHTML 赋值调进来的，
+     那一刻布局还没落定，getBoundingClientRect 全是 0 → 全部判成"不在视口"
+     → 一张头像都不加载（实测就是这个症状：pending 有 16 个、queue 永远是 0）。
+     同步扫一次兜住"布局已完成"的情况，再各补一次等布局/字体/滚动位置稳定。 */
+  [0, 60, 320].forEach(function(d){
+    if(d) setTimeout(avScan, d); else avScan();
+  });
+}
+function avScan(){
+  if(!AV_PENDING.length) return;
+  var rest = [];
+  AV_PENDING.forEach(function(im){
+    if(!im.isConnected || im.__avDone){ return; }   /* 行被重渲染掉了 / 已处理过 */
+    if(avInView(im)){ AV_QUEUE.push(im); } else { rest.push(im); }
+  });
+  AV_PENDING = rest;
+  avPump();
+}
+/* 滚动时再扫（节流 120ms）。
+   ⚠️ 滚动事件**不冒泡**，`document` 上的 capture 监听在部分浏览器里
+   也收不到滚动容器的滚动（实测本机 Chromium 滚到底部一次都不触发）。
+   所以必须**直接绑到滚动容器 #list 上**，window 那份只是兜住整页滚动。 */
+(function(){
+  var t = null;
+  function onScroll(){
+    if(t) return;
+    t = setTimeout(function(){ t = null; avScan(); }, 120);
+  }
+  window.addEventListener('scroll', onScroll, {passive: true});
+  function bindList(){
+    /* 列表和详情**各自**是滚动容器，两个都要绑（详情里的头像也要按滚动加载） */
+    ['list', 'detail'].forEach(function(id){
+      var el = document.getElementById(id);
+      if(el && !el.__avBound){ el.__avBound = true; el.addEventListener('scroll', onScroll, {passive: true}); }
+    });
+  }
+  bindList();
+  document.addEventListener('DOMContentLoaded', bindList);
+  window.__avBindList = bindList;      /* renderList 重建列表后调用一次 */
+})();
+function avPump(){
+  if(AV_BUSY) return;
+  var im = AV_QUEUE.shift();
+  if(!im) return;
+  AV_BUSY = true;
+  var done = function(){
+    AV_BUSY = false;
+    AV_QUEUE.length ? setTimeout(avPump, 0) : null;
+  };
+  avLoad(im, done);
+}
+function avLoad(im, done){
+  var cid = im.dataset.avatar;
+  if(!cid){ if(done) done(); return; }
+  var url = withToken('/api/candidates/' + cid + '/avatar');
+  /* ⚠️ 不能用 HEAD 预检：FastAPI 的 `@app.get` 路由**不响应 HEAD**
+     （返回 405 Method Not Allowed，实测 25 张图全被当成失败移除）。
+     直接用 Image 加载：浏览器自己会走缓存，onload/onerror 就是结果。
+     抽图还没好的返回 404（后台在抽），此时不重试 —— 等下次列表刷新自然出现；
+     重试会把队列堵住，正是我们要消除的东西。 */
+  im.__avDone = true;          /* 标记已处理：列表和详情都调 avScan，不能重复请求 */
+  var probe = new Image();
+  probe.onload = function(){
+    im.src = url;
+    im.classList.add('in');
+    if(done) done();
+  };
+  probe.onerror = function(){
+    im.remove();
+    if(done) done();
+  };
+  probe.src = url;
 }
 
 /* ---------- 右侧详情 ---------- */
@@ -1813,8 +2132,10 @@ async function showOverview(){
   var box = document.getElementById('detail');
   box.classList.remove('comparing');
   box.innerHTML = '<div class="hint">读取概览…</div>';
-  var st = await api('/api/stats');
-  var br = await api('/api/brief/today');
+  /* 两个请求互不依赖，必须并行（v3.0.3）。原来是串行 await，
+     等于白白多等一个完整往返 —— 而这是**打开页面第一眼**看到的东西。 */
+  var _ov = await Promise.all([api('/api/stats'), api('/api/brief/today')]);
+  var st = _ov[0], br = _ov[1];
   if(st.__err){ box.innerHTML = '<div class="hint">' + esc(st.__err) + '</div>'; return; }
   var tiers = st.tiers || {}, stages = st.stages || {};
   function num(label, v, hint){
@@ -1822,7 +2143,7 @@ async function showOverview(){
       '<div class="stat-l">' + label + '</div>' +
       (hint ? '<div class="stat-h">' + hint + '</div>' : '') + '</div>';
   }
-  anaLoad();
+  anaLoad(st);               /* 复用上面刚拿到的 stats，不再重复请求 */
   var todo = (br.priorities || []).map(function(x, i){
     return '<div class="todo"><div class="todo-i num">' + (i + 1) + '</div>' +
       '<div style="min-width:0"><div class="todo-t">' + esc(x.title || '') + '</div>' +
@@ -1886,8 +2207,12 @@ function compareCard(d){
   var row0 = ITEMS.filter(function(x){ return x.id === d.id; })[0] || {};
   var stage = d.stage || app0.stage || '';
   var tier = d.tier_effective || app0.tier_final || app0.tier_suggested || '';
+  /* 详情页头像同样走懒加载（v3.0.3）：与列表用同一套 data-avatar 机制，
+     避免"列表已改成懒加载、详情还是一次性请求"两套逻辑漂移。 */
   var av = d.avatar_path === '-' ? ''
-    : '<img alt="" src="/api/candidates/' + d.id + '/avatar" onerror="this.remove()">';
+    : '<img alt="" data-avatar="' + d.id + '"' +
+      ' src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"' +
+      ' onerror="this.remove()">';
   var edu = (d.edu_history || []).filter(function(h){ return h && h.school; })
     .map(function(h){
       return '<div class="edu-line"><span class="edu-degree">' + esc(h.degree || '学历') +
@@ -1995,7 +2320,7 @@ function openPinnedProfile(cid){
   CUR = Number(cid);
   CUR_DETAIL = d;
   MODE = 'compare';
-  renderList();
+  highlightRow(CUR);         /* 同 pick：只换高亮，不重建列表 */
   MULTI_IVUNIT = String(d.interview_unit || '').split(/[、，,;；]+/)
     .map(function(x){ return x.trim(); }).filter(Boolean);
   var box = document.getElementById('detail');
@@ -2164,6 +2489,7 @@ function openDetail(d){
      之前绑在旧元素上的监听器（阶段下拉、档位按钮）**连同元素一起被丢掉**，
      表现就是"下拉能选但选了没反应"。 */
   bindDetail(d);
+  hydrateAvatars(box);       /* 详情里的头像同样按可见性加载（见 fullDetail 的说明） */
   /* 淡灰可点击字段：点一下才变输入框（渲染后绑定） */
   edInit(box);
   /* 操作记录必须**每次渲染后都填一次**：面试字典是异步加载的，到货会再走一遍
@@ -2178,8 +2504,12 @@ function openDetail(d){
 }
 function fullDetail(d){
   var stage = d.stage || '';
+  /* 详情页头像同样走懒加载（v3.0.3）：与列表用同一套 data-avatar 机制，
+     避免"列表已改成懒加载、详情还是一次性请求"两套逻辑漂移。 */
   var av = d.avatar_path === '-' ? ''
-    : '<img alt="" src="/api/candidates/' + d.id + '/avatar" onerror="this.remove()">';
+    : '<img alt="" data-avatar="' + d.id + '"' +
+      ' src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"' +
+      ' onerror="this.remove()">';
   var row0 = ITEMS.filter(function(i){ return i.id === d.id; })[0] || {};
   var hits = row0.hits || [], miss = row0.miss || [];
   var apps = d.applications || [];
@@ -2954,58 +3284,6 @@ var __progTimer = null;
 var __ingestTask = null;   /* {taskId, label, source, phase:'fetch'|'insight'} */
 var __ingesting = false;
 
-/* ===== 弹窗状态与开合入口（v2.3.0）=================================
-   v2 原来只有 role="dialog" + aria-modal，缺 Esc、焦点陷阱、焦点归还；
-   遮罩点击是**无条件关闭**——进度条还在跑，点一下外面窗就没了，
-   但任务没停，界面也没有任何"还在跑"的痕迹，等于把状态藏起来了。
-   这里把四件事收到一个入口，新加弹窗不可能漏。 */
-var __dlgReturn = null;   // 打开前的焦点元素，关闭时归还
-var __dlgLocked = false;  // 门控型/危险态：Esc 与点遮罩都不关
-var __dlgToken = 0;       // 关闭动画期间又被打开时，作废旧的关闭回调
-
-function _dlgFocusables(){
-  var box = document.getElementById('dlg');
-  if(!box) return [];
-  var sel = 'a[href],button:not([disabled]),input:not([disabled]),' +
-            'select:not([disabled]),textarea:not([disabled]),' +
-            '[tabindex]:not([tabindex="-1"])';
-  return Array.prototype.filter.call(box.querySelectorAll(sel), function(el){
-    return el.offsetParent !== null || el === document.activeElement;
-  });
-}
-
-/* 所有弹窗打开都该走这里。opts: {size:'sm'|'md'|'lg'|'xl', lock:bool}
-   ⚠️ 不传 size 时：若容器上已有历史类名 .wide（editTpl 提前加的），
-   按 xl 处理；否则用 md。这样老的 `.wide` 调用点不用改。 */
-function openDlg(opts){
-  var o = opts || {};
-  var mask = document.getElementById('mask');
-  var dlg = document.getElementById('dlg');
-  if(!mask || !dlg) return;
-  var wasOpen = mask.classList.contains('on');
-  /* 只在"从关闭态打开"时记录触发元素：弹窗链原地切换（进度→结果）
-     不该把返回值覆盖成上一个弹窗里的按钮（那个按钮可能已经被 innerHTML 冲掉）。 */
-  if(!wasOpen) __dlgReturn = document.activeElement;
-  __dlgToken++;
-  mask.classList.remove('closing');
-  var size = o.size || (dlg.classList.contains('wide') ? 'xl' : 'md');
-  dlg.className = 'dlg ' + size;
-  __dlgLocked = !!o.lock;
-  mask.classList.add('on');
-  /* 焦点移入：优先第一个可聚焦元素；纯文本结果没有可聚焦元素时落到容器
-     （容器 tabindex="-1"，可聚焦但不进 Tab 序列）。 */
-  requestAnimationFrame(function(){
-    var f = _dlgFocusables();
-    if(f.length){ try{ f[0].focus(); }catch(e){} }
-    else { try{ dlg.focus(); }catch(e){} }
-  });
-}
-
-/* 点遮罩关闭：门控型（进度条）与危险态不响应 */
-function dlgScrimClose(){
-  if(__dlgLocked) return;
-  closeProgDlg();
-}
 function ensureDlgClose(){
   var t = document.getElementById('dlgTitle');
   if(!t) return;
@@ -3017,23 +3295,15 @@ function ensureDlgClose(){
     t.appendChild(x);
   }
   x.title = '关闭';
-  /* 关闭按钮必须是**可聚焦的按钮**且有可访问名（原来是个 <b>，
-     键盘 Tab 到不了、读屏也读不出"这是关闭"）。 */
-  x.setAttribute('role', 'button');
-  x.setAttribute('tabindex', '0');
-  x.setAttribute('aria-label', '关闭');
-  x.onkeydown = function(ev){
-    if(ev.key === 'Enter' || ev.key === ' '){ ev.preventDefault(); closeProgDlg(); }
-  };
   x.onclick = function(){ closeProgDlg(); };
   var m = document.getElementById('mask');
   if(m){
     m.onclick = function(ev){
-      if(ev.target === ev.currentTarget) dlgScrimClose();
+      if(ev.target === ev.currentTarget) closeProgDlg();
     };
   }
 }
-function openProgDlg(title, html, opts){
+function openProgDlg(title, html){
   var t = document.getElementById('dlgTitle');
   t.textContent = title;
   var b = document.getElementById('edDlgBody');
@@ -3042,129 +3312,62 @@ function openProgDlg(title, html, opts){
   document.getElementById('dlgBody').style.display = 'none';
   document.getElementById('dlgNo').style.display = 'none';
   document.getElementById('dlgYes').style.display = 'none';
-  /* 尺寸与门控锁统一走 openDlg（原来这里直接 mask.classList.add('on')，
-     于是"尺寸档/锁/焦点"三件事根本没地方设） */
-  openDlg(opts);
+  var mask = document.getElementById('mask');
+  mask.classList.add('on');
   ensureDlgClose();
 }
 function closeProgDlg(){
   if(__progTimer){ clearInterval(__progTimer); __progTimer = null; }
+  /* 宽体样式是"这一屏专属"的，关窗必须摘掉，否则下一个普通弹窗也会被撑成 940px */
+  var wide = document.querySelector('#mask .dlg.wide');
+  if(wide) wide.classList.remove('wide');
+  var b = document.getElementById('edDlgBody');
+  if(b){ b.style.display = 'none'; b.innerHTML = ''; }
+  document.getElementById('dlgBody').style.display = '';
+  document.getElementById('dlgNo').style.display = '';
+  document.getElementById('dlgYes').style.display = '';
+  var bar = document.querySelector('#mask .dbar');
+  if(bar) bar.style.display = '';
   var mask = document.getElementById('mask');
-  if(!mask || !mask.classList.contains('on')) return;
-  var my = ++__dlgToken;
-  var finish = function(){
-    if(my !== __dlgToken) return;      // 这期间被 openDlg 抢先了，别关
-    /* 宽体样式是"这一屏专属"的，关窗必须摘掉，否则下一个普通弹窗也会被撑成 940px。
-       openDlg 会把 className 重置成 'dlg <size>'，这里再兜一次遗留。 */
-    var wide = document.querySelector('#mask .dlg.wide');
-    if(wide) wide.classList.remove('wide');
-    var b = document.getElementById('edDlgBody');
-    if(b){ b.style.display = 'none'; b.innerHTML = ''; }
-    document.getElementById('dlgBody').style.display = '';
-    document.getElementById('dlgNo').style.display = '';
-    document.getElementById('dlgYes').style.display = '';
-    var bar = document.querySelector('#mask .dbar');
-    if(bar) bar.style.display = '';
-    mask.classList.remove('on', 'closing');
-    mask.onclick = null;
-    __dlgLocked = false;
-    var title = document.getElementById('dlgTitle');
-    var x = title ? title.querySelector('.dlg-x') : null;
-    if(x) x.remove();
-    /* 焦点归还触发元素：键盘用户关闭后不该被丢到 <body> 再从头 Tab 一遍 */
-    var back = __dlgReturn; __dlgReturn = null;
-    if(back && typeof back.focus === 'function'){
-      try{ back.focus(); }catch(e){}
-    }
-  };
-  var reduce = !!(window.matchMedia &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-  if(reduce){ finish(); return; }
-  mask.classList.add('closing');
-  setTimeout(finish, 120);             // 与 CSS 出场动画时长一致
+  mask.classList.remove('on');
+  mask.onclick = null;
+  var title = document.getElementById('dlgTitle');
+  var x = title ? title.querySelector('.dlg-x') : null;
+  if(x) x.remove();
 }
-
-/* Esc 关闭 + Tab 焦点陷阱（v2.3.0）。
-   必须挂在 document 上：弹窗内容每次 innerHTML 重写，绑在容器上会丢处理器。 */
-document.addEventListener('keydown', function(ev){
-  var mask = document.getElementById('mask');
-  if(!mask || !mask.classList.contains('on')) return;
-  /* askText 自己的输入框已经处理了 Esc（取消），别让它被关两次 */
-  if(ev.key === 'Escape'){
-    if(__dlgLocked) return;
-    if(ev.defaultPrevented) return;
-    ev.preventDefault();
-    if(window.__dlgResolve){ closeDlg(false); return; }
-    closeProgDlg();
-    return;
-  }
-  if(ev.key !== 'Tab') return;
-  var f = _dlgFocusables();
-  if(!f.length){ ev.preventDefault(); return; }
-  var first = f[0], last = f[f.length - 1];
-  var active = document.activeElement;
-  if(ev.shiftKey && (active === first || !mask.contains(active))){
-    ev.preventDefault(); last.focus();
-  } else if(!ev.shiftKey && (active === last || !mask.contains(active))){
-    ev.preventDefault(); first.focus();
-  }
-});
 function resultModal(opts){
   var o = opts || {};
   var kind = o.kind || 'info';
   var color = kind === 'ok' ? 'var(--ok)'
             : (kind === 'danger' ? 'var(--bad)'
             : (kind === 'warn' ? 'var(--warn)' : 'var(--accent)'));
-  /* v2.3.0：正文只放内容，按钮进**固定底栏**（#dlgYes）。
-     原来按钮拼在 body 里，正文一长就跟着滚走 —— 用户得先滚到底才能点"知道了"。
-     尺寸默认 md(520)：一句话的结果不该飘在 940px 的大白块里。
-     危险态（失败/不可逆）加锁：结果必须被看到，点遮罩不能抹掉。 */
   openProgDlg(o.title || '完成',
     '<div style="line-height:1.8;white-space:pre-wrap">' +
       '<div style="font-size:15px;color:' + color + ';font-weight:600;margin-bottom:8px">' +
         esc(o.headline || '') + '</div>' +
       '<div>' + (o.body || '') + '</div>' +
-    '</div>',
-    {size: o.size || 'md', lock: kind === 'danger'});
-  var yes = document.getElementById('dlgYes');
-  if(yes){
-    yes.style.display = '';
-    yes.textContent = o.okText || '知道了';
-    yes.className = 'btn primary';
-    yes.onclick = function(){ closeProgDlg(); };
-  }
+    '</div>' +
+    '<div class="bar" style="margin-top:18px;justify-content:flex-end">' +
+      '<button class="btn primary" onclick="closeProgDlg()">' + esc(o.okText || '知道了') + '</button></div>');
 }
 /* 居中进度弹窗：真实进度条 + 可停止 */
 function progressModal(taskId, opts){
   var o = opts || {};
   if(!taskId){ resultModal({title: o.title || '处理中', body: o.body || '', kind: 'info'}); return; }
   if(__progTimer){ clearInterval(__progTimer); __progTimer = null; }
-  /* v2.3.0：**门控型弹窗**，lock=true —— 任务在后台真的还在跑，
-     界面上"关掉了"但任务没停，是最容易让人误判"已取消"的状态。
-     要离开只能点"停止"或等它自己完成。 */
   openProgDlg(o.title || '处理中…',
     '<div>' +
       '<div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">' +
         esc(o.desc || '正在处理，请稍候') + '</div>' +
       '<div class="progtrack"><div class="progfill" id="progFill" style="width:0%"></div></div>' +
       '<div class="progmeta" id="progMeta">准备中…</div>' +
-    '</div>',
-    {size: o.size || 'md', lock: true});
-  /* 停止按钮也进底栏（左侧，次要动作）——正文再长它也不会被挤到滚动区外面 */
-  if(o.stoppable){
-    var no = document.getElementById('dlgNo');
-    if(no){
-      no.style.display = '';
-      /* ⚠️ 不要给这个元素另起 id（原来试过设成 progStopBtn，然后为了不留残留
-         又 removeAttribute('id') —— 结果第二次打开弹窗时 getElementById('dlgNo')
-         就已经返回 null，整条开窗链路直接抛 TypeError）。
-         共用元素只按它本来的 id 找，下面的完成分支与 progressStop 已同步改成 dlgNo。 */
-      no.textContent = '停止（读完当前文件后停下）';
-      no.className = 'btn';
-      no.title = '读完正在处理的这一份就停下；已处理的全部保留，下次从停下的地方继续';
-      no.onclick = function(){ progressStop(taskId); };
-    }
-  }
+      (o.stoppable
+        ? '<div class="bar" style="margin-top:14px;justify-content:flex-end">' +
+          '<button class="btn" id="progStopBtn" onclick="progressStop(\'' + esc(taskId) + '\')" ' +
+          'title="读完正在处理的这一份就停下；已处理的全部保留，下次从停下的地方继续">' +
+          '停止（读完当前文件后停下）</button></div>'
+        : '') +
+    '</div>');
   var fill = document.getElementById('progFill');
   var meta = document.getElementById('progMeta');
   var stopped = false;
@@ -3201,7 +3404,7 @@ function progressModal(taskId, opts){
     if(r.status === 'done' || r.status === 'error'){
       stopped = true;
       clearInterval(__progTimer); __progTimer = null;
-      var sb = document.getElementById('dlgNo');
+      var sb = document.getElementById('progStopBtn');
       if(sb) sb.disabled = true;
       if(o.chain){ if(o.onDone) o.onDone(r); return; }
       var okAll = !r.failed;
@@ -3228,7 +3431,7 @@ function progressModal(taskId, opts){
 }
 async function progressStop(taskId){
   var r = await api('/api/tasks/' + taskId + '/stop', {method:'POST'});
-  var sb = document.getElementById('dlgNo');
+  var sb = document.getElementById('progStopBtn');
   if(sb){ sb.disabled = true; sb.textContent = '已请求停止（读完当前文件后停下）'; }
   toast(r.__err ? ('停止失败：' + r.__err) : '已请求停止');
 }
@@ -3390,9 +3593,7 @@ async function doUpload(files){
     return /[.](jpe?g|png|bmp|webp|pdf|docx?|txt)$/i.test(f.name);
   });
   if(!arr.length){
-    /* v2.3.0 弹窗减法：字段级校验不需要阻断 —— 用户只是选错了文件，
-       弹一个必须点"知道了"才能继续的窗纯属打断。就地 toast 即可。 */
-    toast('没有可上传的文件（支持图片 / PDF / Word / txt）', 'warn');
+    resultModal({title:'上传', kind:'warn', body:'没有可上传的文件（支持图片 / PDF / Word / txt）'});
     return;
   }
   /* 给出可数的进度：多份文件的裸字节上传常常十几秒，只弹一个 toast 之后界面就没反馈了*/
@@ -3439,23 +3640,17 @@ async function doUpload(files){
     }catch(e){ fail++; failedNames.push(f.name + '：网络错误'); }
   }
   if(fill) fill.style.width = '100%';
-  /* v2.3.0 弹窗减法：**只有失败才弹窗**（要逐条看哪份失败、为什么）。
-     全部成功是纯结果反馈 → toast，用户接着做下一件事，不该被拦一次。 */
-  if(!fail){
-    toast('上传完成：**' + ok + ' 份**已入库。', 'ok');
-  } else {
-    resultModal({
-      title: '上传完成',
-      kind: ok ? 'warn' : 'danger',
-      headline: ok ? '部分文件未上传成功' : '全部文件上传失败',
-      size: 'lg',                     // 失败明细可能十几行
-      body: '共 ' + arr.length + ' 份：成功 ' + ok + ' 份，失败 ' + fail + ' 份'
-        + (failedNames.length
-            ? '<div style="margin-top:10px;color:var(--bad);font-size:13px">失败明细：<br>'
-              + failedNames.map(function(n){ return esc(n); }).join('<br>') + '</div>'
-            : '')
-    });
-  }
+  resultModal({
+    title: '上传完成',
+    kind: fail ? (ok ? 'warn' : 'danger') : 'ok',
+    headline: fail ? (ok ? '部分文件未上传成功' : '全部文件上传失败') : '上传成功',
+    body: '共 ' + arr.length + ' 份：成功 ' + ok + ' 份'
+      + (fail ? ('，失败 ' + fail + ' 份') : '，全部已入库')
+      + (failedNames.length
+          ? '<div style="margin-top:10px;color:var(--bad);font-size:13px">失败明细：<br>'
+            + failedNames.map(function(n){ return esc(n); }).join('<br>') + '</div>'
+          : '')
+  });
   var inp = document.getElementById('upFile');
   if(inp) inp.value = '';
   await load();
@@ -3636,6 +3831,385 @@ function pulse(el){
   el.classList.add('pulse');
 }
 
+/* ---------- 登录（v3.0.3） ---------- */
+/* 设计取舍：**不做"登录页"与"应用页"两个 URL**。
+   单文件内联页面多一个路由就要多处理一次缓存/刷新/回退，而登录只需要
+   一件事：在拿到 token 之前把人挡在外面。
+   这里用一层遮罩 + 401 自动召回：任何接口返回 401 都把遮罩弹回来，
+   同时清掉失效 token —— 会话过期、被管理员踢下线都能正确回到登录页。 */
+var LOGIN_SHOWN = false;
+/* 退场动画（v3.2）跑完之前不再弹回来：登录成功后 bootAfterLogin() 会连发几个
+   请求，其中任何一个 401 都会把登录页叫回来 —— 那会盖在"正在进去"的动画上。 */
+var LOGIN_LEAVING = false;
+function showLogin(msg){
+  var w = document.getElementById('loginWrap');
+  if(!w || LOGIN_LEAVING) return;
+  LOGIN_SHOWN = true;
+  /* 从 hidden 打开时重播入场。**只在这一刻播**：401 把登录页叫回来时
+     w.hidden 本来就是 false，这里不会加 enter，用户不必再等一次淡入。 */
+  if(w.hidden) w.classList.add('enter');
+  w.hidden = false;
+  var e = document.getElementById('loginErr');
+  if(e){
+    e.textContent = msg || '';
+    /* 先摘再挂，强制重排，动画才会重播（连续两次输错口令时第二次也得抖） */
+    e.classList.remove('on');
+    if(msg){ void e.offsetWidth; e.classList.add('on'); }
+  }
+  var u = document.getElementById('loginUser');
+  if(u && !u.value){ try{ u.focus(); }catch(_e){} }
+  loadLoginHint();
+  startLoginNet();
+}
+/* 失败反馈（v3.2）：框横向轻抖一下。"口令不对"这件事不用读字就该知道；
+   连续错两次、三次也照样抖 —— 所以每次先摘类再强制重排。 */
+function loginShake(){
+  var box = document.querySelector('#loginWrap .loginbox');
+  if(!box) return;
+  box.classList.remove('shake');
+  void box.offsetWidth;
+  box.classList.add('shake');
+}
+/* 首次部署时把默认账号写在登录页上（v3.1.3）。
+   原来登录页只有"忘记口令请联系管理员" —— 而管理员自己也不知道初始口令，
+   于是双击打开、看到登录框、输不进去，判定为"程序坏了"。
+   这条提示只在**口令仍是默认值**时出现，改过之后自动消失。 */
+var LOGIN_HINT_LOADED = false;
+async function loadLoginHint(){
+  if(LOGIN_HINT_LOADED) return;
+  LOGIN_HINT_LOADED = true;
+  try{
+    var r = await fetch('/api/login-hint');
+    if(!r.ok) return;
+    var j = await r.json();
+    if(!j || !j.first_run || !j.hint) return;
+    var box = document.getElementById('loginFirstHint');
+    if(box){ box.hidden = false; box.textContent = j.hint; }
+    var u = document.getElementById('loginUser');
+    if(u && !u.value && j.username){ u.value = j.username; }
+    var p = document.getElementById('loginPass');
+    if(p && !p.value){ try{ p.focus(); }catch(_e){} }
+  }catch(e){ /* 拿不到提示不影响登录 */ }
+}
+function hideLogin(){
+  var w = document.getElementById('loginWrap');
+  if(w) w.hidden = true;
+  if(w) w.classList.remove('enter','leaving');
+  var box = document.querySelector('#loginWrap .loginbox');
+  if(box) box.classList.remove('shake','leaving');
+  setLoginBtn('idle');                 /* 下次被 401 弹回来时按钮是干净的 */
+  LOGIN_SHOWN = false;
+  LOGIN_LEAVING = false;
+  stopLoginNet();
+}
+/* 登录成功后的退场（v3.2）：**三段同时起步**，不是串行等待 ——
+     ① 登录框放大 4% 并淡出（像镜头从它身上推开）
+     ② 整层遮罩淡出（露出下面的应用区）
+     ③ 应用区从 98.5% 展开到 100%（body.locked 由 bootAfterLogin 摘掉）
+   合计 280ms。之后才真正 hidden —— `[hidden]{display:none}` 会立刻掐断过渡，
+   所以**不能**在动画开始时就设 hidden，这正是原来"页面闪一下"的原因。 */
+function loginExit(done){
+  var w = document.getElementById('loginWrap');
+  var box = document.querySelector('#loginWrap .loginbox');
+  if(!w || !box || !LOGIN_SHOWN){ if(done) done(); return; }
+  LOGIN_LEAVING = true;
+  stopLoginNet();
+  box.classList.add('leaving');
+  w.classList.add('leaving');
+  setTimeout(function(){
+    hideLogin();
+    if(done) done();
+  }, 290);
+}
+function setToken(t){
+  TOKEN = t || '';
+  try{ if(TOKEN) localStorage.setItem('tp_token', TOKEN); else localStorage.removeItem('tp_token'); }
+  catch(e){ /* 隐私模式下 localStorage 可能不可写，忽略 */ }
+}
+/* 按钮的三个状态（v3.2）：idle → busy（转环）→ done（对勾）/ 回 idle。
+   文字只换一次（"登录"↔"登录中…"），图标在旁边换形状；
+   按钮宽高固定，内容变化不会让它跳动。 */
+function setLoginBtn(state){
+  var btn = document.getElementById('loginBtn');
+  var txt = document.getElementById('loginBtnText');
+  if(!btn) return;
+  btn.classList.toggle('busy', state === 'busy');
+  btn.classList.toggle('done', state === 'done');
+  btn.disabled = (state === 'busy');
+  if(txt) txt.textContent = state === 'busy' ? '登录中…'
+                             : state === 'done' ? '登录成功' : '登录';
+}
+/* 口令错误：抖动 + 错误行淡入。**不再用 alert 式的纯文字**——
+   文字保留（读屏要靠它），但加了一层"不用读也知道"的动作反馈。 */
+function loginFail(msg){
+  var err = document.getElementById('loginErr');
+  if(err){
+    err.textContent = msg || '登录失败';
+    err.classList.remove('on');
+    void err.offsetWidth;
+    err.classList.add('on');
+  }
+  loginShake();
+}
+async function doLogin(user, pass){
+  var err = document.getElementById('loginErr');
+  if(err) err.textContent = '';
+  setLoginBtn('busy');
+  try{
+    /* 登录本身**不能**走 api()：那时还没有 token，而 api() 见到 401 会再弹登录页。 */
+    var r = await fetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: user, password: pass})
+    });
+    var raw = await r.text();
+    var j = {};
+    try{ j = raw ? JSON.parse(raw) : {}; }catch(e){ j = {detail: raw}; }
+    if(!r.ok){
+      setLoginBtn('idle');
+      loginFail(j.detail || ('登录失败（HTTP ' + r.status + '）'));
+      return false;
+    }
+    setToken(j.token);
+    /* 对勾先画出来（220ms），让人看见"成了"，再退场。这 220ms 不是浪费：
+       退场本身要 280ms，两段重叠后总时长仍是 ~300ms，观感却完整得多。 */
+    setLoginBtn('done');
+    await new Promise(function(res){ setTimeout(res, 220); });
+    var exited = new Promise(function(res){ loginExit(res); });
+    await bootAfterLogin();
+    await exited;
+    return true;
+  }catch(ex){
+    setLoginBtn('idle');
+    loginFail('网络错误：' + String(ex));
+    return false;
+  }
+}
+/* 登录成功后把界面真正拉起来。**单独一个函数**：因为登录态下这些请求
+   第一次都会带 401，必须在拿到 token 之后才发。 */
+async function bootAfterLogin(){
+  if(AUTH_ENABLED) await loadMe();
+  renderWhoami();
+  /* renderWhoami() → applyPermissions() 在这里摘掉 body.locked，
+     应用区于是从 98.5% 淡入展开 —— 和登录层的淡出是同时的。 */
+  await load();
+  await showOverview();
+}
+async function loadMe(){
+  var j = await api('/api/me');
+  if(j && !j.__err){ ME = j; }
+}
+function renderWhoami(){
+  var box = document.getElementById('whoami');
+  if(box){
+    if(!AUTH_ENABLED || !ME || !ME.username){ box.innerHTML = ''; }
+    else{
+      box.innerHTML = '<b>' + esc(ME.display_name || ME.username) + '</b>' +
+        '<span>' + esc(ME.role_label || '') + '</span>' +
+        '<button type="button" onclick="doLogout()">退出</button>';
+    }
+  }
+  applyPermissions();
+}
+/* 按权限显示/隐藏界面元素（v3.0.3）。
+   **只负责藏，不负责防**：真正的拦截在服务端 `require()`。
+   藏起来是为了让只读用户看不到一堆点了会 403 的按钮。 */
+function can(perm){
+  if(!AUTH_ENABLED) return true;             /* 本机模式：不限制 */
+  return !!(ME && (ME.permissions || []).indexOf(perm) >= 0);
+}
+function applyPermissions(){
+  var nav = document.getElementById('navUsers');
+  if(nav) nav.hidden = !can('manage_users');
+  /* 只读角色（没有 set_stage）不该看到任何改动入口 */
+  var readonly = AUTH_ENABLED && !can('set_stage');
+  document.body.classList.toggle('readonly', readonly);
+  /* 系统配置页对没有 settings 权限的人也不该出现 */
+  Array.prototype.forEach.call(document.querySelectorAll('.side button'), function(b){
+    if(b.dataset.view === 'sys') b.hidden = !can('settings');
+  });
+  /* 没登录时**整个应用区不可见**（v3.0.3）：
+     登录页是全屏遮罩，但底下的 DOM 仍在 —— 搜索引擎/截图/读屏都能看到
+     "读取概览…" 这类内容，看起来像坏了。用 body 类整体压暗隐藏更干净。 */
+  /* 已经摘掉过就不再重复设置：每次 applyPermissions() 都 toggle 一遍，会触发
+     一次多余的重算（v3.2 起这一行还挂着 transition，写回同值虽不产生动画，
+     但没必要每渲染一次就碰一次）。 */
+  var locked = AUTH_ENABLED && !ME;
+  if(document.body.classList.contains('locked') !== locked){
+    document.body.classList.toggle('locked', locked);
+  }
+}
+async function doLogout(){
+  try{ await fetch('/api/logout', {method:'POST', headers: hdr()}); }catch(e){}
+  setToken('');
+  ME = null;
+  location.reload();
+}
+
+/* ---------- 人才星图（v3.2） ----------
+   一张"点与点连成网"的 canvas：60 个 2px 蓝点缓慢漂移，距离 130px 以内的点
+   自动连线，鼠标 170px 内的连线变亮、点被轻轻吸引。**语义上它就是这个产品**：
+   人才库、关系网；不是随手贴的科技感背景。
+
+   三条硬约束（决定了它长这样）：
+     1. **位置在白色蒙版之下**：CSS 里 canvas 是 z-index:0、登录框 z-index:1，
+        而 .loginwrap 自己的背景层（照片 + 白色渐变蒙版）在 canvas 之下。
+        所以粒子是被蒙版压淡的，永远抢不走登录框的注意力。
+     2. **只跑登录页**：登录成功、页面切走、窗口最小化时立刻停（见 stopLoginNet
+        与 visibilitychange）—— 这类动画最大的问题是"关掉界面还在烧 CPU"。
+     3. **尊重 prefers-reduced-motion**：只画一帧静态网，不跑逐帧循环。
+
+   为什么用 canvas 不用 DOM：60 个点 + 每帧最多几百条线，DOM 方案要维护上千个
+   元素并每帧改样式；办公机（集显/远程桌面）上 DOM 必掉帧，canvas 一帧一次绘制。 */
+var NET = { raf:0, pts:[], ctx:null, cvs:null, w:0, h:0, mx:-9999, my:-9999,
+            t:0, on:false, bound:false };
+var NET_REDUCED = false;
+try{ NET_REDUCED = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches); }catch(e){}
+
+function netSize(){
+  var c = NET.cvs;
+  if(!c) return;
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);   /* 上限 2：4K 屏上 3x 太费 */
+  var r = c.getBoundingClientRect();
+  NET.w = Math.max(1, Math.round(r.width));
+  NET.h = Math.max(1, Math.round(r.height));
+  c.width  = Math.round(NET.w * dpr);
+  c.height = Math.round(NET.h * dpr);
+  var ctx = c.getContext('2d');
+  if(ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  NET.ctx = ctx;
+}
+function netSeed(){
+  /* 点数按面积走：小窗口里点会挤成一团，大屏上又太稀。
+     分母 16000 ≈ 1920×1080 得 130 个，够密；上限 130 防止 4K 屏上算力失控。 */
+  var n = Math.max(34, Math.min(130, Math.round(NET.w * NET.h / 16000)));
+  var pts = [];
+  for(var i = 0; i < n; i++){
+    pts.push({
+      x: Math.random() * NET.w, y: Math.random() * NET.h,
+      /* 速度 ±0.15px/帧：约 9px/秒。再快就成了"飘雪"，再慢就看不出在动。 */
+      vx: (Math.random() - 0.5) * 0.3, vy: (Math.random() - 0.5) * 0.3,
+      r: 1 + Math.random() * 1.2
+    });
+  }
+  NET.pts = pts;
+}
+function netFrame(){
+  var ctx = NET.ctx;
+  if(!ctx) return;
+  var w = NET.w, h = NET.h, pts = NET.pts, i, j, a, b, dx, dy, d, d2;
+  ctx.clearRect(0, 0, w, h);
+  var LINK = 130, LINK2 = LINK * LINK, MOUSE = 170, MOUSE2 = MOUSE * MOUSE;
+
+  if(!NET_REDUCED){
+    for(i = 0; i < pts.length; i++){
+      a = pts[i];
+      a.x += a.vx; a.y += a.vy;
+      /* 撞边反弹而不是绕回：绕回会在边缘出现"凭空冒出来一个点"的跳变 */
+      if(a.x < 0){ a.x = 0; a.vx = -a.vx; } else if(a.x > w){ a.x = w; a.vx = -a.vx; }
+      if(a.y < 0){ a.y = 0; a.vy = -a.vy; } else if(a.y > h){ a.y = h; a.vy = -a.vy; }
+      /* 鼠标吸引：只给一点点力（0.004），像被轻轻带一下，不是被吸过去 */
+      dx = NET.mx - a.x; dy = NET.my - a.y;
+      d2 = dx * dx + dy * dy;
+      if(d2 < MOUSE2 && d2 > 1){
+        d = Math.sqrt(d2);
+        a.vx += (dx / d) * 0.004; a.vy += (dy / d) * 0.004;
+      }
+      /* 限速：吸引累积久了会越飞越快 */
+      a.vx = Math.max(-0.45, Math.min(0.45, a.vx));
+      a.vy = Math.max(-0.45, Math.min(0.45, a.vy));
+    }
+  }
+
+  /* 连线：先画普通网，再画鼠标附近的亮线（两遍是为了让亮线压在普通线上面） */
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();                 /* 同色同宽的线合成一条路径，一次 stroke —— 逐条 stroke 慢 5 倍以上 */
+  for(i = 0; i < pts.length; i++){
+    a = pts[i];
+    for(j = i + 1; j < pts.length; j++){
+      b = pts[j];
+      dx = a.x - b.x; dy = a.y - b.y;
+      d2 = dx * dx + dy * dy;
+      if(d2 > LINK2) continue;
+      ctx.strokeStyle = 'rgba(51,112,255,' + ((1 - Math.sqrt(d2) / LINK) * 0.42).toFixed(3) + ')';
+      ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+    }
+  }
+  ctx.stroke();
+  ctx.lineWidth = 0.9;
+  ctx.strokeStyle = 'rgba(51,112,255,.62)';
+  ctx.beginPath();
+  for(i = 0; i < pts.length; i++){
+    a = pts[i];
+    dx = a.x - NET.mx; dy = a.y - NET.my;
+    if(dx * dx + dy * dy > MOUSE2) continue;
+    for(j = 0; j < pts.length; j++){
+      if(j === i) continue;
+      b = pts[j];
+      dx = a.x - b.x; dy = a.y - b.y;
+      d2 = dx * dx + dy * dy;
+      if(d2 > LINK2) continue;
+      ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+    }
+  }
+  ctx.stroke();
+  /* 点：鼠标附近的点更实、更大一点 */
+  for(i = 0; i < pts.length; i++){
+    a = pts[i];
+    dx = a.x - NET.mx; dy = a.y - NET.my;
+    var near = (dx * dx + dy * dy) < MOUSE2;
+    ctx.fillStyle = 'rgba(51,112,255,' + (near ? 0.8 : 0.5) + ')';
+    ctx.beginPath(); ctx.arc(a.x, a.y, a.r + (near ? 0.6 : 0), 0, Math.PI * 2); ctx.fill();
+  }
+  if(!NET_REDUCED && NET.on) NET.raf = requestAnimationFrame(netFrame);
+}
+function startLoginNet(){
+  if(!NET.cvs){
+    NET.cvs = document.getElementById('loginNet');
+    if(!NET.cvs || !NET.cvs.getContext) return;      /* 老浏览器：没有 canvas 就不画，登录不受影响 */
+  }
+  var wrap = document.getElementById('loginWrap');
+  if(!wrap || wrap.hidden) return;
+  if(!NET.bound){
+    NET.bound = true;
+    /* 鼠标只在这层遮罩上跟着走；登录成功后退场动画期间也仍然有效，不影响。 */
+    wrap.addEventListener('mousemove', function(e){
+      var r = wrap.getBoundingClientRect();
+      NET.mx = e.clientX - r.left; NET.my = e.clientY - r.top;
+    });
+    wrap.addEventListener('mouseleave', function(){ NET.mx = -9999; NET.my = -9999; });
+    window.addEventListener('resize', function(){
+      if(!NET.on) return;
+      netSize(); netSeed();
+      if(NET_REDUCED) netFrame();
+    });
+    /* 窗口切走 / 最小化：停。回来再继续 —— 后台 tab 里跑 rAF 本来就是浪费，
+       但最小化的窗口在某些环境下 rAF 仍会被调度。 */
+    document.addEventListener('visibilitychange', function(){
+      if(document.hidden){ stopLoginNet(); }
+      else if(LOGIN_SHOWN && !LOGIN_LEAVING){ startLoginNet(); }
+    });
+  }
+  netSize();
+  netSeed();
+  if(NET.raf){ cancelAnimationFrame(NET.raf); NET.raf = 0; }
+  if(NET_REDUCED){
+    /* 降级：只画一帧静态网，不跑循环。NET.on 保持 false —— 它是"循环在跑"的
+       标志，静态帧不需要它，否则窗口 resize 时会意外启动循环。 */
+    NET.on = false;
+    netFrame();
+  }else{
+    NET.on = true;
+    netFrame();
+  }
+}
+function stopLoginNet(){
+  NET.on = false;
+  if(NET.raf){ cancelAnimationFrame(NET.raf); NET.raf = 0; }
+  /* 清干净：登录页隐藏后画布内容还留着，下次打开会先闪一帧旧图 */
+  if(NET.ctx){ try{ NET.ctx.clearRect(0, 0, NET.w, NET.h); }catch(e){} }
+}
+
 /* ---------- 取数 ---------- */
 async function load(){
   var j = await api('/api/candidates' + query());
@@ -3678,7 +4252,7 @@ async function pick(id){
   CUR = id;
   MODE = 'detail';
   COMPARE_IDS = []; COMPARE_DATA = {}; COMPARE_ACTIVE = null;
-  renderList();
+  highlightRow(id);          /* 只换高亮，不重建列表（见 highlightRow 的说明） */
   var d = await api('/api/candidates/' + id);
   if(d.__err){ document.getElementById('detail').innerHTML = '<div class="hint">' + esc(d.__err) + '</div>'; return; }
   CUR_DETAIL = d;
@@ -3749,7 +4323,7 @@ var M_MAIL_TASK_ACK = '';
 
 /* 当前模块记在 **URL hash** 里：整页刷新（F5）后还停在原模块，
    不会莫名其妙跳回人才库。浏览器前进/后退也跟着走。 */
-var VIEWS = ['pool', 'chat', 'mail', 'org', 'archive', 'sys'];
+var VIEWS = ['pool', 'chat', 'mail', 'org', 'archive', 'sys', 'users'];
 function setView(v, fromHash){
   VIEW = v;
   if(!fromHash){
@@ -3763,9 +4337,10 @@ function setView(v, fromHash){
      而视图名是 'archive'，对不上 → 归档页永远不显示。
      用显式映射，别耍小聪明。 */
   var MAP = {mailView:'mail', orgView:'org', archView:'archive',
-             sysView:'sys', chatView:'chat'};
+             sysView:'sys', chatView:'chat', usersView:'users'};
   Object.keys(MAP).forEach(function(id){
-    document.getElementById(id).classList.toggle('on', MAP[id] === v);
+    var el = document.getElementById(id);
+    if(el) el.classList.toggle('on', MAP[id] === v);
   });
   Array.prototype.forEach.call(document.querySelectorAll('.side button'), function(b){
     b.classList.toggle('on', b.dataset.view === v);
@@ -3775,6 +4350,7 @@ function setView(v, fromHash){
   if(v === 'org') initOrg();
   if(v === 'archive') initArch();
   if(v === 'sys') initSys();
+  if(v === 'users') initUsers();
   if(v === 'chat') initChat();
 }
 /* 进页面时按 hash 恢复模块；hash 变了（前进/后退）也跟着切 */
@@ -4276,8 +4852,7 @@ function askConfirm(opts){
       if(ev.target === ev.currentTarget) closeDlg(false);
     };
     window.__dlgResolve = resolve;
-    /* 确认型用最小档 400px：一句话确认不该飘在 520px 的框里 */
-    openDlg({size: 'sm'});
+    document.getElementById('mask').classList.add('on');
     yes.focus();
   });
 }
@@ -4288,7 +4863,8 @@ function askText(title, def, ph){
     if(editorBody){ editorBody.style.display = 'none'; editorBody.innerHTML = ''; }
     document.getElementById('dlgBody').style.display = '';
     document.getElementById('dlgBody').innerHTML =
-      '<input id="dlgInput" class="dlg-input" style="width:100%;height:34px;padding:0 10px;font:inherit" ' +
+      '<input id="dlgInput" style="width:100%;height:34px;padding:0 10px;' +
+      'border:1px solid var(--line-2);border-radius:var(--r-s);font:inherit" ' +
       'placeholder="' + esc(ph || '') + '" value="' + esc(def || '') + '">' +
       '<span class="hint" style="display:block;margin-top:8px">回车确定，Esc 取消</span>';
     document.getElementById('dlgNo').textContent = '取消';
@@ -4300,27 +4876,19 @@ function askText(title, def, ph){
     var inp = document.getElementById('dlgInput');
     inp.addEventListener('keydown', function(ev){
       if(ev.key === 'Enter') done(inp.value.trim() || true);
-      /* preventDefault 是给全局 Esc 监听器看的信号："这一层已经处理过了"，
-         否则同一个 Esc 会走两遍关闭流程（两次递增关闭令牌，先发起的那次被作废）。 */
-      if(ev.key === 'Escape'){ ev.preventDefault(); done(null); }
+      if(ev.key === 'Escape') done(null);
     });
     document.getElementById('mask').onclick = function(ev){
       if(ev.target === ev.currentTarget) done(null);
     };
     window.__dlgResolve = resolve;
-    openDlg({size: 'sm'});
+    document.getElementById('mask').classList.add('on');
     setTimeout(function(){ inp.focus(); inp.select(); }, 30);
   });
 }
-/* Esc 关闭弹窗的监听器**只保留上面那一个**（v2.3.0）。
-   这里原来还有一份：
-       document.addEventListener('keydown', function(ev){
-         if(ev.key === 'Escape' && mask.classList.contains('on')) closeDlg(false);
-       });
-   两份同时存在时，一次 Esc 会调两次 closeProgDlg —— 两次各自递增关闭令牌，
-   先发起的那次就被判为"过期"而放弃，行为变得不可预测；
-   而且旧的那份无条件 closeDlg(false)，会绕过门控锁（进度条按 Esc 就没了）。
-   同一件事只在一处实现，新加条件才不可能漏。 */
+document.addEventListener('keydown', function(ev){
+  if(ev.key === 'Escape' && document.getElementById('mask').classList.contains('on')) closeDlg(false);
+});
 
 /* ============================================================
    分析看板：原版的"投递进度环"搬回来 + 几张**不重复**的维度图
@@ -4598,8 +5166,10 @@ function anaCond(key, val, on){
   if(!on && i >= 0) ANA.conds[key].splice(i, 1);
   anaRenderCustom();
 }
-/* 只负责**拉数据**（概览面板里用），不再自己占一个视图 */
-async function anaLoad(){
+/* 只负责**拉数据**（概览面板里用），不再自己占一个视图。
+   `stats` 可由调用方传入 —— 概览面板自己已经拉过一次 `/api/stats`，
+   再拉一遍等于同一次打开页面发两次同样的请求（实测概览页共 4 个请求）。 */
+async function anaLoad(stats){
   if(ANA.items.length){ setTimeout(anaRenderCustom, 0); return; }
   /* ⚠️ 这里**不要**加 `page_size`（2026-10-21 修复）。
      `/api/candidates` 的分页参数是"人才库界面的阅读方式"，**不传就是全量** ——
@@ -4609,7 +5179,7 @@ async function anaLoad(){
      原来这里写死 `?page_size=200`，于是自助分析的每张图都只统计了前 200 个人 ——
      而HR 要的恰恰是"全院这批人整体什么样子"，抽样 200 会让结论直接失真。 */
   var r = await Promise.all([
-    api('/api/stats'),
+    stats ? Promise.resolve(stats) : api('/api/stats'),
     api('/api/candidates')
   ]);
   ANA.stats = r[0] || {};
@@ -5313,6 +5883,133 @@ function cfgText(id, val, ph, rows){
   return '<textarea id="' + id + '" rows="' + (rows || 4) + '" placeholder="' + esc(ph || '') + '">' +
     esc(val == null ? '' : val) + '</textarea>';
 }
+/* ============================================================
+   账号管理（v3.0.3）
+   ============================================================ */
+var USERS = null;
+
+async function initUsers(){
+  var box = document.getElementById('usersView');
+  box.innerHTML = '<div class="hint" style="padding:20px">读取账号…</div>';
+  var j = await api('/api/users');
+  if(j.__err){
+    box.innerHTML = '<div class="hint" style="padding:20px">' + esc(j.__err) +
+      '<br>（账号管理需要「系统管理员」角色）</div>';
+    return;
+  }
+  USERS = j;
+  renderUsers();
+}
+
+function renderUsers(){
+  var box = document.getElementById('usersView');
+  if(!box || !USERS) return;
+  var roles = USERS.roles || [];
+  var roleOf = {};
+  roles.forEach(function(r){ roleOf[r.key] = r; });
+  var rows = (USERS.items || []).map(function(u){
+    var r = roleOf[u.role] || {label: u.role};
+    var isMe = u.username === USERS.me;
+    return '<tr' + (u.active ? '' : ' class="off"') + '>' +
+      '<td><b>' + esc(u.display_name || u.username) + '</b>' +
+        (isMe ? '<span class="utag me">当前登录</span>' : '') +
+        (u.active ? '' : '<span class="utag off">已停用</span>') +
+        '<div class="usub">' + esc(u.username) + '</div></td>' +
+      '<td><select class="sel" onchange="userSetRole(\'' + esc(u.username) + '\', this.value)">' +
+        roles.map(function(x){
+          return '<option value="' + esc(x.key) + '"' +
+            (x.key === u.role ? ' selected' : '') + '>' + esc(x.label) + '</option>';
+        }).join('') + '</select></td>' +
+      '<td class="usub">' + esc(r.desc || '') + '</td>' +
+      '<td style="white-space:nowrap">' +
+        '<button class="btn" onclick="userResetPassword(\'' + esc(u.username) + '\')">重置口令</button> ' +
+        (u.active
+          ? (isMe ? '' : '<button class="btn btn-danger" onclick="userSetActive(\'' +
+              esc(u.username) + '\', false)">停用</button>')
+          : '<button class="btn" onclick="userSetActive(\'' + esc(u.username) +
+              '\', true)">启用</button>') +
+      '</td></tr>';
+  }).join('');
+
+  var matrix = roles.map(function(r){
+    return '<tr><td><b>' + esc(r.label) + '</b><div class="usub">' + esc(r.desc || '') +
+      '</div></td><td>' +
+      Object.keys(USERS.perm_labels || {}).map(function(p){
+        var has = (r.permissions || []).indexOf(p) >= 0;
+        return '<span class="pmask' + (has ? ' on' : '') + '" title="' +
+          esc(USERS.perm_labels[p]) + '">' + (has ? '✓' : '·') + '</span>';
+      }).join('') + '</td></tr>';
+  }).join('');
+
+  box.innerHTML =
+    '<div class="uwrap">' +
+      '<div class="uhead"><h3>账号</h3>' +
+        '<button class="btn primary" onclick="userCreate()">新建账号</button></div>' +
+      '<table class="utable"><thead><tr>' +
+        '<th>账号</th><th>角色</th><th>说明</th><th>操作</th></tr></thead>' +
+        '<tbody>' + (rows || '<tr><td colspan="4" class="hint">还没有账号</td></tr>') +
+        '</tbody></table>' +
+      '<div class="uhead" style="margin-top:26px"><h3>角色权限</h3>' +
+        '<span class="usub">✓ = 该角色拥有此权限</span></div>' +
+      /* 权限矩阵：表头用**竖排**（每个权限两字一行），13 列才排得下。
+         横排会被挤成"查看查看使用让助…"这种没法读的东西。 */
+      '<table class="utable pmtable"><thead><tr><th style="width:190px">角色</th><td>' +
+        Object.keys(USERS.perm_labels || {}).map(function(p){
+          var lab = USERS.perm_labels[p];
+          return '<span class="pmcol" title="' + esc(lab) + '">' +
+            esc(lab.slice(0, 2)) + '</span>';
+        }).join('') + '</td></tr></thead><tbody>' + matrix + '</tbody></table>' +
+      '<div class="hint" style="margin-top:16px">口令至少 ' + (USERS.min_password_len || 8) +
+        ' 位。修改角色或停用账号会**立即清除该账号的登录状态**。</div>' +
+    '</div>';
+}
+
+async function userCreate(){
+  var name = await askText('新建账号', '', '账号名（登录用，不能再改）');
+  if(!name || name === true) return;
+  var pw = await askText('设置初始口令', '', '至少 8 位');
+  if(!pw || pw === true) return;
+  var role = await askText('角色（' +
+    (USERS.roles || []).map(function(r){ return r.key + '=' + r.label; }).join(' / ') +
+    '）', 'hr', 'hr / admin / viewer');
+  if(!role || role === true) return;
+  var r = await api('/api/users', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({username: String(name).trim(), password: String(pw),
+                          role: String(role).trim(), display_name: ''})});
+  if(r.__err){ toast('新建失败：' + r.__err, 'danger'); return; }
+  toast('已新建账号：' + name);
+  initUsers();
+}
+
+async function userSetRole(username, role){
+  var r = await api('/api/users/' + encodeURIComponent(username),
+    {method:'PATCH', headers:{'Content-Type':'application/json'},
+     body: JSON.stringify({role: role})});
+  if(r.__err){ toast('修改失败：' + r.__err, 'danger'); initUsers(); return; }
+  toast('已修改「' + username + '」的角色');
+  initUsers();
+}
+
+async function userSetActive(username, active){
+  var r = await api('/api/users/' + encodeURIComponent(username),
+    {method:'PATCH', headers:{'Content-Type':'application/json'},
+     body: JSON.stringify({active: active})});
+  if(r.__err){ toast('操作失败：' + r.__err, 'danger'); initUsers(); return; }
+  toast((active ? '已启用 ' : '已停用 ') + username);
+  initUsers();
+}
+
+async function userResetPassword(username){
+  var pw = await askText('重置「' + username + '」的口令', '', '至少 8 位');
+  if(!pw || pw === true) return;
+  var r = await api('/api/users/' + encodeURIComponent(username) + '/password',
+    {method:'POST', headers:{'Content-Type':'application/json'},
+     body: JSON.stringify({new_password: String(pw)})});
+  if(r.__err){ toast('重置失败：' + r.__err, 'danger'); return; }
+  toast('已重置口令。该账号需要重新登录。');
+}
+
 async function initSys(){
   var box = document.getElementById('sysView');
   box.innerHTML = '<div class="hint" style="padding:20px">读取配置…</div>';
@@ -6755,11 +7452,26 @@ async function previewMailbox(){
     if(msg){ msg.className = 'msgline'; msg.textContent = '收件箱里没有可预览的邮件'; }
     return;
   }
-  if(msg){ msg.className = 'msgline'; msg.textContent = '读到 ' + items.length + ' 封邮件'; }
+  /* v3.1.2：把"邮箱共多少封"与"这次列了几封"分开写清楚。
+     原来只显示"读到 N 封"（N = 预览条数，默认 5），HR 会以为邮箱里只有 5 封；
+     而不同邮箱的"总数"看起来忽多忽少，其实一个是文件夹全部邮件数、
+     一个是带简历附件的数 —— 两个数含义完全不同，必须各自标名。 */
+  if(msg){
+    msg.className = 'msgline';
+    var parts = [];
+    if(r.total != null) parts.push('邮箱共 ' + r.total + ' 封');
+    if(r.resume_in_sample != null && r.sample_size)
+      parts.push('最近 ' + r.sample_size + ' 封里 ' + r.resume_in_sample + ' 封带简历');
+    msg.textContent = parts.length ? ('✓ ' + parts.join('，')) : ('读到 ' + items.length + ' 封邮件');
+  }
   if(!box) return;
   box.style.display = 'block';
   box.innerHTML = '<div class="pvbox">' +
-    '<div class="pvhead">收件箱最新 ' + items.length + ' 封</div>' +
+    '<div class="pvhead">' +
+      (r.total != null
+        ? '收件箱共 ' + r.total + ' 封，下面是最近 ' + items.length + ' 封'
+        : '收件箱最新 ' + items.length + ' 封') +
+    '</div>' +
     items.map(function(x){
       var frm = x.from || x.sender || '';
       var dt = String(x.date || x.received_at || '').slice(5, 16);
@@ -6791,14 +7503,24 @@ async function restoreChat(){
    在"姓名/邮箱"这种字段上尤其烦（还可能把上一个人的邮箱带出来）。
    用 MutationObserver 兜住**所有**动态生成的输入框（v2 的表单大半是 JS 拼出来的），
    只监听 childList，不监听 attributes —— 避免 setAttribute 触发自己造成死循环。 */
+/* ⚠️ 必须节流（v3.0.3）。原来直接在 body 上挂 MutationObserver 且回调里
+   `querySelectorAll('input,textarea,select')` 全量扫 —— 而列表每渲染一次
+   就新增 25 个 checkbox、详情每打开一次就重建一整块表单。
+   页面上有 57 个 input，等于每次渲染都全扫一遍。改成最多 200ms 一次。 */
+var _KILL_T = null;
 function killAutofill(){
   Array.prototype.forEach.call(
     document.querySelectorAll('input,textarea,select'), function(el){
       if(el.getAttribute('autocomplete') !== 'off') el.setAttribute('autocomplete','off');
     });
 }
+function killAutofillSoon(){
+  if(_KILL_T) return;
+  _KILL_T = setTimeout(function(){ _KILL_T = null; killAutofill(); }, 200);
+}
 if(window.MutationObserver){
-  new MutationObserver(killAutofill).observe(document.body, {childList:true, subtree:true});
+  new MutationObserver(killAutofillSoon)
+    .observe(document.body, {childList: true, subtree: true});
 }
 
 function pickAttach(){
@@ -7531,10 +8253,38 @@ document.getElementById('chkAll').addEventListener('change', function(e){
 });
 
 killAutofill();
-load();
-/* 右侧默认展示「概览 · 待办」（业务方 2026-10-21）：没人选中时不该只留一句
-   "左侧选一个人" —— 那块地方占着半屏，正好放今天该干什么。 */
-showOverview();
+
+/* 启动（v3.0.3）：先决定"能不能进"，再决定"进来看什么"。
+   登录模式下没有 token 就直接弹登录页，**一个业务请求都不发** ——
+   否则控制台会先刷满一串 401，用户看到的是"页面坏了"而不是"请登录"。 */
+document.getElementById('loginForm').addEventListener('submit', function(ev){
+  ev.preventDefault();
+  var u = document.getElementById('loginUser').value.trim();
+  var p = document.getElementById('loginPass').value;
+  if(u && p) doLogin(u, p);
+});
+(function boot(){
+  /* 先按"当前还不知道是谁"收紧界面：账号管理入口藏起来、应用区压暗。
+     登录成功后再由 renderWhoami() 放开。**不能等 loadMe() 回来才做** ——
+     那一瞬间里侧栏是全亮的，看起来像没生效。 */
+  applyPermissions();
+  if(!AUTH_ENABLED){            /* 本机模式：原来的启动路径，一字不改 */
+    load();
+    /* 右侧默认展示「概览 · 待办」（业务方 2026-10-21）：没人选中时不该只留一句
+       "左侧选一个人" —— 那块地方占着半屏，正好放今天该干什么。 */
+    showOverview();
+    return;
+  }
+  if(!TOKEN){ showLogin(''); return; }
+  /* 有 token 但可能已失效：先问 /api/me。失效时 api() 会自动弹登录页，
+     所以这里不需要额外的分支。 */
+  loadMe().then(function(){
+    if(!ME){ showLogin('登录已失效，请重新登录'); return; }
+    renderWhoami();
+    load();
+    showOverview();
+  });
+})();
 </script>
 </body>
 </html>
@@ -7572,5 +8322,67 @@ def render_page_v2(auth_enabled: bool = False) -> str:
         _build = f"v{VERSION}"
     html = _PAGE.replace(_PH_STAGES, stages_json).replace(_PH_TIERS, tiers_json) \
             .replace(_PH_AUTH, "true" if auth_enabled else "false") \
+            .replace("__BRAND_ICON__", _brand_icon_data_uri()) \
             .replace("__V2_BUILD__", _build)
     return html
+
+
+def _brand_icon_data_uri() -> str:
+    """侧栏品牌图标：icon_tray.png 缩到 96px 的 base64 data URI。
+
+    为什么内联而不是挂个 /logo.png：
+      · 页面本来就是单文件内联的，多一个请求在服务刚起时还会闪一下空图；
+      · 打包后程序目录是 `_internal`，多一个"要跟着 spec 一起带上"的静态资源，
+        就多一个会漏的地方（图标丢了下场是页面上一个裂图）。
+    找不到图就退回空串——`<img src="">` 只会显示 alt（空），布局不塌。
+    """
+    import base64
+    import io
+    import os as _os
+
+    from .paths import BASE
+
+    # 三个候选位置，覆盖三种跑法：
+    #   BASE/                —— 源码开发时把图标放在 repo_src 下
+    #   BASE 的上一级        —— 源码开发时图标在工作区根（当前就是这种）
+    #   BASE/_internal/      —— 打包后 BASE 已经是 _internal，图标跟 exe 同级
+    here = _os.path.dirname(BASE)
+    png = ""
+    for cand in (_os.path.join(BASE, "icon_tray.png"),
+                 _os.path.join(here, "icon_tray.png"),
+                 _os.path.join(BASE, "_internal", "icon_tray.png")):
+        if _os.path.isfile(cand):
+            png = cand
+            break
+    if not png:
+        return _BRAND_ICON_FALLBACK
+    try:
+        from PIL import Image
+
+        with Image.open(png) as im:
+            im = im.convert("RGBA")
+            if im.size[0] > 96:
+                im = im.resize((96, 96), Image.LANCZOS)
+            buf = io.BytesIO()
+            im.save(buf, format="PNG", optimize=True)
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        # 缩不了就直接内联原图：宁可页面大 50KB，也不要品牌区空一块。
+        try:
+            with open(png, "rb") as fh:
+                return "data:image/png;base64," + base64.b64encode(fh.read()).decode("ascii")
+        except OSError:
+            return _BRAND_ICON_FALLBACK
+
+
+#: 品牌图标的**兜底**（v3.1.4）：一个内联 SVG，不依赖任何文件或 PIL。
+#: 为什么必须有它：现场出现过侧栏左上角显示"裂图"——`<img src="">` 在浏览器里
+#: 就是裂图占位符，比没有图标更难看。现在无论 PNG 能不能读出来，
+#: 最差也是这个蓝色圆角方块 + 白色 "H"，布局和视觉都不会塌。
+_BRAND_ICON_FALLBACK = (
+    "data:image/svg+xml;charset=utf-8,"
+    "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'%3E"
+    "%3Crect width='96' height='96' rx='22' fill='%23005bdf'/%3E"
+    "%3Cpath d='M26 70V26h10v17h24V26h10v44H60V53H36v17z' fill='%23fff'/%3E"
+    "%3C/svg%3E"
+)

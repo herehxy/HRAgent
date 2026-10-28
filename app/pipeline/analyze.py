@@ -390,7 +390,9 @@ def suggest_job(cand: dict, jobs: list[dict]) -> dict | None:
                           "【在招岗位】\n" + "\n".join(lines)
                           + "\n\n【候选人】\n" + _cand_brief(cand))
     except Exception as exc:
+        import traceback
         print(f"[suggest_job] 模型调用失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        traceback.print_exc()
         return None
     title = str((r or {}).get("job_title") or "").strip()
     if title not in titles:

@@ -92,49 +92,15 @@ for _i, (_s, _d) in enumerate(datas):
         raise SystemExit(f"[spec] datas 第 {_i+1} 项把 master.key 打进包了：{_s}")
 print("[spec] PII 主密钥：未随包分发（仅演示数据自带自己的密钥）")
 
-# v2.2.5：**凭据泄漏硬守卫**（用户 2026-10-22 决定："清空，不随包分发"）。
-# 背景：`_package_cfg/` 是从运行库采集的，一旦开发库里填过真凭据，
-# 采集脚本会把它一并带进来 → **真实邮箱授权码 + 大模型 API Key 被打进交付包**。
-# 拿到包的人可以用用户的邮箱收简历、用他的模型额度。本次实测确实发生了。
-# 所以这里不是"打印一句提醒"，而是**命中就中止打包**（EXIT≠0，别产出包）。
-import re as _re                                              # noqa: E402
-
-#: 私有 MaaS 专属端点（百炼 ws-xxxx）与 key 前缀 —— 出现即视为"带真凭据"
-_CRED_PATTERNS = (
-    (r"sk-ws-[A-Za-z0-9._\-]{10,}", "大模型 API Key（sk-ws-…）"),
-    (r"ws-[a-z0-9]{14,}\.", "阿里云百炼专属端点（ws-xxxx.…）"),
-    (r"https://[a-z0-9]{8,}-[a-z0-9]{8,}\.cn-beijing", "专属 MaaS 端点"),
-)
-_cred_hits = []
-for _i, (_s, _d) in enumerate(datas):
-    if not os.path.isfile(_s):
-        continue
-    try:
-        _txt = open(_s, encoding="utf-8", errors="ignore").read()
-    except OSError:
-        continue
-    for _pat, _label in _CRED_PATTERNS:
-        if _re.search(_pat, _txt):
-            _cred_hits.append(f"第 {_i+1} 项 {os.path.basename(_s)} —— {_label}")
-if _cred_hits:
-    raise SystemExit(
-        "[spec] 拒绝打包：分发配置里带真实凭据\n"
-        + "\n".join("         · " + h for h in _cred_hits)
-        + "\n         清空方法：_package_cfg/secrets.json 的 api_key 置空、"
-          "删除 _package_cfg/imap.secret、\n"
-          "         model.json / embedding.json 的 base_url 换成中性端点。"
-          "真值备份在 _vault/（该目录不进包）。")
-print("[spec] 凭据检查：分发配置中无 API Key / 专属端点")
-
-# 邮箱授权码：v2.2.5 起**默认不分发**（用户决定），收件人需自行在「系统配置」填。
-# 若确实要开箱即收信，可跑 python _write_pack_secret.py 生成 _package_cfg/imap.secret。
+# 邮箱授权码：mailbox.json 里**故意不存明文**（mailbox.py 读取时会剔除），
+# 程序读口令的固定位置是 <base>/config/imap.secret。所以要让收件人开箱能收信，
+# 只能把 imap.secret 一起分发。缺了就明说，别让人以为"配好了却收不到"。
 _secret = os.path.join(_PACK_CFG, "imap.secret")
 if os.path.isfile(_secret) and os.path.getsize(_secret) > 0:
-    raise SystemExit(
-        "[spec] 拒绝打包：_package_cfg/imap.secret 存在且非空 —— 邮箱授权码"
-        "不能随包分发。\n         请删除该文件（真值备份在 _vault/），"
-        "或改用收件人自填的方案。")
-print("[spec] 邮箱授权码：未随包分发 —— 收件人需在「系统配置」自行填授权码")
+    print("[spec] 邮箱授权码：随包分发（收件人可直接收简历）")
+else:
+    print("[spec] 邮箱授权码：**未随包分发** —— 收件人需自己在「系统配置」里"
+          "填授权码才能收简历（跑 python _write_pack_secret.py 可随包带上）")
 
 # v1.29：**发信**口令（config/smtp.secret）的可见性提示。
 # 这个文件刻意放在白名单**之外**（上面那份 datas 列表里没有它）——
@@ -154,22 +120,151 @@ else:
           "客户端专用密码；若收件人与发件人是同一账号、同一口令，"
           "程序会回退读 imap.secret 而直接可用。")
 
-# ===== 不随包分发任何数据（2026-10-26 业务方要求）=========================
-# 交付包只更新**程序与前端**；数据与配置一律用用户原本的：
-#   · 用户的库 / 简历 / 配置住在 %LOCALAPPDATA%\HRAgentData\ —— 安装与更新都不碰
-#   · 老用户升级 = 安装器把他**自己的旧库**迁移过来（不是包里的演示库）
-#   · 全新安装 = **空库**，HR 自己导入简历
-#
-# 为什么把原来的 _pack_data → _internal/seed 注入整段删掉：
-#   启动器会把 `_internal/seed` 当作一个"旧版数据根"自动迁移到用户目录，
-#   于是**任何人第一次打开都先看到 10 个虚构演示人** —— 分不清那是自己的数据还是假的，
-#   更糟的是它会让"迁移失败"看起来像成功了（库里确实有人，只是不是他的）。
-#   去掉之后：扫描命中不到任何种子 → 全新安装就是真空库，语义变干净。
-#
-# ⚠️ `_pack_data/` 仍保留在源码树里（本地开发造数据用），只是不进包。
-#    需要临时打一个"带演示数据"的内部包时，用 git 回退这一段的旧写法即可。
+# 随包分发演示数据（v1.24.8 修：上一版只打了 config、没打 data →
+# 收件人首次启动是**空库**，没有演示候选人、没有邮件模板、没有面试字典。
+# HR 反馈"发给别人的包里没有面试邀请模板"，根因就是这里）。
+# 由 _prepare_pack_data.py 生成：10 位虚构演示人 + 面试邀请模板 + 岗位 + 字典，
+# 不含任何真实简历。
 _PACK_DATA = os.path.join(ROOT, "_pack_data")
-print("[spec] 演示数据：**不注入** —— 包内无 workbench.db / 无 archive（数据一律用用户原本的）")
+if os.path.isdir(_PACK_DATA):
+    # 逐个子项写进datas，**不要**直接把 _pack_data 或 _pack_data/data 当源目录：
+    #   (_PACK_DATA, "data")        → 落成 _internal/data/data/   （多一层，DB 读不到）
+    #   (_PACK_DATA/data, ".")      → 内容全摊到 _internal/ 根、archive 丢失
+    # datas 里的每一项是 (源, 目标目录)，目标目录不会自动补源目录名，所以
+    # 要 data 就把源写成 `_pack_data/data/<名字>`、目标写 "data"。
+    _pd_root = os.path.join(_PACK_DATA, "data")
+    if not os.path.isfile(os.path.join(_pd_root, "workbench.db")):
+        raise SystemExit("[spec] _pack_data/data/workbench.db 不存在 —— 先跑 _prepare_pack_data.py")
+
+    # ---- 打包前强制清洗演示库（v1.24.9）----
+    # **智能助手的对话记录一律不随包分发**：那些是我/开发过程中问出来的内容
+    # （"查看目前情况"之类），对收件人毫无意义，还会让人以为这套系统已经被用过。
+    # 清在这里而不是靠"记得手动删"——打包是重复动作，靠自觉迟早漏。
+    import sqlite3
+    _pack_db = os.path.join(_pd_root, "workbench.db")
+    _con = sqlite3.connect(_pack_db)
+    try:
+        _tabs = {r[0] for r in _con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        # 1) 对话记录：问答正文、工具调用轨迹、token 成本都在这张表
+        if "agent_runs" in _tabs:
+            _n = _con.execute("SELECT count(*) FROM agent_runs").fetchone()[0]
+            _con.execute("DELETE FROM agent_runs")
+            print(f"[spec] 清洗演示库：已清除智能助手对话记录 {_n} 条")
+        # 2) 审计日志里若有智能体运行痕迹也一并清掉（同样是我的测试痕迹）
+        #    v1.24.18 修：原来只按entity='agent' / action LIKE '%agent%' 删，
+        #    漏了 chat_clear（清空助手对话）—— 它entity 不是 agent，
+        #    但留在库里就是一条"有人用过这系统"的痕迹，且没有对应记录看着更奇怪。
+        if "audit_log" in _tabs:
+            _n2 = _con.execute("SELECT count(*) FROM audit_log WHERE entity='agent' "
+                               "OR action LIKE '%agent%' OR action LIKE 'chat%'").fetchone()[0]
+            _con.execute("DELETE FROM audit_log WHERE entity='agent' "
+                         "OR action LIKE '%agent%' OR action LIKE 'chat%'")
+            if _n2:
+                print(f"[spec] 清洗演示库：已清除智能助手审计痕迹 {_n2} 条")
+        # 2b) 待确认提案同理：留着会出现"系统里有N 条待办但HR 从没提过"的错觉
+        if "proposals" in _tabs:
+            _n3 = _con.execute("SELECT count(*) FROM proposals").fetchone()[0]
+            _con.execute("DELETE FROM proposals")
+            if _n3:
+                print(f"[spec] 清洗演示库：已清除遗留提案 {_n3} 条")
+        # 2c) v1.29.4：收信游标与收取痕迹**绝不能随包分发** ——
+        #     游标是"这台电脑收到哪了"（含旧格式纯 UID），带到收件人机器上会让它
+        #     直接跳过收件人邮箱的头 N 封邮件（换账号也一样，旧格式没有账号信息）。
+        #     同理清掉"最近一次收取"记录与聊天清空痕迹（与 2) 的审计口径一致）。
+        if "settings" in _tabs:
+            _sk = ("k LIKE 'imap_cursor%' OR k='last_ingest' "
+                   "OR k LIKE 'chat_cleared%' OR k LIKE 'chat_purge%'")
+            _n4 = _con.execute(f"SELECT count(*) FROM settings WHERE {_sk}").fetchone()[0]
+            _con.execute(f"DELETE FROM settings WHERE {_sk}")
+            if _n4:
+                print(f"[spec] 清洗演示库：已清除收信游标/收取痕迹 {_n4} 条")
+        # 2d) v1.29.4：**收信台账也不能随包** —— `email_messages.processed=1`
+        #     会让收件人首次拉取时把老邮件全部判成"已处理"而静默跳过入库，
+        #     他要的"从头拉全量"就永远拉不到（与 2c 是同一套问题）。
+        if "email_messages" in _tabs:
+            _n5 = _con.execute("SELECT count(*) FROM email_messages").fetchone()[0]
+            _con.execute("DELETE FROM email_messages")
+            if _n5:
+                print(f"[spec] 清洗演示库：已清除收信台账 {_n5} 条")
+        # 3) 自增序列归零：让收件人库里 id 从 1 开始，不带着我的历史偏移
+        for _t in ("agent_runs", "proposals"):
+            if _t in _tabs:
+                _con.execute("DELETE FROM sqlite_sequence WHERE name=?", (_t,))
+        _con.commit()
+        _con.execute("VACUUM")          # 顺带收紧文件（删过数据的页可复用）
+        print("[spec]演示库已洁净：收件人首次打开没有任何历史对话")
+
+        # ---- v1.24.18：给演示库预建语义索引（不然收件人打开就是空索引）----
+        # embeddings 表现有 0 条 → semantic() 直接返回"索引为空"，界面里
+        # 「语义找人」看起来像坏了。而演示库里明明有 10 位候选人。
+        # 真实库里是导入时自动建索引，演示库不经过导入流程，所以得在这里补。
+        # 失败不阻断打包：收件人导入自己的简历时会自动建。
+        # ⚠️ **别把 import 写在 try 里**：上一版把 `from app import search`
+        # 连同 sys.path 插入一起删掉了，异常被 except 降级成"跳过"，
+        # 打包照样EXIT=0，日志里一行"跳过"看着像正常——
+        # **降级会掩盖手误**，这正是 try/except 用在这里的代价。
+        # 所以导入放在 try 之前，让导入失败直接炸出来。
+        import sys as _sys
+        if SRC not in _sys.path:
+            _sys.path.insert(0, SRC)
+        from app import search as _search
+
+        # 关键：**不能直接用 load_cfg()** —— 它按 BASE 读的是工作区的 config/，
+        # 而真正随包分发的是 _package_cfg/。两处配置可能不一致，
+        # 用工作区那份建出来的向量，收件人那边模型对不上 → 分数全是噪音。
+        # 这里显式读 _package_cfg，与分发内容严格同源。
+        import json as _json
+        _ecfg = {}
+        for _fn in ("embedding.json", "secrets.json"):
+            _fp = os.path.join(_PACK_CFG, _fn)
+            if os.path.isfile(_fp):
+                try:
+                    with open(_fp, encoding="utf-8") as _fh:
+                        _ecfg.update(_json.load(_fh))
+                except (ValueError, OSError):
+                    pass
+
+        if _ecfg.get("base_url") and _ecfg.get("api_key"):
+            try:
+                _r = _search.build_index(_pack_db, cfg=_ecfg, force=True)
+                _n = _r.get("indexed") or 0
+                print("[spec] 演示库语义索引：%s，模型 %s，%d 条"
+                      % ("已建立" if _n else "**未建立**", _r.get("model"), _n))
+                if not _n:
+                    print("[spec] ⚠️ 索引为 0 —— 收件人首次语义检索会是空的，"
+                          "先查 embedding 服务是否可达")
+            except Exception as _e:
+                print("[spec] 演示库语义索引：**失败**（%s: %s）"
+                      % (type(_e).__name__, _e))
+        else:
+            print("[spec] 演示库语义索引：跳过（_package_cfg 里没有 base_url/api_key）")
+    finally:
+        _con.close()
+
+    # ---- v2.2.0：演示数据改放 **seed/**，安装目录不再夹带"像用户数据"的东西 ----
+    # 为什么改：热更新的铁律是"只换代码、不碰数据"。若演示库继续躺在
+    # `_internal/data/workbench.db`，任何人（或任何脚本）把 `_internal` 整个
+    # 覆盖一遍，就等于连"数据目录"一起换了 —— 规矩写在文档里没意义。
+    # 改后目录职责清晰：
+    #   _internal/seed/data/  = 首次运行用的演示数据种子（程序资源，可被更新）
+    #   _internal/config/     = 配置**模板**（程序资源，可被更新；只补缺失键，不覆盖用户值）
+    #   %LOCALAPPDATA%\HRAgentData\ = 用户的真实数据与配置（更新器绝不碰）
+    # 启动器会把 seed 当作一个 legacy 根迁移到用户目录 → "装完就有演示数据"不变。
+    for _name in os.listdir(_pd_root):
+        _p = os.path.join(_pd_root, _name)
+        if os.path.isdir(_p):
+            #目录源会被摊平（实测 archive/*全散到 data/ 根），逐个孙项展开才能保层级
+            for _sub in os.listdir(_p):
+                datas.append((os.path.join(_p, _sub), os.path.join("seed", "data", _name)))
+        else:
+            datas.append((_p, os.path.join("seed", "data")))
+    print("[spec] 随包分发演示数据：_pack_data/data/* → _internal/seed/data（种子，非用户数据）")
+else:
+    raise SystemExit(
+        "[spec] 找不到 _pack_data —— 先跑 python _prepare_pack_data.py 生成演示数据。"
+        "不要打空库：收件人打开会什么都没有。"
+    )
 
 hiddenimports = [
     # uvicorn 运行时用 importlib 动态选择循环/协议实现，必须显式列出

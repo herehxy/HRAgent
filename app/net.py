@@ -20,14 +20,45 @@
 from __future__ import annotations
 
 import os
+import sys
+import traceback
 import urllib.error
 import urllib.request
+import ssl
 from urllib.parse import urlsplit
 
 _LOOPBACK_HOSTS = {"localhost", "::1", "0.0.0.0"}
 
-#: 显式空代理的 opener：既忽略环境变量，也保留标准的重定向/错误处理行为
-_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def _direct_opener():
+    """Explicit no-proxy opener, matching the original v2.0.0 behavior."""
+    handlers = [urllib.request.ProxyHandler({})]
+    context = _context()
+    if context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    return urllib.request.build_opener(*handlers)
+
+
+def _context():
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "cacert.pem"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cacert.pem"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cacert.pem"),
+        os.path.join(os.path.dirname(sys.executable), "cacert.pem"),
+        os.path.join(os.path.dirname(sys.executable), "_internal", "cacert.pem"),
+        os.path.join(os.path.dirname(sys.executable), "_internal", "certifi", "cacert.pem"),
+        os.path.join(getattr(sys, "_MEIPASS", ""), "cacert.pem"),
+        os.path.join(getattr(sys, "_MEIPASS", ""), "certifi", "cacert.pem"),
+    ]
+    for path in candidates:
+        path = os.path.abspath(path)
+        if os.path.isfile(path):
+            try:
+                print(f"[net] using CA: {path}", file=sys.stderr)
+                return ssl.create_default_context(cafile=path)
+            except Exception:
+                print(f"[net] CA load failed: {path}", file=sys.stderr)
+                traceback.print_exc()
+    return None
 
 #: 代理相关环境变量（大小写两种写法都认，这是各家工具的惯例）
 _PROXY_VARS = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
@@ -67,11 +98,18 @@ def urlopen(req, timeout: float = 60):
     url = getattr(req, "full_url", None) or str(req)
     if is_loopback(url):
         _LAST.update({"url": url, "route": "direct", "note": "回环地址直连"})
-        return _DIRECT.open(req, timeout=timeout)
+        return _direct_opener().open(req, timeout=timeout)
 
     env = proxy_env()
     try:
-        resp = urllib.request.urlopen(req, timeout=timeout)
+        context = _context()
+        if context is None:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        else:
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=context)
+            )
+            resp = opener.open(req, timeout=timeout)
         _LAST.update({
             "url": url,
             "route": "proxy" if env else "direct",
@@ -79,11 +117,13 @@ def urlopen(req, timeout: float = 60):
         })
         return resp
     except urllib.error.URLError as exc:
+        print(f"[net] urlopen failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        traceback.print_exc()
         if not env:
             _LAST.update({"url": url, "route": "direct", "note": f"直连失败：{exc}"})
             raise
         try:
-            resp = _DIRECT.open(req, timeout=timeout)
+            resp = _direct_opener().open(req, timeout=timeout)
         except Exception:                                   # noqa: BLE001
             _LAST.update({"url": url, "route": "direct_fallback",
                           "note": f"环境代理不可用（{exc}），直连也失败"})

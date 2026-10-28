@@ -213,75 +213,12 @@ def register_uninstall(install_dir: str, version: str, log=LOG) -> None:
     log("[4/5] 已注册卸载项（控制面板 -> 程序和功能 里能看到）")
 
 
-def _schedule_self_delete(install_dir: str, log=LOG) -> None:
-    """把**卸载器自己**排到 TEMP，稍后再删掉安装目录里剩下的东西。
-
-    为什么需要：Windows 锁住正在运行的 exe，卸载器删不到自己。
-    实测后果不是"少删一个文件"这么轻——`rmtree(ignore_errors=True)`
-    会在锁住 exe 那一项上失败并**静默继续**，剩下 exe + 日志留在原地，
-    用户看到的是"卸载完了但目录还在"，像是没卸干净。
-
-    做法（Windows 惯用手法）：
-      ① 把自己 copy 到 %TEMP%（copy 允许读运行中的 exe）
-      ② 起一个 cmd：`ping` 拖延几秒后 `rmdir /s /q` 原目录并删掉临时 exe
-      ③ 原进程退出，锁释放，延时命令刚好在锁消失后执行
-
-    ⚠️ 三个实测踩到的点（别再退回"写 .cmd"的写法）：
-      · **不要把路径写进 .cmd 文件**：安装目录常含中文（如 `E:/hr/安装测试`），
-        .cmd 按 OEM 码页读，中文会变 `????`，`rmdir` 于是去删一个不存在的路径
-        —— 表现是"日志说已安排自清，目录却纹丝不动"。
-      · **cmd 的命令行传参有同样的编码坑**。所以改成让**子 Python 进程**
-        通过环境变量收路径（环境变量是 Unicode，不经码页）。
-      · **要等够久**：PyInstaller onefile 是 **bootloader + 子进程**两进程，
-        bootloader 比子进程活得久，所以要轮询重试而不是固定等几秒。
-    """
-    if not getattr(sys, "frozen", False):
-        return                       # 源码运行（开发）不需要自删
-    try:
-        me = os.path.abspath(sys.executable)
-        # ① 必须**复制到 TEMP 再执行**：清理进程若跑在安装目录里，
-        #    它的删除目标就是正在运行的自己 → 自指死锁，exe 永远删不掉。
-        tmpdir = os.path.join(
-            os.environ.get("TEMP") or os.path.expanduser("~"),
-            "hra_uninstall")
-        os.makedirs(tmpdir, exist_ok=True)
-        tmp_exe = os.path.join(tmpdir, os.path.basename(me))
-        shutil.copy2(me, tmp_exe)
-        env = dict(os.environ)
-        env["HRA_UNINSTALL_TARGET"] = os.path.abspath(install_dir)
-        env["HRA_UNINSTALL_ME"] = me
-        # creationflags 里加 DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP：
-        # 让清理进程**脱离**本进程树。PyInstaller onefile 的 bootloader
-        # 在子进程 return 后会终止整棵树，不脱离的话清理进程刚起就被带走 ——
-        # 表现是"日志说已安排自清，目录却一直留着"（实测）。
-        flags = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                 | getattr(subprocess, "DETACHED_PROCESS", 0)
-                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-        proc = subprocess.Popen([tmp_exe, "--cleanup-after-exit"],
-                                env=env,
-                                creationflags=flags,
-                                close_fds=True)
-        # 给它一点时间真正起来（onefile 要解包 _MEI，可能要 1~2 秒）；
-        # 起不来就如实说，别打"已安排自清"的空头承诺。
-        time.sleep(2.0)
-        if proc.poll() is not None:
-            log(f"    ⚠️ 自清进程未能启动（返回码 {proc.returncode}），"
-                f"请手动删除目录：{install_dir}")
-            return
-        log("    卸载器将在十几秒后自清（Windows 不允许程序删自己）")
-    except Exception as exc:                          # noqa: BLE001
-        log(f"    自清安排失败，可手动删目录：{type(exc).__name__}: {exc}")
-
-
 def do_uninstall(install_dir: str, keep_data: bool = True, log=LOG) -> None:
     """卸载：删程序目录；数据默认保留。"""
     data_root = user_home_dir()
     log(f"[1/3] 删除程序目录：{install_dir}")
     if os.path.isdir(install_dir):
         shutil.rmtree(install_dir, ignore_errors=True)
-    # rmtree 对"运行中的自己"会静默失败 → 排一个延时自清兜底，
-    # 否则用户会看到"卸载完了目录还在"。
-    _schedule_self_delete(install_dir, log=log)
     for link in _shortcut_paths():
         if os.path.exists(link):
             try:
@@ -370,49 +307,22 @@ def detect_legacy_roots(install_dir: str, extra: str = "") -> list:
     mod = _load_migrate_module()
     cands = []
     install_dir = os.path.abspath(install_dir)
-    parent = os.path.dirname(install_dir)
     guesses = [
-        install_dir,                                       # 同目录的老布局
-        os.path.join(install_dir, "_internal"),             # 同目录的老布局（2.0.0）
-        os.path.join(parent, APP_NAME),
-        os.path.join(parent, APP_NAME, "_internal"),
-        r"D:\HRAgent工作台",                                # 历史安装位置（2.0.0 外层）
-        r"D:\HRAgent工作台\_internal",
-        os.path.join(os.path.expanduser("~"), "HRAgent工作台"),
+        os.path.join(install_dir, "_internal"),          # 同目录的老布局
+        os.path.join(os.path.dirname(install_dir), APP_NAME),
+        os.path.join(os.path.dirname(install_dir), APP_NAME, "_internal"),
+        r"D:\HRAgent工作台\_internal",                    # 历史安装位置
         os.path.join(os.path.expanduser("~"), "HRAgent工作台", "_internal"),
     ]
     # 同级目录里的其他 HRAgent 安装（"旧安装"最常见的位置）
-    # ⚠️ 排除条件用**绝对路径**比较，不能用 `name != APP_NAME`：
-    # 2.0.0 的 zip 解压出来就叫 "HRAgent工作台"，用名字排除会把这个
-    # 真正的旧安装排除掉 —— 明明数据就在那儿，却报"没发现旧数据"。
-    def _add_siblings(folder: str) -> None:
-        try:
-            for entry in sorted(os.listdir(folder)):
-                if "HRAgent" not in entry:
-                    continue
-                full = os.path.abspath(os.path.join(folder, entry))
-                if full == install_dir:
-                    continue                       # 就是当前安装目录本身
-                guesses.append(full)
-                guesses.append(os.path.join(full, "_internal"))
-        except OSError:
-            pass
-
-    _add_siblings(parent)
-    # 上两级目录：2.0.0 的 zip 常解压在"下载/桌面/文档"这类地方，
-    # 与新安装目录（%LOCALAPPDATA%\Programs\…）差好几层。
-    _add_siblings(os.path.dirname(parent))
-    # 常见"解压即用"的位置：桌面 / 文档 / 下载。
-    # ⚠️ CSIDL 只能拿到部分已知文件夹：桌面 0x0010（含重定向）、我的文档 0x0005。
-    # "下载"没有对应的 CSIDL（它是 KNOWNFOLDERID），这里退回拼 %USERPROFILE%，
-    # 拼错就当没有（多一个候选猜不中，不影响正确性）。
-    for csidl in (0x0010, 0x0005):
-        folder = _known_folder(csidl, "")
-        if folder and os.path.isdir(folder):
-            _add_siblings(folder)
-    downloads = os.path.join(os.path.expanduser("~"), "Downloads")
-    if os.path.isdir(downloads):
-        _add_siblings(downloads)
+    parent = os.path.dirname(install_dir)
+    try:
+        for name in sorted(os.listdir(parent)):
+            if "HRAgent" in name and name != APP_NAME:
+                guesses.append(os.path.join(parent, name))
+                guesses.append(os.path.join(parent, name, "_internal"))
+    except OSError:
+        pass
     if extra:
         guesses.insert(0, os.path.abspath(extra))
     seen = set()
@@ -421,14 +331,11 @@ def detect_legacy_roots(install_dir: str, extra: str = "") -> list:
         if g in seen or not os.path.isdir(g):
             continue
         seen.add(g)
-        # ⚠️ 判定库在哪**必须走 layout()**，不能硬写 `<g>/data/workbench.db`：
-        # 2.0.0 的分发形态是 `HRAgent工作台/_internal/data/workbench.db`，
-        # 用户在安装器里手选的是**外层** `HRAgent工作台` —— 硬写路径会判定
-        # "这里没有数据"，于是不迁移，HR 打开就是空库（看着像数据丢了）。
-        lay = mod.layout(g) if mod is not None else None
-        if lay is None:
+        db = os.path.join(g, "data", "workbench.db")
+        if not os.path.isfile(db):
             continue
-        db = os.path.join(lay["data"], "workbench.db")
+        if mod is not None and not mod.layout(g):
+            continue
         cands.append((g, _people_count(db)))
     return cands
 
@@ -693,84 +600,6 @@ def run_gui() -> int:
     return 0
 
 
-def _cleanup_after_exit() -> int:
-    """卸载收尾：轮询等原进程退出，然后把安装目录（含本 exe）删干净。
-
-    由 `_schedule_self_delete()` 起的后台子进程执行，路径从**环境变量**拿
-    （`HRA_UNINSTALL_TARGET` / `HRA_UNINSTALL_ME`）——环境变量是 Unicode，
-    不经过 .cmd 的 OEM 码页，中文安装目录不会变 `????`。
-
-    ⚠️ **不能在安装目录里跑这个分支**：那样删的目标就是正在运行的自己，
-    永远删不掉（实测：日志能删、exe 删不掉）。`_schedule_self_delete()`
-    会先把自己复制到 %TEMP% 再从那儿执行；这里额外做一次自保护——
-    若发现自己就在目标目录里，什么都不删并明确报错，别静默"成功"。
-    """
-    target = os.environ.get("HRA_UNINSTALL_TARGET", "")
-    me = os.environ.get("HRA_UNINSTALL_ME", "")
-    # 诊断留痕：这是后台跑的，用户看不到报错，没有落盘就只能靠猜。
-    # （实测踩过：日志说"已安排自清"，目录却一直留着，根因就是这行
-    #   因为拿不到环境变量而空跑退出 —— 没有 trace 就只能反复重打包试。）
-    trace = os.path.join(os.environ.get("TEMP") or os.path.expanduser("~"),
-                         "hra_uninstall_trace.log")
-    try:
-        with open(trace, "w", encoding="utf-8", errors="replace") as fh:
-            fh.write(f"exe={os.path.abspath(sys.executable)}\n"
-                     f"target={target!r}\nme={me!r}\n"
-                     f"frozen={getattr(sys, 'frozen', False)}\n")
-    except OSError:
-        pass
-    if not target:
-        return 1
-    try:
-        if os.path.normcase(os.path.dirname(os.path.abspath(sys.executable))) \
-                == os.path.normcase(target):
-            return 2          # 自指死锁：让调用方知道这次没清掉
-    except OSError:
-        pass
-    # PyInstaller onefile 是 bootloader + 子进程两进程，锁要等 bootloader 也退出
-    for _ in range(40):                      # 最多 ~2 分钟
-        time.sleep(3)
-        if not os.path.exists(target):
-            break
-        shutil.rmtree(target, ignore_errors=True)
-    shutil.rmtree(target, ignore_errors=True)
-    # 最后清掉 TEMP 里那个清理 exe —— 它同样是运行中的自己，删不掉。
-    # 走**第三级接力**：再复制一份到别处，让它删掉清理 exe 和自己。
-    # ⚠️ 路径必须走**环境变量**传给第三级，不能写进 cmd 命令行 ——
-    #    安装目录常含中文，cmd 按 OEM 码页读命令行会变 `????`（实测踩到）。
-    try:
-        relay = os.path.join(
-            os.environ.get("TEMP") or os.path.expanduser("~"),
-            "hra_uninstall_relay.exe")
-        shutil.copy2(sys.executable, relay)
-        renv = dict(os.environ)
-        targets = [x for x in (me, os.path.abspath(sys.executable)) if x]
-        targets.append(relay)
-        renv["HRA_RELAY_DELETE"] = os.pathsep.join(targets)
-        subprocess.Popen([relay, "--relay-delete"],
-                         env=renv,
-                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                         close_fds=True)
-    except OSError:
-        pass
-    return 0
-
-
-def _relay_delete() -> int:
-    """第三级接力：删掉清理 exe 与自己（路径从环境变量拿，避开 cmd 编码坑）。"""
-    time.sleep(4)
-    for f in (os.environ.get("HRA_RELAY_DELETE", "").split(os.pathsep)):
-        if not f:
-            continue
-        for _ in range(10):
-            try:
-                os.remove(f)
-                break
-            except OSError:
-                time.sleep(1)
-    return 0
-
-
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="HRAgent 安装器")
     ap.add_argument("--install", help="程序包 .zip")
@@ -782,16 +611,7 @@ def main(argv=None) -> int:
     ap.add_argument("--no-shortcuts", action="store_true",
                     help="不建桌面/开始菜单快捷方式（服务器或无人值守场景）")
     ap.add_argument("--purge-data", action="store_true", help="卸载时连用户数据一起删（危险）")
-    ap.add_argument("--cleanup-after-exit", action="store_true",
-                    help=argparse.SUPPRESS)   # 内部用：卸载后自清
-    ap.add_argument("--relay-delete", action="store_true",
-                    help=argparse.SUPPRESS)   # 内部用：第三级自清接力
     args = ap.parse_args(argv)
-
-    if args.relay_delete:
-        return _relay_delete()
-    if args.cleanup_after_exit:
-        return _cleanup_after_exit()
 
     if args.uninstall:
         target = args.dir or default_install_dir()

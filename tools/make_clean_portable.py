@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "dist_prod" / "HRAgent工作台"
-OUTPUT = ROOT / "release_prod" / "HRAgent工作台-v2.2.2-便携完整包.zip"
+OUTPUT = ROOT / "release_prod" / "HRAgent工作台-v2.2.3-便携完整包.zip"
 EXCLUDE = {"HRAgent更新器.exe"}
 
 

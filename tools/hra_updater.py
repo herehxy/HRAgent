@@ -38,12 +38,7 @@ EXE_NAME = "HRAgent工作台.exe"
 
 #: 更新包里绝对不许出现的东西（相对路径任一段命中即中止）
 FORBIDDEN_SEGMENTS = ("data",)
-#: 库/密钥类文件：全局禁写。
-#: ⚠️ **`.secret` 不在这里**（2026-10-22 修）：`_internal/config/imap.secret`
-#: 是安装器分发的**配置模板**，属程序资源，必须能被更新器替换；
-#: 早先把它列进全局禁后缀 → 更新包必被拒（"更新包试图改写库文件"），
-#: 热更新链路直接断掉。真正的用户 `.secret` 由 `is_user_data_path()` 拦。
-FORBIDDEN_SUFFIX = (".db", ".key", ".sqlite", ".sqlite3")
+FORBIDDEN_SUFFIX = (".db", ".key", ".secret", ".sqlite", ".sqlite3")
 
 
 def _seg(rel: str) -> list[str]:
@@ -260,18 +255,6 @@ def validate_targets(install_dir: str, manifest: dict) -> list[str]:
             raise UpdateError(f"更新包试图改写用户数据目录，已拒绝：{rel}")
         if is_program_data_dir(rel):
             raise UpdateError(f"更新包试图改写数据目录，已拒绝：{rel}")
-        # 种子目录（_internal/seed/data/…）是**程序资源**，不是用户数据 ——
-        # 演示库 workbench.db 就住在这儿，必须允许替换，否则更新链路对
-        # "随包分发演示数据" 的版本直接死锁（2026-10-22 实测）。
-        # ⚠️ 豁免**只针对演示库与演示简历**（.db/.sqlite + 简历原件），不能整目录
-        # 放行：`_internal/seed/master.key` 若跟着放行，就等于允许更新包
-        # 替换密钥文件（实测边界表里出现过"放行"）。
-        low0 = rel.lower()
-        if is_seed_path(rel) and low0.endswith(
-                (".db", ".sqlite", ".sqlite3", ".pdf", ".doc", ".docx",
-                 ".txt", ".md", ".xls", ".xlsx", ".jpg", ".jpeg", ".png")):
-            targets.append(rel)
-            continue
         low = rel.lower()
         if low.endswith(FORBIDDEN_SUFFIX):
             raise UpdateError(f"更新包试图改写库文件，已拒绝：{rel}")
@@ -342,12 +325,7 @@ def apply_update(install_dir: str, package: str, log=LOG) -> dict:
     before = snapshot_dir(user_home_dir())
     log(f"[1/6] 用户数据快照：{len(before)} 个文件（{user_home_dir()}）")
 
-    try:
-        zf = zipfile.ZipFile(package)
-    except (OSError, zipfile.BadZipFile) as e:
-        raise UpdateError(f"打不开更新包：{package}\n{e}")
-
-    with zf:
+    with zipfile.ZipFile(package) as zf:
         manifest = read_manifest(zf)
         version = str(manifest.get("version", "?"))
         files = manifest.get("files", [])
@@ -524,20 +502,11 @@ def run_gui() -> int:
 
 
 def _relocate_self(argv: list[str]) -> int:
-    """把自己复制到临时目录再跑，然后**立即退出**，由子进程继续。
+    """把自己复制到临时目录再跑，然后返回子进程退出码。
 
     为什么需要：更新包通常**包含新版更新器自己**（让下一次更新用新版工具）。
     但 Windows 会锁住正在运行的 exe —— 不搬走，替换自己那一步必然失败
-    （PermissionError: WinError 5），整个更新回滚。搬走之后原位置的 exe
-    就不再被占用。
-
-    ⚠️ 关键（2026-10-22 实测踩到）：必须用 **Popen 后立刻 return**，
-    不能用 `subprocess.run` 同步等待。同步等待 = 父进程一直活着 =
-    父进程仍然打开着原 exe 文件句柄，子进程照样替换失败。
-    「搬走」要成立的前提是**原进程真的退出了**，不只是"子进程在别处跑"。
-
-    返回码约定：>=0 表示子进程已启动、本进程应按此码退出（不往下走）；
-    -1 表示没搬成，调用方继续在原地执行。
+    （PermissionError），整个更新回滚。搬走之后原位置的 exe 就没被占用。
     """
     if not getattr(sys, "frozen", False):
         return -1
@@ -554,9 +523,8 @@ def _relocate_self(argv: list[str]) -> int:
         return -1
     env = dict(os.environ)
     env["HRA_UPDATER_RELOCATED"] = "1"
-    # 不再 run()：起完立刻退出，把锁释放掉。返回码由子进程自己回传给 shell。
-    subprocess.Popen([me] + list(argv[1:]), env=env, close_fds=True)
-    return 0
+    r = subprocess.run([me] + list(argv[1:]), env=env)
+    return r.returncode
 
 
 def main(argv=None) -> int:

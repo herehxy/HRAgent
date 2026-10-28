@@ -47,6 +47,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sqlite3
 import time as _time
 import re
 import shutil
@@ -62,7 +63,7 @@ import zipfile
 from datetime import datetime
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request, Query
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -150,7 +151,82 @@ def _inside_allowed_root(path: str) -> bool:
     return False
 
 
+#: 启动后台修数据线程的"让路"开关。见 `_startup_purge_task._repair` 里的说明：
+#: 用户刚打开页面时不该被存量数据修补抢写锁，所以先等一段时间再动手。
+#: 设 `TP_REPAIR_DELAY=0` 可关闭等待（测试/压测用）。
+_REPAIR_DELAY = threading.Event()
+
+#: 技能清单重算的"库指纹"设置键。库内容没变就不重跑（见 `_repair_signature`）。
+SKILLS_REFRESH_KEY = "skills_refresh_signature"
+
+
+def _repair_signature(conn) -> str | None:
+    """库内容的廉价指纹：决定 `refresh_skills` 的结果会不会变。
+
+    为什么要它（v3.1.12，现场事故）：`refresh_skills` 对**每条投递**重跑规则抽取
+    并逐条写技能表（390 条投递 → 8653 项，20~35 秒、上万次 commit）。
+    而它修的是"历史数据没跟上新口径"，库不变时重跑结果**完全一样**。
+    现场一份日志里 `database is locked` 出现 76 次，主要来源就是多个实例
+    各自在跑它。加指纹后，第二次启动直接跳过。
+
+    参与计算的四类东西（任何一个变了，重抽的结果就可能变）：
+      · `applications`：条数与最大 id —— 有新增投递
+      · `documents`：条数与最大 id —— 有新简历原文（抽取的输入）
+      · `jobs`：条数与最大 `updated_at` —— JD 词表变了（`_jd_terms` 依赖它）
+      · `ontology.json` 的 mtime —— 本体词表变了
+    算不出来就返回 None，调用方按"照常重跑"处理 —— 宁可多跑一次，
+    也不要因为指纹算错而**该修的数据没修**。
+    """
+    try:
+        row = conn.execute(
+            """SELECT (SELECT COUNT(*) FROM applications) AS an,
+                      (SELECT COALESCE(MAX(id), 0) FROM applications) AS ai,
+                      (SELECT COUNT(*) FROM documents) AS dn,
+                      (SELECT COALESCE(MAX(id), 0) FROM documents) AS di,
+                      (SELECT COUNT(*) FROM jobs) AS jn,
+                      (SELECT COALESCE(MAX(updated_at), '') FROM jobs) AS ju"""
+        ).fetchone()
+        try:
+            onto_mtime = int(os.path.getmtime(
+                os.path.join(_paths.CONFIG_DIR, "ontology.json")))
+        except OSError:
+            onto_mtime = 0
+        return (f"a{row['an']}.{row['ai']}|d{row['dn']}.{row['di']}"
+                f"|j{row['jn']}.{row['ju']}|o{onto_mtime}")
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
 app = FastAPI(title="NIN人才库智能助手", version=PRODUCT_VERSION)
+
+
+# ---- v3.0.2：SQLite 写锁竞争不再变成 500「Internal Server Error」----
+# 单文件库 + 后台线程（启动修数据、入库分析、头像抽取）会长时间持写锁；
+# 此时任何写操作（打开档案要写审计、改档、加备注）会等满 `busy_timeout`
+# 后抛 `sqlite3.OperationalError: database is locked`，FastAPI 未捕获 → 500。
+# 实测：另一个连接持锁时，点开档案要等 5.5 秒然后 500。
+#
+# 这不是"服务器内部错误"，是**暂时忙**，应当是 503 + Retry-After，
+# 让前端能说人话（"系统正在后台整理数据，请稍等几秒重试"）而不是弹一串英文。
+@app.exception_handler(sqlite3.OperationalError)
+async def _sqlite_busy_handler(request: Request, exc: sqlite3.OperationalError):
+    msg = str(exc).lower()
+    if "locked" in msg or "busy" in msg:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "detail": "数据库正忙（后台正在整理数据），请等几秒后重试",
+                "retryable": True,
+                "hint": "若反复出现，检查是否同时开了多个工作台窗口；"
+                        "也可以用托盘菜单「退出」彻底关闭后只开一个。",
+            },
+            headers={"Retry-After": "3"},
+        )
+    return JSONResponse(
+        status_code=500,
+        content={"ok": False, "detail": f"数据库错误：{exc}"},
+    )
 
 
 # ---- 本机来源校验（防 DNS rebinding / 本地 CSRF）----
@@ -367,7 +443,16 @@ def _settings(conn) -> dict:
 
 
 def _auth_enabled() -> bool:
-    return os.environ.get("TP_AUTH", "").strip().lower() in ("1", "true", "on", "yes")
+    """是否启用账号登录。
+
+    v3.0.3 起**默认开启**（原先是"设了 TP_AUTH=1 才开"，等于默认裸奔：
+    任何能打开 127.0.0.1:8756 的人都是全权限 HR）。
+    关掉的办法：`TP_AUTH=0` —— 留给单机自用/排障场景，需要显式写明。
+    """
+    raw = os.environ.get("TP_AUTH")
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() not in ("0", "false", "off", "no")
 
 
 def _session(x_tp_token: str | None, x_tp_role: str | None) -> dict:
@@ -450,6 +535,31 @@ def index_v2() -> Response:
     return resp
 
 
+@app.get("/api/ping")
+def ping():
+    """**实例身份探针**：O(1)、不查库、不鉴权（v3.1.12）。
+
+    为什么必须单独做一个（现场事故 2026-10-28）：
+    启动器靠"探测本机某个端口上是不是自己在跑"来保证**单实例**。
+    原来它探的是 `/api/meta` —— 而那个接口会装配岗位、本体、邮箱配置等
+    一整套元数据，742 人库实测 **585~1584 ms**，
+    而启动器的探测超时写的是 **0.6 秒**。
+    于是"已有实例"**永远认不出来** → 每次双击都起一份新的 →
+    端口被一路吃到 8782 → 每份都在跑启动钩子抢写锁 →
+    现场日志里 `database is locked` 出现 76 次。
+
+    这个端点只回产品名与进程信息，几毫秒返回；
+    `webapp_launcher._is_our_instance` 优先用它，探不到再退回 `/api/meta`
+    （兼容"旧版本实例还在跑"的场景）。
+    """
+    return JSONResponse(
+        # no-store：这是"本机有没有人在跑"的实时判断，缓存会让判断失真
+        {"ok": True, "product": "HRAgent", "ui_build": PRODUCT_VERSION,
+         "pid": os.getpid()},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/api/health")
 def health() -> dict:
     conn = db.connect(DB_PATH)
@@ -463,6 +573,67 @@ def health() -> dict:
 class LoginReq(BaseModel):
     username: str
     password: str
+
+
+@app.get("/login-bg.jpg")
+def login_bg():
+    """登录页背景图（西北有色金属研究院大楼）。
+
+    单独做成一个可缓存的静态资源，**不内联进 HTML**：
+    图片 200KB，而登录页每次打开都会重新请求 HTML（`no-store`），
+    内联等于每次都传 200KB。这里给它一年的强缓存，只有换图时才变。
+    找不到文件就 404 —— 前端 CSS 里已经写了兜底渐变，不会出现白块。
+    """
+    from .paths import BASE
+    import os as _os
+    # 三种布局都要覆盖：
+    #   源码运行   → repo_src/app/login_bg.jpg        (BASE=repo_src)
+    #   打包运行   → _internal/app/login_bg.jpg       (BASE=_internal)
+    #   旧布局兜底 → <程序目录>/app/login_bg.jpg
+    for cand in (_os.path.join(BASE, "app", "login_bg.jpg"),
+                 _os.path.join(_os.path.dirname(BASE), "app", "login_bg.jpg"),
+                 _os.path.join(BASE, "login_bg.jpg")):
+        if _os.path.isfile(cand):
+            return FileResponse(cand, media_type="image/jpeg",
+                                headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    raise HTTPException(status_code=404, detail="背景图未随包分发")
+
+
+@app.get("/api/login-hint")
+def api_login_hint() -> dict:
+    """登录页要显示的提示。**不需要鉴权** —— 未登录时就要能读到它。
+
+    只暴露两件事：有没有账号、默认口令是不是还没改。
+    **绝不返回账号名列表**（那等于给暴力破解指路）；只给"首个管理员账号名"，
+    而且只在"口令还是默认值"时给 —— 一旦改过口令，这条提示就没意义了，
+    直接不返回（`first_run=False`）。
+    """
+    conn = db.connect(DB_PATH)
+    try:
+        users = db.list_users(conn)
+        if not users:
+            return {"first_run": True, "username": "",
+                    "hint": "还没有任何账号。请用管理员账号首次登录以完成初始化。"}
+        # 找出仍是默认口令的启用账号（只能靠 verify 比对，库里不存明文）
+        from .crypto import verify_password as _verify
+        for u in users:
+            if not u.get("active"):
+                continue
+            full = db.get_user(conn, u["username"]) or {}
+            if full.get("password_hash") and _verify(
+                    auth.DEFAULT_PASSWORD, full["password_hash"], full["salt"]):
+                return {
+                    "first_run": True,
+                    "username": u["username"],
+                    # 用 \n 分行（前端 `white-space:pre-line` 会保留）：
+                    # 账号、口令、提醒三件事挤在一行读起来很累。
+                    "hint": (f"首次使用\n账号：{u['username']}\n"
+                             f"口令：{auth.DEFAULT_PASSWORD}\n"
+                             f"（登录后请立即修改）"),
+                }
+        return {"first_run": False, "username": "", "hint": ""}
+    finally:
+        conn.close()
 
 
 @app.post("/api/login")
@@ -485,6 +656,262 @@ def api_logout(x_tp_token: str | None = Header(default=None, alias="X-TP-Token")
         if x_tp_token:
             db.delete_session(conn, x_tp_token)
         return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/api/me")
+def api_me(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+           x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """当前登录者。前端启动时先问这一条，决定"进界面"还是"弹登录页"。
+
+    **匿名直接 401**（而不是返回一个空对象）：前端靠状态码判断，
+    返回空对象会让"没登录"和"登录了但没权限"混成一种表现。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    if s.get("anonymous"):
+        raise HTTPException(status_code=401, detail="未登录或会话已失效")
+    # 显示名优先用账号表里的 display_name；**但老库的 display_name 存的是
+    # 角色名**（"招聘 HR"，v3.0.2 单角色时代建的），拿它当"用户名"显示会
+    # 出现顶栏写着"招聘 HR / 系统管理员"这种重复。所以：display_name 与
+    # 角色名相同就退回账号名。
+    conn = db.connect(DB_PATH)
+    try:
+        u = db.get_user(conn, s["username"]) or {}
+    finally:
+        conn.close()
+    disp = (u.get("display_name") or "").strip()
+    if not disp or disp == auth.role_label(s["role"]) or disp in (
+            v["label"] for v in auth.ROLES.values()):
+        disp = s["username"]
+    return {
+        "username": s["username"],
+        "display_name": disp,
+        "role": s["role"],
+        "role_label": auth.role_label(s["role"]),
+        "permissions": s["permissions"],
+        "auth_enabled": _auth_enabled(),
+    }
+
+
+# ============================================================
+# 账号管理（v3.0.3）
+# ============================================================
+# 数据库层（users/sessions 表、密码 scrypt 哈希、会话过期）早就写好了，
+# 但**一直没有 HTTP 入口** —— `manage_users` 权限声明了却没人调，
+# 账号只能靠 `ensure_seed_users` 建一个硬编码口令的种子。这里补齐。
+
+class UserCreateReq(BaseModel):
+    username: str
+    password: str
+    display_name: str = ""
+    role: str = "hr"
+
+
+class UserUpdateReq(BaseModel):
+    display_name: str | None = None
+    role: str | None = None
+    active: bool | None = None
+
+
+class PasswordReq(BaseModel):
+    old_password: str | None = None
+    new_password: str
+
+
+#: 口令最短长度。**不强制复杂度**（大小写/符号）：单人内网工具，
+#: 强制复杂度只会让 HR 把口令写在便签上，反而更不安全。
+MIN_PASSWORD_LEN = 8
+
+
+def _check_password(pw: str) -> None:
+    if len((pw or "")) < MIN_PASSWORD_LEN:
+        raise HTTPException(status_code=422,
+                            detail=f"口令至少 {MIN_PASSWORD_LEN} 位")
+
+
+def _session_username(s: dict) -> str:
+    """当前会话对应的**账号名**。本机模式下没有真实账号，返回空串。"""
+    return "" if s.get("anonymous") else str(s.get("username") or "")
+
+
+@app.get("/api/users")
+def api_users(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+              x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """账号列表 + 角色/权限矩阵（界面据此画管理页，不必自己维护一份）。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "manage_users")
+    conn = db.connect(DB_PATH)
+    try:
+        # 老库的 display_name 存的是角色名（"招聘 HR"），在账号表里当人名显示
+        # 会和角色列重复。与任一角色名相同的，一律退回账号名。
+        role_labels = {v["label"] for v in auth.ROLES.values()}
+        items = db.list_users(conn)
+        for u in items:
+            disp = (u.get("display_name") or "").strip()
+            if not disp or disp in role_labels:
+                u["display_name"] = u["username"]
+        return {
+            "items": items,
+            "roles": [{"key": k, "label": v["label"], "desc": v["desc"],
+                       "permissions": auth.permissions(k)}
+                      for k, v in auth.ROLES.items()],
+            "perm_labels": auth.PERM_LABELS,
+            "min_password_len": MIN_PASSWORD_LEN,
+            "me": _session_username(s),
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/api/users")
+def api_user_create(req: UserCreateReq,
+                    x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                    x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "manage_users")
+    name = (req.username or "").strip()
+    if not name or len(name) > 40:
+        raise HTTPException(status_code=422, detail="账号名必须 1-40 个字符")
+    if req.role not in auth.ROLES:
+        raise HTTPException(status_code=422,
+                            detail=f"角色只能是 {'/'.join(auth.ROLES)}")
+    _check_password(req.password)
+    conn = db.connect(DB_PATH)
+    try:
+        if db.get_user(conn, name):
+            raise HTTPException(status_code=409, detail=f"账号「{name}」已存在")
+        db.create_user(conn, name, req.password, req.role,
+                       (req.display_name or "").strip() or name)
+        db.add_audit(conn, "user", name, "create", "",
+                     f"{s['username']} 创建账号「{name}」（角色 {auth.role_label(req.role)}）",
+                     s["username"], s["role"])
+        return {"ok": True, "username": name}
+    finally:
+        conn.close()
+
+
+@app.patch("/api/users/{username}")
+def api_user_update(username: str, req: UserUpdateReq,
+                    x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                    x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """改显示名 / 角色 / 启用状态。
+
+    两条**防自锁**规则（这两个错误会让整个系统没人能管）：
+      ① 不能停用或降级**最后一个**启用中的管理员；
+      ② 不能停用自己当前登录的账号。
+    改角色或停用后**清掉该用户所有会话**，让新权限立刻生效。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "manage_users")
+    conn = db.connect(DB_PATH)
+    try:
+        user = db.get_user(conn, username)
+        if not user:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        if req.role is not None and req.role not in auth.ROLES:
+            raise HTTPException(status_code=422,
+                                detail=f"角色只能是 {'/'.join(auth.ROLES)}")
+        losing_admin = (user.get("role") == "admin" and user.get("active")
+                        and ((req.role is not None and req.role != "admin")
+                             or req.active is False))
+        if losing_admin and db.count_active_admins(conn) <= 1:
+            raise HTTPException(
+                status_code=409,
+                detail="这是最后一个启用中的管理员，不能再停用或降级——"
+                       "否则没人能管理账号。请先新建一个管理员。")
+        if req.active is False and username == _session_username(s):
+            raise HTTPException(status_code=409, detail="不能停用自己当前登录的账号")
+
+        changed = []
+        if req.display_name is not None:
+            disp = req.display_name.strip() or username
+            conn.execute("UPDATE users SET display_name = ? WHERE username = ?",
+                         (disp, username))
+            changed.append("显示名")
+        if req.role is not None and req.role != user.get("role"):
+            db.set_user_role(conn, username, req.role)
+            changed.append(f"角色→{auth.role_label(req.role)}")
+        if req.active is not None and bool(req.active) != bool(user.get("active")):
+            db.set_user_active(conn, username, bool(req.active))
+            changed.append("启用" if req.active else "停用")
+        # 角色或启用状态变了 → 踢掉旧会话，新权限立刻生效
+        kicked = 0
+        if req.role is not None or req.active is not None:
+            kicked = db.delete_user_sessions(conn, username)
+        if changed:
+            db.add_audit(conn, "user", username, "update", "",
+                         f"{s['username']} 修改账号「{username}」：{'、'.join(changed)}"
+                         + (f"（清除 {kicked} 个会话）" if kicked else ""),
+                         s["username"], s["role"])
+        return {"ok": True, "changed": changed, "sessions_cleared": kicked}
+    finally:
+        conn.close()
+
+
+@app.post("/api/users/{username}/password")
+def api_user_password(username: str, req: PasswordReq,
+                      x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                      x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """改口令。
+
+    **本人改自己的**：必须提供旧口令（防止别人借你的登录态改掉）。
+    **管理员改别人的**：不需要旧口令（那是重置）。
+    改完一律清该用户会话——包括**自己**的，所以前端要让用户重新登录。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    me = _session_username(s)
+    is_self = bool(me) and me == username
+    if not is_self:
+        require(s, "manage_users")
+    _check_password(req.new_password)
+    conn = db.connect(DB_PATH)
+    try:
+        user = db.get_user(conn, username)
+        if not user:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        if is_self:
+            if not auth.crypto.verify_password(req.old_password or "",
+                                               user["password_hash"], user["salt"]):
+                raise HTTPException(status_code=403, detail="原口令不正确")
+        db.set_user_password(conn, username, req.new_password)
+        kicked = db.delete_user_sessions(conn, username)
+        db.add_audit(conn, "user", username, "set_password", "",
+                     f"{s['username']} 修改了账号「{username}」的口令"
+                     f"（清除 {kicked} 个会话）", s["username"], s["role"])
+        return {"ok": True, "sessions_cleared": kicked, "relogin": is_self}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/users/{username}")
+def api_user_delete(username: str,
+                    x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                    x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """删除账号（软删：置 active=0 并清会话，**不物理删行**）。
+
+    为什么不真删：审计日志里到处是 `operator='zhangsan'`，
+    把人从 users 表抹掉会让历史记录变成"查无此人"，反而妨碍追责。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "manage_users")
+    if username == _session_username(s):
+        raise HTTPException(status_code=409, detail="不能删除自己当前登录的账号")
+    conn = db.connect(DB_PATH)
+    try:
+        user = db.get_user(conn, username)
+        if not user:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        if user.get("role") == "admin" and user.get("active") \
+                and db.count_active_admins(conn) <= 1:
+            raise HTTPException(status_code=409,
+                                detail="这是最后一个启用中的管理员，不能删除")
+        db.set_user_active(conn, username, False)
+        kicked = db.delete_user_sessions(conn, username)
+        db.add_audit(conn, "user", username, "delete", "",
+                     f"{s['username']} 停用了账号「{username}」（保留记录供审计追溯）",
+                     s["username"], s["role"])
+        return {"ok": True, "sessions_cleared": kicked}
     finally:
         conn.close()
 
@@ -1060,24 +1487,50 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
         conn.close()
 
 
+#: 岗位 JD / 技能分类的短缓存。两者都是**低频变更的字典数据**（改岗位、改技能
+#: 分类才变），却每次打开档案都要全量查一遍并构造对象。缓存 5 秒足以吸收
+#: "连续点开好几个人"这个最常见的操作，又短到改了岗位能立刻看到。
+#: 键里带库路径：测试/多库场景不会串。
+_JD_CACHE: dict[str, tuple[float, dict]] = {}
+_CATS_CACHE: dict[str, tuple[float, list]] = {}
+_DICT_TTL = 5.0
+
+
 def _jd_map(conn) -> dict:
-    """岗位 JD 映射（整页查一次，不逐人查）。"""
-    return {j["id"]: {"id": j["id"], "title": j.get("title") or "",
-                      "jd_json": j.get("jd_json") or {}}
-            for j in db.list_jobs(conn, include_inactive=True)}
+    """岗位 JD 映射（整页查一次，不逐人查；5 秒内复用）。"""
+    now = time.monotonic()
+    hit = _JD_CACHE.get(DB_PATH)
+    if hit and now - hit[0] < _DICT_TTL:
+        return hit[1]
+    val = {j["id"]: {"id": j["id"], "title": j.get("title") or "",
+                     "jd_json": j.get("jd_json") or {}}
+           for j in db.list_jobs(conn, include_inactive=True)}
+    _JD_CACHE[DB_PATH] = (now, val)
+    return val
 
 
 def _skill_cats(conn) -> list:
-    """技能分类（整页查一次）。失败返回空列表——专业方向显示不出来不影响其它内容。"""
+    """技能分类（整页查一次；5 秒内复用）。失败返回空列表——不影响其它内容。"""
+    now = time.monotonic()
+    hit = _CATS_CACHE.get(DB_PATH)
+    if hit and now - hit[0] < _DICT_TTL:
+        return hit[1]
     try:
-        return db.skill_categories(conn)
+        val = db.skill_categories(conn)
     except Exception:                                        # noqa: BLE001
         return []
+    _CATS_CACHE[DB_PATH] = (now, val)
+    return val
 
 
-def _detail_flat_item(conn, cid: int) -> dict:
-    """把完整档案的"人 + 最新投递"压成与列表同形状的一条（给 _tier_detail_of 用）。"""
-    d = db.candidate_detail(conn, cid) or {}
+def _detail_flat_item(conn, cid: int, detail: dict | None = None) -> dict:
+    """把完整档案的"人 + 最新投递"压成与列表同形状的一条（给 _tier_detail_of 用）。
+
+    `detail` 可由调用方传入**已经查好的**完整档案。原来这里无条件
+    `db.candidate_detail(conn, cid)` 再查一遍 —— 详情接口于是把同一份档案
+    装配了两次（含 5 条 SQL、解密、文档列表），点开每个人的成本凭空翻倍。
+    """
+    d = detail if detail is not None else (db.candidate_detail(conn, cid) or {})
     apps = d.get("applications") or []
     a = next((x for x in apps if x.get("job_id")), apps[0] if apps else {})
     return {
@@ -1174,7 +1627,7 @@ def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias=
             # 档位来源明细（与列表同一份口径）：完整档案是 HR 逐条核对的地方，
             # 这里没有它就只能看到档位=B却不知道凭什么（v1.12 修）
             # 与列表同一份口径：直接读库算明细（不再借工具重算）
-            "tier_detail": _tier_detail_of(_detail_flat_item(conn, cid),
+            "tier_detail": _tier_detail_of(_detail_flat_item(conn, cid, d),
                                            _jd_map(conn), _skill_cats(conn)),
             "skills": d.get("skills"),
             "tags": d.get("tags"),
@@ -1244,8 +1697,17 @@ def api_candidate_reanalyze(cid: int, full: bool = True, req: dict | None = None
             _jd, _tiers = _jd_tiers()
             # 注意：模块级别名是 `ingest_mod`（`_ing` 只是别的函数里的局部导入，
             # 在这里用会 NameError —— 上次只测了函数、没测接口，漏了这个）
-            r = ingest_mod.reanalyze_full(conn, mb.load_config(), _jd, _tiers, cid,
-                                          use_llm=True, llm_conf=_conf)
+            try:
+                r = ingest_mod.reanalyze_full(
+                    conn, mb.load_config(), _jd, _tiers, cid,
+                    use_llm=True, llm_conf=_conf,
+                )
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "error": f"完整重新分析失败：{type(exc).__name__}: {exc}",
+                    "hint": "请检查模型配置、网络代理与证书；也可先改用只刷新分析文本。",
+                }
             if not r.get("ok"):
                 return r
             r["insight"] = db.get_insight(conn, cid)
@@ -1777,23 +2239,12 @@ def api_candidate_note(cid: int, req: dict,
         conn.close()
 
 
-def _end_open_applications(conn, cid: int, s: dict) -> int:
-    """把某候选人**进行中**的投递置为「已结束」（归档联动用），返回改动条数。
-
-    终态不动：已在终点的不再重复写。终态集合从配置取（v1.29）——
-    原来这里写死 `("已入职", "已结束")`，去掉「已入职」后不同步改的话，
-    历史遗留的「已入职」会被当成"进行中"，每次归档都被重写成"已结束"。
-    """
-    n = 0
-    _terminal = set(stages_mod.terminal_stages())
-    rows = conn.execute("SELECT id, stage FROM applications WHERE candidate_id = ?",
-                        (int(cid),)).fetchall()
-    for a in rows:
-        if (a["stage"] or "") in _terminal:
-            continue
-        db.set_application_stage(conn, a["id"], "已结束", s["username"], s["role"])
-        n += 1
-    return n
+# v3.0.3：`_end_open_applications` 已删除。
+# 它的职责（归档时把进行中的投递置为「已结束」）在 `db.set_candidate_archived`
+# 里用一条批量 UPDATE 做完了，而且更正确：那条 SQL 用 `stage NOT IN (终态)`
+# 过滤，一次事务、一条审计（auto_end_stage）。这里原来又逐条调
+# `set_application_stage` 重做一遍 —— 同一条投递结束两次、审计写两条，
+# 每条还各自开事务（UPDATE + add_audit + 两次查询），是归档卡顿的主因。
 
 
 @app.post("/api/candidates/{cid}/archive")
@@ -1808,9 +2259,13 @@ def api_candidate_archive(cid: int,
         out = db.set_candidate_archived(conn, cid, True, s["username"], s["role"])
         if not out:
             raise HTTPException(status_code=404, detail="未找到该候选人")
-        # 归档即结束流程：把还在推进中的投递一并置为「已结束」。
-        # 否则人从人才库消失了，投递却还挂在「初面」上，管道视图会永远在催它。
-        ended = _end_open_applications(conn, cid, s)
+        # 归档即结束流程：**db 层已经做过了**（`set_candidate_archived` 里那条
+        # 带 `stage NOT IN (终态)` 的批量 UPDATE，并写了 auto_end_stage 审计）。
+        # v3.0.3 删掉了这里原先再调一次的 `_end_open_applications`：
+        # 它逐条 `set_application_stage`，每条都 UPDATE + add_audit + get_application
+        # + count_pending_applications + get_candidate —— 同一条投递被结束两次、
+        # 审计写两条，而且每次写都是一个可以卡住 UI 的独立事务。
+        ended = int(out.get("_ended_applications") or 0)
         return {"ok": True, "id": cid, "archived": True, "ended_applications": ended,
                 "note": "已归档（移入「归档」页，不再在人才库与检索中展示）"
                         + (f"，并自动把 {ended} 条进行中的投递置为「已结束」。"
@@ -2280,51 +2735,100 @@ def _startup_purge_task() -> None:
                   f"{out['days']} 天的对话运行记录（保留期内已无人恢复）")
     except Exception as exc:                               # noqa: BLE001
         print(f"[purge] 对话启动清理失败（不影响使用）：{exc}", file=sys.stderr)
-    # 顺手把库内技能分类对齐到当前本体（v1.6）：专业大类匹配依赖 skills.category，
-    # 而 upsert_skill 不会改写已存在技能的分类，所以本体新增技能（如 Java/Spring Boot）后
-    # 必须同步一次，否则老条目仍归在「其他」里，大类匹配对软件岗就是失真的。
-    # 幂等且只改分类列，放在 route_pending 之前——重算抽取出来的技能也按新分类落库。
-    try:
-        conn = db.connect(DB_PATH)
+    # ---- v3.0.2（关键性能修复）：**启动钩子必须立刻返回** ----
+    # uvicorn 的 `startup()` 是 `await self.lifespan.startup()` **之后**才
+    # `loop.create_server(...)` 绑端口（见 uvicorn/server.py:116 与 182）。
+    # 也就是说：钩子里做多少事，端口就晚多久开始监听。
+    #
+    # 实测（743 人库）：下面这段"顺手修数据"要跑
+    #     route_pending      6.9 秒
+    #     refresh_skills    34.9 秒   ← 每条投递重跑一次规则抽取
+    #     ─────────────────────────
+    #     合计约 42 秒
+    # 而 webapp_launcher.py 只等 12 秒（`deadline = time.time() + 12`），
+    # 等不到就判定"这个端口起不来"，`should_exit=True` + `join(timeout=3)`，
+    # 然后去试下一个端口 —— 但被放弃的线程**仍在跑钩子**，跑完照样绑端口成功。
+    # 结果：110 个候选端口 × 15 秒 ≈ 27 分钟的"双击没反应"，
+    # 并且每个被放弃的实例都在跑 refresh_skills 抢写锁，用户点开档案
+    # （要写一条审计）等满 busy_timeout 后抛 `database is locked` → HTTP 500。
+    #
+    # 所以：**把修数据挪到后台线程**。它本来就"幂等、失败只打印、
+    # 不影响使用"，没有任何理由挡住端口绑定。
+    def _repair() -> None:
+        # ---- v3.0.3：先等一会儿再动手，别和用户抢锁 ----
+        # 线程化已经解决了"挡住端口绑定"，但**没有解决写锁竞争**：
+        # 用户双击图标 → 2 秒后页面就绪 → 立刻点开一个人的档案（要写审计），
+        # 而此刻 refresh_skills 正在逐条重算 2281 条投递（实测约 34 秒），
+        # 每次 persist_skills 都 commit → 写锁反复被占。
+        # 用户那边就是：点开档案等满 busy_timeout 5 秒，然后 503「数据库正忙」。
+        #
+        # 这些都是**存量历史数据**的修补，晚几十秒修完没有任何业务损失；
+        # 而"刚打开软件就点不动"是每天都会遇到的。所以让路：
+        #   · 正常启动先睡 45 秒（够用户完成"打开→看第一眼→点第一个人"）；
+        #   · 用 Event.wait 而不是 sleep，将来要"退出时立刻取消"能直接 set()。
+        _REPAIR_DELAY.wait(float(os.environ.get("TP_REPAIR_DELAY") or 45))
+        # 顺手把库内技能分类对齐到当前本体（v1.6）：专业大类匹配依赖 skills.category，
+        # 而 upsert_skill 不会改写已存在技能的分类，所以本体新增技能（如 Java/Spring Boot）后
+        # 必须同步一次，否则老条目仍归在「其他」里，大类匹配对软件岗就是失真的。
+        # 幂等且只改分类列，放在 route_pending 之前——重算抽取出来的技能也按新分类落库。
         try:
-            from .pipeline import normalize as _nz
-            sync = db.sync_skill_categories(conn, _nz.ontology_categories())
-        finally:
-            conn.close()
-        if sync.get("changed"):
-            print(f"[ontology] 技能分类同步：更新 {sync['changed']} 条"
-                  f"（库内共 {sync['total']} 条）")
-    except Exception as exc:                               # noqa: BLE001
-        print(f"[ontology] 技能分类同步失败（不影响使用）：{exc}", file=sys.stderr)
-    # 顺手把存量「待指定」投递的建议岗位清理一次：老库里 `suggested_job_id` 是按
-    # "默认尺子打分最高"给的，而加权打分已在 v1.12 删除——这些旧建议不再有依据。
-    # **启动路径不调模型**（use_llm=False）：启动要快，不能为 N 条存量投递各调一次模型；
-    # 这里只把失效的旧建议清成"待指定"，HR 需要重新判断时点界面上的按钮（那次才调模型）。
-    try:
-        conn = db.connect(DB_PATH)
+            conn = db.connect(DB_PATH)
+            try:
+                from .pipeline import normalize as _nz
+                sync = db.sync_skill_categories(conn, _nz.ontology_categories())
+            finally:
+                conn.close()
+            if sync.get("changed"):
+                print(f"[ontology] 技能分类同步：更新 {sync['changed']} 条"
+                      f"（库内共 {sync['total']} 条）")
+        except Exception as exc:                           # noqa: BLE001
+            print(f"[ontology] 技能分类同步失败（不影响使用）：{exc}", file=sys.stderr)
+        # 顺手把存量「待指定」投递的建议岗位清理一次：老库里 `suggested_job_id` 是按
+        # "默认尺子打分最高"给的，而加权打分已在 v1.12 删除——这些旧建议不再有依据。
+        # **启动路径不调模型**（use_llm=False）：启动要快，不能为 N 条存量投递各调一次模型；
+        # 这里只把失效的旧建议清成"待指定"，HR 需要重新判断时点界面上的按钮（那次才调模型）。
         try:
-            rep = regrade.route_pending(conn, _load(TIERS_PATH), use_llm=False)
-        finally:
-            conn.close()
-        if rep.get("changed"):
-            print(f"[route] 已清理 {rep['changed']} 条「待指定」投递的失效岗位建议"
-                  f"（在招岗位 {rep['open_jobs']} 个）；需要重新判断请点界面上「重新判断建议岗位」")
-    except Exception as exc:                               # noqa: BLE001
-        print(f"[route] 存量岗位建议重算失败（不影响使用）：{exc}", file=sys.stderr)
-    # 再兜底刷一次已归岗投递的技能清单（v1.6）：技能按「本体 + 岗位 JD 词表」抽取，
-    # 早期已归岗的投递没跟上刷新，会出现"命中里有 Java、技能栏里没有"的自相矛盾（缺陷 #47）。
-    # 幂等且不动档位与分数，所以放启动里跑是安全的；失败只打印、不阻断启动。
-    try:
-        conn = db.connect(DB_PATH)
+            conn = db.connect(DB_PATH)
+            try:
+                rep = regrade.route_pending(conn, _load(TIERS_PATH), use_llm=False)
+            finally:
+                conn.close()
+            if rep.get("changed"):
+                print(f"[route] 已清理 {rep['changed']} 条「待指定」投递的失效岗位建议"
+                      f"（在招岗位 {rep['open_jobs']} 个）；需要重新判断请点界面上「重新判断建议岗位」")
+        except Exception as exc:                           # noqa: BLE001
+            print(f"[route] 存量岗位建议重算失败（不影响使用）：{exc}", file=sys.stderr)
+        # 再兜底刷一次已归岗投递的技能清单（v1.6）：技能按「本体 + 岗位 JD 词表」抽取，
+        # 早期已归岗的投递没跟上刷新，会出现"命中里有 Java、技能栏里没有"的自相矛盾（缺陷 #47）。
+        # 幂等且不动档位与分数，所以放启动里跑是安全的；失败只打印、不阻断启动。
+        #
+        # ⚠️ v3.1.12：**库没变就别重跑**。
+        # 这一步是 O(投递数) 的规则重抽 + 逐条写库（现场 390 条投递 → 8653 项技能，
+        # 实测 20~35 秒；每条 `link_skill` 都 commit）。而它修的是**已经发生过的**
+        # 历史不一致 —— 库不变时重跑一遍结果完全一样，纯属白烧磁盘与写锁。
+        # 现场一份日志里 `database is locked` 出现 **76 次**，主要就是多个实例
+        # 各自在跑这一步。所以用"库指纹"卡住：指纹一致就跳过。
         try:
-            rsk = regrade.refresh_skills(conn, operator="startup", role="system")
-        finally:
-            conn.close()
-        if rsk.get("refreshed"):
-            print(f"[skills] 按对应岗位刷新了 {rsk['refreshed']} 条投递的技能清单"
-                  f"（写入 {rsk['skills_written']} 项；档位与分数未改动）")
-    except Exception as exc:                               # noqa: BLE001
-        print(f"[skills] 技能清单刷新失败（不影响使用）：{exc}", file=sys.stderr)
+            conn = db.connect(DB_PATH)
+            try:
+                sig = _repair_signature(conn)
+                prev = db.get_setting(conn, SKILLS_REFRESH_KEY, None)
+                if sig is not None and prev == sig:
+                    print("[skills] 库内容未变，跳过技能清单重算"
+                          "（省下整轮规则重抽与逐条写库）")
+                else:
+                    rsk = regrade.refresh_skills(conn, operator="startup", role="system")
+                    if rsk.get("refreshed"):
+                        print(f"[skills] 按对应岗位刷新了 {rsk['refreshed']} 条投递的技能清单"
+                              f"（写入 {rsk['skills_written']} 项；档位与分数未改动）")
+                    if sig is not None:
+                        db.set_setting(conn, SKILLS_REFRESH_KEY, sig)
+            finally:
+                conn.close()
+        except Exception as exc:                           # noqa: BLE001
+            print(f"[skills] 技能清单刷新失败（不影响使用）：{exc}", file=sys.stderr)
+
+    threading.Thread(target=_repair, name="startup-repair", daemon=True).start()
     threading.Thread(target=_loop, daemon=True, name="tp-purge").start()
 
 
@@ -3180,14 +3684,7 @@ def api_document_file(did: int, inline: int = 0, token: str | None = None,
     # 会静默返回 False —— 症状是"原件明明在磁盘上，页面却说不在"。
     # 这正是"带旧数据 + 点在线查看简历就报错"的根因。
     if not _paths.lp_isfile(path):
-        # 同样的口径：说清"缺什么"。原件不在，多半是**换机/换目录**之后
-        # 库里的旧绝对路径失效（数据已随迁移搬到新数据根，但这条记录没跟上）。
-        detail = f"原件不在磁盘上：{path}"
-        if not os.path.isdir(os.path.dirname(path)):
-            detail = (f"原件所在目录不存在：{os.path.dirname(path)}"
-                      "（换机器或换目录后旧路径会失效，请在「导入与来源」"
-                      "里重新指定来源目录）")
-        raise HTTPException(status_code=404, detail=detail)
+        raise HTTPException(status_code=404, detail=f"原件不在磁盘上：{path}")
 
     name = d.get("file_name") or os.path.basename(real)
     disposition = "inline" if inline else "attachment"
@@ -3226,13 +3723,6 @@ def _source_file_path(name: str) -> str:
     if os.path.dirname(real) != folder:
         raise HTTPException(status_code=403, detail="文件不在允许的来源目录内，已拒绝")
     if not _paths.lp_isfile(real):
-        # 说清"缺什么"而不是只说"文件不存在"：来源目录本身不在了，
-        # 是一回事（改配置里的路径即可）；文件被移走是另一回事。
-        if not os.path.isdir(folder):
-            raise HTTPException(
-                status_code=404,
-                detail=f"来源目录不存在：{folder}（请在「系统配置 → 导入与来源」"
-                       f"里重新指定来源目录，或把简历放回该目录）")
         raise HTTPException(status_code=404, detail=f"文件不存在：{base}")
     return real
 
@@ -4430,7 +4920,11 @@ def api_jobs(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
     require(s, "read")
     conn = db.connect(DB_PATH)
     try:
-        return {"count": len(db.list_jobs(conn)), "items": db.list_jobs(conn, include_inactive=True)}
+        # v3.0.3：原来这里是 `len(db.list_jobs(conn))` + `db.list_jobs(conn, ...)`，
+        # **同一份岗位表被完整装配两遍**（每个岗位各跑 1 次部门查询 + 1 次投递计数，
+        # 是典型 N+1）。`count` 直接由 items 长度得出即可。
+        items = db.list_jobs(conn, include_inactive=True)
+        return {"count": len(items), "items": items}
     finally:
         conn.close()
 

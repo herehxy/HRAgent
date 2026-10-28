@@ -260,21 +260,34 @@ def apply_tags(conn, cid: int, cand: dict, channel: str, text: str) -> list[str]
 
 
 def persist_skills(conn, cid: int, cand: dict, doc_id: int | None) -> dict:
-    """把归一后的技能写入本体关联表。含未核验项，但 `verified` 标记区分。"""
+    """把归一后的技能写入本体关联表。含未核验项，但 `verified` 标记区分。
+
+    v3.0.3 性能：**整个循环只提交一次**。
+    原来 `upsert_skill` / `link_skill` 各自 `commit()`，一个人十几项技能
+    = 十几次独立写事务。启动时 `refresh_skills` 要跑几千条投递，
+    于是写锁被反复获取/释放几千次 —— 用户在这期间的任何写操作
+    （打开档案写审计、改档）都会撞上 busy_timeout。
+    这既是启动慢的主因，也是"刚打开就点不动"的主因。
+
+    另外删掉了循环里的 `db.find_skill(conn, canon)`：
+    `upsert_skill` 刚刚用**同一个 canon** 建/取过这条记录，
+    再查一次必然是命中（多一次 SELECT，结果恒等于"在"）。
+    """
     stat = {"verified": 0, "unverified": 0, "skills_in_ontology": 0}
-    for item in (cand.get("skill_detail") or []):
-        canon = item.get("canonical")
-        if not canon:
-            continue
-        sid = db.upsert_skill(conn, canon, item.get("category", "其他"))
-        if db.find_skill(conn, canon):
-            stat["skills_in_ontology"] += 1
+    items = [it for it in (cand.get("skill_detail") or []) if it.get("canonical")]
+    if not items:
+        return stat
+    for item in items:
+        canon = item["canonical"]
+        sid = db.upsert_skill(conn, canon, item.get("category", "其他"), commit=False)
+        stat["skills_in_ontology"] += 1
         db.link_skill(conn, cid, sid, item.get("level"), item.get("evidence"),
-                      doc_id, item.get("source", "rule"))
+                      doc_id, item.get("source", "rule"), commit=False)
         if item.get("verified"):
             stat["verified"] += 1
         else:
             stat["unverified"] += 1
+    conn.commit()
     return stat
 
 
@@ -1204,14 +1217,18 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
                     conn, cfg, _other_atts, candidate_id=_mail_cid, message_id=mid,
                     received_at=mail.get("received_at"))
                 report["other_attachments"] += len(_other_atts)
+                _notes = [f"{n}已归档"
+                          + ("" if _mail_cid else "（本封没有可归属的简历，暂存未挂人）")
+                          for n in [a.get("filename", "") for a in _other_atts]]
+                # 口径（业务方 2026-10-27 明确）：**一封邮件只建一个档案**。
+                # 同封邮件里的其余文件一律视为这个人的补充材料，挂在他的
+                # 「其他附件」下。真有两个人的简历被塞进同一封邮件，
+                # 那是投递方的问题 —— 不做自动拆分，也不额外解析去猜。
                 report["details"].append({
                     "file": f"（本封共 {len(_other_atts)} 个非简历附件）",
                     "status": "other_saved",
                     "candidate_id": _mail_cid,
-                    "notes": [f"{n}已归档"
-                              + ("" if _mail_cid else "（本封没有可归属的简历，暂存未挂人）")
-                              for n in
-                              [a.get("filename", "") for a in _other_atts]],
+                    "notes": _notes,
                 })
             report["added"] += added
             report["merged_versions"] += mm
@@ -1443,12 +1460,29 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                         "other_attachments": 0, "other_saved": 0, "details": []}
         total = 0
         done = 0
+        mailbox_total = 0
         try:
             for kind, item in mb.iter_imap(cfg, cursor, limit):
                 if kind == "total":
                     total = item
+                    # v3.1.2：区分"邮箱里一共多少封"与"这次要收多少封"。
+                    # 原来只有前者一个数（其实是后者），界面显示成邮箱总数，
+                    # 于是"第一次 800、第二次 3"看起来像邮件忽多忽少。
+                    if mailbox_total:
+                        msg = (f"邮箱共 {mailbox_total} 封，本次新增 {total} 封，开始收取…"
+                               if total else
+                               f"邮箱共 {mailbox_total} 封，没有新邮件")
+                    else:
+                        msg = (f"已发现 {total} 封新邮件，开始收取…" if total
+                               else "没有新邮件")
                     update_progress(progress_tid, total=total,
-                                    message=f"已发现 {total} 封邮件，开始收取…")
+                                    message=msg)
+                    report["mailbox_total"] = mailbox_total
+                    report["new_mails"] = total
+                    continue
+                if kind == "mailbox_total":
+                    mailbox_total = item
+                    report["mailbox_total"] = mailbox_total
                     continue
                 if stop_requested(progress_tid):
                     stopped = True
