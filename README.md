@@ -44,11 +44,27 @@ flowchart LR
 | 👥 | **账号与权限** | `hr` / `admin` / `viewer` 三角色 + 13 个权限点，登录默认开启 |
 | 🚫 | **合规写进代码** | 性别只取简历明写标签、永不参与评分；民族/婚育/健康等字段在进模型**之前**被替换 |
 
-## 三条反常识的设计
+## 🤖 智能助手：能力全给，写权限不给
+
+一句人话下达指令，模型自己选工具、自己编排调用——但**任何写动作都停在「待确认提案」**，你点确认才落库。
+
+| | 数字 | 说明 |
+|---|---|---|
+| 工具集 | **27 个** | 可调用 20 个（检索查看 12 / 计算生成 3 / **写类 5**），另 7 个直接禁用 |
+| 直接写库 | **0 条** | 写类工具只返回 `pending_confirmation`，并明确要求模型「尚未生效，不要声称已完成」 |
+| 禁用清单 | 7 个 | 对外发送、删除、淘汰、导出外网——在**工具层**就拒绝，不靠提示词约束 |
+| 调用循环 | 最多 5 轮 | 超轮强制收敛；问题、工具链、轮数、token、耗时全写 `agent_runs` |
+| 模型不可用 | 降级不失效 | 走确定性规则路由，调**同一批工具**作答，工具链同样留痕 |
+
+听得懂的话，例如：「还有哪些人没归岗？」「把待归岗的人归到数字化工程师」「把去年投过的人归档」。
+
+**三条反常识的设计**
 
 1. **反幻觉落到字节级**——每条技能必须定位到简历原文片段，抽不到证据就 `verified=0`、不计入岗位命中。模型说"他会 Java"，系统先问"原文哪一行"。
 2. **说"我判不了"是合格答案**——候选人与所有在招岗位零交集时，如实报"尚无对应岗位"，不套一把不对的尺子。
 3. **某些事永远不交给对话**——改模型配置、改来源目录这类有副作用又要审计凭证的操作，助手会说明它不接，把你引到对应页面自己点。
+
+> 工具清单、调用循环与降级路由的实现见 `app/agent/`（`llm.py` / `tools.py` / `loop.py`）。
 
 ---
 
@@ -76,7 +92,7 @@ python cli.py selftest             # 端到端自检，近 400 条真实调用�
 
 ### 第一次使用建议顺序
 
-`init` → `serve` →「岗位管理」建岗位（只写岗位名 + JD）→「邮箱配置」填 IMAP 并点测试连接 →
+`init` → `serve` → 「岗位管理」建岗位（只写岗位名 + JD）→「邮箱配置」填 IMAP 并点测试连接 →
 点「收取简历」→ 在「人才库」看结果。
 
 > `TP_DB_PATH=/tmp/demo.db python cli.py serve` 可指向另一个库，演练时不碰真实人才库。
@@ -138,28 +154,18 @@ config/mailbox.json   收发信配置     config/imap.secret      IMAP 口令（
 ## 目录结构
 
 ```
-cli.py                命令行入口（init / mail / ingest / serve / selftest / doctor …）
-webapp_launcher.py    桌面版启动器：单实例、端口顺延、托盘、自动开浏览器
-build_release.py      打包脚本（PyInstaller，含安装器与热更新包）
-app/
-  db.py               17 张表、迁移、审计、统计、提案、岗位
-  ingest.py           入库编排：去重 → 归档 → 解析兜底 → 归岗 → 判档
-  regrade.py          改 JD 后按新尺子重算已有投递（默认预演）
-  search.py           技能召回 + 语义召回（含哈希向量兜底）
-  crypto.py           AES-256-GCM、盲索引、口令散列、脱敏
-  auth.py             三角色 13 权限点
-  actions.py          提案执行 —— **唯一真正写库的路径**
-  server.py           FastAPI 路由
-  ui_v2.py            单页工作台（原生 JS，无 CDN、无构建）
-  avatar.py           证件照抽取      export.py   CSV 导出
-  pipeline/           san 合规屏蔽 · parse 解析 · extract 抽取 · normalize 本体归一
-                      majors 学科 · domains 领域包 · tier 分级 · analyze 模型增强
-  agent/              llm 模型通道 · tools 工具集 · loop 调用循环与降级 · proactive 主动提示
-config/               岗位尺子 / 本体 / 学科 / 院校 / 模型 / 邮箱
-tests/                selftest（端到端断言）· ui_probe（界面截图验收）· make_fixtures
-                      + 安装器迁移、启动链路、性能等专项回归
-tools/                打包、升级器、界面 JS 校验、验收脚本
-docs/                 设计方案、打包与热更新、升级指南、使用指南
+cli.py            命令行入口
+app/              db 库与迁移 / ingest 入库编排 / regrade 重算 / search 检索
+                  crypto 加解密 / auth 权限 / actions 提案执行(唯一写库路径)
+                  server FastAPI 路由 / ui_v2 单页工作台(原生 JS，无 CDN 无构建)
+                  pipeline/  san 合规屏蔽 · parse 解析 · extract 抽取 · normalize 本体归一
+                             majors 学科 · domains 领域包 · tier 分级 · analyze 模型增强
+                  agent/     llm 模型通道 · tools 工具集 · loop 调用循环与降级
+config/           岗位尺子 / 本体 / 学科 / 院校 / 模型 / 邮箱
+tests/            selftest（端到端断言）· ui_probe（界面截图验收）· make_fixtures
+data/             workbench.db · archive 原件 · removed 回收 · backup 备份
+installer/        安装器源码（setup_wizard 向导 + make_setup 打包）
+packaging/        桌面版打包脚本与 PyInstaller spec
 ```
 
 ---
@@ -168,12 +174,9 @@ docs/                 设计方案、打包与热更新、升级指南、使用�
 
 | 文档 | 给谁看 |
 |---|---|
-| [使用指南](docs/使用指南.md) | HR：装、导入、找人、改档案、写邮件、常见问题 |
+| [使用指南](使用指南.md) | HR：装、导入、找人、改档案、写邮件、常见问题 |
 | [功能清单](功能清单.md) | HR / 业务：功能边界、红线、界面说明 |
-| [规划设计方案](docs/人才库智能体-规划设计方案.md) | 开发：整体设计取舍 |
-| [打包与热更新方案](docs/打包与热更新方案.md) | 开发：发布链路 |
-| [升级指南 2.0.0 → v2.2.5](docs/升级指南-2.0.0到v2.2.5.md) | 运维：老库升级步骤 |
-| [完整版设计说明](docs/README-完整版.md) | 开发：数据模型、智能体治理、实测数据、逐项论证 |
+| [完整版设计说明](README-完整版.md) | 开发：数据模型、智能体治理、实测数据、逐项论证 |
 
 ---
 

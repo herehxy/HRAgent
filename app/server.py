@@ -1111,12 +1111,16 @@ INTERVIEW_PATH = _cfg_path("interview.json")
 
 #: 兜底字典：config/interview.json 缺失时用这份，保证下拉框**不会是空的**
 #: （空下拉框比没有下拉框更糟——HR 会以为功能坏了）。
+#: v4.0.0：字典**不再内置默认值**。以前这里写死了「人事处 / 财务处 /
+#: 创新大楼1519会议室 / 张老师 029-8888XXXX」，等于把本单位的组织架构
+#: 当成产品默认值发出去。现在配置文件里没有就是空，下拉框空着，
+#: 由使用者在「系统配置 → 面试字典」里自己填。
 _INTERVIEW_FALLBACK = {
-    "modes": ["现场面试", "线上面试"],
-    "slots": ["09:00-10:00", "10:00-11:00", "14:00-15:00", "15:00-16:00"],
-    "rooms": ["创新大楼1519会议室"],
-    "units": ["人事处", "财务处", "数字化中心"],
-    "contacts": [{"dept": "人力资源部", "name": "张老师", "phone": "029-8888XXXX"}],
+    "modes": [],
+    "slots": [],
+    "rooms": [],
+    "units": [],
+    "contacts": [],
 }
 
 
@@ -4705,6 +4709,79 @@ def api_model_config_set(req: ModelCfgReq,
             "env_override": r["env_override"], "note": note}
 
 
+class EmbeddingCfgReq(BaseModel):
+    base_url: str | None = None
+    model: str | None = None
+    enabled: bool | None = None
+
+
+@app.get("/api/embedding-config")
+def api_embedding_config_get(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                             x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """向量模型配置（只读）。
+
+    API Key **与对话模型共用** `config/secrets.json` 里那一份，不在这里单独收：
+    同一个百炼 Key 同时管对话与向量，分两份只会让"改了对话忘了向量"。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    c = search.load_cfg()
+    st = search.status(DB_PATH) or {}
+    env_set = [k for k in ("TP_EMBED_BASE_URL", "TP_EMBED_MODEL", "TP_EMBED_API_KEY")
+               if os.environ.get(k)]
+    return {"enabled": bool(c.get("enabled", True)),
+            "base_url": c.get("base_url") or "",
+            "model": c.get("model") or "",
+            "index": st, "env_override": env_set}
+
+
+@app.post("/api/embedding-config")
+def api_embedding_config_set(req: EmbeddingCfgReq,
+                             x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                             x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """保存向量模型配置（写 config/embedding.json，写审计）。
+
+    只覆盖传进来的三个键，`_presets` / `timeout` / `batch` 原样保留——
+    界面上改的是"连哪台服务、用哪个模型"，不是把整个文件重写一遍。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
+    if req.base_url is not None and req.base_url.strip() and \
+            not req.base_url.strip().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="向量模型地址要以 http:// 或 https:// 开头")
+    path = search.CONFIG_PATH
+    try:
+        cur = json.loads(open(path, encoding="utf-8").read()) if os.path.exists(path) else {}
+    except (OSError, ValueError):
+        cur = {}
+    changed: list[str] = []
+    if req.base_url is not None and req.base_url.strip() != (cur.get("base_url") or ""):
+        cur["base_url"] = req.base_url.strip()
+        changed.append("base_url")
+    if req.model is not None and req.model.strip() != (cur.get("model") or ""):
+        cur["model"] = req.model.strip()
+        changed.append("model")
+    if req.enabled is not None and bool(req.enabled) != bool(cur.get("enabled", True)):
+        cur["enabled"] = bool(req.enabled)
+        changed.append("enabled")
+    if not changed:
+        return {"ok": True, "changed": [], "note": "没有需要保存的修改。"}
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(cur, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+    conn = db.connect(DB_PATH)
+    try:
+        db.add_audit(conn, "settings", "embedding-config", "update",
+                     "", "更新向量模型配置：" + "、".join(changed),
+                     s["username"], s["role"])
+    finally:
+        conn.close()
+    return {"ok": True, "changed": changed,
+            "note": "已保存。向量维度随模型变，请点「重建索引」，否则新旧向量混用会算错。"}
+
+
 @app.post("/api/settings")
 def api_settings_set(req: SettingsReq,
                      x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
@@ -4948,7 +5025,11 @@ def api_job_create(req: JobReq, x_tp_token: str | None = Header(default=None, al
         # 填了 JD 字段就按填的算；一个都不填则继承 config/jd.json 的默认尺子
         if req.headcount is not None and req.headcount < 0:
             raise HTTPException(status_code=400, detail="招聘数量请填非负整数")
-        jd = _jd_from_req(_load(JD_PATH), req, req.title.strip(), dept_name)
+        # v4.0.0：**不再继承 config/jd.json 的默认尺子**。以前不填技能就悄悄套上
+        # 「钛合金 / 真空熔铸 / 材料成型」，发给别家单位时等于替人家决定了
+        # "什么算合格"，而且界面上看不出来。现在新建岗位的尺子只由这张表单决定，
+        # 没填就是没填。
+        jd = _jd_from_req({}, req, req.title.strip(), dept_name)
         jid = db.create_job(conn, req.title, dept_id=did, jd=jd,
                             operator=s["username"], headcount=req.headcount)
         return {"ok": True, "id": jid, "job": db.get_job(conn, jid),
@@ -5125,15 +5206,27 @@ def api_mailbox_config(x_tp_token: str | None = Header(default=None, alias="X-TP
     s = _session(x_tp_token, x_tp_role)
     require(s, "read")
     cfg = mb.load_config()
-    ic = cfg.get("imap") or {}
-    return {"mode": cfg.get("mode"), "eml_dir": cfg.get("eml_dir"),
-            "folder_dir": cfg.get("folder_dir") or RESUME_DIR,
-            "imap_host": ic.get("host") or "", "imap_port": ic.get("port", 993),
+    # v4.0.0：**回填用户自己填过的值，不回填内置默认值**。
+    # `load_config()` 会把 DEFAULT_CONFIG 合并进来（端口 993 / INBOX / 20MB /
+    # data/resumes），直接下发等于在界面上"假装"这些是用户设定 —— 换台机器
+    # 发给别人时，对方看到一堆自己没填过的值。这里改读配置文件原文，
+    # 没写过就是空串，输入框里显示占位提示。行为侧仍用合并后的 cfg。
+    raw: dict = {}
+    try:
+        if os.path.exists(mb.CONFIG_PATH):
+            with open(mb.CONFIG_PATH, encoding="utf-8") as fh:
+                raw = json.load(fh) or {}
+    except (OSError, ValueError):
+        raw = {}
+    ic = raw.get("imap") or {}
+    return {"mode": cfg.get("mode"), "eml_dir": raw.get("eml_dir") or "",
+            "folder_dir": raw.get("folder_dir") or "",
+            "imap_host": ic.get("host") or "", "imap_port": ic.get("port") or "",
             "imap_ssl": ic.get("ssl", True), "imap_user": ic.get("user") or "",
-            "imap_folder": ic.get("folder", "INBOX"), "password_set": bool(mb.read_secret()),
-            "attachment_ext": cfg.get("attachment_ext"),
-            "max_attachment_mb": int(cfg.get("max_attachment_mb", 20) or 20),
-            "same_job_reapply_days": (cfg.get("dedup") or {}).get("same_job_reapply_days"),
+            "imap_folder": ic.get("folder") or "", "password_set": bool(mb.read_secret()),
+            "attachment_ext": raw.get("attachment_ext"),
+            "max_attachment_mb": raw.get("max_attachment_mb") or "",
+            "same_job_reapply_days": (raw.get("dedup") or {}).get("same_job_reapply_days"),
             "readonly": ic.get("readonly", True),
             # 提醒由后端一处产出，界面只负责显示——两处各写一套规则必然对不上
             "warnings": _mailbox_warnings(cfg)}
@@ -5746,6 +5839,16 @@ def api_smtp_get(x_tp_token: str | None = Header(default=None, alias="X-TP-Token
     """发信配置（口令只回是否已设置，不回显）。"""
     _session(x_tp_token, x_tp_role)
     conf = mail_send_mod.load_smtp()
+    # v4.0.0：没配过就回空串。`load_smtp()` 内部有 smtp.163.com / 465 的兜底
+    # （发信时要用），但那不该在界面上冒充"用户已设定"。
+    try:
+        raw_smtp = (mb.load_config() or {}).get("smtp") or {}
+    except Exception:                                     # noqa: BLE001
+        raw_smtp = {}
+    if not raw_smtp.get("host"):
+        conf["host"] = ""
+    if not raw_smtp.get("port"):
+        conf["port"] = ""
     return {**conf, "presets": mail_send_mod.SMTP_PRESETS,
             "note": "163 / QQ / 腾讯企业邮都需先开启 SMTP 服务并生成授权码（不是登录密码）。"}
 

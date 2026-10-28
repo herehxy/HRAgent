@@ -173,8 +173,13 @@ button{cursor:pointer}
 .morePanel.on{display:flex}
 /* 「批量维护」是**动作菜单**，不是筛选面板：竖排、每项占满宽度、不换行。
    复用 .morePanel 的浮层外观（边框/阴影/圆角），只覆盖布局。 */
+/* ⚠️ 这里必须 position:fixed，不能用 .morePanel 的 absolute。
+   父级 `.top2` 为了"工具栏只占一行"设了 `overflow-x:auto;overflow-y:hidden`，
+   而 CSS 规定：只要有一个轴不是 visible，另一个轴就会被算成 auto —— 于是浮层
+   被工具栏那 44px 的高度整个裁掉，点开「批量维护」只看得到一条边（v3.1.16 修）。
+   改成 fixed 后跳出裁切，位置由 `placeBatchPanel()` 按按钮的实时坐标算。 */
 #batchPanel{flex-direction:column;flex-wrap:nowrap;gap:2px;padding:5px;min-width:170px;
-  max-width:none;top:38px}
+  max-width:none;position:fixed;top:0;left:0}
 #batchPanel .btn{width:100%;text-align:left;border-color:transparent;background:transparent;
   padding:8px 10px;font-size:13.5px}
 #batchPanel .btn:hover{background:var(--accent-soft);border-color:transparent;
@@ -1706,13 +1711,33 @@ function toggleMore(){
   document.getElementById('morePanel').classList.toggle('on');
 }
 /* 「批量维护」动作菜单。与「更多筛选」同一套开合规矩（点外面/按 Esc 收起），
-   但两者互斥：两个浮层同时开着会叠在一起，看起来像坏了。 */
+   但两者互斥：两个浮层同时开着会叠在一起，看起来像坏了。
+   ⚠️ 面板是 position:fixed：它所在的 `.top2` 有 overflow 裁切（见 CSS 注释），
+   所以位置得自己算——贴着按钮左边缘、下方 4px，并夹进视口内。 */
+function placeBatchPanel(){
+  var p = document.getElementById('batchPanel');
+  var b = document.getElementById('btnBatch');
+  if(!p || !b || !p.classList.contains('on')) return;
+  var r = b.getBoundingClientRect();
+  var w = p.offsetWidth || 170;
+  /* 按钮靠右时面板会顶出窗口右边：先夹到 [8, innerWidth - w - 8]。
+     工具栏可以横向滚动，按钮可能滚到视口外，夹完仍保证看得见。 */
+  var left = Math.min(r.left, window.innerWidth - w - 8);
+  left = Math.max(8, left);
+  p.style.left = left + 'px';
+  p.style.top = Math.round(r.bottom + 4) + 'px';
+}
 function toggleBatchMenu(){
   var p = document.getElementById('batchPanel');
   var m = document.getElementById('morePanel');
   if(m) m.classList.remove('on');
   p.classList.toggle('on');
+  if(p.classList.contains('on')) placeBatchPanel();
 }
+/* 开着的时候窗口缩放 / 任一容器滚动（工具栏自己会横向滚），面板必须跟着走位，
+   否则会停在旧坐标上，看起来像"又飘到别处去了"。 */
+window.addEventListener('resize', placeBatchPanel);
+window.addEventListener('scroll', placeBatchPanel, true);
 /* 「更多筛选」是浮层：点**空白处**就该收起（业务方 2026-10-21 反馈）。
    只点按钮才能关的话，用户想关的时候得先瞄准那个按钮——面板还挡住半个页面。
    两条常见做法一起上：① 点浮层外任意处关闭；② Esc 关闭。
@@ -5250,12 +5275,7 @@ async function initOrg(){
 async function newJob(){
   openProgDlg('新增岗位',
     '<div class="crow"><label>岗位名称</label><div class="cinput">' +
-      '<input class="ced" id="njTitle" placeholder="如 数字化工程师"></div></div>' +
-    /* 部门输入框已删（2026-10-21）：后端 `JobReq` 只有 `department_id`/`dept_id`，
-       发 `department_name` 会被 Pydantic 静默忽略 —— 填了等于没填。
-       而且部门概念在 2026-09 改版后已整体退出产品界面
-       （见 `server.py:23-25` 的说明：岗位只写名称 + JD）。
-       留一个"填了不生效"的框，比没有更糟。 */
+      '<input class="ced" id="njTitle"></div></div>' +
     '<div class="crow"><label>招聘数量</label><div class="cinput">' +
       '<input class="ced" id="njHead" type="number" min="0" step="1" style="width:90px"> 人</div></div>' +
     '<div class="crow"><label>最低学历</label><div class="cinput">' +
@@ -5266,11 +5286,9 @@ async function newJob(){
     '<div class="crow"><label>最低年限</label><div class="cinput">' +
       '<input class="ced" id="njYears" type="number" min="0" step="1" style="width:90px"> 年</div></div>' +
     '<div class="crow"><label>必需技能</label><div class="cinput">' +
-      '<input class="ced" id="njSkills" placeholder="顿号分隔，如 金相分析、X射线衍射"></div></div>' +
+      '<input class="ced" id="njSkills" placeholder="顿号分隔"></div></div>' +
     '<div class="crow"><label>专业要求</label><div class="cinput">' +
       '<input class="ced" id="njMajors" placeholder="顿号分隔"></div></div>' +
-    '<div class="hint" style="margin-top:8px">这些就是"判断尺子"：最低学历不够就直接判 D 档，' +
-      '技能/专业命中与否决定档位高低。</div>' +
     '<div class="bar" style="margin-top:16px;justify-content:flex-end">' +
       '<button class="btn primary" onclick="saveNewJob()">创建</button></div>');
 }
@@ -5792,6 +5810,17 @@ var CFG = {};
 function cfgRow(label, ctrl){
   return '<div class="crow"><label>' + esc(label) + '</label>' + ctrl + '</div>';
 }
+/* 索引状态一行说完：用哪个模型、多少维、覆盖多少人、服务通不通。
+   维度跟着模型变，混用会算错——所以这里必须把"实际在用哪个"摆出来，
+   不能只显示配置里的模型名。 */
+function embIndexText(idx){
+  if(!idx || !idx.index_model) return '未建索引';
+  var s = idx.index_model;
+  if(idx.dim) s += ' · ' + idx.dim + ' 维';
+  if(idx.people) s += ' · ' + idx.people + ' 人';
+  if(idx.reachable === false) s += ' · 服务不可达（已退化为哈希向量）';
+  return s;
+}
 /* ---------- 配置项：**现值与输入框分开** ----------
    业务方 2026-10-20 14:2x 指出：把输入框直接摆在现值旁边，HR 想"看一眼"就会手滑改掉。
    现在默认**只显示现值 + 一个「改」按钮**，点「改」才展开输入框；
@@ -5799,6 +5828,7 @@ function cfgRow(label, ctrl){
 var CFG_VALUES = {};      /* 草稿：字段 id → 新值 */
 var CFG_GROUP = {
   mcBaseUrl:'model', mcModel:'model', mcKey:'model',
+  embEnabled:'embed', embBaseUrl:'embed', embModel:'embed',
   cfgSmtpHost:'smtp', cfgSmtpPort:'smtp', cfgSmtpSsl:'smtp', cfgSmtpUser:'smtp',
   cfgSmtpFrom:'smtp', cfgSmtpPwd:'smtp',
   cfgMbMode:'mb', cfgMbHost:'mb', cfgMbPort:'mb', cfgMbSsl:'mb', cfgMbUser:'mb',
@@ -6015,11 +6045,14 @@ async function initSys(){
   box.innerHTML = '<div class="hint" style="padding:20px">读取配置…</div>';
   var r = await Promise.all([
     api('/api/model-config'), api('/api/mail/smtp'), api('/api/mailbox/config'),
-    api('/api/mailbox/presets'), api('/api/interview-dict'), api('/api/mail/templates')
+    api('/api/mailbox/presets'), api('/api/interview-dict'), api('/api/mail/templates'),
+    api('/api/embedding-config')
   ]);
   CFG = {model: r[0] || {}, smtp: r[1] || {}, mailbox: r[2] || {},
-         presets: (r[3] || {}).presets || [], dict: r[4] || {}, tpl: (r[5] || {}).items || []};
+         presets: (r[3] || {}).presets || [], dict: r[4] || {}, tpl: (r[5] || {}).items || [],
+         embed: r[6] || {}};
   var m = CFG.model, sb = CFG.smtp, mb = CFG.mailbox, dc = CFG.dict;
+  var em = CFG.embed, emIdx = em.index || {};
   var presetOpts = ['<option value="">（选一个邮箱预设）</option>'].concat(
     CFG.presets.map(function(p){
       return '<option value="' + esc(p.host + '|' + p.port + '|' + (p.ssl ? '1' : '0')) + '">' +
@@ -6043,15 +6076,25 @@ async function initSys(){
   box.innerHTML =
     '<div class="dhead" style="margin-bottom:4px"><div style="min-width:0">' +
       '<div class="dname">系统配置</div>' +
-      '<div class="dmeta"><span>密钥类字段只显示掩码；密码框留空 = 不修改</span></div>' +
     '</div></div>' +
 
     '<div class="sec cfgsec" data-g="model"><h3>模型与密钥' + '<span class="cfgacts">' + '<button class="btn sm" data-cfg-g="edit">修改</button>' + '<button class="btn primary sm" data-cfg-g="save" style="display:none">保存</button>' + '<button class="btn sm" data-cfg-g="cancel" style="display:none">取消</button>' + '</span></h3>' +
       cfgEdit('mcBaseUrl', '接口地址', m.base_url, 'https://…/compatible-mode/v1', 'text') +
-      cfgEdit('mcModel', '模型名', m.model, '如 qwen3.5-flash', 'text') +
+      cfgEdit('mcModel', '模型名', m.model, '', 'text') +
       cfgEdit('mcKey', 'API Key', m.key_set ? ('已配置（' + m.key_masked + '）') : '未配置',
-              m.key_set ? '留空 = 不修改' : '输入后保存', 'password', true) +
-      '<div class="hint" style="margin-top:6px">' + esc(m.note || '') + '</div>' +
+              m.key_set ? '留空 = 不修改' : '', 'password', true) +
+    '</div>' +
+
+    /* 向量模型（v4.0.1 新增）：以前只能在 config/embedding.json 里手改，
+       HR 拿不到入口。API Key 不在这里收 —— 与对话模型共用 secrets.json 那一份。 */
+    '<div class="sec cfgsec" data-g="embed"><h3>向量模型' + '<span class="cfgacts">' + '<button class="btn sm" data-cfg-g="edit">修改</button>' + '<button class="btn primary sm" data-cfg-g="save" style="display:none">保存</button>' + '<button class="btn sm" data-cfg-g="cancel" style="display:none">取消</button>' + '</span></h3>' +
+      cfgEdit('embEnabled', '启用', em.enabled ? '1' : '0', '', 'select', false, null,
+              [['1', '开'], ['0', '关']]) +
+      cfgEdit('embBaseUrl', '接口地址', em.base_url, 'https://…/compatible-mode/v1', 'text') +
+      cfgEdit('embModel', '模型名', em.model, '', 'text') +
+      '<div class="crow cfgrow"><label>索引</label><div class="cval">' +
+        '<span class="cur">' + esc(embIndexText(emIdx)) + '</span>' +
+        '<button class="btn sm" data-cfg="reindex">重建索引</button></div></div>' +
     '</div>' +
 
     '<div class="sec cfgsec" data-g="smtp"><h3>发信配置（SMTP）' + '<span class="cfgacts">' + '<button class="btn sm" data-cfg-g="edit">修改</button>' + '<button class="btn primary sm" data-cfg-g="save" style="display:none">保存</button>' + '<button class="btn sm" data-cfg-g="cancel" style="display:none">取消</button>' + '</span></h3>' +
@@ -6087,12 +6130,10 @@ cfgEdit('cfgFolderDir', '简历目录', mb.folder_dir, 'data/resumes', 'text') +
          （`server.py:4411-4413`）。附件白名单为空时后端还会警告
          "任何附件都不会被收进来"（`server.py:4460-4462`）。 */
       cfgEdit('cfgMbAttExt', '附件白名单', (mb.attachment_ext || []).join(','),
-              '留空=不限；如 .pdf,.docx,.doc,.txt,.md', 'text') +
+              '.pdf,.docx,.doc,.txt,.md', 'text') +
       cfgEdit('cfgMbMaxMb', '单附件上限(MB)', mb.max_attachment_mb, '20', 'number') +
       cfgEdit('cfgMbReapply', '同岗位重投窗口(天)', mb.same_job_reapply_days,
-              '多少天内的同岗位重复投递视为重复', 'number') +
-      '<div class="hint" style="margin-top:6px">国内邮箱需在邮箱设置里开启 IMAP 并生成「授权码」，' +
-        '口令栏填授权码，不是登录密码。</div>' +
+              '', 'number') +
       '<div style="margin-top:10px"><button class="btn" data-cfg="mbTest">测试收信</button>' +
         '<span class="msgline busy" id="mbMsg" style="display:none"></span></div>' +
       '<div style="margin-top:8px"><button class="btn" onclick="previewMailbox()">预览收信</button>' +
@@ -6101,19 +6142,17 @@ cfgEdit('cfgFolderDir', '简历目录', mb.folder_dir, 'data/resumes', 'text') +
     '</div>' +
 
     '<div class="sec cfgsec" data-g="dict"><h3>面试字典' + '<span class="cfgacts">' + '<button class="btn sm" data-cfg-g="edit">修改</button>' + '<button class="btn primary sm" data-cfg-g="save" style="display:none">保存</button>' + '<button class="btn sm" data-cfg-g="cancel" style="display:none">取消</button>' + '</span></h3>' +
-      '<div class="hint" style="margin-bottom:8px">一行一个；这些值会在写邮件页变成可点的候选。' +
-        '联系人格式：部门 | 姓名 | 电话</div>' +
       dictItemsRow('units', '面试单位', dc.units) +
-      cfgEdit('cfgUnits', '面试单位', dictLines(dc.units), '难熔金属材料研究所', 'textarea') +
+      cfgEdit('cfgUnits', '面试单位', dictLines(dc.units), '一行一个', 'textarea') +
       dictItemsRow('rooms', '会议室', dc.rooms) +
-      cfgEdit('cfgRooms', '会议室', dictLines(dc.rooms), '创新大楼1519会议室', 'textarea') +
+      cfgEdit('cfgRooms', '会议室', dictLines(dc.rooms), '一行一个', 'textarea') +
       dictItemsRow('slots', '面试时段', dc.slots) +
-      cfgEdit('cfgSlots', '面试时段', dictLines(dc.slots), '09:30-10:30', 'textarea') +
+      cfgEdit('cfgSlots', '面试时段', dictLines(dc.slots), '一行一个', 'textarea') +
       dictItemsRow('modes', '面试方式', dc.modes) +
-      cfgEdit('cfgModes', '面试方式', dictLines(dc.modes), '现场面试', 'textarea') +
+      cfgEdit('cfgModes', '面试方式', dictLines(dc.modes), '一行一个', 'textarea') +
       dictItemsRow('contacts', '联系人', (dc.contacts || []).map(function(c){
         return [c.dept, c.name, c.phone].filter(Boolean).join(' · '); })) +
-      cfgEdit('cfgContacts', '联系人', contactLines, '人事处 · 赵 · 02989896666', 'textarea') +
+      cfgEdit('cfgContacts', '联系人', contactLines, '部门 | 姓名 | 电话，一行一个', 'textarea') +
       /* 原来的「会议平台」输入框已删：后端字典保存只认 `meeting_no`
          （`server.py:732-733`），`meeting_platform` 不在白名单里，
          提交后**静默丢弃** —— 一个填了永远没反应的框，不如没有。 */
@@ -6251,6 +6290,26 @@ async function sysAct(act){
     toast(r.__err ? ('保存失败：' + r.__err) : '模型配置已保存（已改 ' + (r.changed || []).length + ' 项）');
     return;
   }
+  if(act === 'embed'){
+    var be = {base_url: v('embBaseUrl'), model: v('embModel'),
+              enabled: v('embEnabled') === '1'};
+    var re = await api('/api/embedding-config', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(be)});
+    if(re.__err){ toast('保存失败：' + re.__err, 'danger'); return; }
+    toast((re.changed || []).length
+      ? '向量模型已保存，点「重建索引」生效'
+      : '没有修改', (re.changed || []).length ? 'warn' : 'ok');
+    return;
+  }
+  if(act === 'reindex'){
+    toast('重建索引中…（人数多时需要一会儿）', 'warn');
+    var ri = await api('/api/search/index', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({force: true})});
+    if(ri.__err){ toast('重建失败：' + ri.__err, 'danger'); return; }
+    toast('索引已重建：' + (ri.indexed || 0) + ' 人 / 模型 ' + (ri.model || '—'), 'ok');
+    initSys();
+    return;
+  }
   if(act === 'smtpTest'){
     var m0 = document.getElementById('smtpMsg');
     if(m0){ m0.style.display = ''; m0.className = 'msgline busy'; m0.textContent = '测试中…'; }
@@ -6287,10 +6346,16 @@ async function sysAct(act){
   }
   if(act === 'mb' || act === 'mbTest'){
     if(act === 'mb'){
-      var b2 = {mode: v('cfgMbMode'), eml_dir: v('cfgEmlDir'), folder_dir: v('cfgFolderDir'),
-                imap_host: v('cfgMbHost'), imap_port: Number(v('cfgMbPort') || 993),
+      /* 空输入框一律发 null（= 不改动），不发空串：v4 起这几项默认就是空的，
+         发空串会在配置文件里写下 ""，把有效缺省值冲掉。 */
+      var b2 = {mode: v('cfgMbMode'),
+                eml_dir: v('cfgEmlDir') || null,
+                folder_dir: v('cfgFolderDir') || null,
+                imap_host: v('cfgMbHost') || null,
+                imap_port: v('cfgMbPort') ? Number(v('cfgMbPort')) : null,
                 imap_ssl: v('cfgMbSsl') === '1',
-                imap_user: v('cfgMbUser'), imap_folder: v('cfgMbFolder')};
+                imap_user: v('cfgMbUser') || null,
+                imap_folder: v('cfgMbFolder') || null};
       if(v('cfgMbPwd')) b2.password = v('cfgMbPwd');
       /* 附件白名单 / 单附件上限 / 同岗位重投窗口：原来**完全不提交**，
          于是这三项在 v2 里既改不了、也看不到现值。后端是支持的
