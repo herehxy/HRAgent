@@ -495,7 +495,9 @@ button{cursor:pointer}
   font-weight:600;white-space:nowrap;display:inline-block}
 .jst.on{color:var(--ok);background:var(--ok-soft);border:1px solid var(--ok-line)}
 .jst.off{color:var(--ink-3);background:var(--surface-2);border:1px solid var(--line)}
-.sfoot{margin-top:auto;padding:10px 8px 0;font-size:12px;color:var(--ink-3);line-height:1.6}
+/* 页脚只剩构建时间：放大到 14px、主文字色，排障时一眼能念出来 */
+.sfoot{margin-top:auto;padding:10px 8px 4px;font-size:14px;color:var(--ink-2);
+  font-weight:600;letter-spacing:.01em;line-height:1.6;font-variant-numeric:tabular-nums}
 
 .main{min-width:0;height:100vh;display:flex;flex-direction:column;overflow:hidden}
 
@@ -662,16 +664,27 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
 .empty{padding:28px 16px;color:var(--ink-3);font-size:13px;text-align:center}
 
 /* 右：详情 */
-.detail{overflow-y:auto;padding:20px 24px 40px}
+/* 上内边距挪进 `.detail-toolbar`（见那里的说明）：否则 sticky 贴边后
+   顶部会留一条露出滚动内容的缝。 */
+.detail{overflow-y:auto;padding:0 24px 40px}
 .detail.comparing{padding-top:0}
 /* 右栏限宽：1600px 下内容只占左侧 60%，右边一大片空白会把视线拉散。
    限到 960px 后行宽落在舒适区（中文 ~45 字/行）。 */
 .detail > *{max-width:1280px}
-.detail > .detail-toolbar{max-width:none;width:auto;margin:-20px -24px 0;padding:12px 24px}
+.detail > .detail-toolbar{max-width:none;width:auto;margin:0 -24px;padding:20px 24px 12px}
+/* 操作条**常驻**（2026-10-28）：档案往下滚时，"保存更正 / 阶段 / 归档"要一直够得着。
+   原先是 position:relative，跟着内容一起滚走 —— 看到页面下半部分想改阶段，
+   得先滚回顶部。
+   sticky 的容器是 `.detail`（它自己 overflow-y:auto），所以 top:0 贴的是详情栏顶边。 */
+/* 常驻且**紧贴顶边**（2026-10-28）：sticky 的贴边基准是滚动容器的 padding box，
+   而 `.detail` 有 `padding-top:20px` —— 于是操作条下方贴住了，上方那条 20px 的缝里
+   会露出下面滚上来的档案内容（看起来像"漏出来"）。
+   解法：把这段上内边距从容器挪进操作条自己（`padding-top:20px`），
+   再用负左右外边距抵掉容器的左右 padding，让背景色铺满整栏宽度。 */
 .detail-toolbar{
-  position:relative;z-index:2;display:flex;justify-content:flex-end;align-items:center;
-  margin:0;padding:12px 0;background:var(--surface);
-  border-bottom:1px solid var(--line);
+  position:sticky;top:0;z-index:6;display:flex;justify-content:flex-end;align-items:flex-start;
+  margin:0;padding:14px 0 12px;background:var(--surface);
+  border-bottom:1px solid var(--line);box-shadow:0 1px 0 rgba(31,35,41,.04);
 }
 .detail-toolbar .dact{flex:initial;width:100%;margin-left:0}
 .profile-head{margin-top:22px;padding-top:0}
@@ -684,7 +697,8 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
 .profile-layout > .quality,
 .profile-layout > .srcbar,
 .profile-layout > .edu-band{grid-column:1/-1}
-.profile-head .dmeta{font-size:15px}
+/* 头部信息行字号在 `.dmeta` 里统一定义（17px，比姓名小一号）；
+   这里原有一行 `font-size:15px` 因为选择器更具体会把它盖掉，已去掉。 */
 .profile-layout{font-size:15px}
 .profile-layout .sec > h3{font-size:14px}
 .profile-layout .hint{font-size:14px}
@@ -718,20 +732,45 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
 /* 姓名可点改：hover 才显出底色，平时保持大标题的干净 */
 .dname.edu-click{border-bottom-color:transparent}
 .dname.edu-click:hover{background:var(--accent-soft);color:var(--accent-ink)}
-/* 头部那排基本信息：电话/邮箱用强调色+白底，比灰色标签更抓眼（HR 最常要看的就是联系方式）。
-   padding 与字号都收一档 —— 原来每个框撑得很开，一行信息占半屏还留大片空白。 */
-.dmeta .edv{background:var(--surface);border-color:var(--line-2);
-  color:var(--accent-ink);font-weight:600;padding:1px 7px;font-size:13px}
-/* 头部第二行（阶段 / 结论 / 数据质量）：与联系方式那行拉开一点距离，
-   字号更小 —— 它们是"扫一眼"的标签，不该和电话邮箱抢注意力。 */
-.dmeta.dmeta2{margin-top:7px}
-.dmeta.dmeta2 .chipl{font-size:12.5px;padding:1px 8px}
-.dmeta.dmeta2 .stagechip{background:var(--surface);border-color:var(--line-2);
-  color:var(--ink-2);font-weight:600}
-.dmeta.dmeta2 .offerchip{background:var(--ok-soft);border-color:var(--ok-line);
-  color:var(--ok);font-weight:600}
-.dmeta .edv:hover{background:var(--accent-soft);border-color:var(--accent-line)}
+/* ---------- 头部信息区（2026-10-28 重做） ----------
+   问题：性别/岗位/状态/电话/邮箱**五种不同性质的信息**全做成同样大小的白底方框，
+   还有五六个边框，远看是一排一样的东西 —— 没有层级，也不整齐。
+   现在按"这一行是什么"分三段，各自一种形状：
+     ① 事实（性别 · 岗位 · 状态）：**无框纯文字**，中间用小圆点分隔，像一句陈述；
+     ② 竖线：把"人是谁"和"怎么联系"分开；
+     ③ 联系方式：浅灰底的胶囊（可点改），比纯文字重、比阶段/结论轻。 */
+/* 字号：比姓名（24px）小一号（17px）。这一行是"这个人是谁"的全部关键信息，
+   13.5px 在 24px 的姓名旁边显得像脚注（业务方 2026-10-28 反馈）。 */
+.dmeta{margin-top:6px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;
+  font-size:17px;color:var(--ink-2)}
+.dfacts{display:inline-flex;align-items:center;min-width:0}
+/* ⚠️ 必须带 `#detail` 前缀：下面"详情页整体放大一号"那段有 `#detail .chipl{font-size:14px}`，
+   ID 选择器会把这里的字号盖掉（2026-10-28 踩过：改了等于没改）。 */
+#detail .dmeta .chipl{background:transparent;border-color:transparent;color:var(--ink-3);
+  font-weight:500;font-size:16px;padding:0;border-radius:0}
+.dmeta .chipl.jchip{color:var(--ink-2);font-weight:600}
+.dmeta .chipl.jchip.none{color:var(--warn)}
+.dmeta .chipl.jchip:hover{background:transparent;border-color:transparent;
+  color:var(--accent-ink);text-decoration:underline}
+.fdsep{width:4px;height:4px;border-radius:50%;background:var(--line-2);
+  margin:0 10px;flex:none}
+.vsep{width:1px;height:16px;background:var(--line);margin:0 4px;flex:none}
+.dcontact{display:inline-flex;align-items:center;gap:8px;min-width:0}
+.dmeta .edv{background:var(--surface-2);border:1px solid transparent;color:var(--ink);
+  font-weight:500;font-size:16px;padding:3px 11px;border-radius:6px}
+.dmeta .edv:hover{background:var(--surface);border-color:var(--accent-line);
+  color:var(--accent-ink)}
 .dmeta .edv.empty{color:var(--ink-3);font-weight:400}
+/* 第二行：阶段 / 结论 / 录用函 / 数据质量 —— 这些才是"判断类"信息，
+   给实底（阶段深灰、结论绿/红、录用函浅绿），与上面那行的事实区拉开层级。 */
+.dmeta.dmeta2{margin-top:10px;gap:8px}
+/* 同样要带 `#detail`：上面 `#detail .dmeta .chipl` 会连第二行一起放大 */
+#detail .dmeta.dmeta2 .chipl{font-size:14px;font-weight:600;padding:3px 11px;border-radius:6px;
+  background:var(--surface-2);border:1px solid var(--line);color:var(--ink-2)}
+.dmeta.dmeta2 .stagechip{background:#3f4753;border-color:#3f4753;color:#fff}
+.dmeta.dmeta2 .offerchip{background:var(--ok-soft);border-color:var(--ok-line);
+  color:var(--ok)}
+.dmeta.dmeta2 .ochip{font-size:14px;padding:4px 11px;margin-left:0}
 /* 岗位标签做成可点：看起来是标签，点下去是"改岗位" */
 .jchip{cursor:pointer;font-family:inherit;line-height:1.5}
 .jchip:hover{background:var(--accent-soft);border-color:var(--accent-line);
@@ -750,7 +789,7 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
 .sensline{background:var(--ok-soft);border:1px solid var(--ok-line);border-radius:var(--r);
   padding:7px 11px;margin-bottom:9px;font-size:13px;color:var(--ink)}
 .sensline.none{background:var(--surface-2);border-color:var(--line);color:var(--ink-2)}
-.dmeta{margin-top:4px;font-size:14px;color:var(--ink-2);display:flex;gap:8px;flex-wrap:wrap}
+/* （原有一条重复的 .dmeta 规则在这里，字号 14px 把上面 17px 覆盖掉了 —— 已合并进上方） */
 .chipl{
   padding:2px 8px;border-radius:4px;font-size:13px;font-weight:700;
   color:var(--accent-ink);background:var(--accent-soft);border:1px solid var(--accent-line);
@@ -1155,7 +1194,10 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
    全部尊重 prefers-reduced-motion。 */
 @keyframes v2in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
 @keyframes v2pulse{0%{transform:scale(1)}45%{transform:scale(1.1)}100%{transform:scale(1)}}
-.detail.swap > *{animation:v2in .17s cubic-bezier(.2,.7,.3,1) both}
+/* ⚠️ 操作条**不参与**这个入场动画（2026-10-28）：v2in 的起始帧带
+   `transform: translateY(5px)`，而 sticky 元素一旦有 transform，就会整体下移 5px ——
+   表现为"常驻条上方露出 5px 的缝，下面的档案内容从缝里透出来"。 */
+.detail.swap > *:not(.detail-toolbar){animation:v2in .17s cubic-bezier(.2,.7,.3,1) both}
 .pulse{animation:v2pulse .32s ease-out}
 @media (prefers-reduced-motion: reduce){
   .detail.swap > *, .pulse{animation:none!important}
@@ -1348,7 +1390,9 @@ body.readonly [data-act]{display:none!important}
        现在换成真正的应用图标 + 产品名 + 一行说明（业务方 2026-10-27）。 -->
   <div class="sbrand">
     <img src="__BRAND_ICON__" alt="">
-    <span><b>HRAgent 工作台</b><small>西北有色院 · 人事</small></span>
+    <!-- 副标题「西北有色院 · 人事」已删（2026-10-28）：产品名本身已经说清是什么，
+         这一行在窄侧栏里只会折成两行小字。 -->
+    <span><b>HRAgent 工作台</b></span>
   </div>
   <div class="sgroup">招聘</div>
   <button data-view="pool" class="on">人才库</button>
@@ -1362,7 +1406,9 @@ body.readonly [data-act]{display:none!important}
        但**入口就不该出现** —— 让人点一个"你没权限"的按钮是坏体验。 -->
   <button data-view="users" id="navUsers" hidden>账号管理</button>
   <!-- 构建时间由服务端注入：改了代码后如果这里的时间没变，说明浏览器还在跑旧页面 -->
-  <div class="sfoot">v2 预览 · __V2_BUILD__</div>
+  <!-- 侧栏页脚只留构建时间（2026-10-28）："v2 预览"是开发期口径，不该出现在给人事用的界面上；
+       时间则要能一眼看清（排障第一句就是"你那边版本是什么时候的"），所以放大加粗。 -->
+  <div class="sfoot">__V2_BUILD__</div>
 </aside>
 
 <div class="main">
@@ -1482,7 +1528,7 @@ body.readonly [data-act]{display:none!important}
   <canvas id="loginNet" aria-hidden="true"></canvas>
   <form class="loginbox" id="loginForm" autocomplete="on">
     <div class="loginbrand"><i class="logindot"></i>HRAgent 工作台</div>
-    <div class="loginsub">西北有色院 · 人事</div>
+    <!-- 副标题「西北有色院 · 人事」已删（2026-10-28）：同一句话不再出现在界面上 -->
     <label class="loginlabel" for="loginUser">账号</label>
     <input id="loginUser" class="logininput" autocomplete="username" required>
     <label class="loginlabel" for="loginPass">口令</label>
@@ -2915,21 +2961,27 @@ function fullDetail(d){
        标签全部收窄 —— 原来每个框都撑得很开，一行信息占了半屏还留大片空白）。
        四六级已挪到「荣誉 / 论文 / 专利」那一块：它是**资质**，不属于身份信息。 */
     '<div class="dmeta">' +
-      edSel('edGender', [['', '性别'], ['男', '男'], ['女', '女']],
-            (d.gender || '').trim(), 54) +
-      (app0.job_title
-        ? '<button class="chipl gray jchip" title="点击修改岗位" ' +
-            'onclick="openAssignJob(' + d.id + ')">' + esc(app0.job_title) + '</button>'
-        : '<button class="chipl gray jchip" title="点击指定岗位" ' +
-            'onclick="openAssignJob(' + d.id + ')">未归岗 · 指定</button>') +
-      ((d.status_display || app0.status_display)
-        ? '<span class="chipl gray">' +
-            esc(d.status_display || app0.status_display) + '</span>' : '') +
-      edText('edPhone', d.phone === '—' ? '' : d.phone, '电话', 108) +
-      edText('edEmail', d.email === '—' ? '' : d.email, '邮箱', 160) +
-      (emailState.sent
-        ? '<span class="chipl" style="color:var(--ok);border-color:var(--ok-line)">已发邮件 ' +
-          esc(String(emailState.count || 0)) + ' 次</span>' : '') +
+      '<span class="dfacts">' +
+        edSel('edGender', [['', '性别'], ['男', '男'], ['女', '女']],
+              (d.gender || '').trim(), 54) +
+        '<i class="fdsep"></i>' +
+        (app0.job_title
+          ? '<button class="chipl jchip" title="点击修改岗位" ' +
+              'onclick="openAssignJob(' + d.id + ')">' + esc(app0.job_title) + '</button>'
+          : '<button class="chipl jchip none" title="点击指定岗位" ' +
+              'onclick="openAssignJob(' + d.id + ')">未归岗 · 指定</button>') +
+        ((d.status_display || app0.status_display)
+          ? '<i class="fdsep"></i><span class="chipl">' +
+              esc(d.status_display || app0.status_display) + '</span>' : '') +
+      '</span>' +
+      '<i class="vsep"></i>' +
+      '<span class="dcontact">' +
+        edText('edPhone', d.phone === '—' ? '' : d.phone, '电话', 136) +
+        edText('edEmail', d.email === '—' ? '' : d.email, '邮箱', 208) +
+        (emailState.sent
+          ? '<span class="chipl" style="color:var(--ok)">已发邮件 ' +
+            esc(String(emailState.count || 0)) + ' 次</span>' : '') +
+      '</span>' +
     '</div>' +
     /* 第二行：**判断类标签**（阶段 / 结论 / 数据质量）。
        这些正是左侧列表里扫人时看的那几个标签，点进来却要往下翻到「面试与录用」
