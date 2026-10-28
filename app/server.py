@@ -4766,6 +4766,12 @@ def api_embedding_config_set(req: EmbeddingCfgReq,
         changed.append("enabled")
     if not changed:
         return {"ok": True, "changed": [], "note": "没有需要保存的修改。"}
+    # ⚠️ 必须清掉 `preset`：`search.load_cfg()` 里 preset 会**覆盖**顶层的
+    # base_url / model（`cfg.update(_presets[preset])`）。界面上改了模型名却留着
+    # 旧 preset，读配置时又被覆盖回去——保存成功、实际没变，是最难查的那种。
+    if ("base_url" in changed or "model" in changed) and cur.get("preset"):
+        cur.pop("preset", None)
+        changed.append("preset（已清除，改为按 base_url/model 生效）")
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(cur, fh, ensure_ascii=False, indent=2)
