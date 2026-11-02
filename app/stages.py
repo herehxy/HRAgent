@@ -31,10 +31,10 @@ _FALLBACK: dict = {
     # ⚠️ v1.29.2（业务方 2026-10-16 定稿）：阶段收成 5 档。
     #   「待发offer」**并掉** —— 「拟录用」不再是一个独立阶段，
     #   而是**已面试阶段直接打的标签**，通过后进入「已发放offer」；
-    #   「新投递」改名为「全部简历」—— 业务方要的是"还没进流程的所有简历"这个视角，
-    #   而不是一个叫"新投递"的阶段（收到就是全部简历，进流程后才分档）。
-    "order": ["全部简历", "初筛通过", "待面试", "已面试", "已发放offer", "已结束"],
-    "pipeline": ["全部简历", "初筛通过", "待面试", "已面试", "已发放offer"],
+    #   「新投递」改名为「新投递」—— 业务方要的是"还没进流程的所有简历"这个视角，
+    #   而不是一个叫"新投递"的阶段（收到就是新投递，进流程后才分档）。
+    "order": ["新投递", "初筛通过", "待面试", "已面试", "已发放offer", "已结束"],
+    "pipeline": ["新投递", "初筛通过", "待面试", "已面试", "已发放offer"],
     "terminal": ["已结束"],
     "auto_archive_on": ["已结束"],
     # 结论标签（业务方 2026-10-16 定稿）：
@@ -48,7 +48,7 @@ _FALLBACK: dict = {
                  "已面试": ["拟录用", "不录用"],
                  "已发放offer": ["已签约", "拒签"]},
     "actions": {
-        "全部简历": [{"label": "加入初筛通过", "to": "初筛通过"}],
+        "新投递": [{"label": "加入初筛通过", "to": "初筛通过"}],
         # 面试单位**在进入待面试之前**必填（业务方裁定）。
         # 它是面试邀请邮件里的单位，也是「待面试按部门分流」那个筛选的数据来源。
         "初筛通过": [{"label": "加入待面试", "to": "待面试",
@@ -68,10 +68,10 @@ _FALLBACK: dict = {
                         {"label": "拒签", "to": "已结束", "outcome": "拒签"}],
     },
     "colors": {
-        "全部简历": "#8a94a6", "初筛通过": "#3370ff", "待面试": "#7b61ff",
+        "新投递": "#8a94a6", "初筛通过": "#3370ff", "待面试": "#7b61ff",
         "已面试": "#0f8a6a", "已发放offer": "#d97706", "已结束": "#86909c",
     },
-    "default_stage": "全部简历",
+    "default_stage": "新投递",
     "thresholds": {"pass": 60, "hold": 45},
 }
 
@@ -82,7 +82,7 @@ def default_stage() -> str:
     """初始阶段（新简历进来时的阶段；也是认不出的历史阶段的归并去处）。
 
     ⚠️ **从配置读，不写字面量**。这里原来硬编码 `DEFAULT_STAGE = "新投递"`，
-    而配置里早已改成「全部简历」—— 于是 `normalize_stage()` 把所有未知值归到
+    而配置里早已改成「新投递」—— 于是 `normalize_stage()` 把所有未知值归到
     「新投递」，而 `all_stages()` 里根本没有这个值，两边对不上。
     后果实测很隐蔽：界面上一切正常（`normalize` 的兜底会显示），但**主动提案那条
     规则（"A 档却没推进"）永远匹配不上**，静默产出 0 条，判据全红。
@@ -100,6 +100,25 @@ def default_stage() -> str:
 
 
 
+def _rename_legacy_stage(obj):
+    """把配置里所有「全部简历」换成「新投递」（含 dict 的 key）。
+
+    2026-11-02：阶段改名后，**老用户的 config/stages.json 还是旧名字**。
+    `load_cfg()` 是"用户配置覆盖内置默认"，所以旧文件会把新默认整段盖掉 ——
+    结果：数据库里的投递已经叫「新投递」，界面却按「全部简历」建列，
+    管道看板每一列都是 0（业务方实测就是这个现象）。
+    这里在读取时自愈：改名 + 回写文件，一次到位。
+    """
+    OLD, NEW = "全部简历", "新投递"
+    if isinstance(obj, str):
+        return NEW if obj == OLD else obj
+    if isinstance(obj, list):
+        return [_rename_legacy_stage(x) for x in obj]
+    if isinstance(obj, dict):
+        return {_rename_legacy_stage(k): _rename_legacy_stage(v) for k, v in obj.items()}
+    return obj
+
+
 def load_cfg(force: bool = False) -> dict:
     """读阶段配置。缺文件/坏 JSON/缺关键键 → 回落 `_FALLBACK`（并打印一行到 stderr）。
 
@@ -111,18 +130,32 @@ def load_cfg(force: bool = False) -> dict:
     if _cached is not None and not force:
         return _cached
     cfg = dict(_FALLBACK)
+    self_healed = False
     try:
         if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH, encoding="utf-8") as fh:
                 user = json.load(fh)
             if isinstance(user, dict):
                 # 逐键覆盖：允许只写要改的键（其余用兜底值），但 order 必须非空
-                cfg.update({k: v for k, v in user.items() if not k.startswith("_")})
+                cleaned = _rename_legacy_stage(
+                    {k: v for k, v in user.items() if not k.startswith("_")})
+                self_healed = (cleaned != {k: v for k, v in user.items()
+                                           if not k.startswith("_")})
+                cfg.update(cleaned)
     except Exception as exc:                                    # noqa: BLE001
         import sys
         print(f"[stages] config/stages.json 读取失败，已回落内置默认阶段表："
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         cfg = dict(_FALLBACK)
+    if self_healed:
+        # 把改名结果写回文件，避免下次启动又走一遍；失败不影响运行（内存里已经是对的）
+        try:
+            with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+                json.dump(cfg, fh, ensure_ascii=False, indent=2)
+                fh.write("\n")
+            print("[stages] 已把配置里的「全部简历」改为「新投递」并回写 stages.json")
+        except OSError as exc:
+            print(f"[stages] 回写 stages.json 失败（不影响本次运行）：{exc}")
     if not cfg.get("order"):
         cfg["order"] = list(_FALLBACK["order"])
     if not cfg.get("pipeline"):
@@ -264,7 +297,7 @@ def required_fields(from_stage: str, to_stage: str) -> list[str]:
 
     ⚠️ v4.0.6：**按"目标阶段"判定，不再按"动作"判定**。
     原来只认 `actions` 里配了的那一对（初筛通过 → 待面试），于是界面上的阶段下拉
-    直接跳「全部简历 → 已面试」就绕过去了 —— 业务方实测"没填面试单位也能进已面试"。
+    直接跳「新投递 → 已面试」就绕过去了 —— 业务方实测"没填面试单位也能进已面试"。
     面试单位是面试这件事的前提，凡是从**待面试之前**跨到**待面试及之后**的推进，
     都必须先有它，无论中间跳过几档、走哪条路径（卡片下拉 / 管道 / 助手提案）。
     """
@@ -338,7 +371,7 @@ def verdict(stage: str, outcome: str | None) -> str:
 
     ⚠️ v1.29.2：「拟录用」从"独立阶段"改成**已面试阶段打的标签**，
     所以它现在走 `outcome` 分支；老库里 stage 还写着「待发offer」的行会被
-    `normalize_stage` 归并到「全部简历」，但**那些行 outcome 为空**，
+    `normalize_stage` 归并到「新投递」，但**那些行 outcome 为空**，
     导出上会显示 `—` —— 属于需要人工确认一次的历史数据，不猜。
     """
     o = str(outcome or "").strip()

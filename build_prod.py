@@ -136,11 +136,11 @@ def prepare_config_template() -> None:
 #: 发行包里这几份配置**不能**沿用本机的值 —— 它们是"这个人/这家单位"的设置，
 #: 不是产品默认。v4.0.0 起一律写成空壳，由使用者自己填。
 #:
-#: · model.json / embedding.json：本机指向单位内网 MaaS 端点（`ws-*.maas...`），
+#: · model.json / embedding.json：本机指向单位内网模型端点，
 #:   打进安装包等于把内网地址连同模型名一起发出去；
-#: · jd.json：这是**新岗位会继承的默认判定尺子**（钛合金/真空熔铸/材料成型…），
+#: · jd.json：这是**新岗位会继承的默认判定尺子**（本机岗位的默认判定项），
 #:   发给别家单位，等于替人家决定"什么算合格"；
-#: · interview.json：面试单位/会议室/联系人（含真实电话）是本单位组织架构。
+#: · interview.json：面试单位/会议室/联系人属于本单位组织架构。
 BLANK_CONFIGS = {
     "model.json": {
         "enabled": False,
@@ -417,9 +417,9 @@ def main(argv: list[str] | None = None) -> int:
 
     setup: str | None = None
     if not args.skip_installer:
-        # 用 installer/make_setup.py 打单文件安装器：它装完会写 portable.flag，
-        # 数据/配置留在安装目录内，和 v2.0.0 的 _internal\data|config 同构，
-        # 老用户的 model.json / mailbox.json / *.secret 迁过来即用。
+        # 用 installer/make_setup.py 打**单文件**安装器（与 4.0.6 同款）：装完会写
+        # portable.flag，数据/配置留在安装目录内，和 v2.0.0 的 _internal\data|config
+        # 同构，老用户的 model.json / mailbox.json / *.secret 迁过来即用。
         # （repo_src/installer.py + HRAgentInstaller.spec 已废弃：它不写
         # portable.flag、也不迁移旧数据，装完配置目录是空的，模型和邮箱全部失效。）
         make_setup = os.path.join(WORKSPACE, "installer", "make_setup.py")

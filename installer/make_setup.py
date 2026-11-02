@@ -26,6 +26,12 @@ def _version() -> str:
 VERSION = _version()
 APPNAME = "HRAgent工作台"
 INSTALLER_NAME = f"{APPNAME}-安装程序-v{VERSION}"
+# 单文件安装器的解包目录。**不能再用 %TEMP%**：现场 %TEMP% 里有 ACL
+# 锁死的 _MEI* 残留，而企业策略又拦未签名 exe 在 %TEMP% 里解包，
+# 表现就是"双击 exe 没反应，但 Install-HRAgent.cmd 能起"。
+# %LOCALAPPDATA% 会被 PyInstaller 启动器展开，实测解包到
+# C:\Users\<用户>\AppData\Local\HRAgentInstallerTmp\_MEIxxxxxx。
+RUNTIME_TMPDIR = r"%LOCALAPPDATA%\HRAgentInstallerTmp"
 
 
 def build_payload() -> Path:
@@ -58,24 +64,29 @@ a = Analysis([{str(BOOT)!r}], pathex=[{str(BOOT.parent)!r}], binaries=[],
     excludes=["numpy", "pandas", "scipy", "torch", "PIL", "fitz", "openpyxl",
               "fastapi", "uvicorn", "pymupdf", "markitdown"], noarchive=False)
 pyz = PYZ(a.pure)
-# v3.1.14：**单文件（onefile）**。
+# v4.0.9：**单文件（onefile）** —— 与 4.0.6 完全一致的打包方式。
 #
-# 现场核实（2026-10-28）：v3.1.9 的单文件安装器在**别人电脑上完全正常**，
-# 只有业务方这台机器会报 "Could not create temporary directory!" ——
-# 那是它 %TEMP% 里留下了两个被 ACL 锁死、连 takeown 都删不掉的 `_MEI*` 目录，
-# 属于**单机环境问题**，不是打包格式的问题。
+# 历史：中间试过"目录版"来绕开 %TEMP% 里那两个 ACL 锁死的 `_MEI*` 残留
+# （报错 "Could not create temporary directory!"）。但业务方要求按 4.0.6 的方式
+# 发一个单文件 exe，所以恢复 onefile。
 #
-# 所以分发用的就是这个格式。万一某台机器也中招，包里同时带了
-# 「安装.cmd」（robocopy + PowerShell 版安装脚本），双击它一样能装。
+# v4.0.15：onefile 保留，但**解包目录从 %TEMP% 挪到 %LOCALAPPDATA%**。
+# 这是"双击 exe 没反应、用 Install-HRAgent.cmd 就能起"的根因修复：
+#   · %TEMP% 里有历史 _MEI* 残留，普通进程读不了也删不掉；
+#   · 企业策略拦未签名 exe 在 %TEMP% 里创建/解包；
+#   · 启动器不会因为换目录而失效，验证过 _MEIPASS =
+#     C:/Users/<用户>/AppData/Local/HRAgentInstallerTmp/_MEIxxxxxx。
+# 代价：每次启动仍要解出约 180 MB，只是不再依赖 %TEMP%。
 exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], name={INSTALLER_NAME!r},
     debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
     console=False, disable_windowed_traceback=False, argv_emulation=False,
     target_arch=None, codesign_identity=None, entitlements_file=None,
-    icon={str(ROOT / "app.ico")!r})
+    icon={str(ROOT / "app.ico")!r},
+    runtime_tmpdir={RUNTIME_TMPDIR!r})
 ''', encoding="utf-8")
     dist_dir = OUT / "_dist"
     work_dir = OUT / "_build"
-    print("[i] 构建单文件安装器")
+    print("[i] 构建单文件安装器（与 4.0.6 同款）")
     from PyInstaller.__main__ import run as run_pyinstaller
     run_pyinstaller([str(spec), "--distpath", str(dist_dir),
                      "--workpath", str(work_dir), "--noconfirm"])
@@ -87,7 +98,7 @@ exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], name={INSTALLER_NAME!r},
 
 
 def _zip_onefile(exe: Path, dst: Path) -> None:
-    """把单文件安装器打成 zip（只含那一个 exe）。"""
+    """单文件安装器打成 zip（只含那一个 exe，和 4.0.6 的分发包同构）。"""
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         zf.write(exe, exe.name)
     print(f"[OK] 分发包：{dst} ({dst.stat().st_size / 1024**2:.1f} MB)")

@@ -1997,7 +1997,7 @@ function cardHtml(x){
             ? `<span class="chip" style="color:var(--warn);background:var(--warn-soft)" title="简历读出来了，但这些字段没抽到：${esc(_miss.join('、'))}，可手动更正">缺：${esc(_miss.join('、'))}</span>`
             : '<span class="chip" style="color:var(--warn);background:var(--warn-soft)" title="这条投递有字段没抽到；打开完整档案会列出具体缺什么（姓名/年限/技能），并提供更正入口">信息缺失 · 点开档案核对</span>')
         : '');
-  const stage = x.stage || STAGE_CFG.default_stage || '全部简历';
+  const stage = x.stage || STAGE_CFG.default_stage || '新投递';
   // v1.29.2：**结论与阶段拆成两个标签，且结论更显眼**。
   // 为什么拆：阶段是"走到哪了"，结论是"这一步判下来是什么"——
   // HR 扫人才库时真正要找的是"谁拟录用了、谁被拒了"，那是结论。
@@ -2011,9 +2011,9 @@ function cardHtml(x){
   const stages = STAGES.map(k=>`<option value="${k}" ${k===stage?'selected':''}>${k}</option>`).join('');
   // v2.0.2（业务方 2026-10-19 第二次反馈）：位置从「档位右边」挪到**「岗位右边」**。
   // 理由：HR 扫卡片的动线是 名字 → 岗位 → 我要做什么；放在整行最右要横跨一屏才点到。
-  // **只在「全部简历」阶段出这个按钮**；已经有阶段的**不再灰显一份当前阶段** ——
+  // **只在「新投递」阶段出这个按钮**；已经有阶段的**不再灰显一份当前阶段** ——
   // 同一行的阶段标签（stageTag）就在左边几个 chip 处，再放一个灰的等于同一件事写两遍。
-  const _defStage = STAGE_CFG.default_stage || '全部简历';
+  const _defStage = STAGE_CFG.default_stage || '新投递';
   const _firstPass = (STAGES && STAGES[1]) || '初筛通过';
   const stageAction = (x.application_id && stage === _defStage)
     ? `<button class="btn-primary stage-go"
@@ -4396,7 +4396,7 @@ async function previewMail(){
   const r = await api('/api/mailbox/preview?limit=10', {method:'POST', body:JSON.stringify({})});
   if (r.__http_error || r.ok===false){
     out.innerHTML = `<div class="warn">连接失败：${esc(r.error||r.detail||'未知错误')}
-      <div class="small">请到「邮箱配置」核对服务器、账号与授权码（口令不回显，留空则沿用已保存的）。</div></div>`;
+      <div class="small">请到「邮箱配置」核对服务器、账号与授权码（密码不回显，留空则沿用已保存的）。</div></div>`;
     return;
   }
   out.innerHTML = `<div class="srcbox">${esc(r.message||'')}
@@ -6191,15 +6191,15 @@ async function renderMailCfgInto(boxId){
         <div class="small">「导入与来源」页从这里的文件建档。可填绝对路径（如外接盘或共享目录）。</div></div>
       <div class="k">服务商预设</div><div class="bar">
         <select id="cfgPreset" onchange="applyCfgPreset()"><option value="">（选择后自动填服务器/端口/SSL）</option></select>
-        <span class="small">国内邮箱需在邮箱里开启 IMAP 并生成<b>授权码</b>，口令栏填授权码，不是登录密码。</span></div>
+        <span class="small">国内邮箱需在邮箱里开启 IMAP 并生成<b>授权码</b>，密码栏填授权码，不是登录密码。</span></div>
       <div class="k">IMAP 服务器</div><div><input id="cfgHost" value="${esc(c.imap_host||'')}" style="width:240px" placeholder="imap.example.com"></div>
       <div class="k">端口 / SSL</div><div class="bar">
         <input id="cfgPort" value="${c.imap_port==null?993:c.imap_port}" style="width:90px">
         <label style="display:flex;align-items:center;gap:5px"><input type="checkbox" id="cfgSsl" ${c.imap_ssl?'checked':''}> 使用 SSL/TLS</label></div>
       <div class="k">账号</div><div><input id="cfgUser" value="${esc(c.imap_user||'')}" style="width:260px" placeholder="jobs@example.cn"></div>
-      <div class="k">授权码 / 口令</div><div><input id="cfgPass" type="password" style="width:260px"
+      <div class="k">授权码 / 密码</div><div><input id="cfgPass" type="password" style="width:260px"
         placeholder="${c.password_set?'已保存（留空则不修改）':'未设置'}">
-        <span class="small">${c.password_set?'当前已保存口令（不回显）':'尚未保存口令'}
+        <span class="small">${c.password_set?'当前已保存密码（不回显）':'尚未保存密码'}
           —— 这是<b>收信</b>授权码；发信另有一份，在下方「发信配置」里单独填。</span></div>
       <div class="k">收件文件夹</div><div><input id="cfgFolder" value="${esc(c.imap_folder||'INBOX')}" style="width:180px"></div>
       <div class="k">附件白名单</div><div><input id="cfgExt" value="${esc(attExt)}" style="width:340px" placeholder=".pdf,.docx,.doc,.txt,.md"></div>
@@ -6251,7 +6251,7 @@ async function renderSmtpCfgInto(boxId){
         placeholder="${c.password_set?'已保存（留空则不修改）':'未设置'}">
         <span class="small">${c.password_set
           ? ('当前已保存（不回显）　留空 = 不修改'
-             + (c.own_password_file ? '' : '　目前与收信口令共用一个文件，在此处保存后即独立'))
+             + (c.own_password_file ? '' : '　目前与收信密码共用一个文件，在此处保存后即独立'))
           : '尚未保存'}</span></div>
       <div class="k">发件人显示名</div><div><input id="spFrom" value="${esc(c.from_name||'')}" style="width:260px"
         placeholder="西北有色金属研究院 人力资源部"></div>
@@ -6314,7 +6314,7 @@ async function saveMailCfg(){
   const r = await api('/api/mailbox/config',{method:'POST',body:JSON.stringify(body)});
   if(r.__http_error||r.error){toast(r.detail||r.error||'保存失败','danger');return;}
   const warn = r.warnings||[];
-  toast('邮箱配置已保存'+(r.password_set?'（口令已更新）':'')+(warn.length?(' ｜ '+warn.join('；')):''),
+  toast('邮箱配置已保存'+(r.password_set?'（密码已更新）':'')+(warn.length?(' ｜ '+warn.join('；')):''),
         warn.length?'warn':'ok');
   document.getElementById('cfgOut').innerHTML = warn.length
     ? `<div class="warn" style="margin-top:10px">还有几处需要确认：<br>${warn.map(x=>'· '+esc(x)).join('<br>')}</div>`
@@ -6514,7 +6514,7 @@ async function viewSys(){
         <div class="k">回收目录</div><div><code>${esc((META.storage||{}).removed_dir||'data/removed')}</code>（界面上「删除」的来源文件移到这里，可恢复）</div>
         <div class="k">本地邮件</div><div><code>${esc((META.storage||{}).mail_dir||'data/mail_in')}</code>（eml 演练模式读取的目录）</div>
         <div class="k">备份</div><div><code>${esc((META.storage||{}).backup_dir||'data/backup')}</code></div>
-        <div class="k">配置</div><div><code>config/</code>（模型、JD 尺子、档位规则、embedding、邮箱口令 imap.secret）</div>
+        <div class="k">配置</div><div><code>config/</code>（模型、JD 尺子、档位规则、embedding、邮箱密码 imap.secret）</div>
       </div>
       <div class="small" style="margin-top:8px">备份方式：停服后整目录拷贝即可（重点 <code>data/</code> 与 <code>config/</code>）。</div>
     </div>

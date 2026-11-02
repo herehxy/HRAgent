@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "provider": "openai_compatible",
+  "base_url": "",
+  "model": "",
+  "max_tool_rounds": 4,
+  "temperature": 0,
+  "timeout": 180
+}

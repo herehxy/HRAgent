@@ -227,7 +227,7 @@ def _ensure_db() -> str:
         # 必须赶在第一个 HTTP 请求之前完成，否则登录进来的人没有管理权限。
         created = auth.ensure_seed_users(conn)
         if created:
-            print(f"[√] 已创建管理员账号：{', '.join(created)}（初始口令 change-me，"
+            print(f"[√] 已创建管理员账号：{', '.join(created)}（初始密码 change-me，"
                   f"首次登录后请立即修改）")
     finally:
         conn.close()

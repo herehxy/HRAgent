@@ -211,7 +211,7 @@ def blind_index(value: str | None) -> str | None:
     return hmac.new(key, norm.encode("utf-8"), hashlib.sha256).hexdigest()[:40]
 
 
-# —— 口令散列（用户登录）——
+# —— 密码散列（用户登录）——
 
 def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
     salt = salt or secrets.token_hex(16)

@@ -915,13 +915,11 @@ def main(verbose: bool = True) -> int:
         c.ok("unarchive_on_reapply" in _acts, "归档后重新投递写审计（可追溯为什么又出现了）")
         conn.close()
 
-        # ③ 列表排序口径：最差档沉底，其余按投递时间倒序（不看分数）
+        # ③ 列表排序口径：只看投递时间倒序（最新在前），不看档位、不看分数
         odb = os.path.join(work, "order.db")
         conn = db.connect(odb)
         for _nm, _tier, _at, _sc in (("甲", "A", "2026-01-01 09:00:00", 0.9),
                                      ("乙", _HARD_T, "2026-03-01 09:00:00", 0.2),
-                                     # 丙用**非最差档**：三档下 "C" 就是最差档，
-                                     # 与乙撞成同档会让"沉底"这条用例失去区分度
                                      ("丙", "B", "2026-02-01 09:00:00", 0.5)):
             _c = db.insert_candidate(conn, {"name": _nm, "source": "测试"})
             conn.execute(
@@ -930,8 +928,8 @@ def main(verbose: bool = True) -> int:
                 (_c, _tier, _at, _sc, _at, _at))
         conn.commit()
         _order = [x["name"] for x in db.list_candidates(conn) if x["name"] in ("甲", "乙", "丙")]
-        c.ok(_order == ["丙", "甲", "乙"],
-             "排序：最差档沉底，其余按投递时间倒序（最新在前，不看分数）", str(_order))
+        c.ok(_order == ["乙", "丙", "甲"],
+             "排序：只按投递时间倒序（最新在前），最差档/分数都不影响顺序", str(_order))
         conn.close()
 
         # ============================================================ R2
@@ -1248,8 +1246,9 @@ def main(verbose: bool = True) -> int:
                      _jsres[:70])
                 from app import ui_v2 as _ui2_mod
                 _pg2 = _ui2_mod.render_page_v2(auth_enabled=False)
-                _s2 = _pg2.index("<script>") + len("<script>")
-                _pg2js = _pg2[_s2:_pg2.index("</script>", _s2)]
+                # v4.0.15：主 JS 已拆成 /ui/<hash>.js 静态资源，
+                # 渲染结果里只剩内联配置块；语法检查直接取模块里的 _JS。
+                _pg2js = getattr(_ui2_mod, "_JS", "")
                 _tmpjs2 = os.path.join(work, "_ui_v2_check.js")
                 with open(_tmpjs2, "w", encoding="utf-8") as _fh:
                     _fh.write(_pg2js)
@@ -1259,33 +1258,35 @@ def main(verbose: bool = True) -> int:
                 c.ok(_jsres2.startswith("OK"),
                      "v2 页面渲染后的内联 JS 能通过解析",
                      _jsres2[:70])
-                c.ok("class=\"iv-split\"" in _pg2
-                     and "<h4>面试安排</h4>" in _pg2
-                     and "<h4>面试结论</h4>" in _pg2,
+                # 详情/邮件等界面片段是 JS 拼出来的；拆包后要连主 JS 一起查。
+                _pg2all = _pg2 + "\n" + _pg2js
+                c.ok("class=\"iv-split\"" in _pg2all
+                     and "<h4>面试安排</h4>" in _pg2all
+                     and "<h4>面试结论</h4>" in _pg2all,
                      "v2 面试安排与面试结论同框左右排")
-                c.ok("class=\"edu-band\"" in _pg2
-                     and "class=\"edu-period\"" in _pg2
-                     and _pg2.count('id="edFD"') == 1
-                     and _pg2.count('id="edEdu"') == 1
-                     and "专业未识别" not in _pg2
-                     and _pg2.index("class=\"edu-band\"") < _pg2.index("<h3>档位</h3>"),
+                c.ok("class=\"edu-band\"" in _pg2all
+                     and "class=\"edu-period\"" in _pg2all
+                     and _pg2all.count('id="edFD"') == 1
+                     and _pg2all.count('id="edEdu"') == 1
+                     and "专业未识别" not in _pg2all
+                     and _pg2all.index("class=\"edu-band\"") < _pg2all.index("<h3>档位</h3>"),
                      "v2 教育经历在姓名下方按时间线展示，空专业/排名不占位")
-                c.ok(_pg2.index("<h3>投递记录（") < _pg2.index("<h3>系统分析</h3>")
-                     and _pg2.index("<h3>系统分析</h3>") < _pg2.index("<h3>技能（")
-                     and _pg2.index("<h3>档位来源与操作记录</h3>")
-                     < _pg2.index("<h3>更多操作</h3>"),
+                c.ok(_pg2all.index("<h3>投递记录（") < _pg2all.index("<h3>系统分析</h3>")
+                     and _pg2all.index("<h3>系统分析</h3>") < _pg2all.index("<h3>技能（")
+                     and _pg2all.index("<h3>档位来源与操作记录</h3>")
+                     < _pg2all.index("<h3>更多操作</h3>"),
                      "v2 完整档案按流程事实→判断→能力→材料→审计→操作排列")
-                c.ok("function ensureDlgClose()" in _pg2
-                     and "function plainResponse(raw)" in _pg2
-                     and "ensureDlgClose();" in _pg2,
+                c.ok("function ensureDlgClose()" in _pg2js
+                     and "function plainResponse(raw)" in _pg2js
+                     and "ensureDlgClose();" in _pg2js,
                      "v2 弹窗统一提供关闭入口，非 JSON 错误先转成可读文本")
-                c.ok("/api/mail/send?async=1" in _pg2
-                     and "progressModal(r.task_id" in _pg2,
+                c.ok("/api/mail/send?async=1" in _pg2all
+                     and "progressModal(r.task_id" in _pg2all,
                      "v2 发信走后台任务轮询，大附件发送不会因 HTTP 断开被误报失败")
-                c.ok("收件人看到的样子" not in _pg2
-                     and "class=\"medit\"" in _pg2
-                     and _pg2.index("<h3>第一步 · 选人、选模板</h3>")
-                     < _pg2.index("<h3>第二步 · 预览与修改</h3>"),
+                c.ok("收件人看到的样子" not in _pg2all
+                     and "class=\"medit\"" in _pg2all
+                     and _pg2all.index("<h3>第一步 · 选人、选模板</h3>")
+                     < _pg2all.index("<h3>第二步 · 预览与修改</h3>"),
                      "v2 写邮件：左侧准备材料，右侧完整编辑与发送，不再保留收件人预览栏")
                 c.ok("function doInsertTable()" in _pgjs and "<table>" in _pgjs
                      and "contenteditable" in _pgjs,
@@ -3720,7 +3721,7 @@ def main(verbose: bool = True) -> int:
             _old_env = {k: os.environ.pop(k) for k in
                         ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY") if k in os.environ}
             try:
-                _KEY = "sk-test-1234567890abcd"
+                _KEY = "dummy-not-a-real-key"
                 _, g0_body = _asgi(srv.app, "GET", "/api/model-config", {})
                 g0 = json.loads(g0_body)
                 c.ok(g0.get("key_set") is False and g0.get("key_masked") == ""
@@ -3734,7 +3735,7 @@ def main(verbose: bool = True) -> int:
                                                "api_key": _KEY}).encode())
                 p1 = json.loads(p1_body)
                 c.ok(p1.get("ok") and "api_key" in (p1.get("changed") or [])
-                     and p1.get("key_masked") == "sk-****abcd"
+                     and p1.get("key_masked") == "dum****-key"
                      and _KEY not in p1_body,
                      "保存后只回掩码（完整 key 不出现在任何响应里，含审计路径）",
                      str(p1.get("key_masked")))
@@ -3761,7 +3762,7 @@ def main(verbose: bool = True) -> int:
                      "模型地址/名写 model.json，key 只进 secrets.json（两文件分离）")
                 _, g1_body = _asgi(srv.app, "GET", "/api/model-config", {})
                 g1 = json.loads(g1_body)
-                c.ok(g1.get("key_masked") == "sk-****abcd" and g1.get("key_set") is True
+                c.ok(g1.get("key_masked") == "dum****-key" and g1.get("key_set") is True
                      and _KEY not in g1_body and "密钥文件" in (g1.get("key_source") or ""),
                      "回读只见掩码，来源如实标为密钥文件",
                      f"{g1.get('key_masked')} / {g1.get('key_source')}")
@@ -3784,7 +3785,7 @@ def main(verbose: bool = True) -> int:
                 _c.close()
                 _ad = _ar["after"] if _ar else ""
                 c.ok(bool(_ad) and "api_key" in _ad
-                     and _KEY not in _ad and "sk-****" not in _ad,
+                     and _KEY not in _ad and "dum****" not in _ad,
                      "审计记了改了哪些字段，但 key 的值与掩码都不进审计",
                      _ad[:40])
             finally:

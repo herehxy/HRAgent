@@ -1177,6 +1177,14 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
             # 它们在下面统一挂到本封邮件**那位投递人**的档案上。
             _resume_atts = [a for a in atts if (a.get("kind") or "resume") == "resume"]
             _other_atts = [a for a in atts if (a.get("kind") or "resume") == "other"]
+            # 兜底（v4.0.7）：**一封邮件最多建一个档案**。
+            # `mailbox.extract_attachments` 已经保证每封只有一份 kind=resume，
+            # 但那是"上游的保证"——这里再夹一道，因为 ingest_mails 是公开入口
+            # （测试、脚本、以后新增的收取通道都可能直接喂 mails）。
+            # 多出来的那份按"其他材料"挂到同一个人的档案上，绝不再建一个人。
+            if len(_resume_atts) > 1:
+                _other_atts = _resume_atts[1:] + _other_atts
+                _resume_atts = _resume_atts[:1]
             # 本封邮件建出来的人（**局部变量**）。不能回头扫 `report["details"]` ——
             # 那个列表是**整批累积**的，会把上一封邮件的人挂到这封的附件上。
             _mail_cid: int | None = None

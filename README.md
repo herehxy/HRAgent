@@ -113,7 +113,7 @@ data/archive/         简历原件（按年月分目录，只增不改）
 config/jd.json        岗位尺子      config/tiers.json       A/B/C/D 阈值
 config/ontology.json  技能本体      config/majors.json      学科目录（13 门类 / 93 一级学科）
 config/universities.json  985·211   config/model.json       模型服务（OpenAI 兼容）
-config/mailbox.json   收发信配置     config/imap.secret      IMAP 口令（0600，不入版本库）
+config/mailbox.json   收发信配置     config/imap.secret      IMAP 密码（0600，不入版本库）
 ```
 
 接内网大模型只改 `base_url` + `model`，不动代码；也支持 `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` 覆盖。

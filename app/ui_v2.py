@@ -26,7 +26,9 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 
 from . import stages as stages_mod
 from . import tiers as tiers_mod
@@ -43,7 +45,9 @@ _PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>人才库 · v2 预览</title>
+<title>人才库智能体</title>
+<!-- 标签页图标：复用侧栏品牌图，避免浏览器去请求 /favicon.ico（404） -->
+<link rel="icon" type="image/png" href="__BRAND_ICON__">
 <style>
 :root{
   /* ============ 配色：**完全沿用原版**（`ui.py` 的 :root）============
@@ -161,7 +165,7 @@ button{cursor:pointer}
 }
 .vdiv{width:1px;height:18px;background:var(--line-2);margin:0 2px;flex:none}
 .allbox{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--ink-2);
-  cursor:pointer;user-select:none;padding:0 4px}
+  cursor:pointer;user-select:none;padding:0 4px;white-space:nowrap;flex:none}
 .allbox input{width:14px;height:14px;accent-color:var(--accent);cursor:pointer}
 .more{position:relative}
 .morePanel{
@@ -190,6 +194,16 @@ button{cursor:pointer}
   width:172px;min-width:172px;max-width:172px;box-sizing:border-box;flex:none;
   font-size:14px;line-height:1.2}
 .morePanel .lbl{font-size:13px;color:var(--ink-3)}
+/* 投递时间：开始/结束两个日期框（业务方 2026-11-02 要求具体到天）。
+   单独占一行，避免和 172px 的下拉挤在一起；宽度够显示完整 yyyy-mm-dd。 */
+.morePanel .dateRange{flex:0 0 100%;display:flex;align-items:center;gap:8px;height:32px}
+.morePanel .dateRange .lbl{white-space:nowrap}
+.morePanel .dateRange input{
+  width:150px;height:32px;padding:0 8px;border:1px solid var(--line-2);
+  border-radius:var(--r-s);background:var(--surface);color:var(--ink-2);
+  font:inherit;font-size:14px;box-sizing:border-box}
+.morePanel .dateRange input:focus{outline:none;border-color:var(--accent)}
+.morePanel .dateRange .dash{color:var(--ink-3);user-select:none}
 /* 「清空筛选」单独占一行、靠右、用警示色（它是"推翻所有条件"的动作，
    混在一排下拉里既容易误点、也看不出来是按钮） */
 .morePanel .clearRow{flex-basis:100%;display:flex;justify-content:flex-end;margin-top:4px;
@@ -210,30 +224,41 @@ button{cursor:pointer}
   background:var(--accent-soft);border-color:var(--accent-line);
   color:var(--accent-ink);font-weight:600;
 }
-/* ---------------- 左侧栏（模块切换） ---------------- */
+/* ---------------- 左侧栏（模块切换） ----------------
+   2026-11-02 重做：图标 + 单行账号。
+   设计要求（业务方原话）："像 workbuddy 那样一行就可以"、"不要emoji、用图标"、
+   "克制、克制、再克制" —— 所以这里只做三件事：
+     · 每项 = 17px 线性图标 + 文字，行高 34px，间距统一 2px；
+     · 分组标题 11px、字距 .08em，只做"分区提示"，不抢视线；
+     · 账号压成一行（头像 22 + 名字 + 角色），点击出菜单。 */
 .side{background:var(--nav);border-right:1px solid var(--line);
-  padding:16px 10px;overflow-y:auto;display:flex;flex-direction:column}
+  padding:14px 8px 10px;overflow-y:auto;display:flex;flex-direction:column}
 /* 品牌区 = 应用图标 + 产品名。图标用内联 data URI：
    这个页面是**单文件内联**的（JS/CSS 全在 HTML 里，见 render_page_v2），
    再挂一个 /logo.png 请求只会多一次往返，还会在服务刚起时闪一下空图。
    base64 是 icon_tray.png 缩到 96px 的版本，四角已透明，浅色侧栏上不露白边。 */
-.sbrand{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:600;
-  padding:2px 8px 16px;letter-spacing:.01em;line-height:1.25}
+.sbrand{display:flex;align-items:center;gap:9px;font-size:14.5px;font-weight:600;
+  padding:2px 10px 14px;letter-spacing:.01em;line-height:1.25}
 .sbrand img{width:26px;height:26px;flex:none;display:block;
   border-radius:7px;box-shadow:0 1px 2px rgba(24,28,32,.14)}
 .sbrand span{display:flex;flex-direction:column;min-width:0}
 .sbrand b{font-weight:650;color:var(--ink);white-space:nowrap}
 .sbrand small{font-size:11.5px;font-weight:400;color:var(--ink-3);
   white-space:nowrap;letter-spacing:.02em;margin-top:1px}
-.sgroup{font-size:12px;color:var(--ink-3);padding:10px 12px 5px;letter-spacing:.04em}
+.sgroup{font-size:11px;color:var(--ink-3);padding:14px 10px 6px;
+  letter-spacing:.08em;font-weight:500}
 .side button{
-  display:block;width:100%;text-align:left;border:0;background:transparent;
-  color:var(--ink-2);padding:10px 12px;border-radius:var(--r-s);font-size:15px;
-  margin-bottom:2px;
+  display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+  border:0;background:transparent;color:var(--ink-2);
+  padding:0 10px;height:34px;border-radius:8px;font-size:14px;
+  margin-bottom:2px;line-height:1;cursor:pointer;
 }
-.sgroup{font-size:13px;}
+.side button .ico{width:17px;height:17px;flex:none;stroke:currentColor;fill:none;
+  stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;opacity:.66}
 .side button:hover{background:var(--ground)}
+.side button:hover .ico{opacity:.9}
 .side button.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+.side button.on .ico{opacity:1;stroke-width:1.8}
 .multi{display:inline-flex;flex-wrap:wrap;align-items:center;gap:5px;flex:1;min-width:230px}
 .mchip{display:inline-flex;align-items:center;gap:4px;background:var(--accent-soft);
   border:1px solid var(--accent-line);color:var(--accent-ink);border-radius:4px;
@@ -321,6 +346,10 @@ button{cursor:pointer}
 .proprow{padding:7px 0;border-top:1px dashed var(--warn-line)}
 .proprow:first-of-type{border-top:0;padding-top:2px}
 .proprow-t{font-size:13px;line-height:1.6;color:var(--ink)}
+/* 提案里的候选人姓名：点开右侧档案。做成明确的下划线链接，别让人猜可不可点 */
+.plink{color:var(--accent-ink);text-decoration:none;border-bottom:1px dashed var(--accent-line);
+  cursor:pointer}
+.plink:hover{color:var(--accent);border-bottom-style:solid}
 .proprow-a{margin-top:6px;display:flex;gap:6px}
 .stg{font-size:12px;line-height:1;padding:2px 7px;border-radius:4px;margin-left:7px;
   font-weight:600;white-space:nowrap;display:inline-block;vertical-align:1px}
@@ -345,6 +374,13 @@ button{cursor:pointer}
 .cfgsec .ced{display:none}
 .cfgsec.editing .cur{display:none}
 .cfgsec.editing .ced{display:block}
+/* 面试字典（2026-11-02 重做）：只读态只显示条目本身，编辑态才出现"添加"框和批量文本框。
+   原来两行都在：上面一行"面试单位（还没有条目）[输入后回车添加]"，下面一行
+   "面试单位 未设置" —— 同一个标题出现两次，用户不知道该用哪个。 */
+.dict-bulk{display:none}
+.cfgsec.editing .dict-bulk{display:block}
+.dict-add{display:none}
+.cfgsec.editing .dict-add{display:block}
 .vsel{height:32px;padding:0 8px;border:1px solid var(--line-2);border-radius:var(--r-s);
   background:var(--surface);font:inherit;outline:none;cursor:pointer;min-width:110px}
 .vsel:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
@@ -495,9 +531,39 @@ button{cursor:pointer}
   font-weight:600;white-space:nowrap;display:inline-block}
 .jst.on{color:var(--ok);background:var(--ok-soft);border:1px solid var(--ok-line)}
 .jst.off{color:var(--ink-3);background:var(--surface-2);border:1px solid var(--line)}
-/* 页脚只剩构建时间：放大到 14px、主文字色，排障时一眼能念出来 */
-.sfoot{margin-top:auto;padding:10px 8px 4px;font-size:14px;color:var(--ink-2);
-  font-weight:600;letter-spacing:.01em;line-height:1.6;font-variant-numeric:tabular-nums}
+/* 左下角**账号区**（2026-10-30 加入，2026-11-02 压成一行）。
+   业务方反馈："账号太大了，像 workbuddy 那样一行就可以，为什么这么高"。
+   所以：头像 22px + 名字 + 角色**同一行**，整块高 36px，无边框、无卡片底色；
+   点开是菜单：账号管理（有权限才显示）+ 退出登录。
+   「系统配置」不在菜单里 —— 它已经是左侧导航的一项，重复放两处只会让人犹豫点哪个。 */
+.sfoot{margin-top:auto;padding:8px 2px 2px;position:relative;
+  border-top:1px solid var(--line)}
+.acct{display:flex;align-items:center;gap:8px;width:100%;padding:0 8px;height:34px;
+  border:0;background:transparent;border-radius:8px;cursor:pointer;
+  text-align:left;font:inherit;color:var(--ink)}
+.acct:hover{background:var(--ground)}
+.acct:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.acct .av{width:22px;height:22px;border-radius:50%;flex:none;display:grid;place-items:center;
+  background:var(--accent-soft);color:var(--accent-ink);font-weight:700;font-size:11px}
+.acct .txt{flex:1;min-width:0;display:flex;align-items:baseline;gap:6px;overflow:hidden}
+.acct .txt b{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.acct .txt i{font-style:normal;font-size:11.5px;color:var(--ink-3);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.acct .chev{color:var(--ink-3);font-size:10px;flex:none;opacity:.55}
+.acctMenu{position:absolute;left:2px;right:2px;bottom:calc(100% + 4px);z-index:60;
+  background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 12px 30px rgba(16,24,40,.16);padding:4px;display:none}
+.acctMenu.on{display:block}
+.acctMenu button{display:block;width:100%;text-align:left;padding:0 10px;height:32px;
+  border:0;background:transparent;border-radius:7px;cursor:pointer;font:inherit;
+  color:var(--ink);font-size:13.5px;line-height:32px}
+.acctMenu button:hover{background:var(--ground)}
+/* ⚠️ 必须显式写：上面把 display 设成 block，会盖掉浏览器对 [hidden] 的默认隐藏，
+   导致"没权限的账号管理"仍然显示出来（点了才 403）。 */
+.acctMenu button[hidden]{display:none}
+.acctMenu .ver{margin-top:2px;padding:7px 10px 3px;border-top:1px solid var(--line);
+  font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
 
 .main{min-width:0;height:100vh;display:flex;flex-direction:column;overflow:hidden}
 
@@ -689,6 +755,12 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
 .detail-toolbar .dact{flex:initial;width:100%;margin-left:0}
 .profile-head{margin-top:22px;padding-top:0}
 .profile-head .dname{line-height:1.4}
+/* 姓名行：姓名在左、动作组贴最右（2026-10-30）。
+   窄窗口下允许换行，动作组整体掉到第二行右对齐 —— 不允许把姓名挤成竖排。 */
+.namerow{display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap}
+.namerow .dname{min-width:0}
+.dhead-act{margin-left:auto;display:flex;gap:8px;align-items:center;flex:none;flex-wrap:wrap;
+  padding-top:2px}
 .profile-layout{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
   gap:0 26px;align-items:start;grid-auto-flow:row dense}
 .profile-layout > *{min-width:0}
@@ -847,6 +919,11 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
 .btn.primary{background:var(--accent-soft);border-color:var(--accent-line);
   color:var(--accent-ink);font-weight:700}
 .btn.primary:hover{background:var(--accent-hi);border-color:var(--accent);color:var(--accent-ink)}
+/* 「已复核」态（2026-11-02）：按下之后按钮本身要能一眼看出来，
+   天蓝底 + 深蓝字 + 前面一个对勾；悬停提示"点击撤销复核"。
+   原来按下后文字变成"撤销复核"，用户反而看不出"这个人复核过了没有"。 */
+.btn.reviewed{background:#e6f4fd;border-color:#9fd4f3;color:#0f6fa8;font-weight:600}
+.btn.reviewed:hover{background:#d6ecfa;border-color:#7cc4ea;color:#0b5c8c}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 
 /* 分节：一条细线 + 小标题，不用卡片 */
@@ -1260,7 +1337,7 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
 /* ---- 登录框动效（v3.2）----
    三段，各回答一个问题：
      入场  "界面出来了"  → 淡入 + 上浮 8px（只动 opacity/transform，走合成层）
-     失败  "口令不对"    → 横向轻抖，不用读字也知道错在哪
+     失败  "密码不对"    → 横向轻抖，不用读字也知道错在哪
      成功  "进去了"      → 框放大淡出 + 整层淡出 + 应用区从 97% 推开
    入场只做一次（靠 .loginwrap.enter 类控制），401 把登录页叫回来时不重播 ——
    会话过期被弹回来时用户是着急的，这时候再让他等 280ms 是帮倒忙。 */
@@ -1331,7 +1408,7 @@ body.locked > .side,body.locked > .main{opacity:0;transform:scale(.985);transfor
 @keyframes drawCheck{to{stroke-dashoffset:0}}
 .loginhint{margin-top:14px;font-size:11.5px;color:var(--ink-3);text-align:center}
 /* 首次使用提示：与普通脚注**同一副样子**（灰、小、居中），
-   只是允许换行 —— 账号和口令挤在一行会糊成一片。
+   只是允许换行 —— 账号和密码挤在一行会糊成一片。
    刻意不做高亮块：登录框里只该有一个视觉重点（那个登录按钮）。 */
 #loginFirstHint{
   margin-top:14px;font-size:11.5px;line-height:1.7;
@@ -1380,9 +1457,56 @@ body.readonly .detail-toolbar [onclick*="avatarRefresh"],
 body.readonly .seg button,                   /* 档位按钮 */
 body.readonly .stagesel,
 body.readonly [data-act]{display:none!important}
+
+/* ---------------- 前端体验优化（2026-11-02） ---------------- */
+/* 列表加载态：一条顶部细进度条 + 列表/分页变淡，慢查询不再像"点了没反应" */
+.loadbar{position:fixed;top:0;left:0;right:0;height:3px;z-index:80;overflow:hidden;
+  pointer-events:none;opacity:0;transition:opacity .15s}
+.loadbar.on{opacity:1}
+.loadbar::before{content:'';display:block;width:35%;height:100%;background:var(--accent);
+  border-radius:0 2px 2px 0;animation:loadslide 1s ease-in-out infinite}
+@keyframes loadslide{0%{transform:translateX(-120%)}100%{transform:translateX(380%)}}
+body.list-busy #list{opacity:.55;pointer-events:none}
+body.list-busy #pager{opacity:.5;pointer-events:none}
+/* 键盘可见焦点：鼠标点击不出现，Tab 才出现 */
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,
+[tabindex]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;background:var(--accent-soft)}
+/* 窄屏：左栏抽成抽屉；侧栏只留图标 */
+.listmask{display:none;position:fixed;inset:0;z-index:38;background:rgba(20,24,30,.18)}
+#btnListToggle{display:none}
+@media (max-width:1280px){
+  body{grid-template-columns:168px 1fr}
+  .wrap{grid-template-columns:340px 1fr}
+  .search{width:230px}
+  .detail{padding:0 18px 36px}
+}
+@media (max-width:1100px){
+  body{grid-template-columns:64px 1fr}
+  .side{padding:10px 6px}
+  .sbrand{justify-content:center;padding:2px 0 12px}
+  .sbrand span,.side button span,.side .sgroup,.side .sfoot .txt,.side .sfoot .chev{display:none}
+  .side .sfoot .av{display:inline-flex}
+  .side button{justify-content:center;padding:0}
+  .wrap{grid-template-columns:1fr}
+  .listwrap{position:fixed;left:64px;top:0;bottom:0;width:min(360px,82vw);z-index:40;
+    transform:translateX(-115%);transition:transform .2s ease;
+    box-shadow:8px 0 24px rgba(24,28,32,.16)}
+  body.list-open .listwrap{transform:none}
+  body.list-open .listmask{display:block}
+  #btnListToggle{display:inline-flex}
+  .detail{padding:0 14px 36px}
+  .morePanel{max-width:calc(100vw - 90px)}
+  /* 窄屏顶部工具条允许换行：1000px 下一行放不下搜索+筛选，硬塞会把
+     "全部/未复核" 和工具栏按钮挤出可视区。 */
+  .top{height:auto;min-height:52px;flex-wrap:wrap;gap:6px;padding:6px 10px}
+  .top .search{flex:1 1 220px;width:auto;min-width:160px}
+  #count{display:none}
+}
 </style>
 </head>
 <body>
+<div class="loadbar" id="loadBar" aria-hidden="true"></div>
 <aside class="side">
   <!-- 品牌区：应用图标 + 产品名。原来的写法是一个 9px 蓝色小方块 + "人才库"，
        那个方块是占位符（`.sbrand i`），跟 exe 图标毫无关系；而"人才库"又是
@@ -1395,24 +1519,48 @@ body.readonly [data-act]{display:none!important}
     <span><b>HRAgent 工作台</b></span>
   </div>
   <div class="sgroup">招聘</div>
-  <button data-view="pool" class="on">人才库</button>
-  <button data-view="chat">智能助手</button>
-  <button data-view="mail">写邮件</button>
+  <button data-view="pool" class="on">
+    <svg class="ico" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.6 19.2c.5-3.3 2.7-5.2 5.4-5.2s4.9 1.9 5.4 5.2"/><path d="M16.2 5.6a3 3 0 0 1 0 5.9"/><path d="M17.6 19.2c-.2-2.3-1-4-2.4-4.9 2.7-.3 5.1 1.5 5.4 4.9"/></svg>
+    <span>人才库</span></button>
+  <button data-view="chat">
+    <svg class="ico" viewBox="0 0 24 24"><path d="M20.5 12a8.5 8.5 0 0 1-12.2 7.6L3.5 20.5l.9-4.8A8.5 8.5 0 1 1 20.5 12Z"/><path d="M8.6 11.8h.01M12 11.8h.01M15.4 11.8h.01"/></svg>
+    <span>智能助手</span></button>
+  <button data-view="mail">
+    <svg class="ico" viewBox="0 0 24 24"><rect x="3" y="5.5" width="18" height="13" rx="2.2"/><path d="m3.8 7.2 7.1 5.2a2 2 0 0 0 2.2 0l7.1-5.2"/></svg>
+    <span>写邮件</span></button>
   <div class="sgroup">管理</div>
-  <button data-view="org">岗位管理</button>
-  <button data-view="archive">归档</button>
-  <button data-view="sys">系统配置</button>
-  <!-- 账号管理只对 admin 显示（v3.0.3）。权限不足时点进去也是 403，
-       但**入口就不该出现** —— 让人点一个"你没权限"的按钮是坏体验。 -->
-  <button data-view="users" id="navUsers" hidden>账号管理</button>
+  <button data-view="org">
+    <svg class="ico" viewBox="0 0 24 24"><rect x="3" y="7.5" width="18" height="12" rx="2.2"/><path d="M9 7.5V6a1.8 1.8 0 0 1 1.8-1.8h2.4A1.8 1.8 0 0 1 15 6v1.5"/><path d="M3 12.2h18"/></svg>
+    <span>岗位管理</span></button>
+  <button data-view="archive">
+    <svg class="ico" viewBox="0 0 24 24"><rect x="3.2" y="4.5" width="17.6" height="4.4" rx="1.4"/><path d="M4.8 8.9V18a1.8 1.8 0 0 0 1.8 1.8h10.8A1.8 1.8 0 0 0 19.2 18V8.9"/><path d="M9.6 12.4h4.8"/></svg>
+    <span>归档</span></button>
+  <button data-view="sys">
+    <svg class="ico" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3"/><circle cx="15" cy="7" r="2.2"/><path d="M4 17h3M11 17h9"/><circle cx="9" cy="17" r="2.2"/></svg>
+    <span>系统配置</span></button>
+  <!-- 账号管理**不在左侧导航**（2026-11-02）：它属于"人的设置"，跟业务模块不是一类，
+       放进左下角账号弹出菜单里更顺 —— 也免得侧栏出现两个"管理"。 -->
   <!-- 构建时间由服务端注入：改了代码后如果这里的时间没变，说明浏览器还在跑旧页面 -->
-  <!-- 侧栏页脚只留构建时间（2026-10-28）："v2 预览"是开发期口径，不该出现在给人事用的界面上；
-       时间则要能一眼看清（排障第一句就是"你那边版本是什么时候的"），所以放大加粗。 -->
-  <div class="sfoot">__V2_BUILD__</div>
+  <div class="sfoot" id="sfoot">
+    <button class="acct" id="acctBtn" onclick="toggleAcct(event)"
+            title="账号" aria-haspopup="true" aria-expanded="false">
+      <span class="av" id="acctAv">·</span>
+      <span class="txt"><b id="acctName">本机模式</b><i id="acctRole"></i></span>
+      <span class="chev">▴</span>
+    </button>
+    <div class="acctMenu" id="acctMenu" role="menu">
+      <button role="menuitem" onclick="acctGo('users')" id="acctUsers" hidden>账号管理</button>
+      <button role="menuitem" onclick="doLogout()" id="acctLogout" hidden>退出登录</button>
+      <div class="ver">__V2_BUILD__</div>
+    </div>
+  </div>
 </aside>
 
 <div class="main">
 <div class="top" id="topBar">
+  <!-- 窄屏（<=1100px）才显示：把左栏名单抽成抽屉，详情占满宽度 -->
+  <button class="btn" id="btnListToggle" onclick="toggleListDrawer()"
+          aria-label="打开候选人名单">名单</button>
   <div class="brand" style="display:none"><i></i>人才库</div>
   <input id="kw" class="search" placeholder="搜索姓名 / 院校 / 专业 / 技能"
          onkeydown="if(event.key==='Enter'){doSearch()}">
@@ -1448,19 +1596,26 @@ body.readonly [data-act]{display:none!important}
       <!-- 面试部门（原版有、v2 缺）：后端 `interview_unit` 支持顿号/逗号分隔的多值匹配 -->
       <select id="fUnit" class="sel"><option value="">面试部门：不限</option></select>
       <select id="fOutcome" class="sel"><option value="">面试结论：不限</option></select>
-      <select id="fDate" class="sel">
-        <option value="">投递时间：不限</option>
-        <option value="7">近 7 天</option>
-        <option value="30">近 30 天</option>
-        <option value="year">今年</option>
-      </select>
+      <!-- 投递时间改成**具体日期的起止范围**（业务方 2026-11-02）：
+           原来的「近 7 天 / 近 30 天 / 今年」只能选粗档，筛不到"某月某日到某月某日"。
+           后端 `db.search_candidates` 本来就支持 `date_from` / `date_to`（按 applied_at，
+           含结束当天），这里只换控件，查询链路不变。
+           输入框平时是 text，点开才切成 date —— 这样能显示"开始日期/结束日期"占位，
+           原生 date 控件的占位是固定的 yyyy/mm/dd，改不了。 -->
+      <div class="dateRange" id="fDateRange">
+        <span class="lbl">投递时间</span>
+        <input id="fDateFrom" type="text" placeholder="开始日期"
+               onfocus="this.type='date'" onblur="if(!this.value)this.type='text'">
+        <span class="dash">~</span>
+        <input id="fDateTo" type="text" placeholder="结束日期"
+               onfocus="this.type='date'" onblur="if(!this.value)this.type='text'">
+      </div>
       <div class="clearRow"><button class="btn" onclick="clearFilters()">清空筛选</button></div>
     </div>
   </div>
   <button class="btn" id="btnOverview" onclick="showOverview()">概览 · 待办</button>
-  <!-- 当前登录者（只有登录模式才有内容，本机模式保持空） -->
-  <div class="whoami" id="whoami"></div>
-  <div class="count" id="count"></div>
+  <!-- 当前登录者已移到**左下角账号区**（2026-10-30 业务方要求），顶部不再重复显示 -->
+  <div class="count" id="count" aria-live="polite"></div>
 </div>
 
 <div class="top2">
@@ -1508,6 +1663,7 @@ body.readonly [data-act]{display:none!important}
 <div class="pipe" id="pipe"></div>
 <div class="propbox" id="propBox"></div>
 
+<div class="listmask" id="listMask" onclick="toggleListDrawer()"></div>
 <div class="wrap" id="wrapBox">
   <div class="listwrap">
   <div class="list" id="list"></div>
@@ -1516,7 +1672,7 @@ body.readonly [data-act]{display:none!important}
   <div class="detail" id="detail"><div class="hint">读取概览…</div></div>
 </div>
 </div>
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div class="mask" id="mask"><div class="dlg" role="dialog" aria-modal="true"><h3 id="dlgTitle"></h3><div class="db" id="dlgBody"></div><div class="db" id="edDlgBody" style="display:none"></div><div class="dbar"><button class="btn" id="dlgNo"></button><button class="btn primary" id="dlgYes"></button></div></div></div>
 
 <!-- 登录页（v3.0.3）。只有 AUTH_ENABLED=true 时才显示；本机模式整块不出现。
@@ -1531,7 +1687,7 @@ body.readonly [data-act]{display:none!important}
     <!-- 副标题「西北有色院 · 人事」已删（2026-10-28）：同一句话不再出现在界面上 -->
     <label class="loginlabel" for="loginUser">账号</label>
     <input id="loginUser" class="logininput" autocomplete="username" required>
-    <label class="loginlabel" for="loginPass">口令</label>
+    <label class="loginlabel" for="loginPass">密码</label>
     <input id="loginPass" class="logininput" type="password" autocomplete="current-password" required>
     <div class="loginerr" id="loginErr"></div>
     <!-- 忙碌/成功图标（v3.2）：同一条 SVG，圆环转 → 对勾画出来。
@@ -1543,18 +1699,23 @@ body.readonly [data-act]{display:none!important}
       </svg>
       <span id="loginBtnText">登录</span>
     </button>
-    <!-- 首次使用提示（v3.1.3）：原来这里只有"忘记口令请联系管理员"，
-         而**管理员自己也不知道初始口令是什么** —— 双击打开、看到登录页、
+    <!-- 首次使用提示（v3.1.3）：原来这里只有"忘记密码请联系管理员"，
+         而**管理员自己也不知道初始密码是什么** —— 双击打开、看到登录页、
          输不进去，第一反应是"程序坏了"。首次部署必须把默认账号写出来。
-         口令改过之后这行会自动消失（服务端按 must_change_password 决定是否下发）。 -->
+         密码改过之后这行会自动消失（服务端按 must_change_password 决定是否下发）。 -->
     <div class="loginhint" id="loginFirstHint" hidden></div>
-    <div class="loginhint">忘记口令请联系系统管理员重置。</div>
+    <div class="loginhint">忘记密码请联系系统管理员重置。</div>
   </form>
 </div>
 
 <script>
+/* 这两份配置必须按请求注入（每个部署阶段/档位不同），所以留在内联；
+   主 JS/CSS 在下方拆成带内容 hash 的静态资源，可长期缓存。 */
 var STAGE_CFG = __V2_STAGES__;
 var TIER_CFG  = __V2_TIERS__;
+var AUTH_ENABLED = __V2_AUTH__;
+</script>
+<script id="ui-main">
 var ITEMS = [], CUR = null, CUR_DETAIL = null;
 
 /* ---------- 登录态（2026-10-20 补齐） ----------
@@ -1567,7 +1728,6 @@ var ITEMS = [], CUR = null, CUR_DETAIL = null;
      · hdr() 给 api() 与裸 fetch 统一加头
      · withToken() 供**浏览器原生导航**用 —— 那条路带不了自定义请求头，
        后端 /api/documents/{id}/file 与 /api/sources/file 都接受 ?token= 兜底。 */
-var AUTH_ENABLED = __V2_AUTH__;
 var TOKEN = (function(){ try { return localStorage.getItem('tp_token') || ''; }
                         catch(e){ return ''; } })();
 /*: 当前登录者（`/api/me` 的结果）。本机模式下保持 null，界面不显示"当前用户"。 */
@@ -1605,6 +1765,13 @@ function toast(msg, kind){
   t.textContent = msg;
   t.className = 'toast on ' + (kind || 'info');
   clearTimeout(t._h); t._h = setTimeout(function(){ t.classList.remove('on'); }, 2200);
+}
+/* 让非 button 的可点标签（× 等）也能用 Enter/Space 触发 */
+function keyClick(ev){
+  if(ev.key === 'Enter' || ev.key === ' '){
+    ev.preventDefault();
+    ev.currentTarget.click();
+  }
 }
 async function api(path, opt){
   opt = opt || {};
@@ -1698,6 +1865,7 @@ function msPick(id, i, on){
   if(on && at < 0) m.sel.push(v);
   if(!on && at >= 0) m.sel.splice(at, 1);
   msSync(id);
+  PAGE.page = 1;
   load();          /* 勾完立刻重查，省得再点一次"搜索" */
 }
 function msClearOne(id){
@@ -1708,6 +1876,7 @@ function msClearOne(id){
   if(wrap) Array.prototype.forEach.call(wrap.querySelectorAll('input[type=checkbox]'),
     function(c){ c.checked = false; });
   msSync(id);
+  PAGE.page = 1;
   load();
 }
 function msToggle(id){
@@ -1769,6 +1938,7 @@ fillSel('fOverseas', '海外院校', [['海外','海外'],['非海外','非海�
         x.classList.remove('on');
       });
       b.classList.add('on');
+      PAGE.page = 1;
       load();
     });
   });
@@ -1888,7 +2058,7 @@ document.addEventListener('keydown', function(ev){
   if(batch) batch.classList.remove('on');
 });
 function clearFilters(){
-  ['kw','fEdu','fStage','fTier','fGender','fUniv','fBachelor','fCet','fDate','fOutcome',
+  ['kw','fEdu','fStage','fTier','fGender','fUniv','fBachelor','fCet','fOutcome',
    'fOverseas','fUnit'].forEach(function(id){
     var el = document.getElementById(id);
     if(!el) return;
@@ -1897,6 +2067,11 @@ function clearFilters(){
     }else{
       el.value = '';
     }
+  });
+  /* 投递时间是两个日期框，清空后还要切回 text，否则会留下 yyyy/mm/dd 的原生占位 */
+  ['fDateFrom','fDateTo'].forEach(function(id){
+    var el = document.getElementById(id);
+    if(el){ el.value = ''; el.type = 'text'; }
   });
   /* 勾选式下拉的选中状态存在 MSEL 里，hidden input 清空还不够 */
   ['msEdu', 'msCet'].forEach(function(id){
@@ -1911,9 +2086,122 @@ function clearFilters(){
   Array.prototype.forEach.call(document.querySelectorAll('.tabs button'), function(x){
     x.classList.toggle('on', x.dataset.tab === 'ALL');
   });
+  PAGE.page = 1;
   load();
 }
 
+/* ---------------- 筛选状态同步到 URL（刷新/后退不丢） ---------------- */
+var URL_READY = false;
+function urlState(){
+  var p = new URLSearchParams();
+  [['kw','kw'],['education','fEdu'],['stage','fStage'],['gender','fGender'],
+   ['univ','fUniv'],['bachelor','fBachelor'],['cet','fCet'],['outcome','fOutcome'],
+   ['overseas','fOverseas'],['interview_unit','fUnit'],
+   ['date_from','fDateFrom'],['date_to','fDateTo']].forEach(function(kv){
+    var el = document.getElementById(kv[1]);
+    var v = el ? String(el.value || '').trim() : '';
+    if(v) p.set(kv[0], v);
+  });
+  if(TAB && TAB !== 'ALL') p.set('tier', TAB);
+  if(PAGE.page && PAGE.page > 1) p.set('page', PAGE.page);
+  if(PAGE.page_size && PAGE.page_size !== 50) p.set('page_size', PAGE.page_size);
+  return p;
+}
+function syncUrlState(push){
+  if(!URL_READY) return;
+  var qs = urlState().toString();
+  var want = location.pathname + (qs ? '?' + qs : '');
+  if(want === location.pathname + location.search) return;
+  try{ history[push ? 'pushState' : 'replaceState'](null, '', want); }catch(e){}
+}
+/* 勾选式多选（学历/四六级）从 URL 恢复：隐藏 input 和复选框都要同步 */
+function msSetCsv(id, csv){
+  var m = MSEL[id];
+  if(!m) return;
+  var vals = String(csv || '').split(',').map(function(s){ return s.trim(); })
+    .filter(Boolean);
+  m.sel = vals.filter(function(v){
+    return m.pairs.some(function(p){ return p[0] === v; });
+  });
+  var wrap = document.getElementById(id);
+  if(wrap) Array.prototype.forEach.call(wrap.querySelectorAll('input[type=checkbox]'),
+    function(c){
+      var p = m.pairs[Number(c.dataset.i)];
+      c.checked = !!p && m.sel.indexOf(p[0]) >= 0;
+    });
+  msSync(id);
+}
+function applyUrlState(){
+  var p = new URLSearchParams(location.search);
+  /* 先把所有控件复位到默认，再按 URL 赋值 —— 否则浏览器"后退"到一个
+     不带筛选的地址时，上一页的条件会残留在控件里。 */
+  ['kw','fStage','fGender','fUniv','fBachelor','fOutcome','fOverseas','fUnit']
+    .forEach(function(id){
+      var el = document.getElementById(id);
+      if(el) el.value = '';
+    });
+  ['fDateFrom','fDateTo'].forEach(function(id){
+    var el = document.getElementById(id);
+    if(el){ el.value = ''; el.type = 'text'; }
+  });
+  msSetCsv('msEdu', '');
+  msSetCsv('msCet', '');
+  TAB = 'ALL';
+  Array.prototype.forEach.call(document.querySelectorAll('.tabs button'), function(x){
+    x.classList.toggle('on', x.dataset.tab === 'ALL');
+  });
+  PAGE.page = 1;
+  PAGE.page_size = 50;
+  var set = function(id, key){
+    var el = document.getElementById(id);
+    if(el && p.has(key)) el.value = p.get(key);
+  };
+  set('kw','kw'); set('fStage','stage'); set('fGender','gender');
+  set('fUniv','univ'); set('fBachelor','bachelor'); set('fOutcome','outcome');
+  set('fOverseas','overseas');
+  /* 面试部门的选项来自数据/字典，启动时可能还没有这一项；先把 URL 里的值
+     补成一个 option 再选中，否则 `.value = ...` 会被浏览器静默重置成空。 */
+  var uEl = document.getElementById('fUnit');
+  if(uEl && p.has('interview_unit')){
+    var uv = p.get('interview_unit');
+    var has = Array.prototype.some.call(uEl.options, function(o){ return o.value === uv; });
+    if(!has){
+      var o = document.createElement('option');
+      o.value = uv; o.textContent = uv; uEl.appendChild(o);
+    }
+    uEl.value = uv;
+  }
+  [['fDateFrom','date_from'],['fDateTo','date_to']].forEach(function(kv){
+    var el = document.getElementById(kv[0]);
+    if(el && p.has(kv[1])){ el.type = 'date'; el.value = p.get(kv[1]); }
+  });
+  if(p.has('education')) msSetCsv('msEdu', p.get('education'));
+  if(p.has('cet')) msSetCsv('msCet', p.get('cet'));
+  if(p.has('tier')){
+    TAB = p.get('tier');
+    Array.prototype.forEach.call(document.querySelectorAll('.tabs button'), function(x){
+      x.classList.toggle('on', x.dataset.tab === TAB);
+    });
+  }
+  var ps = Number(p.get('page_size')); if(ps > 0) PAGE.page_size = ps;
+  var pg = Number(p.get('page')); if(pg > 0) PAGE.page = pg;
+}
+window.addEventListener('popstate', function(){
+  applyUrlState();
+  load({push:false});
+});
+/* 加载态：顶部细进度条 + 列表/分页变淡；同时标记 aria-busy */
+function setListBusy(on){
+  document.body.classList.toggle('list-busy', !!on);
+  var bar = document.getElementById('loadBar');
+  if(bar) bar.classList.toggle('on', !!on);
+  var list = document.getElementById('list');
+  if(list) list.setAttribute('aria-busy', on ? 'true' : 'false');
+}
+/* 窄屏左侧名单抽屉 */
+function toggleListDrawer(){
+  document.body.classList.toggle('list-open');
+}
 function query(){
   var p = [];
   function add(k, id){
@@ -1934,25 +2222,21 @@ function query(){
   add('overseas','fOverseas');
   add('interview_unit','fUnit');
   if(TAB !== 'ALL') p.push('tier=' + encodeURIComponent(TAB));
-  var d = document.getElementById('fDate').value;
-  if(d){
-    var today = new Date();
-    var from = new Date(today);
-    if(d === 'year'){ from.setMonth(0); from.setDate(1); }
-    else from.setDate(today.getDate() - (d === '7' ? 6 : 29));
-    var iso = function(x){
-      var p2 = function(n){ return (n < 10 ? '0' : '') + n; };
-      return x.getFullYear() + '-' + p2(x.getMonth() + 1) + '-' + p2(x.getDate());
-    };
-    p.push('date_from=' + iso(from));
-    p.push('date_to=' + iso(today));
+  /* 投递时间：具体日期的起止范围。只填一端就只卡一端；
+     两端都填且顺序反了，自动对调（日期是 YYYY-MM-DD，字典序即时间序）。 */
+  var dateFrom = document.getElementById('fDateFrom').value;
+  var dateTo = document.getElementById('fDateTo').value;
+  if(dateFrom && dateTo && dateFrom > dateTo){
+    var swap = dateFrom; dateFrom = dateTo; dateTo = swap;
   }
+  if(dateFrom) p.push('date_from=' + encodeURIComponent(dateFrom));
+  if(dateTo) p.push('date_to=' + encodeURIComponent(dateTo));
   return p.length ? '?' + p.join('&') : '';
 }
 
 /* ---------- 左侧列表 ---------- */
 /* 阶段用**各阶段自己的颜色**（config/stages.json 原版就定义好了）：
-   全部简历 灰蓝 / 初筛通过 蓝 / 待面试 紫 / 已面试 青绿 / 已发放offer 橙 / 已结束 灰。
+   新投递 灰蓝 / 初筛通过 蓝 / 待面试 紫 / 已面试 青绿 / 已发放offer 橙 / 已结束 灰。
    阶段是"他走到哪一步"的唯一视觉线索，全用同一个中性色等于没编码。 */
 function stageChip(stage){
   var c = (STAGE_CFG.colors || {})[stage] || '#8a94a6';
@@ -1981,6 +2265,7 @@ function jobChip(x){
 }
 function rowHtml(x){
   var t = x.tier_effective || '';
+  var nm = esc(x.name || '未识别');
   /* 头像**懒加载**（v3.0.1，性能）：一页 25 行，如果每行都在 HTML 里直接写
      `<img src=...>`，浏览器会立刻并发 25 个 `/api/candidates/<id>/avatar`。
      实测 1440px 窗口、25 行里 16 人有照片 → 16 个请求排成一队共 **1471ms**，
@@ -2005,13 +2290,14 @@ function rowHtml(x){
     qual += '<span class="flagneutral" title="' + esc(x.status_hint || '') + '">' +
       esc(x.status_display) + '</span>';
   }
-  return '<div class="row' + (CUR === x.id ? ' on' : '') + '" data-id="' + x.id + '">' +
+  return '<div class="row' + (CUR === x.id ? ' on' : '') + '" data-id="' + x.id + '"' +
+    ' role="button" tabindex="0" aria-label="打开 ' + nm + ' 的档案">' +
     '<div class="rowbar"></div>' +
     '<div class="chk"><input type="checkbox" data-id="' + x.id + '"' +
       (SEL[x.id] ? ' checked' : '') + '></div>' +
     '<div class="av">' + esc((x.name || '?').slice(0,1)) + av + '</div>' +
     '<div style="min-width:0">' +
-      '<div class="nm">' + esc(x.name || '未识别') + stageChip(x.stage) + outcomeChip(x.outcome, x.stage) +
+      '<div class="nm">' + nm + stageChip(x.stage) + outcomeChip(x.outcome, x.stage) +
         (x.search_score != null
           ? '<span class="jchip sug">匹配 ' + (Math.round(x.search_score * 100) / 100) + '</span>'
           : '') + qual + '</div>' +
@@ -2023,9 +2309,9 @@ function rowHtml(x){
     '<div class="tier ' + esc(t) + '">' + esc(t || '–') + '</div>' +
   '</div>';
 }
-/* 分页：**默认一页 25 人**（原来不传 page_size → 服务端返回全量，
-   页数算出来永远是 1/1，翻页是假的）。 */
-var PAGE = {page:1, page_size:25, total:0, total_pages:1};
+/* 分页：**默认一页 50 人**（业务方 2026-11-02 指定；原来的 25 一眼看不完一个岗位的投递）。
+   注意仍然要**显式传 page_size**——不传的话服务端返回全量，页数算出来永远是 1/1，翻页是假的。 */
+var PAGE = {page:1, page_size:50, total:0, total_pages:1};
 var FACETS = null;
 /* ---------- 分页控件（原来 v2 一屏一屏，没翻页） ---------- */
 function renderPager(){
@@ -2117,6 +2403,19 @@ function bindListOnce(){
     if(!c || c.type !== 'checkbox' || !c.dataset.id){ return; }
     SEL[c.dataset.id] = c.checked;
     syncSel();
+  });
+  /* 键盘可达：行本身是 role=button，Enter/Space 打开档案；
+     落在勾选框/按钮上时不抢它们的键。 */
+  el.addEventListener('keydown', function(ev){
+    if(ev.key !== 'Enter' && ev.key !== ' ') return;
+    var t = ev.target;
+    if(t && (t.tagName === 'INPUT' || t.tagName === 'BUTTON' ||
+             t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
+    var row = t && t.closest ? t.closest('.row') : null;
+    if(row && row.dataset.id){
+      ev.preventDefault();
+      pick(Number(row.dataset.id));
+    }
   });
 }
 
@@ -2401,7 +2700,7 @@ function compareCard(d){
         '<div class="dmeta">' + stageChip(stage) + outcomeChip(d.outcome, stage) +
           (tier ? '<span class="tier ' + esc(tier) + '">' + esc(tier) + '</span>' : '') +
         '</div></div>' +
-      '<button class="compare-close" title="关闭这个档案窗口" ' +
+      '<button class="compare-close" title="关闭这个档案窗口" aria-label="关闭这个档案窗口" ' +
         'onclick="closeCompareCard(' + d.id + ')">×</button>' +
     '</div>' +
     '<div class="compare-card-body">' +
@@ -2453,7 +2752,7 @@ function pinnedTabsHtml(){
       return '<div class="pinned-tab' + (Number(id) === Number(COMPARE_ACTIVE) ? ' on' : '') +
         '" title="' + esc(d.name || '未识别') + '" onclick="activatePinnedTab(' + id + ')">' +
         '<span class="pt-name">' + esc(d.name || '未识别') + '</span>' +
-        '<button class="pt-x" title="关闭这个档案" onclick="event.stopPropagation();closeCompareCard(' +
+        '<button class="pt-x" title="关闭这个档案" aria-label="关闭这个档案" onclick="event.stopPropagation();closeCompareCard(' +
           id + ')">×</button></div>';
     }).join('') +
     '</div><div class="pinned-tab-actions"><span class="hint">' +
@@ -2659,6 +2958,10 @@ function openDetail(d){
 }
 function fullDetail(d){
   var stage = d.stage || '';
+  /* 复核状态（2026-11-02 修）：后端把它存在 `applications.status` 里，值为「已确认」，
+     **没有** `d.reviewed` 这个字段。原来按钮直接读 d.reviewed → 永远是 undefined →
+     永远显示「标记已复核」，用户点完看不出到底复核没复核。 */
+  var isReviewed = (d.reviewed === true) || (String(d.status || '') === '已确认');
   /* 详情页头像同样走懒加载（v3.0.3）：与列表用同一套 data-avatar 机制，
      避免"列表已改成懒加载、详情还是一次性请求"两套逻辑漂移。 */
   var av = d.avatar_path === '-' ? ''
@@ -2929,34 +3232,54 @@ function fullDetail(d){
       : '<span class="srcfile"><span class="srcmeta">无简历原件</span></span>') +
   '</div>';
 
-  /* 档案操作条独立于个人信息：横跨右侧详情栏，滚动时固定在右上角。 */
+  /* 档案操作条独立于个人信息：横跨右侧详情栏，滚动时固定在右上角。
+     2026-10-30 业务方要求重排：
+       · 「复制信息 / 推进初筛通过 / 标记已复核」**从这条常驻条上撤下来**，
+         挪到姓名那一行的最右边 —— 这三件事都是"看完这个人顺手做一下"，
+         挂在顶部常驻条上反而离人最远；
+       · 新增绿色「写邮件」，点一下直接跳到写邮件页并带好这个人。 */
   var actionBar = '<div class="detail-toolbar"><div class="dact">' +
-    '<button class="btn" onclick="copyBasicInfo()" ' +
-      'title="复制姓名 / 学历 / 性别 / 电话 / 邮箱 / 学校 / 专业为纯文本">复制信息</button>' +
     '<button class="btn primary" onclick="saveAll(' + d.id + ',' + (d.application_id || 0) + ')">保存更正</button>' +
-    (d.application_id && stage === (STAGE_CFG.default_stage || '全部简历')
-      ? '<button class="btn" id="btnAdv">推进初筛通过</button>' : '') +
     (d.application_id
       ? '<select id="stageSel" class="stagesel" title="推进阶段（写审计）">' +
         (STAGE_CFG.order || []).map(function(k){
           return '<option value="' + esc(k) + '"' + (k === stage ? ' selected' : '') + '>' +
             esc(k) + '</option>';
         }).join('') + '</select>' : '') +
-    (d.application_id
-      ? '<button class="btn" id="btnReview" data-undo="' + (d.reviewed ? '1' : '0') + '">'
-        + (d.reviewed ? '撤销复核' : '标记已复核') + '</button>' : '') +
     '<button class="btn" onclick="reanalyze(' + d.id + ')">重新分析</button>' +
     '<button class="btn" onclick="archiveOne(' + d.id + ')">归档</button>' +
   '</div></div>';
+
+  /* 姓名行右侧的动作组（复制信息 / 推进初筛 / 复核 / 写邮件）。
+     写邮件排最后且是绿色 —— 它是这条链路上"下一步要做的事"，
+     前三项是"顺手记一下"，视觉上不该和它抢。 */
+  var headAct = '<div class="dhead-act">' +
+    '<button class="btn" onclick="copyBasicInfo()" ' +
+      'title="复制姓名 / 性别 / 电话 / 邮箱为纯文本">复制信息</button>' +
+    (d.application_id && stage === (STAGE_CFG.default_stage || '新投递')
+      ? '<button class="btn" id="btnAdv">推进初筛通过</button>' : '') +
+    (d.application_id
+      ? '<button class="btn' + (isReviewed ? ' reviewed' : '') + '" id="btnReview" '
+        + 'data-undo="' + (isReviewed ? '1' : '0') + '" '
+        + 'title="' + (isReviewed ? '已复核 · 点击撤销复核' : '标记这个人的档案已经复核过') + '">'
+        + (isReviewed ? '✓ 已复核' : '标记已复核') + '</button>' : '') +
+    '<button class="btn btn-green" onclick="mailFor(' + d.id + ')" ' +
+      'title="跳到写邮件页，自动带出这个人的收件人、姓名与档案里填过的面试信息">✉ 写邮件</button>' +
+  '</div>';
 
   /* 操作条与个人信息完全分离：先铺右上操作条，再从下一行开始个人档案。 */
   return actionBar +
     '<div class="dhead profile-head">' +
     '<div class="av-lg">' + esc((d.name || '?').slice(0, 1)) + av + '</div>' +
     '<div class="dmain">' +
+    /* 姓名行 = 姓名 + 右侧动作组（2026-10-30）：复制信息贴在姓名最右边，
+       推进初筛 / 复核 / 写邮件跟它排在一起。 */
+    '<div class="namerow">' +
     '<div class="dname edu-click" title="点击修改姓名" ' +
       'onclick="editField(\'name\', ' + d.id + ')">' +
       esc(d.name || '未识别') + '</div>' +
+    headAct +
+    '</div>' +
     /* 顺序：**性别 → 岗位 → 状态 → 电话 → 邮箱**（业务方 2026-10-21：性别放第一个；
        标签全部收窄 —— 原来每个框都撑得很开，一行信息占了半屏还留大片空白）。
        四六级已挪到「荣誉 / 论文 / 专利」那一块：它是**资质**，不属于身份信息。 */
@@ -3456,12 +3779,14 @@ async function setPipeOverdue(){
    这里给每个维度加一条"条目行"：每条一个 × 可删，下面一个输入框可加。 */
 function dictItemsRow(key, label, items){
   var list = items || [];
-  return '<div class="crow"><label>' + esc(label) + '</label><div class="cinput dictrow">' +
+  return '<div class="crow dict-row"><label>' + esc(label) + '</label><div class="cinput dictrow">' +
     (list.length ? list.map(function(v, i){
       return '<span class="mchip">' + esc(v) +
-        '<b onclick="dictDel(\'' + key + '\',' + i + ')" title="删除这条">×</b></span>';
-    }).join('') : '<span class="hint">（还没有条目）</span>') +
-    '<input id="dictAdd_' + key + '" placeholder="输入后回车添加">' +
+        '<b role="button" tabindex="0" aria-label="删除这条" onkeydown="keyClick(event)" ' +
+        'onclick="dictDel(\'' + key + '\',' + i + ')" title="删除这条">×</b></span>';
+    }).join('') : '<span class="cur none">未设置</span>') +
+    '<input class="dict-add" id="dictAdd_' + key + '" ' +
+      'placeholder="输入后按回车添加，例如：综合楼 302">' +
   '</div></div>';
 }
 async function dictAdd(key){
@@ -4074,7 +4399,7 @@ function showLogin(msg){
   var e = document.getElementById('loginErr');
   if(e){
     e.textContent = msg || '';
-    /* 先摘再挂，强制重排，动画才会重播（连续两次输错口令时第二次也得抖） */
+    /* 先摘再挂，强制重排，动画才会重播（连续两次输错密码时第二次也得抖） */
     e.classList.remove('on');
     if(msg){ void e.offsetWidth; e.classList.add('on'); }
   }
@@ -4083,7 +4408,7 @@ function showLogin(msg){
   loadLoginHint();
   startLoginNet();
 }
-/* 失败反馈（v3.2）：框横向轻抖一下。"口令不对"这件事不用读字就该知道；
+/* 失败反馈（v3.2）：框横向轻抖一下。"密码不对"这件事不用读字就该知道；
    连续错两次、三次也照样抖 —— 所以每次先摘类再强制重排。 */
 function loginShake(){
   var box = document.querySelector('#loginWrap .loginbox');
@@ -4093,9 +4418,9 @@ function loginShake(){
   box.classList.add('shake');
 }
 /* 首次部署时把默认账号写在登录页上（v3.1.3）。
-   原来登录页只有"忘记口令请联系管理员" —— 而管理员自己也不知道初始口令，
+   原来登录页只有"忘记密码请联系管理员" —— 而管理员自己也不知道初始密码，
    于是双击打开、看到登录框、输不进去，判定为"程序坏了"。
-   这条提示只在**口令仍是默认值**时出现，改过之后自动消失。 */
+   这条提示只在**密码仍是默认值**时出现，改过之后自动消失。 */
 var LOGIN_HINT_LOADED = false;
 async function loadLoginHint(){
   if(LOGIN_HINT_LOADED) return;
@@ -4161,7 +4486,7 @@ function setLoginBtn(state){
   if(txt) txt.textContent = state === 'busy' ? '登录中…'
                              : state === 'done' ? '登录成功' : '登录';
 }
-/* 口令错误：抖动 + 错误行淡入。**不再用 alert 式的纯文字**——
+/* 密码错误：抖动 + 错误行淡入。**不再用 alert 式的纯文字**——
    文字保留（读屏要靠它），但加了一层"不用读也知道"的动作反馈。 */
 function loginFail(msg){
   var err = document.getElementById('loginErr');
@@ -4214,25 +4539,68 @@ async function bootAfterLogin(){
   renderWhoami();
   /* renderWhoami() → applyPermissions() 在这里摘掉 body.locked，
      应用区于是从 98.5% 淡入展开 —— 和登录层的淡出是同时的。 */
-  await load();
+  applyUrlState();          /* 刷新/收藏进来的筛选条件先落回控件 */
+  URL_READY = true;
+  await load({push:false});
   await showOverview();
 }
 async function loadMe(){
   var j = await api('/api/me');
   if(j && !j.__err){ ME = j; }
 }
+/* 左下角账号区（2026-10-30）。原来这里渲染顶部那条 `.whoami`，
+   现在整块搬到侧栏底部，并**放大成一个可点的入口**：
+     · 本机模式（没开登录）：显示"本机模式"，菜单里只有系统配置；
+     · 登录模式：显示姓名 + 角色，菜单里有账号管理（有权限才显示）与退出登录。 */
 function renderWhoami(){
-  var box = document.getElementById('whoami');
-  if(box){
-    if(!AUTH_ENABLED || !ME || !ME.username){ box.innerHTML = ''; }
-    else{
-      box.innerHTML = '<b>' + esc(ME.display_name || ME.username) + '</b>' +
-        '<span>' + esc(ME.role_label || '') + '</span>' +
-        '<button type="button" onclick="doLogout()">退出</button>';
-    }
+  var nameEl = document.getElementById('acctName');
+  var roleEl = document.getElementById('acctRole');
+  var avEl = document.getElementById('acctAv');
+  var usersBtn = document.getElementById('acctUsers');
+  var logoutBtn = document.getElementById('acctLogout');
+  if(!nameEl) return;
+  if(!AUTH_ENABLED || !ME || !ME.username){
+    nameEl.textContent = '本机模式';
+    roleEl.textContent = '无需登录 · 数据只在本机';
+    avEl.textContent = '本';
+    if(usersBtn) usersBtn.hidden = true;
+    if(logoutBtn) logoutBtn.hidden = true;
+  }else{
+    var disp = ME.display_name || ME.username || '';
+    nameEl.textContent = disp;
+    roleEl.textContent = ME.role_label || ME.role || '';
+    avEl.textContent = (disp || '?').slice(0, 1);
+    if(logoutBtn) logoutBtn.hidden = false;
   }
   applyPermissions();
 }
+/* 菜单开合：点外面 / 按 Esc 收起（与「更多筛选」「批量维护」同一套规矩） */
+function toggleAcct(ev){
+  if(ev && ev.stopPropagation) ev.stopPropagation();
+  var menu = document.getElementById('acctMenu');
+  var btn = document.getElementById('acctBtn');
+  if(!menu) return;
+  var on = !menu.classList.contains('on');
+  menu.classList.toggle('on', on);
+  if(btn) btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+}
+function closeAcct(){
+  var menu = document.getElementById('acctMenu');
+  var btn = document.getElementById('acctBtn');
+  if(menu) menu.classList.remove('on');
+  if(btn) btn.setAttribute('aria-expanded', 'false');
+}
+function acctGo(view){
+  closeAcct();
+  setView(view);
+}
+document.addEventListener('click', function(ev){
+  var box = document.getElementById('sfoot');
+  if(box && !box.contains(ev.target)) closeAcct();
+});
+document.addEventListener('keydown', function(ev){
+  if(ev.key === 'Escape') closeAcct();
+});
 /* 按权限显示/隐藏界面元素（v3.0.3）。
    **只负责藏，不负责防**：真正的拦截在服务端 `require()`。
    藏起来是为了让只读用户看不到一堆点了会 403 的按钮。 */
@@ -4241,13 +4609,15 @@ function can(perm){
   return !!(ME && (ME.permissions || []).indexOf(perm) >= 0);
 }
 function applyPermissions(){
-  var nav = document.getElementById('navUsers');
-  if(nav) nav.hidden = !can('manage_users');
+  /* 账号管理只在左下角弹出菜单里（左侧导航已移除，2026-11-02）。
+     藏，不是防 —— 服务端仍会 403。 */
+  var acctUsers = document.getElementById('acctUsers');
+  if(acctUsers) acctUsers.hidden = !can('manage_users');
   /* 只读角色（没有 set_stage）不该看到任何改动入口 */
   var readonly = AUTH_ENABLED && !can('set_stage');
   document.body.classList.toggle('readonly', readonly);
   /* 系统配置页对没有 settings 权限的人也不该出现 */
-  Array.prototype.forEach.call(document.querySelectorAll('.side button'), function(b){
+  Array.prototype.forEach.call(document.querySelectorAll('.side button[data-view]'), function(b){
     if(b.dataset.view === 'sys') b.hidden = !can('settings');
   });
   /* 没登录时**整个应用区不可见**（v3.0.3）：
@@ -4433,8 +4803,16 @@ function stopLoginNet(){
 }
 
 /* ---------- 取数 ---------- */
-async function load(){
+var LOAD_SEQ = 0;
+async function load(opts){
+  var seq = ++LOAD_SEQ;
+  setListBusy(true);
   var j = await api('/api/candidates' + query());
+  /* 快速连续改筛选时，先发的请求可能后返回；只让最后一次渲染，避免
+     "列表刚显示新结果又被旧结果盖回去"。 */
+  if(seq !== LOAD_SEQ) return;
+  setListBusy(false);
+  if(j.__err){ toast(j.__err, 'danger'); return; }
   ITEMS = j.items || [];
   PAGE = j.paging || {page:1, page_size:0, total:ITEMS.length, total_pages:1};
   FACETS = j;                       /* 筛选器的人数（级联） */
@@ -4442,6 +4820,7 @@ async function load(){
   renderPager();
   renderFacetCounts();
   fillUnitSel(ITEMS);
+  syncUrlState(!opts || opts.push !== false);
 }
 /* 面试部门下拉的选项：当前这批人的 `interview_unit` 并集 + 字典里的单位。
    不只靠字典，是因为实际数据里常有字典外的历史写法；每次加载顺手刷新，
@@ -4450,6 +4829,9 @@ function fillUnitSel(items){
   var sel = document.getElementById('fUnit');
   if(!sel) return;
   var cur = sel.value, set = {};
+  /* 当前选中值必须保留：URL 恢复的部门可能不在本页数据/字典里，
+     重建 option 时若丢掉它，筛选条件会静默变成"不限"。 */
+  if(cur) set[cur] = null;
   var fac = (FACETS && FACETS.interview_unit_facets) || {};
   Object.keys(fac).forEach(function(k){
     if(k) set[k] = Number(fac[k]) || 0;
@@ -4472,6 +4854,10 @@ function fillUnitSel(items){
 }
 async function pick(id){
   CUR = id;
+  /* 窄屏下名单是抽屉：选中人之后自动收起，详情直接占满宽度 */
+  if(window.matchMedia && window.matchMedia('(max-width:1100px)').matches){
+    document.body.classList.remove('list-open');
+  }
   MODE = 'detail';
   COMPARE_IDS = []; COMPARE_DATA = {}; COMPARE_ACTIVE = null;
   highlightRow(id);          /* 只换高亮，不重建列表（见 highlightRow 的说明） */
@@ -4503,9 +4889,10 @@ document.getElementById('kw').addEventListener('input', function(e){
   clearTimeout(kwTimer);
   kwTimer = setTimeout(doSearch, 120);            // 清空 → 恢复全量
 });
-['fEdu','fStage','fGender','fUniv','fBachelor','fCet','fDate','fOutcome','fOverseas','fUnit'].forEach(function(id){
+['fEdu','fStage','fGender','fUniv','fBachelor','fCet','fDateFrom','fDateTo','fOutcome','fOverseas','fUnit'].forEach(function(id){
   var el = document.getElementById(id);
-  if(el) el.addEventListener('change', load);
+  /* 换筛选条件必须回到第 1 页：停在第 2 页再筛，很可能直接看到空列表 */
+  if(el) el.addEventListener('change', function(){ PAGE.page = 1; load(); });
 });
 /* 点击/回车触发搜索：**回到第 1 页**再查。
    不重置的话，从第 3 页搜一个新词会"没有结果"—— 其实是有结果但都在前两页。
@@ -4564,7 +4951,7 @@ function setView(v, fromHash){
     var el = document.getElementById(id);
     if(el) el.classList.toggle('on', MAP[id] === v);
   });
-  Array.prototype.forEach.call(document.querySelectorAll('.side button'), function(b){
+  Array.prototype.forEach.call(document.querySelectorAll('.side button[data-view]'), function(b){
     b.classList.toggle('on', b.dataset.view === v);
   });
   if(v === 'mail') initMail();
@@ -4584,7 +4971,12 @@ function setView(v, fromHash){
     if(VIEWS.indexOf(h2) >= 0 && h2 !== VIEW) setView(h2, true);
   });
 })();
-Array.prototype.forEach.call(document.querySelectorAll('.side button'), function(b){
+/* ⚠️ 只给**导航项**绑点击（`[data-view]`）。
+   2026-11-02 修的 bug：这里原来是 `.side button`，把左下角账号按钮和它的菜单项
+   也一起绑上了 —— 那些按钮没有 `data-view`，一点就 `setView(undefined)`，
+   body.className 变成 `v-undefined`，整个应用区被隐藏，表现就是
+   "点账号管理没反应"（其实页面已被切到一个不存在的视图）。 */
+Array.prototype.forEach.call(document.querySelectorAll('.side button[data-view]'), function(b){
   if(b.disabled) return;
   b.addEventListener('click', function(){ setView(b.dataset.view); });
 });
@@ -4895,7 +5287,8 @@ function renderToChip(d){
     return;
   }
   box.innerHTML = '<span class="tochip">' + esc(M_TO) +
-    '<b onclick="clearRecipient()" title="清空收件人（连同自动带出的信息一起清）">×</b></span>' +
+    '<b role="button" tabindex="0" aria-label="清空收件人" onkeydown="keyClick(event)" ' +
+    'onclick="clearRecipient()" title="清空收件人（连同自动带出的信息一起清）">×</b></span>' +
     '<span class="hint" style="margin-left:8px">' + esc(d.name || '') + '</span>';
 }
 /* ---------- 档案里填过的面试信息 → 自动带进邮件页 ----------
@@ -6180,7 +6573,7 @@ function renderUsers(){
         }).join('') + '</select></td>' +
       '<td class="usub">' + esc(r.desc || '') + '</td>' +
       '<td style="white-space:nowrap">' +
-        '<button class="btn" onclick="userResetPassword(\'' + esc(u.username) + '\')">重置口令</button> ' +
+        '<button class="btn" onclick="userResetPassword(\'' + esc(u.username) + '\')">重置密码</button> ' +
         (u.active
           ? (isMe ? '' : '<button class="btn btn-danger" onclick="userSetActive(\'' +
               esc(u.username) + '\', false)">停用</button>')
@@ -6217,7 +6610,7 @@ function renderUsers(){
           return '<span class="pmcol" title="' + esc(lab) + '">' +
             esc(lab.slice(0, 2)) + '</span>';
         }).join('') + '</td></tr></thead><tbody>' + matrix + '</tbody></table>' +
-      '<div class="hint" style="margin-top:16px">口令至少 ' + (USERS.min_password_len || 8) +
+      '<div class="hint" style="margin-top:16px">密码至少 ' + (USERS.min_password_len || 8) +
         ' 位。修改角色或停用账号会**立即清除该账号的登录状态**。</div>' +
     '</div>';
 }
@@ -6225,7 +6618,7 @@ function renderUsers(){
 async function userCreate(){
   var name = await askText('新建账号', '', '账号名（登录用，不能再改）');
   if(!name || name === true) return;
-  var pw = await askText('设置初始口令', '', '至少 8 位');
+  var pw = await askText('设置初始密码', '', '至少 8 位');
   if(!pw || pw === true) return;
   var role = await askText('角色（' +
     (USERS.roles || []).map(function(r){ return r.key + '=' + r.label; }).join(' / ') +
@@ -6259,13 +6652,13 @@ async function userSetActive(username, active){
 }
 
 async function userResetPassword(username){
-  var pw = await askText('重置「' + username + '」的口令', '', '至少 8 位');
+  var pw = await askText('重置「' + username + '」的密码', '', '至少 8 位');
   if(!pw || pw === true) return;
   var r = await api('/api/users/' + encodeURIComponent(username) + '/password',
     {method:'POST', headers:{'Content-Type':'application/json'},
      body: JSON.stringify({new_password: String(pw)})});
   if(r.__err){ toast('重置失败：' + r.__err, 'danger'); return; }
-  toast('已重置口令。该账号需要重新登录。');
+  toast('已重置密码。该账号需要重新登录。');
 }
 
 async function initSys(){
@@ -6319,6 +6712,8 @@ async function initSys(){
       cfgEdit('embEnabled', '启用', em.enabled ? '1' : '0', '', 'select', false, null,
               [['1', '开'], ['0', '关']]) +
       cfgEdit('embBaseUrl', '接口地址', em.base_url, 'https://…/compatible-mode/v1', 'text') +
+      cfgRow('', '<button class="btn sm" data-cfg="embFromModel">接口地址同对话模型</button>' +
+        '<span class="hint" style="margin-left:8px">两处常是同一个服务，省得再敲一遍</span>') +
       cfgEdit('embModel', '模型名', em.model, '', 'text') +
       '<div class="crow cfgrow"><label>索引</label><div class="cval">' +
         '<span class="cur">' + esc(embIndexText(emIdx)) + '</span>' +
@@ -6332,6 +6727,8 @@ async function initSys(){
       cfgEdit('cfgSmtpPort', '端口', sb.port, '465', 'number') +
       cfgEdit('cfgSmtpSsl', '加密', sb.ssl ? 'SSL' : 'STARTTLS', 'SSL / STARTTLS', 'bool', false, sb.ssl) +
       cfgEdit('cfgSmtpUser', '账号', sb.user, '发件邮箱', 'text') +
+      cfgRow('', '<button class="btn sm" data-cfg="smtpFromImap">账号同收信配置</button>' +
+        '<span class="hint" style="margin-left:8px">授权码取不回来，两边仍需各填一次</span>') +
       cfgEdit('cfgSmtpFrom', '显示名', sb.from_name, '如 西北有色金属研究院', 'text') +
       cfgEdit('cfgSmtpPwd', '授权码', sb.password_set ? '已配置' : '未配置',
               sb.password_set ? '留空 = 不修改' : '输入后保存', 'password', true) +
@@ -6347,6 +6744,7 @@ async function initSys(){
       cfgEdit('cfgMbPort', '端口', mb.imap_port, '993', 'number') +
       cfgEdit('cfgMbSsl', '加密', mb.imap_ssl ? 'SSL' : 'STARTTLS', 'SSL / STARTTLS', 'bool', false, mb.imap_ssl) +
       cfgEdit('cfgMbUser', '账号', mb.imap_user, '收件邮箱', 'text') +
+      cfgRow('', '<button class="btn sm" data-cfg="imapFromSmtp">账号同发信配置</button>') +
       cfgEdit('cfgMbFolder', '文件夹', mb.imap_folder, 'INBOX', 'text') +
       cfgEdit('cfgMbPwd', '授权码', mb.password_set ? '已配置' : '未配置',
               mb.password_set ? '留空 = 不修改' : '输入后保存', 'password', true) +
@@ -6371,16 +6769,16 @@ cfgEdit('cfgFolderDir', '简历目录', mb.folder_dir, 'data/resumes', 'text') +
 
     '<div class="sec cfgsec" data-g="dict"><h3>面试字典' + '<span class="cfgacts">' + '<button class="btn sm" data-cfg-g="edit">修改</button>' + '<button class="btn primary sm" data-cfg-g="save" style="display:none">保存</button>' + '<button class="btn sm" data-cfg-g="cancel" style="display:none">取消</button>' + '</span></h3>' +
       dictItemsRow('units', '面试单位', dc.units) +
-      cfgEdit('cfgUnits', '面试单位', dictLines(dc.units), '一行一个', 'textarea') +
+      '<div class="dict-bulk">' + cfgEdit('cfgUnits', '面试单位', dictLines(dc.units), '一行一个', 'textarea') + '</div>' +
       dictItemsRow('rooms', '会议室', dc.rooms) +
-      cfgEdit('cfgRooms', '会议室', dictLines(dc.rooms), '一行一个', 'textarea') +
+      '<div class="dict-bulk">' + cfgEdit('cfgRooms', '会议室', dictLines(dc.rooms), '一行一个', 'textarea') + '</div>' +
       dictItemsRow('slots', '面试时段', dc.slots) +
-      cfgEdit('cfgSlots', '面试时段', dictLines(dc.slots), '一行一个', 'textarea') +
+      '<div class="dict-bulk">' + cfgEdit('cfgSlots', '面试时段', dictLines(dc.slots), '一行一个', 'textarea') + '</div>' +
       dictItemsRow('modes', '面试方式', dc.modes) +
-      cfgEdit('cfgModes', '面试方式', dictLines(dc.modes), '一行一个', 'textarea') +
+      '<div class="dict-bulk">' + cfgEdit('cfgModes', '面试方式', dictLines(dc.modes), '一行一个', 'textarea') + '</div>' +
       dictItemsRow('contacts', '联系人', (dc.contacts || []).map(function(c){
         return [c.dept, c.name, c.phone].filter(Boolean).join(' · '); })) +
-      cfgEdit('cfgContacts', '联系人', contactLines, '部门 | 姓名 | 电话，一行一个', 'textarea') +
+      '<div class="dict-bulk">' + cfgEdit('cfgContacts', '联系人', contactLines, '部门 | 姓名 | 电话，一行一个', 'textarea') + '</div>' +
       /* 原来的「会议平台」输入框已删：后端字典保存只认 `meeting_no`
          （`server.py:732-733`），`meeting_platform` 不在白名单里，
          提交后**静默丢弃** —— 一个填了永远没反应的框，不如没有。 */
@@ -6435,6 +6833,17 @@ cfgEdit('cfgFolderDir', '简历目录', mb.folder_dir, 'data/resumes', 'text') +
 
   Array.prototype.forEach.call(box.querySelectorAll('[data-cfg]'), function(b){
     b.addEventListener('click', function(){ sysAct(b.dataset.cfg); });
+  });
+  /* 面试字典的"输入后回车添加"：**必须在这里绑 keydown**。
+     2026-11-02 修的 bug：输入框一直写着"输入后回车添加"，但代码里从来没有
+     keydown 监听 —— 用户敲回车什么都不会发生，只能猜。 */
+  Array.prototype.forEach.call(box.querySelectorAll('.dict-add'), function(inp){
+    inp.addEventListener('keydown', function(ev){
+      if(ev.key === 'Enter'){
+        ev.preventDefault();
+        dictAdd(inp.id.replace('dictAdd_', ''));
+      }
+    });
   });
   Array.prototype.forEach.call(box.querySelectorAll('[data-src]'), function(b){
     b.addEventListener('click', function(){ srcAct(b.dataset.src); });
@@ -6500,6 +6909,15 @@ async function loadEnv(){
     return '<dt>' + esc(r[0]) + '</dt><dd class="num">' + esc(String(r[1])) + '</dd>';
   }).join('');
 }
+/* 把值填进某个配置输入框：**只填不存**，用户仍要自己点「保存」。
+   2026-11-02 加，用于「账号同收信 / 接口地址同对话模型」这类少填一遍的按钮。 */
+function fillCfg(id, val){
+  var e = document.getElementById(id);
+  if(!e) return false;
+  e.value = (val == null ? '' : String(val));
+  try{ e.dispatchEvent(new Event('input', {bubbles:true})); }catch(err){}
+  return true;
+}
 async function sysAct(act){
   var box = document.getElementById('sysView');
   /* 取值优先级：草稿（行内改过）> 编辑框里的当前值 > 空 */
@@ -6509,6 +6927,22 @@ async function sysAct(act){
     if(!e) return '';
     if(e.type === 'checkbox') return e.checked ? '1' : '0';
     return (e.value || '').trim();
+  }
+  if(act === 'embFromModel'){
+    var _bu = v('mcBaseUrl');
+    if(!_bu){ toast('对话模型的接口地址还没填', 'warn'); return; }
+    fillCfg('embBaseUrl', _bu);
+    toast('已带入对话模型的接口地址，记得点「保存」', 'ok');
+    return;
+  }
+  if(act === 'smtpFromImap' || act === 'imapFromSmtp'){
+    var fromId = act === 'smtpFromImap' ? 'cfgMbUser' : 'cfgSmtpUser';
+    var toId = act === 'smtpFromImap' ? 'cfgSmtpUser' : 'cfgMbUser';
+    var _u = v(fromId);
+    if(!_u){ toast('对侧还没填账号', 'warn'); return; }
+    fillCfg(toId, _u);
+    toast('已带入账号，记得点「保存」', 'ok');
+    return;
   }
   if(act === 'model'){
     var body = {base_url: v('mcBaseUrl'), model: v('mcModel')};
@@ -7171,7 +7605,8 @@ function multiRenderIvUnit(){
   if(!box) return;
   box.innerHTML = MULTI_IVUNIT.map(function(v, i){
     return '<span class="mchip">' + esc(v) +
-      '<b onclick="multiDelIvUnit(' + i + ')" title="移除">×</b></span>';
+      '<b role="button" tabindex="0" aria-label="移除这个面试单位" onkeydown="keyClick(event)" ' +
+      'onclick="multiDelIvUnit(' + i + ')" title="移除">×</b></span>';
   }).join('') +
     '<input id="madd_ivunit" list="dlIvUnit" placeholder="选面试单位（可多选）或直接输入">' +
     '<datalist id="dlIvUnit">' + (IDICT.units || []).map(function(x){
@@ -7216,33 +7651,77 @@ function multiDelIvUnit(i){
    同意 → 执行并写审计；拒绝 → 也写审计（谁在什么时候拒的）。
    放在人才库第二行，点开是一张可折叠的清单。 */
 var PROPS = [];
+/* 提案摘要里的姓名 → 可点开档案的链接。
+   后端 `/api/proposals` 已把每条提案的 candidate_id / candidate_name 解析好
+   （set_stage 提案存的是 application_id，由后端换成候选人），这里只替换
+   摘要里**第一次出现**的姓名 —— 现有摘要都以姓名开头。
+   找不到姓名（例如"给投递 #12 写备注"）就保持纯文本，不硬造链接。 */
+function propSummaryHtml(p){
+  var raw = String(p.summary || '');
+  var name = String(p.candidate_name || '');
+  var cid = Number(p.candidate_id || 0);
+  if(!cid || !name) return esc(raw);
+  var at = raw.indexOf(name);
+  if(at < 0) return esc(raw);
+  return esc(raw.slice(0, at)) +
+    '<a class="plink" href="javascript:void(0)" ' +
+    'onclick="openPropCandidate(' + cid + ',event)" title="打开档案">' +
+    esc(name) + '</a>' + esc(raw.slice(at + name.length));
+}
+/* 点姓名：先收起提案浮层，再在右侧打开档案（pick 是列表行同款入口） */
+function openPropCandidate(cid, ev){
+  if(ev){ ev.preventDefault(); ev.stopPropagation(); }
+  var box = document.getElementById('propBox');
+  if(box) box.classList.remove('on');
+  var btn = document.getElementById('btnProp');
+  if(btn) btn.classList.remove('on');
+  pick(Number(cid));
+}
 function toggleProps(){
   var box = document.getElementById('propBox');
   var open = box.classList.toggle('on');
   document.getElementById('btnProp').classList.toggle('on', open);
   if(open) loadProps();
 }
+function propRowHtml(p){
+  return '<div class="prow" id="prop-' + p.id + '">' +
+    '<div class="ptext">' + propSummaryHtml(p) + '</div>' +
+    '<span class="prisk r' + esc(p.risk || '低') + '">' + esc(p.risk || '低') + '风险</span>' +
+    '<span class="pacts">' +
+      '<button class="btn primary sm" onclick="decideProp(' + p.id + ',\'approve\',this)">同意</button>' +
+      '<button class="btn sm" onclick="decideProp(' + p.id + ',\'reject\',this)">拒绝</button>' +
+    '</span></div>';
+}
+/* 只更新计数，不重建整个提案列表（v4.0.15：原来每处理一条都整块重绘） */
+function updatePropCount(){
+  var btn = document.getElementById('btnProp');
+  if(btn) btn.textContent = '待确认提案（' + PROPS.length + '）';
+  var n = document.getElementById('propCount');
+  if(n) n.textContent = '共 ' + PROPS.length + ' 条待确认';
+  if(!PROPS.length){
+    var box = document.getElementById('propBox');
+    if(box && box.classList.contains('on')){
+      box.innerHTML = '<div class="hint" style="padding:10px">没有待确认的提案</div>';
+    }
+  }
+}
 async function loadProps(){
   var box = document.getElementById('propBox');
   box.innerHTML = '<div class="hint" style="padding:8px">读取提案…</div>';
   var r = await api('/api/proposals');
   PROPS = (r.items || []).filter(function(x){ return x.status === '待确认'; });
-  document.getElementById('btnProp').textContent = '待确认提案（' + PROPS.length + '）';
-  if(!PROPS.length){ box.innerHTML = '<div class="hint" style="padding:10px">没有待确认的提案</div>'; return; }
-  box.innerHTML = (PROPS.length ? '<div class="prow" style="border-bottom:1px solid var(--line)">' +
-    '<span class="ptext hint">共 ' + PROPS.length + ' 条待确认</span>' +
+  if(!PROPS.length){
+    updatePropCount();
+    box.innerHTML = '<div class="hint" style="padding:10px">没有待确认的提案</div>';
+    return;
+  }
+  box.innerHTML = '<div class="prow" style="border-bottom:1px solid var(--line)">' +
+    '<span class="ptext hint" id="propCount">共 ' + PROPS.length + ' 条待确认</span>' +
     '<span class="pacts">' +
       '<button class="btn sm" onclick="decideAllProps(\'approve\')">全部确认执行</button>' +
       '<button class="btn sm" onclick="decideAllProps(\'reject\')">全部拒绝</button>' +
-    '</span></div>' : '') + PROPS.map(function(p){
-    return '<div class="prow" id="prop-' + p.id + '">' +
-      '<div class="ptext">' + esc(p.summary || '') + '</div>' +
-      '<span class="prisk r' + esc(p.risk || '低') + '">' + esc(p.risk || '低') + '风险</span>' +
-      '<span class="pacts">' +
-        '<button class="btn primary sm" onclick="decideProp(' + p.id + ',\'approve\',this)">同意</button>' +
-        '<button class="btn sm" onclick="decideProp(' + p.id + ',\'reject\',this)">拒绝</button>' +
-      '</span></div>';
-  }).join('');
+    '</span></div>' + PROPS.map(propRowHtml).join('');
+  updatePropCount();
 }
 /* 批量决定：逐条走同一个 decide 接口（每条都写审计），失败不中断，最后汇总 */
 async function decideAllProps(decision){
@@ -7260,7 +7739,9 @@ async function decideAllProps(decision){
     if(r.__err) fail++; else done++;
   }
   toast('已处理 ' + done + ' 条' + (fail ? ('，失败 ' + fail + ' 条') : ''));
-  loadProps(); load();
+  /* 批量是一次性操作，重建一次列表可以接受；单条决定见 decideProp 的局部更新 */
+  loadProps();
+  load({push:false});
 }
 async function decideProp(pid, decision, btn){
   var q = decision === 'approve'
@@ -7274,10 +7755,19 @@ async function decideProp(pid, decision, btn){
   var r = await api('/api/proposals/' + pid + '/decide', {method:'POST',
     headers:{'Content-Type':'application/json'}, body: JSON.stringify({decision: decision})});
   if(r.__err){ toast(r.__err); if(btn) btn.disabled = false; return; }
+  /* 局部更新：保留这一行并标成"已处理"，只把计数减一；不重建整块提案列表。
+     这样 40+ 条时不会每次点同意都闪一下，也能看见这条已经处理过了。 */
   var row = document.getElementById('prop-' + pid);
-  if(row) row.classList.add('done');
+  if(row){
+    row.classList.add('done');
+    var acts = row.querySelector('.pacts');
+    if(acts) acts.innerHTML = '<span class="hint">' +
+      (decision === 'approve' ? '已同意' : '已拒绝') + '</span>';
+  }
+  PROPS = PROPS.filter(function(x){ return Number(x.id) !== Number(pid); });
+  updatePropCount();
   toast(decision === 'approve' ? '已执行' : '已拒绝');
-  loadProps(); load();
+  load({push:false});
 }
 /* ---------- 批量：按模型重跑 / 分析待分析的人 ---------- */
 async function batchReanalyze(){
@@ -7425,9 +7915,10 @@ async function doStageAction(aid, to, outcome){
   toast(r.note || ('已推进到「' + to + '」'));
   load(); if(CUR) pick(CUR);
 }
-/* 一键复制基本信息（业务方 2026-10-21）。
-   HR 常常要把候选人信息发到微信/短信/群里，逐项选中复制很烦。
-   取值顺序是**先读输入框当前值**（包含刚改还没点「保存更正」的），
+/* 一键复制基本信息（业务方 2026-10-21，2026-10-30 收窄）。
+   收窄原因：HR 实际用途是"把人发给面试官 / 发到群里"，只要**姓名 + 性别 + 两个联系方式**；
+   学历、学校、专业、四六级都在简历里，复制过去反而是噪音。
+   取值顺序仍是**先读输入框当前值**（包含刚改还没点「保存更正」的），
    读不到才退回库里下发的 d —— 否则复制出来的是改动之前的内容，容易发错。 */
 function copyBasicInfo(){
   var d = CUR_DETAIL || {};
@@ -7435,18 +7926,67 @@ function copyBasicInfo(){
     var el = document.getElementById(id);
     return (el && el.value !== '' && el.value != null) ? el.value : (fallback || '');
   }
-  var rows = [
-    ['姓名', cur('edName', d.name)],
-    ['学历', cur('edEdu', d.edu_level)],
-    ['性别', cur('edGender', d.gender)],
-    ['四六级', cur('edCetLv', d.cet_level)],
-    ['电话', cur('edPhone', d.phone)],
-    ['邮箱', cur('edEmail', d.email)],
-    ['学校', cur('edSchool', d.school)],
-    ['专业', cur('edMajor', d.major)]
-  ].filter(function(r){ return r[1] && r[1] !== '—'; });
-  if(!rows.length){ toast('这个人还没有可复制的信息', 'warn'); return; }
-  copyText(rows.map(function(r){ return r[0] + '：' + r[1]; }).join('\n'));
+  function clean(v){ return (v == null ? '' : String(v)).trim(); }
+  var name = clean(cur('edName', d.name));
+  var gender = clean(cur('edGender', d.gender));
+  var phone = clean(cur('edPhone', d.phone));
+  var email = clean(cur('edEmail', d.email));
+  if(phone === '—') phone = '';
+  if(email === '—') email = '';
+
+  var lines = [];
+  /* 第一行：姓名 + 性别（中间用全角空格，粘到微信里是一行，好读也好删） */
+  var head = [name, gender].filter(Boolean).join('　');
+  if(head) lines.push(head);
+  if(phone) lines.push(phone);
+  if(email) lines.push(email);
+  if(!lines.length){ toast('这个人还没有可复制的信息', 'warn'); return; }
+  copyText(lines.join('\n'));
+}
+
+/* ---------- 档案 → 写邮件（2026-10-30 业务方要求） ----------
+   点档案里的绿色「写邮件」：跳到写邮件页、把这个人的收件人填好，
+   并且**默认选中「面试邀约」模板** —— 选模板会触发 renderMailVars()，
+   而它末尾会调 autofillInterviewVars()，于是档案里填过的
+   面试单位 / 时间 / 时段 / 方式自动带进邮件，HR 不用再敲一遍。 */
+var MAIL_JUMP_CID = null;
+function mailTplInterviewId(){
+  /* 模板名/场景里带"面试"或"邀约"的第一个 —— 不写死 id，模板可以改名 */
+  for(var i = 0; i < (MAIL_TPL || []).length; i++){
+    var t = MAIL_TPL[i];
+    var s = (t.name || '') + ' ' + (t.scene || '');
+    if(s.indexOf('面试') >= 0 || s.indexOf('邀约') >= 0) return String(t.id);
+  }
+  return '';
+}
+function waitFor(cond, timeout){
+  return new Promise(function(resolve){
+    var t0 = Date.now();
+    (function tick(){
+      if(cond()) return resolve(true);
+      if(Date.now() - t0 > (timeout || 4000)) return resolve(false);
+      setTimeout(tick, 60);
+    })();
+  });
+}
+async function mailFor(cid){
+  MAIL_JUMP_CID = cid;
+  setView('mail');
+  /* initMail 是异步的，setView 不 await 它 —— 等页面真正画出来再选人 */
+  var ready = await waitFor(function(){ return !!document.getElementById('mCandInput'); });
+  if(!ready){ toast('写邮件页没打开，请从左侧「写邮件」重试', 'warn'); return; }
+  if(MAIL_JUMP_CID !== cid) return;        /* 中途又点了别人 → 以后来的为准 */
+  await pickCand(cid);
+  var sel = document.getElementById('mTpl');
+  if(sel && !sel.value){
+    var tid = mailTplInterviewId();
+    if(tid){
+      sel.value = tid;
+      /* 手动派发 change：让"换模板 → 重画变量 → 带出面试信息 → 生成草稿"这条链跑起来 */
+      sel.dispatchEvent(new Event('change', {bubbles: true}));
+    }
+  }
+  MAIL_JUMP_CID = null;
 }
 /* 复制到剪贴板 */
 function copyText(t){
@@ -8583,7 +9123,9 @@ document.getElementById('loginForm').addEventListener('submit', function(ev){
      那一瞬间里侧栏是全亮的，看起来像没生效。 */
   applyPermissions();
   if(!AUTH_ENABLED){            /* 本机模式：原来的启动路径，一字不改 */
-    load();
+    applyUrlState();
+    URL_READY = true;
+    load({push:false});
     /* 右侧默认展示「概览 · 待办」（业务方 2026-10-21）：没人选中时不该只留一句
        "左侧选一个人" —— 那块地方占着半屏，正好放今天该干什么。 */
     showOverview();
@@ -8595,7 +9137,9 @@ document.getElementById('loginForm').addEventListener('submit', function(ev){
   loadMe().then(function(){
     if(!ME){ showLogin('登录已失效，请重新登录'); return; }
     renderWhoami();
-    load();
+    applyUrlState();
+    URL_READY = true;
+    load({push:false});
     showOverview();
   });
 })();
@@ -8603,6 +9147,36 @@ document.getElementById('loginForm').addEventListener('submit', function(ev){
 </body>
 </html>
 """
+
+# ---------------------------------------------------------------- 静态资源拆分
+# 页面原来是一整块约 500KB 的内联 CSS/JS，响应又是 no-store —— 每次刷新都要
+# 重新下载并解析。这里在模块加载时把两块抽出来，用内容 hash 做文件名，
+# 由 /ui/<hash>.css|js 长期缓存；HTML 里只保留按请求注入的阶段/档位/登录开关。
+_m_css = re.search(r"<style>(.*?)</style>", _PAGE, re.S)
+_m_js = re.search(r'<script id="ui-main">(.*?)</script>', _PAGE, re.S)
+if not _m_css or not _m_js:
+    raise RuntimeError("ui_v2 模板缺少 <style> 或 <script id='ui-main'>")
+_CSS = _m_css.group(1)
+_JS = _m_js.group(1)
+_CSS_NAME = "ui-%s.css" % hashlib.sha1(_CSS.encode("utf-8")).hexdigest()[:12]
+_JS_NAME = "ui-%s.js" % hashlib.sha1(_JS.encode("utf-8")).hexdigest()[:12]
+_ASSETS = {
+    _CSS_NAME: (_CSS, "text/css; charset=utf-8"),
+    _JS_NAME: (_JS, "application/javascript; charset=utf-8"),
+}
+_PAGE = _PAGE.replace(
+    "<style>%s</style>" % _CSS,
+    '<link rel="stylesheet" href="/ui/%s">' % _CSS_NAME, 1,
+)
+_PAGE = _PAGE.replace(
+    '<script id="ui-main">%s</script>' % _JS,
+    '<script src="/ui/%s"></script>' % _JS_NAME, 1,
+)
+
+
+def get_ui_asset(name: str):
+    """返回 (body, media_type)；文件名不匹配（含旧 hash）返回 None。"""
+    return _ASSETS.get(name)
 
 
 def render_page_v2(auth_enabled: bool = False) -> str:

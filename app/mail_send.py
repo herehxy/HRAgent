@@ -10,7 +10,7 @@
 v1.27：**发信与收信是两组独立配置**。原来发信直接复用 `config/imap.secret`
 且账号回退到收信账号，理由是"163 的收信与发信用同一个授权码"——但那只对
 **同一家服务商的同一账号**成立。单位里的实际情形是：招聘收件箱与对外发件
-经常是两个号（甚至两个服务商），此时复用口令必然配不出来。现在发信口令走
+经常是两个号（甚至两个服务商），此时复用密码必然配不出来。现在发信密码走
 `config/smtp.secret`、账号只读 `smtp.user`，老配置由 `mb.read_smtp_secret` 回退兼容。
 """
 from __future__ import annotations
@@ -56,7 +56,7 @@ def load_smtp(cfg: dict | None = None) -> dict:
     现在只读 `smtp.user`，没填就是没填（`user_same_as_imap=False`），
     由界面明确提示"发信账号还没单独填"，而不是替HR 猜一个。
 
-    口令同理走独立的 `config/smtp.secret`（`mb.read_smtp_secret` 内部对
+    密码同理走独立的 `config/smtp.secret`（`mb.read_smtp_secret` 内部对
     老配置有回退，见那里的说明）。
     """
     cfg = cfg if cfg is not None else mb.load_config()
@@ -75,7 +75,7 @@ def load_smtp(cfg: dict | None = None) -> dict:
         # 那时要在界面上说清"发信用的就是这个号"，否则分设置的意义就看不出来了）。
         "user_same_as_imap": bool(user) and user == imap_user,
         "imap_user": imap_user,
-        # 独立口令文件是否已建（没建说明还在用老配置回退读 imap.secret）
+        # 独立密码文件是否已建（没建说明还在用老配置回退读 imap.secret）
         "own_password_file": os.path.exists(
             os.path.join(mb.CONFIG_DIR, "smtp.secret")),
     }
@@ -256,7 +256,7 @@ def send_mail(to: str, subject: str, body: str,
               cfg: dict | None = None, password: str | None = None,
               dry_run: bool = False, html: str | None = None,
               attachments: list[dict] | None = None) -> dict:
-    """发一封邮件。返回 {ok, ...}；失败时给出可读原因（**不含口令**）。
+    """发一封邮件。返回 {ok, ...}；失败时给出可读原因（**不含密码**）。
 
     `html` 不为空时按 **multipart/alternative** 发送：同一封邮件里同时带
     「纯文本」与「HTML」两个版本，由收件人的客户端自己挑——现代客户端显示表格，
@@ -281,7 +281,7 @@ def send_mail(to: str, subject: str, body: str,
     pwd = password if password is not None else mb.read_smtp_secret()
     if not pwd:
         return {"ok": False, "error": "还没保存**发信**授权码。邮箱需在「设置 → POP3/SMTP/IMAP」"
-                                      "里开启服务并生成授权码，填在「发信配置」的口令栏。"}
+                                      "里开启服务并生成授权码，填在「发信配置」的密码栏。"}
     to = (to or "").strip()
     if not dry_run and (not to or "@" not in to):
         return {"ok": False, "error": "收件人邮箱为空或格式不对"}
@@ -383,7 +383,7 @@ def check_smtp(cfg: dict | None = None, password: str | None = None) -> dict:
     if not pwd:
         return {"ok": False, "error": "还没保存**发信**授权码。在邮箱「设置 → POP3/SMTP/IMAP」里"
                                       "开启 SMTP 服务并生成授权码（不是登录密码），"
-                                      "填到「发信配置」的口令栏。"}
+                                      "填到「发信配置」的密码栏。"}
     s = None
     tried: list = []
     try:

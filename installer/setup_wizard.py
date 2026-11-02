@@ -347,17 +347,37 @@ def _migrate_robust(legacy: str, target: Path) -> dict:
             "target_root": str(home), "via": "robocopy"}
 
 
-def legacy_program_root(selected: str) -> Path:
-    """Resolve the removable old app root, never a merely related parent folder."""
+def legacy_data_root(selected: str) -> Path:
+    """把"用户选的目录"解析成**数据根**（只要求有 workbench.db）。
+
+    v4.0.9：和 `legacy_program_root` 拆开。原来一个函数同时管"能不能迁移"和
+    "能不能删除"，而它要求目录里必须有 `HRAgent工作台.exe` —— 于是用户把
+    data/config 单独拷到桌面（D:\\Desktop\\HR 这种，只有 data + config + portable.flag）
+    时，安装器会说"未找到旧版主程序"并**拒绝迁移**，可那份数据明明完好。
+    迁移只需要数据库，不需要 exe。
+    """
     import profile_migrate
     old = profile_migrate.layout(selected)
     if not old:
-        raise ValueError("旧版目录没有可迁移的数据库")
+        raise ValueError("该目录里没有找到 data\\workbench.db（旧版数据）")
     root = Path(old["root"]).resolve()
     if root.name.lower() == "_internal":
         root = root.parent
+    return root
+
+
+def legacy_program_root(selected: str) -> Path:
+    """解析"可以被整体删除的旧目录"。
+
+    有主程序的按主程序目录算；**纯数据目录也允许**（没有 exe，但确实是一份
+    data/config 目录）—— 删它不会留下半截程序，正是用户勾"删除旧版"的意图。
+    """
+    root = legacy_data_root(selected)
     if not (root / EXE_NAME).is_file():
-        raise ValueError("未找到旧版 HRAgent 主程序，不能确认这是可删除的旧程序目录")
+        looks_like_data = ((root / "data").is_dir()
+                           or (root / "_internal" / "data").is_dir())
+        if not looks_like_data:
+            raise ValueError("未找到旧版 HRAgent 主程序，也不像数据目录")
     return root
 
 
@@ -434,15 +454,30 @@ class Wizard(tk.Tk):
                 break
 
     def _legacy_candidates(self) -> list[Path]:
+        import profile_migrate
+
         previous = previous_install_dir()
         roots = [previous] if previous else []
         roots.extend([Path(self.target.get()), Path(self.target.get()).parent])
+        # 常见的"用户把数据文件夹放在桌面"的情况（v4.0.9）：桌面上直接放了
+        # HR 这种只含 data/config 的目录。找不到旧安装时顺手看一眼桌面。
+        for desk in (Path.home() / "Desktop", Path.home() / "桌面"):
+            if desk.is_dir():
+                roots.append(desk)
         found = []
         for root in roots:
             for candidate in (root, root / "_internal", root / "HRAgent工作台",
                               root / "HRAgent工作台" / "_internal"):
                 if candidate not in found:
                     found.append(candidate)
+            # 桌面这类"父目录"再往下看一层
+            try:
+                for child in sorted(Path(root).iterdir()):
+                    if child.is_dir() and profile_migrate.layout(str(child)):
+                        if child not in found:
+                            found.append(child)
+            except (OSError, NameError):
+                pass
         return found
 
     def _center(self):
@@ -573,22 +608,50 @@ class Wizard(tk.Tk):
         self.migration_hint.configure(text="不迁移旧版数据，直接安装")
 
     def _browse_legacy(self):
-        chosen = filedialog.askdirectory(title="选择旧版 HRAgent 2.0.0 安装目录")
+        chosen = filedialog.askdirectory(
+            title="选择旧版数据目录（含 data\\workbench.db 的文件夹，或它的上一层）")
         if not chosen:
             return
         import profile_migrate
-        if not profile_migrate.layout(chosen):
-            for child in (Path(chosen) / "_internal",
-                          Path(chosen) / "HRAgent工作台",
-                          Path(chosen) / "HRAgent工作台" / "_internal"):
-                if profile_migrate.layout(str(child)):
-                    chosen = str(child)
-                    break
-        if not profile_migrate.layout(chosen):
-            messagebox.showerror("未找到旧版数据", "请选择包含 data\\workbench.db 的旧版目录。")
+
+        def _find(root: str) -> str | None:
+            """先看目录本身，再看它的下一层（用户常直接选"桌面"这种父目录）。"""
+            if profile_migrate.layout(root):
+                return root
+            for sub in ("_internal", "HRAgent工作台", "HRAgent工作台/_internal"):
+                cand = str(Path(root) / sub)
+                if profile_migrate.layout(cand):
+                    return cand
+            # 下一层：D:\Desktop\HR 这类"数据文件夹放在桌面里"的常见布局
+            try:
+                for child in sorted(Path(root).iterdir()):
+                    if not child.is_dir():
+                        continue
+                    if profile_migrate.layout(str(child)):
+                        return str(child)
+                    for sub in ("_internal", "HRAgent工作台", "HRAgent工作台/_internal"):
+                        cand = child / sub
+                        if profile_migrate.layout(str(cand)):
+                            return str(cand)
+            except OSError:
+                pass
+            return None
+
+        found = _find(chosen)
+        if not found:
+            messagebox.showerror(
+                "未找到旧版数据",
+                "这个目录（以及它下一层）里都没有 data\\workbench.db。\n\n"
+                "请选**包含 data 文件夹的那一层**，例如：\n"
+                "D:\\Desktop\\HR\\\n"
+                "如果数据在 D:\\Desktop\\HR\\_internal\\data，直接选 D:\\Desktop\\HR 也可以。")
             return
-        self.legacy.set(chosen)
-        self.migration_hint.configure(text=f"将复制旧版数据：{chosen}")
+        self.legacy.set(found)
+        has_exe = (Path(found) / EXE_NAME).is_file()
+        self.migration_hint.configure(
+            text=(f"将复制旧版数据：{found}"
+                  if has_exe else
+                  f"已识别为**数据目录**（没有主程序，只迁移数据）：{found}"))
 
     def _update_space(self):
         p = Path(self.target.get())
@@ -633,7 +696,8 @@ class Wizard(tk.Tk):
         old_root = None
         if self.legacy.get():
             try:
-                old_root = legacy_program_root(self.legacy.get())
+                # 只要"能迁移"就放行：**不再要求目录里有 exe**（纯数据目录很常见）
+                old_root = legacy_data_root(self.legacy.get())
             except ValueError as exc:
                 # v4.0.3：旧目录只是"顺手把老数据带过来"的便利功能，
                 # **不能因为校验不过就把整个安装拦死**。自动探测填进来的候选
@@ -1006,8 +1070,12 @@ class Wizard(tk.Tk):
         # Revalidate immediately before scheduling deletion, then allow this wizard
         # process to exit so an installer launched from the old folder is not locked.
         root = root.resolve()
-        if not (root / EXE_NAME).is_file():
-            raise ValueError("旧版目录缺少主程序，拒绝删除")
+        # 纯数据目录（只有 data/config、没有 exe）同样允许删除 —— 用户勾了
+        # "删除旧版"，指的往往是"这份老数据别再留了"，不是"必须有个 exe 才删"。
+        if not (root / EXE_NAME).is_file() and not (
+            (root / "data").is_dir() or (root / "_internal" / "data").is_dir()
+        ):
+            raise ValueError("旧版目录既没有主程序，也不像数据目录，拒绝删除")
         for protected in (target.resolve(), data_dir().resolve()):
             if protected == root or root in protected.parents:
                 raise ValueError("旧目录包含新版程序或数据，拒绝删除")

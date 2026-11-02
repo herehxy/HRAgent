@@ -78,13 +78,13 @@ def role_label(role: str) -> str:
 def ensure_seed_users(conn, default_password: str = "change-me") -> list[str]:
     """准备可登录的账号。分三种情况，**都不能把人锁在外面**：
 
-    ① 空库（全新部署）：建一个 `admin`，口令 `change-me`，界面强制改；
+    ① 空库（全新部署）：建一个 `admin`，密码 `change-me`，界面强制改；
     ② 老库只有 `hr`（v3.0.2 及以前，单角色时代）：把 `hr` **提升为 admin**。
        这是本次升级最关键的一步 —— v3.0.3 起账号登录默认开启，
        而老库里没有任何 admin，若不提升，升级后连"账号管理"页都进不去；
     ③ 已经有 admin：什么都不做。
 
-    为什么不给老库"新建一个 admin/admin"：那会凭空多出一个**弱口令入口**，
+    为什么不给老库"新建一个 admin/admin"：那会凭空多出一个**弱密码入口**，
     比少一个功能危险得多。提升已有账号只需改写 role 列，不新增凭据。
     """
     users = db.list_users(conn)
@@ -107,9 +107,9 @@ def ensure_seed_users(conn, default_password: str = "change-me") -> list[str]:
     return []
 
 
-#: 种子口令。命中它就在登录响应里带 `must_change_password=True`，
+#: 种子密码。命中它就在登录响应里带 `must_change_password=True`，
 #: 前端弹改密对话框。**不用"是否改过"的标记位**：多一列状态就要多维护一处，
-#: 而"口令还是默认值"本身就是最准确的判断。
+#: 而"密码还是默认值"本身就是最准确的判断。
 DEFAULT_PASSWORD = "change-me"
 
 

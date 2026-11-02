@@ -10,7 +10,7 @@
 三条不可动摇的安全约束：
 
 1. **只读**：`SELECT ... readonly=True` + `BODY.PEEK[]`，不删信、不改已读、不打标签；
-2. **凭据不进代码**：口令从环境变量或密钥文件读取，不写日志、不回显；
+2. **凭据不进代码**：密码从环境变量或密钥文件读取，不写日志、不回显；
 3. **先归档再解析**：附件优先落盘到原件区（只增不改），解析失败也不丢件。
 
 统一数据结构（适配 imap / eml 两个来源）::
@@ -95,7 +95,7 @@ def resolve_dir(value: str) -> str:
     `config/` 开头同理要走 CONFIG_DIR：`imap.password_file` 的默认值就是
     `config/imap.secret`，而打包后 BASE 是 `_internal`，按 BASE 拼会得到
     `_internal/config/imap.secret`——那个文件不存在，于是"邮箱配好了却取不到
-    口令"。其余相对路径按 BASE 拼，行为不变。
+    密码"。其余相对路径按 BASE 拼，行为不变。
     """
     if os.path.isabs(value):
         return value
@@ -110,7 +110,7 @@ def resolve_dir(value: str) -> str:
 # ---------------------------------------------------------------- 配置读写（供界面）
 
 _SECRET_DEFAULT_PATH = os.path.join(CONFIG_DIR, "imap.secret")
-# v1.27：发信口令**独立文件**（config/smtp.secret）。
+# v1.27：发信密码**独立文件**（config/smtp.secret）。
 # 为什么必须分开：原来收发信共用 imap.secret，于是"收信 A 邮箱、发信 B 邮箱"
 # 这种配置根本配不出来 —— 换发信账号就要把收信账号的授权码顶掉，
 # 而同一个服务商下两者授权码往往还不是同一个（企业邮可分开授权）。
@@ -120,14 +120,14 @@ _SMTP_SECRET_DEFAULT_PATH = os.path.join(CONFIG_DIR, "smtp.secret")
 # UI 可编辑、且允许写回 mailbox.json 的顶层键（白名单，避免误写入口径）
 _EDITABLE_KEYS = {"mode", "eml_dir", "folder_dir", "archive_dir", "attachment_ext",
                   "max_attachment_mb", "imap", "dedup",
-                  # v1.8.3 发信：SMTP 服务器配置（口令走各自的 .secret 文件，不在这里）
+                  # v1.8.3 发信：SMTP 服务器配置（密码走各自的 .secret 文件，不在这里）
                   "smtp"}
 
 
 def save_config(updates: dict, path: str | None = None) -> dict:
     """把界面提交的配置深合并进 mailbox.json 并落盘。返回合并后的完整配置。
 
-    安全约束：`imap.password*` 字段一律不写进 mailbox.json——口令只走
+    安全约束：`imap.password*` 字段一律不写进 mailbox.json——密码只走
     `write_secret()` 落到 0600 的密钥文件。即使调用方误传密码键也会被丢弃。
     """
     target = path or CONFIG_PATH
@@ -142,7 +142,7 @@ def save_config(updates: dict, path: str | None = None) -> dict:
             cfg[k] = v
     imap = cfg.setdefault("imap", {})
     for drop in ("password", "password_env", "password_file"):
-        # 保留 password_env/password_file 的"指向"，但绝不允许写入口令明文
+        # 保留 password_env/password_file 的"指向"，但绝不允许写入密码明文
         if drop == "password":
             imap.pop("password", None)
     os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -152,7 +152,7 @@ def save_config(updates: dict, path: str | None = None) -> dict:
 
 
 def read_secret(path: str | None = None) -> str | None:
-    """读取**收信**（IMAP）口令（config/imap.secret，0600）。不存在返回 None。"""
+    """读取**收信**（IMAP）密码（config/imap.secret，0600）。不存在返回 None。"""
     full = path or _SECRET_DEFAULT_PATH
     if os.path.exists(full):
         with open(full, encoding="utf-8") as fh:
@@ -162,7 +162,7 @@ def read_secret(path: str | None = None) -> str | None:
 
 
 def write_secret(password: str, path: str | None = None) -> None:
-    """写入**收信**（IMAP）口令到密钥文件，权限收紧为 0600（仅本用户可读）。"""
+    """写入**收信**（IMAP）密码到密钥文件，权限收紧为 0600（仅本用户可读）。"""
     full = path or _SECRET_DEFAULT_PATH
     os.makedirs(os.path.dirname(full), exist_ok=True)
     with open(full, "w", encoding="utf-8") as fh:
@@ -174,11 +174,11 @@ def write_secret(password: str, path: str | None = None) -> None:
 
 
 def read_smtp_secret(path: str | None = None) -> str | None:
-    """读取**发信**（SMTP）口令（config/smtp.secret，0600）。
+    """读取**发信**（SMTP）密码（config/smtp.secret，0600）。
 
     回退规则（v1.27）：`smtp.secret` 不存在时**回退读 imap.secret**。
-    为什么回退而不是直接判无：v1.26 及之前收发信共用一个口令文件，
-    升级后若一律判"没口令"，**已经能正常发信的部署会立刻发不出去**。
+    为什么回退而不是直接判无：v1.26 及之前收发信共用一个密码文件，
+    升级后若一律判"没密码"，**已经能正常发信的部署会立刻发不出去**。
     一旦 HR 在界面上单独保存了发信授权码，就落到 smtp.secret，两边彻底分开。
 
     ⚠️ 回退时传的必须是**同一个目录**下的 imap.secret：
@@ -200,7 +200,7 @@ def _imap_secret_beside(smtp_path: str) -> str:
 
 
 def write_smtp_secret(password: str, path: str | None = None) -> None:
-    """写入**发信**（SMTP）口令到独立密钥文件（config/smtp.secret，0600）。"""
+    """写入**发信**（SMTP）密码到独立密钥文件（config/smtp.secret，0600）。"""
     full = path or _SMTP_SECRET_DEFAULT_PATH
     os.makedirs(os.path.dirname(full), exist_ok=True)
     with open(full, "w", encoding="utf-8") as fh:
@@ -213,12 +213,12 @@ def write_smtp_secret(password: str, path: str | None = None) -> None:
 
 def test_imap(host: str, port: int, ssl_on: bool, user: str, password: str,
               folder: str = "INBOX", timeout: int = 15) -> dict:
-    """测试 IMAP 连接与登录。**绝不回显口令**，只返回 ok/error。"""
+    """测试 IMAP 连接与登录。**绝不回显密码**，只返回 ok/error。"""
     host = (host or "").strip()
     if not host:
         return {"ok": False, "error": "未填写 IMAP 服务器地址"}
     if not password:
-        return {"ok": False, "error": "未填写授权码/口令"}
+        return {"ok": False, "error": "未填写授权码/密码"}
     try:
         ctx = ssl.create_default_context()
         if ssl_on:
@@ -270,7 +270,7 @@ def preview_imap(host: str, port: int, ssl_on: bool, user: str, password: str,
     """连上邮箱，列出**最近几封邮件**的主题/发件人/时间/附件名。
 
     用途：收信之前先确认"连的是不是那个邮箱、里面有没有简历"。
-    **只读打开、只取邮件头与结构，不下载正文、不改任何标记、绝不回显口令。**
+    **只读打开、只取邮件头与结构，不下载正文、不改任何标记、绝不回显密码。**
     """
     host = (host or "").strip()
     if not host:
@@ -278,7 +278,7 @@ def preview_imap(host: str, port: int, ssl_on: bool, user: str, password: str,
     if not user:
         return {"ok": False, "error": "未填写邮箱账号"}
     if not password:
-        return {"ok": False, "error": "未填写授权码/口令"}
+        return {"ok": False, "error": "未填写授权码/密码"}
     try:
         if ssl_on:
             conn = imaplib.IMAP4_SSL(host, int(port or 993), ssl_context=ssl.create_default_context())
@@ -577,12 +577,12 @@ def fetch_eml(cfg: dict) -> list[dict]:
 # ---------------------------------------------------------------- imap 模式
 
 def _imap_password(imap_cfg: dict) -> str | None:
-    """取 IMAP 口令：环境变量 → mailbox.json 指定的文件 → 默认 imap.secret。
+    """取 IMAP 密码：环境变量 → mailbox.json 指定的文件 → 默认 imap.secret。
 
     最后一档回退不能省：`password_file` 只在 mailbox.json 里写了才生效，
     而界面保存配置时会把它从白名单外剔除（`_EDITABLE_KEYS` 不含它），
     老库/手工编辑过的 mailbox.json 也可能整条缺失。没有这一档，
-    "config/imap.secret 明明存在、界面也显示已配置"，收信却报"未取到口令"。
+    "config/imap.secret 明明存在、界面也显示已配置"，收信却报"未取到密码"。
     """
     env_key = imap_cfg.get("password_env", "TP_IMAP_PASSWORD")
     if os.environ.get(env_key):
@@ -620,7 +620,7 @@ def iter_imap(cfg: dict, cursor: str | None = None, limit: int = 200):
     if not password:
         secret_path = resolve_dir(ic.get("password_file") or "config/imap.secret")
         raise RuntimeError(
-            f"未取到邮箱口令：请设置环境变量 {ic.get('password_env', 'TP_IMAP_PASSWORD')} "
+            f"未取到邮箱密码：请设置环境变量 {ic.get('password_env', 'TP_IMAP_PASSWORD')} "
             f"或把授权码写入 {secret_path}（该文件不应提交到版本库）")
 
     ctx = ssl.create_default_context()

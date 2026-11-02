@@ -81,7 +81,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"[√] 数据库就绪：{DB_PATH}")
         if created:
             print(f"[√] 已创建 HR 账号：{', '.join(created)}"
-                  f"（初始口令 change-me，请立即修改；本机单机模式默认免登录）")
+                  f"（初始密码 change-me，请立即修改；本机单机模式默认免登录）")
         n_jobs = len(db.list_jobs(conn, include_inactive=True))
         print(f"[√] 当前岗位：{n_jobs} 个"
               + ("（空库——在界面「岗位管理」里填岗位名 + JD 即可，不需要建部门）"
@@ -281,7 +281,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if mcfg.get("mode") == "imap":
         print(f"           服务器 {icfg.get('host') or '（未配置）'}:{icfg.get('port', 993)}"
               f"｜账号 {icfg.get('user') or '（未配置）'}｜收件夹 {icfg.get('folder', 'INBOX')}")
-        print(f"           口令 {'已设置（不回显）' if mb.read_secret() else '未设置'}"
+        print(f"           密码 {'已设置（不回显）' if mb.read_secret() else '未设置'}"
               f"｜配置文件 {mb.CONFIG_PATH}")
         if not icfg.get("host"):
             print("           [!] 未配置 imap.host：请在界面「邮箱配置」里填写并测试连接")

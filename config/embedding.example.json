@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "provider": "openai_compatible",
+  "base_url": "",
+  "model": "",
+  "timeout": 60,
+  "batch": 16
+}

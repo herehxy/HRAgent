@@ -89,9 +89,9 @@ CREATE TABLE IF NOT EXISTS applications (
     tier_suggested TEXT,
     tier_final TEXT,
     -- ⚠️ 取值域以 config/stages.json 为准（唯一真源，见 app/stages.py）；这里只是注释。
-    -- v1.29.2：全部简历/初筛通过/待面试/已面试/已发放offer/已结束
+    -- v1.29.2：新投递/初筛通过/待面试/已面试/已发放offer/已结束
     -- （旧的 已联系/初面/复面/待offer/已入职 已废弃）
-    stage TEXT DEFAULT '全部简历',
+    stage TEXT DEFAULT '新投递',
     status TEXT DEFAULT '待确认',         -- 待确认/已确认
     note TEXT DEFAULT '',
     needs_review INTEGER DEFAULT 0,
@@ -416,7 +416,7 @@ def _migrate_v01(conn: sqlite3.Connection) -> dict | None:
             (cid, d.get("source", "文件夹"), d.get("created_at"), doc_id, d.get("score"),
              d.get("tier_suggested"), d.get("tier_final"),
              # 第 8 位是 stage：读配置里的初始档（**不写字面量**——
-             # 阶段名改过一次（v1.29.2 新投递→全部简历），字面量就会跟着过期）
+             # 阶段名改过一次（v1.29.2 新投递→新投递），字面量就会跟着过期）
              d.get("stage") or stages_mod.DEFAULT_STAGE,
              d.get("status") or "待确认",
              d.get("note", ""), d.get("needs_review", 0), d.get("reasons"), d.get("risks"),
@@ -485,6 +485,25 @@ def connect(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     return conn
 
 
+def _rename_legacy_stage(conn: sqlite3.Connection) -> int:
+    """v4.0.9：阶段「全部简历」改名为「新投递」，把**存量投递**一并改过来。
+
+    不改的话，老库里几百条投递的 stage 还是旧名字，而新的阶段清单里没有它
+    → 它们会落进"认不出的历史值"，界面按阶段筛「新投递」时一条都筛不到。
+    幂等：没有旧值就是 0 行。
+    """
+    try:
+        cur = conn.execute(
+            "UPDATE applications SET stage = ? WHERE TRIM(stage) = ?",
+            ("新投递", "全部简历"))
+        n = cur.rowcount or 0
+    except sqlite3.OperationalError:
+        return 0
+    if n:
+        print(f"[migrate] 阶段改名：{n} 条投递 全部简历 → 新投递")
+    return n
+
+
 def _init_schema(conn: sqlite3.Connection) -> dict | None:
     """建表 + 迁移 + 补列（每个库在每个进程里执行一次）。
 
@@ -500,6 +519,7 @@ def _init_schema(conn: sqlite3.Connection) -> dict | None:
     _ensure_schema_columns(conn)      # v2.2.4：按 SCHEMA 补齐缺的列
     _exec_schema(conn)
     _ensure_columns(conn)
+    _rename_legacy_stage(conn)        # v4.0.9：全部简历 → 新投递
     conn.commit()
     return migration
 
@@ -1716,20 +1736,13 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
         args.extend([like] * 8)
     if where:
         sql += " WHERE " + " AND ".join(where)
-    # 排序（v1.8.8，HR 口径）：**最差档一律沉底**，其余不看分数、按导入时间倒序。
-    # 为什么不再按分数排：分数受"是否识别出年限/技能词表命中"影响，准确性还不到
-    # 能当排序依据的程度——按分数排会让 HR 误以为"前几名就是最优"。档位里
-    # D 是唯一明确的否（学历不过线），所以只有它特殊处理；A/B/C 按投递时间排，
-    # 最新投递在最上面，符合"刚收到的先看"的实际工作方式。
-    sql += (" ORDER BY CASE WHEN COALESCE(a.tier_final, a.tier_suggested, '') = ?"
-            " THEN 1 ELSE 0 END, COALESCE(a.applied_at,'') DESC, c.id DESC")
+    # 默认排序（v4.0.15，业务方 2026-11-02 明确要求）：**只看投递时间，最新在前**。
+    # 不再按档位做任何特殊处理，也不再按分数排 —— 分数受"是否识别出年限/技能词表
+    # 命中"影响，不能当排序依据；档位是判断结果，不是时间。HR 的工作方式是
+    # "刚收到的简历先看"，所以列表只按 applied_at 倒序，同一天再按 id 倒序兜底。
+    sql += " ORDER BY COALESCE(a.applied_at,'') DESC, c.id DESC"
     if limit:
         sql += f" LIMIT {int(limit)}"
-
-    # ⚠️ ORDER BY 里那个 `?` 是**最后**追加的参数，顺序不能错 —— 它必须跟在
-    # 所有 WHERE 参数之后。用 `?` 而不是把档位字母拼进 SQL：档位来自配置文件，
-    # 拼串一旦配置里带了引号就会把整条 SQL 弄坏。
-    args = [*args, tiers_mod.hard_shortfall_tier()]
     items = [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
     # v1.24.9：把"缺哪些字段"与"简历有没有读出来"解出来给界面用。
     # 过去只有 needs_review 一个布尔，两种情况都显示"待人工判读"，
@@ -3053,7 +3066,7 @@ AUDIT_LABEL = {
     "delete": "删除了数据", "clear": "清空了数据", "remove": "移入了回收站",
     "restore": "从回收站恢复", "archive_pinned": "归档了原件",
     # v3.0.3 账号管理
-    "create": "新建了", "update": "修改了", "set_password": "重置了口令",
+    "create": "新建了", "update": "修改了", "set_password": "重置了密码",
     "import_domain": "导入了领域词表", "send": "发送了邮件",
     "chat_clear": "清空了对话", "chat_restore": "恢复了对话", "chat_purge": "清理了对话记录",
     "update": "修改了", "edit_settings": "修改了系统设置", "edit_config": "修改了配置",
@@ -4414,7 +4427,7 @@ def list_users(conn: sqlite3.Connection) -> list[dict]:
 
 
 def set_user_password(conn: sqlite3.Connection, username: str, password: str) -> bool:
-    """改口令。改完**必须清掉该用户的全部会话**（见 `delete_user_sessions`）——
+    """改密码。改完**必须清掉该用户的全部会话**（见 `delete_user_sessions`）——
     否则旧 token 还能用到过期，等于改了密码没生效。"""
     from .crypto import hash_password
 
@@ -4658,7 +4671,10 @@ def pipeline_stats(conn: sqlite3.Connection) -> dict:
     channels: dict[str, int] = {}
     today_str = today()
     for r in rows:
-        st = r["stage"] or "新投递"
+        # ⚠️ 必须归一化再分列（2026-11-02）：阶段改名「全部简历 → 新投递」后，
+        # 老库里仍可能留着旧名字的行。原来直接拿 raw stage 当 key，
+        # 于是这些行落进一个配置里不存在的列，界面上那一列永远是 0。
+        st = stages_mod.normalize_stage(r["stage"])
         days = 0
         if r["applied_at"]:
             try:

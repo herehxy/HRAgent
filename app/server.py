@@ -97,7 +97,7 @@ from .pipeline import sanitize
 from .pipeline import tier as tier_mod
 from .pipeline.analyze import analyze_fit, draft_interview
 from .ui import render_page, ui_build
-from .ui_v2 import render_page_v2
+from .ui_v2 import get_ui_asset, render_page_v2
 
 #: 程序根目录。默认按文件位置推导；**TP_HOME 可覆盖**——
 #: 开发/测试时用它把源码版指向已安装目录（_internal/），
@@ -508,7 +508,44 @@ def index() -> Response:
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
+    _harden_page_headers(resp)
     return resp
+
+
+def _harden_page_headers(resp: Response) -> None:
+    """给主页面加一层浏览器侧防护。
+
+    JS 已拆成同源静态文件，图片只来自同源/`data:`；仍然保留 `'unsafe-inline'`，
+    因为页面还有内联配置脚本和大量既有 `onclick` 属性 —— 这是历史包袱，
+    但 CSP 仍能挡掉外链脚本、`<object>`、`<base>` 改写和跨站表单提交。
+    """
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "img-src 'self' data: blob:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "connect-src 'self'; "
+        "font-src 'self' data:; "
+        "object-src 'none'; "
+        "base-uri 'none'; "
+        "frame-ancestors 'none'; "
+        "form-action 'self'"
+    )
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["X-Frame-Options"] = "DENY"
+
+
+@app.get("/ui/{name}")
+def ui_asset(name: str) -> Response:
+    """带内容 hash 的 UI 静态资源：一年缓存，内容一变 URL 就变。"""
+    asset = get_ui_asset(name)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="not found")
+    body, media = asset
+    return Response(body, media_type=media,
+                    headers={"Cache-Control": "public, max-age=31536000, immutable",
+                             "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/v1", response_class=HTMLResponse)
@@ -532,6 +569,7 @@ def index_v2() -> Response:
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
+    _harden_page_headers(resp)
     return resp
 
 
@@ -603,9 +641,9 @@ def login_bg():
 def api_login_hint() -> dict:
     """登录页要显示的提示。**不需要鉴权** —— 未登录时就要能读到它。
 
-    只暴露两件事：有没有账号、默认口令是不是还没改。
+    只暴露两件事：有没有账号、默认密码是不是还没改。
     **绝不返回账号名列表**（那等于给暴力破解指路）；只给"首个管理员账号名"，
-    而且只在"口令还是默认值"时给 —— 一旦改过口令，这条提示就没意义了，
+    而且只在"密码还是默认值"时给 —— 一旦改过密码，这条提示就没意义了，
     直接不返回（`first_run=False`）。
     """
     conn = db.connect(DB_PATH)
@@ -614,7 +652,7 @@ def api_login_hint() -> dict:
         if not users:
             return {"first_run": True, "username": "",
                     "hint": "还没有任何账号。请用管理员账号首次登录以完成初始化。"}
-        # 找出仍是默认口令的启用账号（只能靠 verify 比对，库里不存明文）
+        # 找出仍是默认密码的启用账号（只能靠 verify 比对，库里不存明文）
         from .crypto import verify_password as _verify
         for u in users:
             if not u.get("active"):
@@ -626,9 +664,9 @@ def api_login_hint() -> dict:
                     "first_run": True,
                     "username": u["username"],
                     # 用 \n 分行（前端 `white-space:pre-line` 会保留）：
-                    # 账号、口令、提醒三件事挤在一行读起来很累。
+                    # 账号、密码、提醒三件事挤在一行读起来很累。
                     "hint": (f"首次使用\n账号：{u['username']}\n"
-                             f"口令：{auth.DEFAULT_PASSWORD}\n"
+                             f"密码：{auth.DEFAULT_PASSWORD}\n"
                              f"（登录后请立即修改）"),
                 }
         return {"first_run": False, "username": "", "hint": ""}
@@ -699,7 +737,7 @@ def api_me(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
 # ============================================================
 # 数据库层（users/sessions 表、密码 scrypt 哈希、会话过期）早就写好了，
 # 但**一直没有 HTTP 入口** —— `manage_users` 权限声明了却没人调，
-# 账号只能靠 `ensure_seed_users` 建一个硬编码口令的种子。这里补齐。
+# 账号只能靠 `ensure_seed_users` 建一个硬编码密码的种子。这里补齐。
 
 class UserCreateReq(BaseModel):
     username: str
@@ -719,15 +757,15 @@ class PasswordReq(BaseModel):
     new_password: str
 
 
-#: 口令最短长度。**不强制复杂度**（大小写/符号）：单人内网工具，
-#: 强制复杂度只会让 HR 把口令写在便签上，反而更不安全。
+#: 密码最短长度。**不强制复杂度**（大小写/符号）：单人内网工具，
+#: 强制复杂度只会让 HR 把密码写在便签上，反而更不安全。
 MIN_PASSWORD_LEN = 8
 
 
 def _check_password(pw: str) -> None:
     if len((pw or "")) < MIN_PASSWORD_LEN:
         raise HTTPException(status_code=422,
-                            detail=f"口令至少 {MIN_PASSWORD_LEN} 位")
+                            detail=f"密码至少 {MIN_PASSWORD_LEN} 位")
 
 
 def _session_username(s: dict) -> str:
@@ -853,10 +891,10 @@ def api_user_update(username: str, req: UserUpdateReq,
 def api_user_password(username: str, req: PasswordReq,
                       x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    """改口令。
+    """改密码。
 
-    **本人改自己的**：必须提供旧口令（防止别人借你的登录态改掉）。
-    **管理员改别人的**：不需要旧口令（那是重置）。
+    **本人改自己的**：必须提供旧密码（防止别人借你的登录态改掉）。
+    **管理员改别人的**：不需要旧密码（那是重置）。
     改完一律清该用户会话——包括**自己**的，所以前端要让用户重新登录。
     """
     s = _session(x_tp_token, x_tp_role)
@@ -873,11 +911,11 @@ def api_user_password(username: str, req: PasswordReq,
         if is_self:
             if not auth.crypto.verify_password(req.old_password or "",
                                                user["password_hash"], user["salt"]):
-                raise HTTPException(status_code=403, detail="原口令不正确")
+                raise HTTPException(status_code=403, detail="原密码不正确")
         db.set_user_password(conn, username, req.new_password)
         kicked = db.delete_user_sessions(conn, username)
         db.add_audit(conn, "user", username, "set_password", "",
-                     f"{s['username']} 修改了账号「{username}」的口令"
+                     f"{s['username']} 修改了账号「{username}」的密码"
                      f"（清除 {kicked} 个会话）", s["username"], s["role"])
         return {"ok": True, "sessions_cleared": kicked, "relogin": is_self}
     finally:
@@ -3551,7 +3589,7 @@ def _remember_ingest(report: dict, operator: str) -> None:
 @app.get("/api/sources")
 def api_sources(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                 x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    """"简历是从哪来的"：本地文件夹绝对路径 + 文件清单；邮箱是哪个账号 + 口令状态。
+    """"简历是从哪来的"：本地文件夹绝对路径 + 文件清单；邮箱是哪个账号 + 密码状态。
 
     清单一并标出「超过体积上限」的文件：导入时会跳过它们，
     提前标红比导完之后再解释"为什么这份没进来"要省事得多。
@@ -3649,7 +3687,8 @@ def _file_session(header_token: str | None, query_token: str | None) -> dict:
 #: 文件类响应的兜底安全头（配合 `_file_session` 的说明一起看）
 _FILE_SAFE_HEADERS = {"Referrer-Policy": "no-referrer",
                       "Cache-Control": "private, no-store",
-                      "Pragma": "no-cache"}
+                      "Pragma": "no-cache",
+                      "X-Content-Type-Options": "nosniff"}
 
 
 @app.get("/api/documents/{did}/file")
@@ -3692,10 +3731,17 @@ def api_document_file(did: int, inline: int = 0, token: str | None = None,
 
     name = d.get("file_name") or os.path.basename(real)
     disposition = "inline" if inline else "attachment"
+    # v4.0.15：**扩展名优先**。历史数据里有 100+ 条 PDF/图片的 mime 被存成了
+    # `application/octet-stream`，直接按库里的 mime 发，浏览器不会预览，
+    # 只会下载或显示空白 —— 用户看到的就是"在线打开不是简历本身"。
+    # 扩展名能识别时以它为准；只有扩展名不认识时才回退到库里的 mime。
+    _ext_mime = _mime_of(name)
+    _media = (_ext_mime if _ext_mime != "application/octet-stream"
+              else ((d.get("mime") or "").strip() or _ext_mime))
     # 发送用带 @@BS@@?@@BS@@ 前缀的路径（超长也能读）；越界检查仍用未加前缀的 real。
     return FileResponse(_paths.long_path(real), filename=name,
                         content_disposition_type=disposition,
-                        media_type=d.get("mime") or _mime_of(name),
+                        media_type=_media,
                         headers=_FILE_SAFE_HEADERS)
 
 
@@ -4472,6 +4518,28 @@ def api_proposals(status: str | None = None, x_tp_token: str | None = Header(def
     conn = db.connect(DB_PATH)
     try:
         items = db.list_proposals(conn, status=status, limit=100)
+        # 界面上要把提案里的姓名做成"点击跳档案"的链接。提案表只存
+        # `summary`（人看的文字）和 `args`（执行参数），没有统一的
+        # candidate_id：主动巡检的 set_stage 给的是 application_id，
+        # 其他工具给的是 candidate_id。这里统一解析出候选人，
+        # 前端就不必猜 summary 里的名字，也不用手动拼 URL。
+        for it in items:
+            _a = it.get("args") or {}
+            if isinstance(_a, str):
+                try:
+                    _a = json.loads(_a)
+                except (TypeError, ValueError):
+                    _a = {}
+            elif not isinstance(_a, dict):
+                _a = {}
+            _cid = _a.get("candidate_id")
+            if not _cid and _a.get("application_id"):
+                _app = db.get_application(conn, int(_a["application_id"]))
+                _cid = (_app or {}).get("candidate_id")
+            if _cid:
+                _cand = db.get_candidate(conn, int(_cid)) or {}
+                it["candidate_id"] = int(_cid)
+                it["candidate_name"] = _cand.get("name") or ""
         return {"count": len(items), "items": items,
                 "can_confirm": auth.can(s["role"], "confirm"),
                 "note": "提案由智能体生成，必须由 HR 确认才会落到人才库"}
@@ -5200,7 +5268,7 @@ class MailboxConfigReq(BaseModel):
     imap_ssl: bool | None = None
     imap_user: str | None = None
     imap_folder: str | None = None
-    password: str | None = None             # 授权码/口令（写入 imap.secret，不回显）
+    password: str | None = None             # 授权码/密码（写入 imap.secret，不回显）
     attachment_ext: list[str] | None = None
     max_attachment_mb: int | None = None
     same_job_reapply_days: int | None = None
@@ -5256,7 +5324,7 @@ def api_mailbox_presets(x_tp_token: str | None = Header(default=None, alias="X-T
     _session(x_tp_token, x_tp_role)
     return {"presets": MAILBOX_PRESETS,
             "note": "国内邮箱（QQ/163/企业邮）需在邮箱设置里开启 IMAP 并生成"
-                    "「授权码」，口令栏填授权码，不是登录密码。"}
+                    "「授权码」，密码栏填授权码，不是登录密码。"}
 
 
 def _mailbox_warnings(cfg: dict) -> list[str]:
@@ -5276,7 +5344,7 @@ def _mailbox_warnings(cfg: dict) -> list[str]:
     if mode == "imap" and not ic.get("user"):
         warns.append("模式是 imap 但没填邮箱账号。")
     if mode == "imap" and not mb.read_secret():
-        warns.append("模式是 imap 但还没保存授权码/口令。")
+        warns.append("模式是 imap 但还没保存授权码/密码。")
     if mode == "off":
         warns.append("邮箱抓取已关闭：只能靠「本地文件夹导入」。")
     ext = cfg.get("attachment_ext") or []
@@ -5288,7 +5356,7 @@ def _mailbox_warnings(cfg: dict) -> list[str]:
 @app.post("/api/mailbox/config")
 def api_mailbox_save(req: MailboxConfigReq, x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                      x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    """保存邮箱配置。口令单独写入 config/imap.secret（0600），不回显。"""
+    """保存邮箱配置。密码单独写入 config/imap.secret（0600），不回显。"""
     s = _session(x_tp_token, x_tp_role)
     require(s, "settings")
     updates: dict = {}
@@ -5333,7 +5401,7 @@ def api_mailbox_save(req: MailboxConfigReq, x_tp_token: str | None = Header(defa
             "password_set": bool(mb.read_secret()),
             "warnings": warns,
             "note": ("配置已保存，但有几处需要确认：" + "；".join(warns)) if warns
-                    else "配置已保存。口令不会显示在界面或日志中。"}
+                    else "配置已保存。密码不会显示在界面或日志中。"}
 
 
 class MailboxTestReq(BaseModel):
@@ -5362,7 +5430,7 @@ def _resolve_imap(req) -> tuple[str, int, bool, str, str, str]:
 @app.post("/api/mailbox/test")
 def api_mailbox_test(req: MailboxTestReq, x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                      x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    """测试 IMAP 连接与登录。口令不回显。
+    """测试 IMAP 连接与登录。密码不回显。
 
     连上了不等于配好了——还要把模式切到 imap 才会真正去收信，
     所以成功时把"下一步点哪里"直接写进响应，省掉一轮猜测。
@@ -5385,7 +5453,7 @@ def api_mailbox_preview(req: MailboxTestReq, limit: int = 10,
                         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     """收信**之前**先看一眼：连的是哪个邮箱、最近几封是什么、有没有简历附件。
 
-    只读打开、只取邮件头与附件名，不下载正文、不改标记；口令不回显、不落日志。
+    只读打开、只取邮件头与附件名，不下载正文、不改标记；密码不回显、不落日志。
     """
     s = _session(x_tp_token, x_tp_role)
     require(s, "settings")
@@ -5851,7 +5919,7 @@ def api_mail_template_delete(tid: int,
 @app.get("/api/mail/smtp")
 def api_smtp_get(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    """发信配置（口令只回是否已设置，不回显）。"""
+    """发信配置（密码只回是否已设置，不回显）。"""
     _session(x_tp_token, x_tp_role)
     conf = mail_send_mod.load_smtp()
     # v4.0.0：没配过就回空串。`load_smtp()` 内部有 smtp.163.com / 465 的兜底
