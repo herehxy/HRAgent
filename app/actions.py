@@ -52,18 +52,42 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
                 return _denied(conn, p, operator, role, need)
             aid, stage = int(args["application_id"]), args["stage"]
             _before = db.get_application(conn, aid) or {}
+            _cur_stage = str(_before.get("stage") or "").strip()
+            _expected = str(args.get("expected_stage") or "").strip()
+            if _expected and _cur_stage != _expected:
+                return {"ok": False,
+                        "error": f"提案创建时档案在「{_expected}」，现在已是「{_cur_stage}」。"
+                                 "为避免把阶段改回去，本次没有执行；请刷新提案后重新发起。"}
+            # 老提案没有 expected_stage：至少拦住“目标阶段比当前更早”的倒退。
+            _order = stages_mod.all_stages()
+            if (not _expected and _cur_stage in _order and stage in _order
+                    and _order.index(stage) < _order.index(_cur_stage)):
+                return {"ok": False,
+                        "error": f"档案当前已到「{_cur_stage}」，该提案会把阶段回退到"
+                                 f"「{stage}」；已拒绝执行，请刷新后重新发起。"}
             _actual_stage = stages_mod.auto_advance_stage(
                 _before.get("stage"), stage, args.get("outcome"))
             # v1.29：结论标签一起落库。参数是**可选**的——老提案里没有这个键，
             # 传 None 表示"不改结论"（与"把结论清空"用空串区分，见 db.update_application_fields）。
             # ⚠️ 校验放在 db.set_application_stage 里（那里是唯一真源），这里不重复判一遍：
             # 两处各判一次，迟早会出现"这处放行、那处拒绝"。
-            r = db.set_application_stage(conn, aid, _actual_stage, args.get("outcome"),
-                                         operator, role)
+            # 关键字传参：签名里 `sign_status` 在 operator/role 之前，
+            # 位置传参会让「同意提案」执行阶段变更时把用户名当成签约情况。
+            try:
+                r = db.set_application_stage(conn, aid, _actual_stage, args.get("outcome"),
+                                             operator=operator, role=role)
+            except ValueError as exc:
+                # 必填字段缺失 / 非法结论：把原因原样交给 HR，不要冒成 500。
+                return {"ok": False, "error": str(exc)}
+            _archived = bool((r or {}).pop("_auto_archived", False))
             result["after"] = {"application_id": aid, "stage": r.get("stage") if r else None,
                                "advanced_to": (_actual_stage
                                                if _actual_stage != _before.get("stage") else None),
                                "outcome": r.get("outcome") if r else None}
+            if _archived:
+                result["auto_archived"] = True
+                result["message"] = ("提案已执行；该候选人的投递都走完了，已自动归档"
+                                     "（可在「归档」页恢复）。")
 
         elif tool == "set_tier":
             if not auth.can(role, "confirm"):
@@ -290,6 +314,62 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             r = _reanalyze_many(conn, [int(x) for x in (args.get("candidate_ids") or [])],
                                 int(args.get("limit") or 50), operator, role)
             result["after"] = {"done": r.get("done"), "failed": r.get("failed")}
+
+        elif tool == "bulk_initial_pass":
+            if not auth.can(role, "set_stage"):
+                return _denied(conn, p, operator, role, "set_stage")
+            from . import regrade as _rg
+            ids = [int(x) for x in (args.get("candidate_ids") or [])]
+            if not ids:
+                return {"ok": False, "error": "提案里没有候选人"}
+            r = _rg.bulk_initial_pass(conn, ids, _tiers(),
+                                      operator=operator, role=role)
+            result["after"] = {"advanced": r.get("advanced"),
+                               "assigned": r.get("assigned"),
+                               "no_suggestion": r.get("no_suggestion"),
+                               "already_passed": r.get("already_passed"),
+                               "failed": r.get("failed")}
+
+        elif tool == "bulk_assign_job":
+            if not auth.can(role, "set_stage"):
+                return _denied(conn, p, operator, role, "set_stage")
+            from . import regrade as _rg
+            ids = [int(x) for x in (args.get("candidate_ids") or [])]
+            if not ids:
+                return {"ok": False, "error": "提案里没有候选人"}
+            r = _rg.bulk_assign_job(conn, ids, int(args["job_id"]), _tiers(),
+                                    operator=operator, role=role)
+            if not r.get("ok", True):
+                return {"ok": False, "error": r.get("error")}
+            result["after"] = {"assigned": r.get("assigned"),
+                               "unchanged": r.get("unchanged"),
+                               "skipped": r.get("skipped"),
+                               "failed": r.get("failed")}
+
+        elif tool == "set_sign_status":
+            if not auth.can(role, "set_stage"):
+                return _denied(conn, p, operator, role, "set_stage")
+            aid = int(args["application_id"])
+            cur = db.get_application(conn, aid)
+            if not cur:
+                return {"ok": False, "error": f"未找到投递 #{aid}"}
+            status = str(args.get("status") or "").strip()
+            if status not in db.SIGN_STATUSES:
+                return {"ok": False, "error": "签约情况只能是：" + "/".join(db.SIGN_STATUSES)}
+            patch = {"sign_status": status}
+            if args.get("hire_unit"):
+                patch["hire_unit"] = str(args["hire_unit"]).strip()[:40]
+            if args.get("onboard_deadline"):
+                patch["onboard_deadline"] = str(args["onboard_deadline"]).strip()[:10]
+            if status == "已签约":
+                if args.get("signed_at"):
+                    patch["signed_at"] = str(args["signed_at"]).strip()[:10]
+                elif not cur.get("signed_at"):
+                    patch["signed_at"] = db.today()
+            elif status in ("未签约", "拒签"):
+                patch["signed_at"] = None
+            db.update_application_fields(conn, aid, operator=operator, role=role, **patch)
+            result["after"] = {"application_id": aid, "sign_status": status}
 
         elif tool == "route_pending":
             if not auth.can(role, "set_stage"):

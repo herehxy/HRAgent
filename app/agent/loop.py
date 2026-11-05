@@ -17,16 +17,116 @@ from __future__ import annotations
 import json
 import re
 import time
+import urllib.error
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 
 from .. import db, stages as stages_mod
 from ..pipeline import normalize as nz
 from . import llm
 from . import tools as tools_write
+from .router import route_tools, tool_catalog_text
+from .skills import match_skill
 from .tools import DISABLED_TOOLS, STAGES, TOOL_SPECS, ToolCtx, execute
 
+# --------------------------------------------------------------- 文本形式的工具调用
+#
+# 有些 OpenAI 兼容端点（实测小米 MiMo，部分 Qwen 部署也是如此）不会把工具调用
+# 放进 `tool_calls`，而是把模型的原生标签原样写进 `content`：
+#
+#   <tool_call><function=search_candidates><parameter=job>数字化工程师</parameter>
+#   <parameter=limit>50</parameter></function></tool_call>
+#
+# 不解析会有两个后果：工具一个都没执行；这段标签被当成答复原样显示给 HR。
+# 这里按**模型实际输出的形态**解析，而不是要求端点必须规范。
+_TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.S | re.I)
+_TEXT_FUNCTION_RE = re.compile(
+    r"<function\s*=\s*[\"']?([A-Za-z_][\w.-]*)[\"']?\s*>(.*?)</function>", re.S | re.I)
+_TEXT_PARAM_RE = re.compile(
+    r"<parameter\s*=\s*[\"']?([A-Za-z_][\w.-]*)[\"']?\s*>(.*?)</parameter>", re.S | re.I)
+_TEXT_PARAM_NAMED_RE = re.compile(
+    r"<parameter\s+name\s*=\s*[\"']([^\"']+)[\"']\s*>(.*?)</parameter>", re.S | re.I)
+
+
+def _text_arg_value(raw: str):
+    """XML 参数值 → Python 值（50→int，true→bool，[1,2]→list，其余保留原文）。"""
+    v = (raw or "").strip()
+    if not v:
+        return ""
+    try:
+        return json.loads(v)
+    except (TypeError, ValueError):
+        return v
+
+
+def _text_tool_calls(content: str) -> tuple[list[dict], str]:
+    """从正文里拆出文本形式的工具调用，并返回去掉标签后的正文。
+
+    支持两种实际见过的形态：
+      · `<tool_call><function=x><parameter=k>v</parameter></function></tool_call>`
+      · `<tool_call>{"name":"x","arguments":{...}}</tool_call>`
+    """
+    text = content or ""
+    calls: list[dict] = []
+
+    def _mk(name: str, args: dict) -> dict:
+        return {"id": "call_" + uuid.uuid4().hex[:12], "type": "function",
+                "function": {"name": name,
+                             "arguments": json.dumps(args, ensure_ascii=False)}}
+
+    for block in _TOOL_CALL_BLOCK_RE.findall(text):
+        raw = block.strip()
+        # ---- JSON 形态 ----
+        if raw.startswith("{"):
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                obj = None
+            if isinstance(obj, dict):
+                fn = obj.get("function") if isinstance(obj.get("function"), dict) else obj
+                name = fn.get("name") or obj.get("name") or ""
+                args = fn.get("arguments", obj.get("arguments", {}))
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except ValueError:
+                        args = {}
+                if name and isinstance(args, dict):
+                    calls.append(_mk(name, args))
+                    continue
+        # ---- XML 形态 ----
+        matched = False
+        for fm in _TEXT_FUNCTION_RE.finditer(block):
+            matched = True
+            args: dict = {}
+            for pm in _TEXT_PARAM_RE.finditer(fm.group(2)):
+                args[pm.group(1)] = _text_arg_value(pm.group(2))
+            for pm in _TEXT_PARAM_NAMED_RE.finditer(fm.group(2)):
+                args[pm.group(1)] = _text_arg_value(pm.group(2))
+            calls.append(_mk(fm.group(1), args))
+        # 半截输出：只有 <function=x> 没有 </function>，参数仍按 <parameter> 收
+        if not matched:
+            fm = re.search(r"<function\s*=\s*[\"']?([A-Za-z_][\w.-]*)", block, re.I)
+            if fm:
+                args = {}
+                for pm in _TEXT_PARAM_RE.finditer(block):
+                    args[pm.group(1)] = _text_arg_value(pm.group(2))
+                calls.append(_mk(fm.group(1), args))
+
+    cleaned = _TOOL_CALL_BLOCK_RE.sub("", text)
+    cleaned = re.sub(r"</?tool_call>", "", cleaned, flags=re.I).strip()
+    return calls, cleaned
+
+
+def _strip_tool_call_text(text: str) -> str:
+    """答复出口的最后一道清洗：文本形式的工具调用不该显示给 HR。"""
+    return re.sub(r"<tool_call>.*?</tool_call>", "", text or "",
+                  flags=re.S | re.I).strip()
+
+
 SYSTEM_PROMPT = (
-    "你是西北有色金属研究院人才库工作台的 HR 助手，熟悉稀有金属材料（钛合金、难熔合金、"
+    "你是西北有色金属研究院人才库智能体的 HR 助手，熟悉稀有金属材料（钛合金、难熔合金、"
     "高温合金）研发与工艺岗位的招聘。\n"
     "铁律：\n"
     "1) 涉及候选人数量、条件筛选、技能、简历细节的问题，必须先调用工具取真实数据，"
@@ -109,7 +209,29 @@ SYSTEM_PROMPT = (
     "（get_candidate / explain_grade 都能带出投递），"
     "查到了就直接用；查不到或有多条歧义，才回头问 HR。"
     "不要一上来就要求 HR 再确认一遍编号——**编号就是他要你用的那个**。\n"
-    "6) 回答用简体中文，结论先行、结构化（可用编号或短列表），不要输出 JSON。"
+    "6) 回答用简体中文，结论先行、结构化（可用编号或短列表），不要输出 JSON。\n"
+    "7f) **需要一次看 2 人以上时，用 get_candidates 批量读取**，不要连续多次调用 "
+    "get_candidate——每次单读都要多一轮，5 个人就会把回答拖到一分钟以上。\n"
+    "7g) 工具调用要克制：同一个目标最多检索 2 轮；信息已经够回答就停下来组织答案，"
+    "不要为了“再确认一次”反复查。用户要的是结论，不是工具调用次数。\n"
+    "7e) 做分布 / 占比 / 图表时，先调 pool_stats 并传 group_by"
+    "（education/school/major/job/stage/tier/gender）拿真实分布，再按第 8 条输出图表；"
+    "**不要自己拉全量列表再心算**，也不要把两个同义学历（专科/大专、研究生/硕士）分开列。\n"
+    # v4.3.3（业务方截图：要折线图和饼图，模型吐了两段 Mermaid 伪代码，界面
+    # 按代码块原样显示）。界面现在能直接把 Mermaid 渲染成图，这里把格式说死：
+    # 必须用 ```mermaid 代码块，数据必须来自本轮工具结果。
+    "8) 用户要图表时，**必须用 ```mermaid 代码块**输出 Mermaid，界面会自动渲染成图："
+    "饼图用 `pie showData`（每行 `\"标签\" : 数值`）；"
+    "折线/柱状用 `xychart-beta`（title / x-axis [..] / y-axis \"单位\" 0 --> 上限 / line [..] 或 bar [..]）。"
+    "**不要**输出 matplotlib、echarts、Python 绘图代码，也不要输出 `pie showData` 这类"
+    "没有代码块包裹的裸伪代码——那样只会显示成文字。图表里的每个数字都必须来自本轮工具结果。\n"
+    "9) 回答要有结构：较长的回答用 **加粗小标题** 分段（如 **结论**、**缺口**、**下一步**），"
+    "多用短列表和表格；不要把多个要点挤成一大段。\n"
+    "10) 涉及日期时以 system 里的【当前时间】为准：用户说今天/明天/后天/本周/下周，"
+    "先换算成 YYYY-MM-DD 再传给工具或写进答复；不要凭记忆猜年份。\n"
+    "11) 用户一句话里包含多个动作时（如“筛人→归岗→安排面试→导出”），"
+    "先拆成编号步骤，**按顺序把每个动作都执行**；写操作分别生成待确认提案，"
+    "最后集中汇总，让 HR 一次「全部同意」。不要只做第一个动作就收尾。"
 )
 
 
@@ -265,7 +387,9 @@ def _looks_like_fake_proposal(answer: str, trace: list[dict]) -> bool:
 
 
 def _force_tool_call(messages: list[dict], answer: str, cfg: dict,
-                     usage_total: dict) -> list[dict] | None:
+                     usage_total: dict,
+                     thinking: list[str] | None = None,
+                     tools: list[dict] | None = None) -> list[dict] | None:
     """模型口头声称做了写操作却没调工具 —— 强制它重发一次工具调用。
 
     为什么用 `tool_choice="required"` 而不是继续猜中文动词：
@@ -289,17 +413,31 @@ def _force_tool_call(messages: list[dict], answer: str, cfg: dict,
          "参数取你上一条里已经写明的人与目标值。不要解释，不要重复结论。"},
     ]
     try:
-        msg = llm.chat(probe, tools=TOOL_SPECS, cfg=cfg, tool_choice="required")
+        if tools:
+            msg = llm.chat(probe, tools=tools, cfg=cfg, tool_choice="required")
+        else:
+            # 文本工具协议：不传 tools，模型按 system 里的 XML 清单输出
+            msg = llm.chat(probe, cfg=cfg)
     except Exception:
         return None
     _accumulate(usage_total, msg.get("_usage"))
-    calls = msg.get("tool_calls")
+    _reason = msg.get("_reasoning") or ""
+    if thinking is not None and _reason:
+        thinking.append(_reason.strip())
+    calls = msg.get("tool_calls") or []
+    if not calls:
+        # 有些端点会把工具调用写成正文（见文件头 `_text_tool_calls`）
+        calls, _ = _text_tool_calls(msg.get("content") or "")
     if not calls:
         return None
-    # 把这一轮也接进对话，保持顺序合法（assistant 的 tool_calls 必须带 id）
+    # 把这一轮也接进对话，保持顺序合法（assistant 的 tool_calls 必须带 id）。
+    # MiMo 等推理模型要求把 `reasoning_content` 原样回传，否则多轮工具调用 400。
     messages.append({"role": "assistant", "content": answer})
-    messages.append({"role": "assistant", "content": "",
-                     "tool_calls": calls})
+    _asst = {"role": "assistant", "content": "",
+             "tool_calls": calls}
+    if _reason:
+        _asst["reasoning_content"] = _reason
+    messages.append(_asst)
     return calls
 
 
@@ -450,27 +588,436 @@ def _recover_missed_action(answer: str, user_message: str, ctx, trace: list[dict
             f"推进到「{new_stage}」，**待确认提案已生成** —— 下面点「确认执行」生效。")
 
 
-def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None) -> dict:
+#: v4.0.17：实时调用轨迹（右侧面板轮询）。
+#: 只存在进程内，不落库；最终完整 trace 仍随 `/api/agent/chat` 返回并写 agent_runs。
+#: key=session_id，value={operator, status, trace:[{tool,tool_label,args,write,disabled}], ts}
+_LIVE_TRACES: dict[str, dict] = {}
+
+
+def _live_update(ctx: ToolCtx, trace: list[dict], status: str = "running",
+                 mode: str | None = None, rounds: int = 0,
+                 thinking: str = "") -> None:
+    sid = str(ctx.session_id or "").strip()
+    if not sid:
+        return
+    now_ts = time.time()
+    # 顺手清掉 10 分钟前的残留，避免进程内字典无限增长
+    for k in [k for k, v in _LIVE_TRACES.items() if now_ts - float(v.get("ts") or 0) > 600]:
+        _LIVE_TRACES.pop(k, None)
+    _LIVE_TRACES[sid] = {
+        "operator": ctx.operator,
+        "status": status,
+        "mode": mode,
+        "rounds": rounds,
+        # 思考过程只用于界面实时展示；最终仍随 /api/agent/chat 返回并落库
+        "thinking": thinking or "",
+        "route": list(getattr(ctx, "route", []) or []),
+        "ts": now_ts,
+        "trace": [{
+            "tool": t.get("tool"),
+            "tool_label": t.get("tool_label") or t.get("tool"),
+            "args": t.get("args") or {},
+            "write": bool(t.get("write")),
+            "disabled": bool(t.get("disabled")),
+        } for t in trace],
+    }
+
+
+def live_trace(session_id: str, operator: str) -> dict | None:
+    """给右侧轨迹面板读的**当前会话**轨迹；只允许会话所属账号。"""
+    v = _LIVE_TRACES.get(str(session_id or ""))
+    if not v or str(v.get("operator") or "") != str(operator or ""):
+        return None
+    return {"status": v.get("status"), "mode": v.get("mode"),
+            "rounds": v.get("rounds"), "thinking": v.get("thinking") or "",
+            "route": list(v.get("route") or []),
+            "trace": list(v.get("trace") or [])}
+
+
+def _merge_tool_delta(acc: dict, tc: dict) -> None:
+    """把流式返回的 tool_call 增量按 index（没有就用 id）拼成完整调用。"""
+    idx = tc.get("index")
+    if idx is None:
+        idx = tc.get("id") or 0
+    slot = acc.get(idx)
+    if slot is None:
+        slot = {"id": "", "type": "function",
+                "function": {"name": "", "arguments": ""}}
+        acc[idx] = slot
+    if tc.get("id"):
+        slot["id"] = tc["id"]
+    fn = tc.get("function") or {}
+    if fn.get("name"):
+        slot["function"]["name"] += fn["name"]
+    if fn.get("arguments"):
+        slot["function"]["arguments"] += fn["arguments"]
+
+
+def _finalize_tool_calls(acc: dict) -> list[dict]:
+    out = []
+    for slot in acc.values():
+        if not (slot.get("function") or {}).get("name"):
+            continue
+        if not slot.get("id"):
+            slot["id"] = "call_" + uuid.uuid4().hex[:12]
+        out.append(slot)
+    return out
+
+
+def _est_tokens(text: str) -> int:
+    """粗略 token 估算：中文≈1 字 1 token，英文/符号≈4 字符 1 token。
+
+    只用于右栏"上下文用量"的可视化，精度足够；真实计费仍以模型返回的
+    `usage` 为准（`agent_runs.tokens_in/out`）。
+    """
+    s = str(text or "")
+    if not s:
+        return 0
+    cjk = len(re.findall(r"[一-鿿]", s))
+    return max(1, int(cjk + (len(s) - cjk) * 0.28))
+
+
+def build_context_estimate(*, window: int = 1_000_000, messages_text: str = "",
+                           allowed_specs: list[dict] | None = None,
+                           text_tools: bool = False,
+                           skill: dict | None = None,
+                           memory: str = "",
+                           model: str = "",
+                           params: dict | None = None,
+                           window_source: str = "config",
+                           model_params: str = "") -> dict:
+    """构造右栏「上下文」面板的数据（估算，不调模型）。"""
+    try:
+        win = int(window or 1_000_000)
+    except (TypeError, ValueError):
+        win = 1_000_000
+    specs = allowed_specs or []
+    sys_tools_text = (tool_catalog_text(specs) if text_tools
+                      else json.dumps(specs, ensure_ascii=False))
+    parts = [
+        {"key": "messages", "label": "对话消息", "tokens": _est_tokens(messages_text)},
+        {"key": "system_prompt", "label": "系统提示词", "tokens": _est_tokens(SYSTEM_PROMPT)},
+        {"key": "system_tools", "label": "工具说明", "tokens": _est_tokens(sys_tools_text)},
+        {"key": "skills", "label": "SOP / 技能",
+         "tokens": _est_tokens((skill["sop"] + skill["output"]) if skill else "")},
+        {"key": "memory", "label": "会话记忆", "tokens": _est_tokens(memory)},
+    ]
+    used = sum(p["tokens"] for p in parts)
+    parts.append({"key": "free", "label": "剩余空间", "tokens": max(0, win - used)})
+    return {"window": win, "used": used,
+            "percent": round(used * 100.0 / win, 1) if win else 0,
+            "parts": parts, "source": "estimate",
+            "model": str(model or ""), "params": dict(params or {}),
+            "model_params": str(model_params or ""),
+            "window_source": window_source}
+
+
+_SIMPLE_GREET_RE = re.compile(
+    r"^(你好|您好|hi|hello|嗨|哈喽|在吗|在不在|早上好|上午好|下午好|晚上好|早安|晚安)"
+    r"[\s!！。.~～,，]*$", re.I)
+_SIMPLE_THANKS_RE = re.compile(
+    r"^(谢谢|多谢|感谢|thanks|thank you|thx)[\s!！。.~～,，]*$", re.I)
+_SIMPLE_BYE_RE = re.compile(
+    r"^(再见|拜拜|bye|goodbye|回头见)[\s!！。.~～,，]*$", re.I)
+_SIMPLE_ACK_RE = re.compile(
+    r"^(好|好的|好吧|行|可以|收到|明白|了解|嗯|哦|ok|okay)[\s!！。.~～,，]*$", re.I)
+
+
+def _simple_reply(message: str) -> str | None:
+    """问候/致谢/告别/乱码 → 固定短回复，不调模型。
+
+    目的不是"更聪明"，而是**别把一句"你好"也拖成 10 秒的模型思考**。
+    只匹配整句，不做子串匹配："你好，帮我看下岗位"仍走正常流程。
+    """
+    s = re.sub(r"\s+", "", str(message or ""))
+    if not s:
+        return "可以直接说：查谁、哪个岗位，或者要做什么。"
+    if _SIMPLE_GREET_RE.match(s):
+        return "你好，我是人才库智能助手。查人、看招聘进度、导出名单都可以直接说。"
+    if _SIMPLE_THANKS_RE.match(s):
+        return "不客气，还有需要直接说。"
+    if _SIMPLE_BYE_RE.match(s):
+        return "好的，随时再叫我。"
+    if _SIMPLE_ACK_RE.match(s):
+        return "好的。"
+    # 纯标点、单字符重复、纯数字、无中文的键盘乱码（短、单个长 Latin 词）
+    if len(s) <= 24 and re.fullmatch(r"[?？!！。.、，,~～]+", s):
+        return "没太看懂。可以直接说：查谁、哪个岗位、要做什么。"
+    if re.fullmatch(r"(.)\1{2,}", s):
+        return "没太看懂。可以直接说：查谁、哪个岗位、要做什么。"
+    if re.fullmatch(r"\d{1,6}", s):
+        return "没太看懂。可以直接说：查谁、哪个岗位、要做什么。"
+    if len(s) <= 24 and not re.search(r"[一-鿿0-9]", s):
+        words = re.findall(r"[a-z]+", s.lower())
+        _known = {"hi", "hello", "ok", "okay", "hr", "jd", "offer", "excel",
+                  "word", "pdf", "python", "java", "sql", "ppt", "cet", "cet4", "cet6"}
+        if words and len(words) == 1 and len(words[0]) >= 5 and words[0] not in _known:
+            return "没太看懂。可以直接说：查谁、哪个岗位、要做什么。"
+    return None
+
+
+def _tools_unsupported(exc: Exception) -> bool:
+    """端点是否明确表示"不支持 tools / function calling"。
+
+    只认 400/422 + tool/function 关键字，避免把网络错误、限流、鉴权失败
+    误判成"换文本协议就好了"——那会白白多发一次请求。
+    """
+    text = str(exc).lower()
+    code = ""
+    if isinstance(exc, urllib.error.HTTPError):
+        code = str(getattr(exc, "code", "") or "")
+        try:
+            text += " " + exc.read().decode("utf-8", "ignore").lower()
+        except Exception:                                    # noqa: BLE001
+            pass
+    if code and code not in ("400", "422"):
+        return False
+    return ("tool" in text or "function" in text) and any(
+        k in text for k in ("unsupport", "not support", "invalid", "unknown",
+                            "unrecognized", "does not support", "不支持"))
+
+
+def _tool_ok(result: str) -> bool:
+    try:
+        d = json.loads(result)
+    except (TypeError, ValueError):
+        return True
+    return not (isinstance(d, dict) and d.get("error"))
+
+
+def _result_brief(result: str) -> str:
+    """工具结果给前端的一行摘要（不泄露长 JSON）。"""
+    try:
+        d = json.loads(result)
+    except (TypeError, ValueError):
+        return str(result or "")[:160]
+    if isinstance(d, dict):
+        for k in ("summary", "note", "message", "error", "hint"):
+            if d.get(k):
+                return str(d[k])[:180]
+        if d.get("count") is not None:
+            return f"{d['count']} 条"
+        if isinstance(d.get("items"), list):
+            return f"{len(d['items'])} 条"
+    return str(result or "")[:160]
+
+
+def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None,
+              emit=None, should_stop=None) -> dict:
     started = time.time()
     ctx.session_id = ctx.session_id or uuid.uuid4().hex[:12]
+    # 问候/致谢/告别/乱码：固定短回复，绝不为了"你好"跑一轮模型和工具。
+    _simple = _simple_reply(user_message)
+    if _simple:
+        return _finalize(ctx, user_message, _simple, [], "simple", 0, {},
+                         started, thinking="")
     cfg = llm.load_cfg()
 
     if not cfg.get("enabled", True):
         trace: list[dict] = []
         answer = _rule_answer(user_message, ctx, trace=trace)
-        return _finalize(ctx, user_message, answer, trace, "offline", 0, {}, started)
+        _live_update(ctx, trace, status="done", mode="offline", rounds=0)
+        return _finalize(ctx, user_message, answer, trace, "offline", 0, {}, started,
+                         thinking="")
+
+    # 模型无关的工具路由：68 个工具按意图收成 10~22 个。
+    # 没有命中任何关键词时给一组覆盖面最广的读工具，避免"问什么都缺工具"。
+    _allowed_specs, _route_groups = route_tools(user_message, history)
+    # 业务 SOP：命中就注入固定步骤，并把该 SOP 需要的工具补进本轮可见集。
+    # 不额外调用模型，不增加一轮延迟；只是让模型少走弯路。
+    _skill = match_skill(user_message, history)
+    if _skill:
+        ctx.skill, ctx.skill_name = _skill["id"], _skill["name"]
+        _have = {s["function"]["name"] for s in _allowed_specs}
+        for _s in TOOL_SPECS:
+            _n = _s["function"]["name"]
+            if _n in _skill["tools"] and _n not in _have:
+                _allowed_specs.append(_s)
+                _have.add(_n)
+        _route_groups = list(_route_groups) + ["skill:" + _skill["id"]]
+    ctx.route = _route_groups
+    _tool_mode = str(cfg.get("tool_mode") or "auto").lower()
+    _text_tools = _tool_mode in ("text", "prompt", "xml")
+    _tools = [] if _text_tools else _allowed_specs
+
+    # 会话记忆：UI 只带最近 8 条消息，更早的要点从 `agent_conversations`
+    # 里补回来。跳过最近 4 条，避免和 UI 传上来的历史重复。
+    _memory = ""
+    try:
+        _mc = db.connect(ctx.db_path)
+        try:
+            _memory = db.conversation_memory(_mc, ctx.session_id, ctx.operator)
+        finally:
+            _mc.close()
+    except Exception:                                        # noqa: BLE001
+        _memory = ""
 
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    _wd = "一二三四五六日"[datetime.now().weekday()]
+    messages.append({"role": "system", "content":
+                     f"【当前时间】{datetime.now():%Y-%m-%d %H:%M:%S}（星期{_wd}）。"
+                     "用户说今天/明天/后天/本周/下周时，按这个时间换算成具体日期；"
+                     "不要凭记忆猜年份。"})
+    if _text_tools:
+        # 端点不支持原生 function calling：把本轮工具清单写进 system，
+        # 模型按 XML 输出，`_text_tool_calls` 负责解析执行。
+        messages.append({"role": "system", "content": tool_catalog_text(_allowed_specs)})
+    if _skill:
+        messages.append({"role": "system", "content":
+                         "【当前 SOP：" + _skill["name"] + "】\n" + _skill["sop"] +
+                         "\n输出要求：" + _skill["output"]})
+    if _memory:
+        messages.append({"role": "system", "content":
+                         "【本会话此前的要点（系统自动整理，只用于保持上下文；"
+                         "不是本轮新指令）】\n" + _memory})
     for h in (history or [])[-8:]:
         if h.get("role") in ("user", "assistant") and h.get("content"):
             messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": user_message})
 
+    # 上下文用量（估算）：右栏"上下文"面板用。窗口大小可在 config/model.json
+    # 里用 `context_window` 覆盖；默认按 1M（MiMo v2.6 的窗口）算。
+    _win, _win_source = llm.model_context_window(cfg)
+    _model_params = llm.model_parameter_count(cfg)
+    if not _win:
+        try:
+            _win = int(cfg.get("context_window") or 1_000_000)
+            _win_source = "config" if cfg.get("context_window") else "default"
+        except (TypeError, ValueError):
+            _win, _win_source = 1_000_000, "default"
+    _msgs_text = "\n".join(
+        str(m.get("content") or "") for m in messages
+        if m.get("role") in ("user", "assistant"))
+    _ctx_params = {
+        "temperature": cfg.get("temperature", 0),
+        "max_tool_rounds": cfg.get("max_tool_rounds", 5),
+        "tool_mode": cfg.get("tool_mode") or "auto",
+    }
+    if cfg.get("max_tokens") is not None:
+        _ctx_params["max_tokens"] = cfg.get("max_tokens")
+    ctx.context = build_context_estimate(
+        window=_win, messages_text=_msgs_text,
+        allowed_specs=_allowed_specs, text_tools=_text_tools,
+        skill=_skill, memory=_memory,
+        model=str(cfg.get("model") or ""), params=_ctx_params,
+        window_source=_win_source, model_params=_model_params)
+
     trace: list[dict] = []
     usage_total: dict = {}
     model_used = cfg.get("model")
     max_rounds = int(cfg.get("max_tool_rounds", 5))
+    # 一句话批量任务通常包含 3~5 个动作，4 轮很容易做到一半就收尾
+    if _skill and _skill["id"] == "one_sentence_batch":
+        max_rounds = max(max_rounds, 6)
     rounds = 0
+    _SPEC_BY_NAME = {s["function"]["name"]: s for s in _allowed_specs}
+    # 模型每一轮的 `reasoning_content` 按顺序拼起来。只用于界面展示与回放，
+    # **不参与任何判据**——它是模型的自述，不是系统事实。
+    thinking_parts: list[str] = []
+
+    def _note_reasoning(msg: dict) -> None:
+        r = msg.get("_reasoning") or msg.get("reasoning_content") or ""
+        if isinstance(r, str) and r.strip():
+            thinking_parts.append(r.strip())
+
+    def _thinking_text() -> str:
+        return "\n\n".join(thinking_parts)
+
+    def _activate_text_mode() -> None:
+        """端点拒绝原生 tools 时，切到 XML 文本协议（只切一次）。"""
+        nonlocal _text_tools, _tools
+        if _text_tools:
+            return
+        _text_tools = True
+        _tools = []
+        messages.append({"role": "system",
+                         "content": tool_catalog_text(_allowed_specs)})
+
+    _stream_answer = False
+
+    def _emit(ev: dict) -> None:
+        if emit:
+            try:
+                emit(ev)
+            except Exception:                                # noqa: BLE001
+                pass          # 前端断开不该拖垮后端
+
+    def _cancelled() -> bool:
+        try:
+            return bool(should_stop and should_stop())
+        except Exception:                                    # noqa: BLE001
+            return False
+
+    def _replace_answer(text: str) -> None:
+        """清掉前端已显示的流式答案，再推最终版（安全网改写时用）。"""
+        nonlocal _stream_answer
+        if not emit:
+            return
+        _emit({"type": "answer_reset"})
+        if text:
+            _emit({"type": "answer_delta", "text": text})
+        _stream_answer = bool(text)
+
+    def _turn(msgs: list[dict], tools: list[dict] | None):
+        """一次模型调用。有 emit 时走流式并逐块推送；失败自动退回非流式。"""
+        nonlocal _stream_answer, model_used
+        if not emit:
+            try:
+                return llm.chat(msgs, tools=tools, cfg=cfg)
+            except Exception as exc:                         # noqa: BLE001
+                if tools and _tools_unsupported(exc):
+                    _activate_text_mode()
+                    _m = (msgs if msgs is messages else
+                          msgs + [{"role": "system",
+                                   "content": tool_catalog_text(_allowed_specs)}])
+                    return llm.chat(_m, tools=None, cfg=cfg)
+                raise
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        calls_acc: dict = {}
+        try:
+            for ev in llm.chat_stream(msgs, tools=tools, cfg=cfg):
+                if ev.get("model"):
+                    model_used = ev["model"] or model_used
+                if ev.get("usage"):
+                    _accumulate(usage_total, ev["usage"])
+                delta = ev.get("delta") or {}
+                r = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                if isinstance(r, str) and r:
+                    reasoning_parts.append(r)
+                    _emit({"type": "thinking_delta", "text": r})
+                c = delta.get("content") or ""
+                if isinstance(c, str) and c:
+                    content_parts.append(c)
+                    _emit({"type": "answer_delta", "text": c})
+                    _stream_answer = True
+                for tc in (delta.get("tool_calls") or []):
+                    _merge_tool_delta(calls_acc, tc)
+        except Exception as exc:                            # noqa: BLE001
+            # 只要还没给用户看到任何文字，就退回非流式重来；
+            # 已经显示了一半再换协议会造成重复/截断，宁可把错误抛给上层。
+            if reasoning_parts or content_parts:
+                raise
+            if tools and _tools_unsupported(exc):
+                _activate_text_mode()
+                _m = (msgs if msgs is messages else
+                      msgs + [{"role": "system",
+                               "content": tool_catalog_text(_allowed_specs)}])
+                return llm.chat(_m, tools=None, cfg=cfg)
+            # 端点不支持流式（或直接报错）→ 用同一条消息退回非流式，
+            # 保证换任何通用 LLM 都不会因为 stream 参数把对话打断。
+            return llm.chat(msgs, tools=tools, cfg=cfg)
+        msg = {"content": "".join(content_parts),
+               "tool_calls": _finalize_tool_calls(calls_acc),
+               "_reasoning": "".join(reasoning_parts)}
+        # 什么都没收到（有的端点返回 200 但空流）→ 退回非流式
+        if not msg["content"] and not msg["tool_calls"] and not msg["_reasoning"]:
+            msg = llm.chat(msgs, tools=tools, cfg=cfg)
+        elif msg["content"] and not msg["tool_calls"]:
+            # 正文已经出完，后面只剩服务端的收尾（安全网/落库）。
+            # 前端据此把状态改成"正在收尾"，不再显示成"还在生成"。
+            _emit({"type": "answer_complete"})
+        return msg
 
     def _run_calls(calls: list[dict]) -> int:
         """执行一批 tool_calls，写进 trace 与 messages。返回执行了几个。
@@ -478,135 +1025,172 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         抽成函数是为了让"正常路径"和下面的"强制补调路径"走**完全相同**的执行逻辑
         —— 否则两条路容易长歪（一条改了权限校验、另一条没改）。
         """
-        n = 0
+        prepared = []
         for tc in calls:
             fn = (tc.get("function") or {}).get("name", "")
             try:
                 args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
             except ValueError:
                 args = {}
-            result = execute(fn, args, ctx)
+            if not isinstance(args, dict):
+                args = {}
+            spec = _SPEC_BY_NAME.get(fn)
+            result = None
+            if not spec:
+                result = json.dumps({
+                    "error": f"未知工具「{fn}」",
+                    "hint": "只能用本轮提供的工具；需要别的能力时先向用户说明。",
+                    "available": sorted(_SPEC_BY_NAME)[:30],
+                }, ensure_ascii=False)
+            else:
+                required = ((spec.get("function") or {}).get("parameters") or {}) \
+                    .get("required") or []
+                missing = [k for k in required
+                           if k not in args or args[k] is None
+                           or args[k] == "" or args[k] == []]
+                if missing:
+                    result = json.dumps({
+                        "error": "缺少必填参数：" + "、".join(missing),
+                        "tool": fn, "missing": missing,
+                        "hint": "补齐参数后重新调用这个工具，不要改用其它工具。",
+                    }, ensure_ascii=False)
+            prepared.append({"tc": tc, "fn": fn, "args": args, "result": result})
+
+        def _start(p: dict) -> None:
+            _emit({"type": "tool_start", "id": p["tc"].get("id", ""),
+                   "tool": p["fn"], "tool_label": _TOOL_LABEL.get(p["fn"], p["fn"]),
+                   "args": p["args"]})
+
+        def _record(p: dict) -> None:
+            fn, result = p["fn"], p["result"]
             # v1.13.9：邮件草稿要**完整**带回（正文会被 900 字截断，
             # 截断了前端就渲染不出卡片）；其余工具仍然只留摘要。
-            trace.append({"tool": fn, "args": args,
+            trace.append({"tool": fn, "args": p["args"],
                           "result": (result if fn in _FULL_RESULT_TOOLS else result[:900]),
-                          # v1.25：中文名给前端，HR 不需要看函数标识符
                           "tool_label": _TOOL_LABEL.get(fn, fn),
                           "write": fn in WRITE_TOOLS,
+                          # 结果可能被截到 900 字，不能再靠 json.loads 判断成败；
+                          # 在截断前把 ok / download 记下来。
+                          "ok": _tool_ok(result),
+                          "download": _download_of({"result": result}),
                           "disabled": fn in DISABLED_TOOLS})
-            # 结果必须回灌给模型，否则它下一轮看不见工具返回、只能继续编
-            messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+            _emit({"type": "tool_result", "id": p["tc"].get("id", ""),
+                   "tool": fn, "tool_label": _TOOL_LABEL.get(fn, fn),
+                   "ok": _tool_ok(result), "summary": _result_brief(result)})
+            _live_update(ctx, trace, thinking=_thinking_text())
+            messages.append({"role": "tool", "tool_call_id": p["tc"].get("id", ""),
                              "name": fn, "content": result})
-            n += 1
-        return n
+
+        runnable = [p for p in prepared if p["result"] is None]
+        # 同一批里全是只读工具 → 并行执行。5 次读取档案串行虽然每次不慢，
+        # 但叠起来 + 模型每轮思考会让用户觉得"卡死"；并行是纯收益。
+        parallel = (len(runnable) > 1 and all(
+            p["fn"] not in WRITE_TOOLS and p["fn"] not in DISABLED_TOOLS
+            for p in runnable))
+        if parallel:
+            for p in prepared:
+                _start(p)
+            with ThreadPoolExecutor(max_workers=min(6, len(runnable))) as ex:
+                futs = {ex.submit(execute, p["fn"], p["args"], ctx): p for p in runnable}
+                for f in as_completed(futs):
+                    p = futs[f]
+                    try:
+                        p["result"] = f.result()
+                    except Exception as exc:                 # noqa: BLE001
+                        p["result"] = json.dumps(
+                            {"error": f"{type(exc).__name__}: {exc}"},
+                            ensure_ascii=False)
+            for p in prepared:
+                _record(p)
+        else:
+            for p in prepared:
+                _start(p)
+                if p["result"] is None:
+                    try:
+                        p["result"] = execute(p["fn"], p["args"], ctx)
+                    except Exception as exc:                 # noqa: BLE001
+                        p["result"] = json.dumps(
+                            {"error": f"{type(exc).__name__}: {exc}"},
+                            ensure_ascii=False)
+                _record(p)
+        return len(prepared)
 
     try:
         for _ in range(max_rounds):
+            if _cancelled():
+                return _finalize(ctx, user_message, "已停止。", trace, "stopped",
+                                 rounds, usage_total, started, model_used,
+                                 thinking=_thinking_text())
             rounds += 1
-            msg = llm.chat(messages, tools=TOOL_SPECS, cfg=cfg)
+            msg = _turn(messages, _tools)
             model_used = msg.get("_model") or model_used
             _accumulate(usage_total, msg.get("_usage"))
-            calls = msg.get("tool_calls")
+            _note_reasoning(msg)
+            calls = msg.get("tool_calls") or []
             if not calls:
-                answer = (msg.get("content") or "").strip()
+                # 端点把工具调用写进正文时，**先拆出来真的执行**，
+                # 而不是把这段 XML 当成答复显示给 HR。
+                calls, _clean = _text_tool_calls(msg.get("content") or "")
+                if calls:
+                    msg["content"] = _clean
+            elif msg.get("content"):
+                # 原生 tool_calls 与正文里的 XML 同时出现时，正文也要清掉，
+                # 否则下一轮回灌给模型的上下文里还带着一段伪工具调用。
+                msg["content"] = _strip_tool_call_text(msg.get("content") or "")
+            if not calls:
+                answer = _strip_tool_call_text(msg.get("content") or "").strip()
                 if not answer:
                     raise ValueError("模型返回了空答复")
+                _streamed_answer = answer      # 前端已经流式看到的版本
 
-                # ===== v1.25.x：邮件意图但没调邮件工具 → 兜底补调 =====
-                # 弱模型常把"用模板给X发面试邀请"当普通问答，直接吐 raw HTML。
-                # 这里在出口用事实兜住：认得出候选人 + 命中邮件意图，
-                # 系统自己调一次 draft_email，渲染出带按钮的草稿卡。
-                _ea, _fired = _email_safety_net(user_message, ctx, trace)
-                if _fired:
-                    return _finalize(ctx, user_message, _ea, trace, "llm", rounds,
-                                     usage_total, started, model_used)
-
-                # ---- v1.25：口头提案 → **强制它真调一次工具** ----
-                #
-                # 历史（两版，都留着记录为的是不再走回去）：
-                #   v1.24.18 —— 只在出口加一句"上面这段描述不算数"。结果 HR 看到的是
-                #               "系统说要改却没改"，比明说"做不了"更糟。
-                #   v1.24.19 —— 改用 `_recover_missed_action()` 按答案**猜**意图补跑。
-                #               但它是枚举中文动词的，实测「推进**至**」就抽不出来
-                #              （正则先吃掉`推进`，尾巴剩 `至「初面」` 匹配不上阶段名），
-                #               于是警告加了、补救没做——最坏的组合。
-                #               **枚举中文动词必然不全**，这是 MEMORY.md 3.7 第 7 条
-                #               已经用八版教训换来的结论，不该在补救里重犯。
-                #
-                # v1.25 的做法：**不猜词，让模型自己重发一次工具调用。**
-                # 它刚说完"已推进到初面"，就不可能不知道要调哪个工具。
-                # 用 tool_choice="required" 强制本轮必须出 tool_calls，
-                # 于是提案真的落库、确认按钮真的出现——
-                # 「真正实现了才是最重要的」，而不是加一句免责声明。
-                if not any(t.get("write") for t in trace) \
-                        and _looks_like_fake_proposal(answer, trace):
-                    forced = _force_tool_call(messages, answer, cfg, usage_total)
-                    if forced:
-                        n_ran = _run_calls(forced)
-                        rounds += 1
-                        if n_ran and any(t.get("write") for t in trace):
-                            # 补调成功：让模型基于**真实工具结果**重说一遍，
-                            # 而不是把那段"我已做完"的幻觉话术留给 HR。
-                            follow = llm.chat(
-                                messages + [{"role": "user", "content":
-                                             "工具已按你的意图执行完毕。请基于上面的工具返回，"
-                                             "用简体中文向 HR 说明**实际发生了什么**"
-                                             "（如已生成待确认提案，就说『已提交待确认』），"
-                                             "不要重复你上一条里未经执行的说法。"}],
-                                tools=TOOL_SPECS, cfg=cfg)
-                            _accumulate(usage_total, follow.get("_usage"))
-                            model_used = follow.get("_model") or model_used
-                            rounds += 1
-                            txt = (follow.get("content") or "").strip()
-                            # 模型可能又调工具（如再查一次）；一并执行掉，保证一致性
-                            if follow.get("tool_calls"):
-                                _run_calls(follow["tool_calls"])
-                            if txt:
-                                answer = txt
-                            else:
-                                answer = _summarize_actions(trace)
-                        else:
-                            # 强制了还没调出写类工具 → 退到确定性文案
-                            answer = _summarize_actions(trace)
-
-                # v1.25.5：最后一道闸——数据来源校验（读类的编造）。
-                # 用户原话：「出现了编造的数据，这是不可容忍的，智能助手的回答
-                # 必须有真实数据来源」。上面拦"虚假完成态"（写），这里拦
-                # "编造姓名 / 零工具却出对比表"（读）。
-                _da, _d_fired = _data_claim_safety_net(
-                    user_message, answer, ctx, trace, messages, cfg, usage_total)
-                if _d_fired:
-                    answer = _da
+                # 所有“出口检测/补做”兜底已停用（业务方 2026-11-05）：
+                # 它们会在正常导出、进度、名单回答上误判，并把 LLM 原文替换成
+                # 系统拼接的文案（例如“这一轮没有产生任何需要确认的操作”）。
+                # 现在回答完全以模型本轮输出为准；写操作仍由模型显式调工具生成提案。
+                if emit and answer != _streamed_answer:
+                    _replace_answer(answer)
                 return _finalize(ctx, user_message, answer, trace, "llm", rounds,
-                                 usage_total, started, model_used)
-            messages.append({"role": "assistant", "content": msg.get("content") or "",
-                             "tool_calls": calls})
+                                 usage_total, started, model_used,
+                                 thinking=_thinking_text())
+            if emit and _stream_answer:
+                _replace_answer("")     # 这一轮只是"先说一句再调工具"，清掉再执行
+            _asst = {"role": "assistant", "content": msg.get("content") or "",
+                     "tool_calls": calls}
+            # MiMo 等推理模型：带 tool_calls 的 assistant 轮必须把
+            # reasoning_content 原样回传，否则下一轮直接 400。
+            if msg.get("_reasoning"):
+                _asst["reasoning_content"] = msg["_reasoning"]
+            messages.append(_asst)
+            if _cancelled():
+                return _finalize(ctx, user_message, "已停止。", trace, "stopped",
+                                 rounds, usage_total, started, model_used,
+                                 thinking=_thinking_text())
             _run_calls(calls)
-        # 轮次用尽，强制收敛
-        # 出口前再给一次邮件兜底机会：弱模型可能调了别的工具却始终没起草邮件。
-        _ea, _fired = _email_safety_net(user_message, ctx, trace)
-        if _fired:
-            return _finalize(ctx, user_message, _ea, trace, "llm", rounds,
-                             usage_total, started, model_used)
+        # 轮次用尽，强制收敛；不再做邮件/口头提案等出口兜底，
+        # 最终答复以模型输出为准。
         messages.append({"role": "user", "content": "请基于已获取的信息直接给出最终答复。"})
-        final = llm.chat(messages, cfg=cfg)
+        final = _turn(messages, None)
         _accumulate(usage_total, final.get("_usage"))
+        _note_reasoning(final)
         rounds += 1
-        _fa = (final.get("content") or "").strip()
-        # v1.25.5：数据来源校验（与上一个出口同一道闸）
-        _da, _d_fired = _data_claim_safety_net(
-            user_message, _fa, ctx, trace, messages, cfg, usage_total)
-        if _d_fired:
-            _fa = _da
+        _fa = _strip_tool_call_text(final.get("content") or "").strip()
+        _streamed_answer = _fa
+        # 数据来源兜底已停用，见上方说明；不再替换最终答复。
+        if emit and _fa != _streamed_answer:
+            _replace_answer(_fa)
         return _finalize(ctx, user_message, _fa,
-                         trace, "llm", rounds, usage_total, started, model_used)
+                         trace, "llm", rounds, usage_total, started, model_used,
+                         thinking=_thinking_text())
     except Exception as exc:
         # 模型不可用 → 规则路由兜底（不是罢工）
         st = llm.status()
         reason = st.get("error") or f"{type(exc).__name__}: {exc}"
         answer = _rule_answer(user_message, ctx, reason=reason, trace=trace)
+        if emit and _stream_answer:
+            _replace_answer(answer)
         return _finalize(ctx, user_message, answer, trace, "rule", rounds,
-                         usage_total, started, model_used)
+                         usage_total, started, model_used,
+                         thinking=_thinking_text())
 
 
 def _proposal_id_of(t: dict) -> int | None:
@@ -622,6 +1206,22 @@ def _proposal_id_of(t: dict) -> int | None:
             return int(r["proposal_id"])
         except (TypeError, ValueError):
             return None
+    return None
+
+
+def _download_of(t: dict) -> dict | None:
+    """从工具返回里提取可下载产物，供历史回放/右栏「本次产出」使用。"""
+    if isinstance(t.get("download"), dict):
+        return t["download"]
+    r = t.get("result")
+    if isinstance(r, str):
+        try:
+            r = json.loads(r)
+        except Exception:                                    # noqa: BLE001
+            return None
+    if isinstance(r, dict) and r.get("download_url"):
+        return {"download_url": r["download_url"],
+                "scope": r.get("scope") or r.get("label") or ""}
     return None
 
 
@@ -841,6 +1441,8 @@ _NAME_STOPWORDS = frozenset({
     "配置", "设置", "入口", "按钮", "页面", "功能", "权限", "表格", "列表", "清单",
     "分类", "分组", "对比", "差异", "变化", "趋势", "分布", "结构", "构成", "比例",
     "占比", "总数", "总人数", "数量", "人数", "投递", "阶段", "学历结构", "院校层次",
+    "结论", "核心结论", "总览", "整体情况", "详细", "缺口", "完成率", "已签", "待签",
+    "应招", "应签", "签约", "录用", "入职", "单位", "下一步", "数据来源",
     "材料研发", "数字化", "应届生", "应届", "在职", "离职", "实习", "正式", "试用",
 })
 
@@ -854,8 +1456,11 @@ _TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:]*-{3,}[\s:\-|]*\|?\s*$", re.M)
 #: "数据类"读工具——只有这些成功执行过，答复里的候选人数据才算"有来源"。
 #: 故意收窄：读了模板/审计/岗位等不算（它们不是候选人数据）。
 _READ_DATA_TOOLS = frozenset({
-    "search_candidates", "get_candidate", "pool_stats", "search_by_skills",
-    "semantic_search", "similar_candidates", "pipeline_overview",
+    "search_candidates", "get_candidate", "get_candidates", "pool_stats",
+    "search_by_skills", "semantic_search", "similar_candidates",
+    "pipeline_overview", "list_jobs", "recruit_overview",
+    "recruit_progress", "recruit_gaps", "recruit_roster",
+    "recruit_signed_list", "recruit_health", "recruit_years",
 })
 
 
@@ -899,6 +1504,11 @@ def _has_ok_read(trace: list[dict]) -> bool:
     """本轮是否有**成功的**数据类读工具（返回里没有 error 才算）。"""
     for t in trace:
         if t.get("tool") not in _READ_DATA_TOOLS:
+            continue
+        # 新 trace 直接带 ok（结果可能已截断，不能靠解析判断）
+        if "ok" in t:
+            if t.get("ok"):
+                return True
             continue
         r = t.get("result")
         if isinstance(r, str):
@@ -969,7 +1579,8 @@ def _truth_fallback_answer(ctx: ToolCtx, bad_names: list[str]) -> str:
 
 def _data_claim_safety_net(user_message: str, answer: str, ctx: ToolCtx,
                            trace: list[dict], messages: list[dict],
-                           cfg: dict, usage_total: dict) -> tuple[str | None, bool]:
+                           cfg: dict, usage_total: dict,
+                           thinking: list[str] | None = None) -> tuple[str | None, bool]:
     """出口数据来源校验。命中疑似编造 → 补真实数据 → 重写 → 复检 → 兜底。
 
     返回 (new_answer, fired)。fired=False 时调用方保持原答复不动。
@@ -1013,16 +1624,22 @@ def _data_claim_safety_net(user_message: str, answer: str, ctx: ToolCtx,
         try:
             rw = llm.chat(rewrite_messages, cfg=cfg)
             _accumulate(usage_total, rw.get("_usage"))
-            new_a = (rw.get("content") or "").strip()
+            _rw_reason = rw.get("_reasoning") or ""
+            if thinking is not None and _rw_reason:
+                thinking.append(_rw_reason.strip())
+            _rw_txt = rw.get("content") or ""
+            _rw_calls = rw.get("tool_calls") or []
+            if not _rw_calls:
+                _rw_calls, _rw_txt = _text_tool_calls(_rw_txt)
+            new_a = _strip_tool_call_text(_rw_txt).strip()
             # 模型可能顺手又调工具：执行掉保持一致（正常不应发生）
-            if rw.get("tool_calls"):
-                for tc in rw["tool_calls"]:
-                    fn = (tc.get("function") or {}).get("name", "")
-                    try:
-                        _args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
-                    except ValueError:
-                        _args = {}
-                    execute(fn, _args, ctx)
+            for tc in _rw_calls:
+                fn = (tc.get("function") or {}).get("name", "")
+                try:
+                    _args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
+                except ValueError:
+                    _args = {}
+                execute(fn, _args, ctx)
         except Exception:
             new_a = ""
 
@@ -1041,9 +1658,29 @@ def _data_claim_safety_net(user_message: str, answer: str, ctx: ToolCtx,
 
 
 def _accumulate(total: dict, usage: dict | None) -> None:
+    if not usage:
+        return
     for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        if usage and usage.get(k):
+        if usage.get(k):
             total[k] = total.get(k, 0) + int(usage[k])
+    # 各家缓存命中的字段名不同：OpenAI 在 prompt_tokens_details.cached_tokens，
+    # DeepSeek 用 prompt_cache_hit_tokens，Anthropic 兼容层用 cache_read_input_tokens。
+    hit = usage.get("cache_hit_tokens")
+    reported = hit is not None
+    if hit is None:
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict) and "cached_tokens" in details:
+            hit = details.get("cached_tokens")
+            reported = True
+    if hit is None:
+        hit = usage.get("prompt_cache_hit_tokens")
+        reported = hit is not None
+    if hit is None:
+        hit = usage.get("cache_read_input_tokens")
+        reported = hit is not None
+    if reported:
+        total["cache_reported"] = 1
+        total["cache_hit_tokens"] = total.get("cache_hit_tokens", 0) + int(hit or 0)
 
 
 def _proposal_brief(p: dict, conn=None) -> dict:
@@ -1088,7 +1725,10 @@ def _proposal_brief(p: dict, conn=None) -> dict:
             # HR 不需要看懂代码标识符。取不到就回落到原名，不至于空白。
             "tool_label": _TOOL_LABEL.get(p["tool"], p["tool"]),
             "summary": p["summary"],
-            "risk": p["risk"], "candidate_id": cid,
+            "risk": p["risk"],
+            # 状态必须带出来：历史回放里已执行/已拒绝的提案不能还显示可点的按钮。
+            "status": p.get("status") or "待确认",
+            "candidate_id": cid,
             # v1.25：结构化前后值，让 HR 在卡片上就能核对完，不必跳去档案页盲签。
             "changes": _proposal_changes(p, a if isinstance(a, dict) else {}, conn)}
 
@@ -1104,8 +1744,35 @@ def _proposal_changes(p: dict, a: dict, conn) -> list[dict]:
 
 def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode: str,
               rounds: int, usage: dict, started: float,
-              model: str | None = None) -> dict:
+              model: str | None = None, thinking: str = "") -> dict:
     latency = int((time.time() - started) * 1000)
+    # 文本形式的工具调用绝不能出现在答复里（模型偶尔会漏成裸标签）
+    answer = _strip_tool_call_text(answer)
+    if not answer:
+        answer = "模型这一轮没有返回可显示的内容。请换一种说法再试一次。"
+    thinking = (thinking or "").strip()
+    if len(thinking) > 20000:
+        thinking = thinking[:20000] + "\n\n…（思考过程过长，已截断）"
+    # 有真实 usage 时，用 prompt_tokens 校准上下文总量；分项按比例缩放。
+    # 流式端点没返回 usage 时保留估算值，不强行编一个数。
+    _actual_prompt = int(usage.get("prompt_tokens") or 0) if usage else 0
+    if _actual_prompt and ctx.context and ctx.context.get("window"):
+        _parts = ctx.context.get("parts") or []
+        _nonfree = [p for p in _parts if p.get("key") != "free"]
+        _old = sum(int(p.get("tokens") or 0) for p in _nonfree)
+        if _old > 0:
+            _scale = _actual_prompt / _old
+            for p in _nonfree:
+                p["tokens"] = int(round(int(p.get("tokens") or 0) * _scale))
+        _win = int(ctx.context.get("window") or 0)
+        for p in _parts:
+            if p.get("key") == "free":
+                p["tokens"] = max(0, _win - _actual_prompt)
+        ctx.context["used"] = _actual_prompt
+        ctx.context["percent"] = round(_actual_prompt * 100.0 / _win, 1) if _win else 0
+        ctx.context["source"] = "actual"
+    _live_update(ctx, trace, status="done", mode=mode, rounds=rounds,
+                 thinking=thinking)
     # v1.14：**只回传本轮产生的提案**。
     # 原来取的是全库「待确认」，于是每轮对话下面都挂着一堆不相干的历史提案——
     # HR 点进去发现是上周的事。要按"本轮工具调用创建了哪些 proposal_id"来过滤。
@@ -1126,30 +1793,46 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
     briefs: list[dict] = []
     conn = db.connect(ctx.db_path)
     try:
-        _all = db.list_proposals(conn, status="待确认", limit=20)
-        proposals = [p for p in _all if int(p["id"]) in _mine] if _mine else []
+        _all = db.list_proposals(conn, status="待确认", limit=100)
+        # ① 本轮工具真正创建/引用过的提案
+        # ② 答复正文里用 `#55` 点名的提案
+        # ③ 本会话最近仍待确认的提案（兜底：模型在上一轮建了提案，这一轮只做汇总）
+        # 三种来源取并集，保证"当前这条回答下面"就能点确认，而不是逼 HR 去提案页翻。
+        _mentioned = {int(m.group(1)) for m in re.finditer(r"#(\d{1,9})", answer or "")}
+        _picked = set(_mine) | _mentioned
+        proposals = [p for p in _all if int(p["id"]) in _picked] if _picked else []
+        if not proposals:
+            _session_pending = [
+                p for p in _all
+                if str(p.get("session_id") or "") == str(ctx.session_id or "")
+            ]
+            if mode != "simple" and _session_pending:
+                proposals = _session_pending[:6]
         # v1.24.18：拦截「口头提案」。模型 sometimes 不调工具，直接用文字描述一个
         # 待确认提案（截图实测：rounds=1、proposals 为空、文案却说"已为您生成待确认提案"）。
         # HR 看到的是一段承诺，底下**没有任何确认按钮**——比明说"做不了"更糟：
         # 它让人以为只要去系统里找一找就能点。
         # 这里不指望提示词（那是劝说，小模型会不听），而是在出口**核对事实**：
         # 声称做了写操作却一个写类工具都没调 → 明确告诉 HR 提案不存在。
-        _wrote = any(_t.get("write") for t in trace)
-        if not _wrote and _looks_like_fake_proposal(answer, trace):
-            # v1.25：**不再加"上面这段描述不算数"那种警告。**
-            # 用户原话：「不要加那句什么没有实现警告，真正实现了才是最重要的」。
-            # 警告是补救，而且是最差的一种补救——HR 既没办成事，
-            # 又看了一句自我否定。真做不成的极端情况（比如模型两轮都不肯调工具、
-            # 或参数缺得没法执行），就**把话说清楚并给出下一步**，
-            # 由 `_summarize_actions` 用事实拼出确定性文案。
-            # 走到这里说明强制补调也没成功，属于罕见路径。
-            answer = _summarize_actions(trace)
+        # 出口不再改写答案：所有回复以模型本轮输出为准。
+        # 之前的“口头提案”检测会在正常导出/名单回答上误判，
+        # 把 LLM 原文替换成“这一轮没有产生任何需要确认的操作”。
         # 必须在 conn.close() 之前构造：_proposal_brief 里的
         # application_id → candidate_id 要查 applications 表，
         # 放到 return 里用已关闭的连接会抛 "Cannot operate on a closed database"。
         briefs = [_proposal_brief(p, conn) for p in proposals]
+        # 只有“本轮创建/正文点名”的提案参与「全部同意」；本会话旧提案
+        # 仍可以单独处理，但不能被一次批量误点执行。
+        for _b in briefs:
+            try:
+                _b["current_turn"] = int(_b.get("proposal_id")) in _mine \
+                    or int(_b.get("proposal_id")) in _mentioned
+            except (TypeError, ValueError):
+                _b["current_turn"] = False
         db.log_agent_run(conn, {
             "session_id": ctx.session_id, "question": question, "answer": answer[:4000],
+            "thinking": thinking,
+            "context": getattr(ctx, "context", {}) or {},
             "model": model,
             # v1.25：除了工具名与参数，还要存下**卡片所需的信息**——
             # 提案 id（供历史回放重建提案卡）与邮件草稿全文（重建草稿卡）。
@@ -1159,10 +1842,13 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
                             "tool_label": t.get("tool_label"),
                             "recovered": bool(t.get("recovered")),
                             **({"proposal_id": _pid} if (_pid := _proposal_id_of(t)) else {}),
-                            **({"draft": _draft_of(t)} if _draft_of(t) else {})}
+                            **({"draft": _draft_of(t)} if _draft_of(t) else {}),
+                            **({"download": _dl} if (_dl := _download_of(t)) else {})}
                            for t in trace],
             "rounds": rounds, "tokens_in": usage.get("prompt_tokens", 0),
             "tokens_out": usage.get("completion_tokens", 0),
+            "cache_hit_tokens": usage.get("cache_hit_tokens", 0),
+            "cache_reported": usage.get("cache_reported", 0),
             "latency_ms": latency, "status": "ok", "mode": mode, "operator": ctx.operator,
         })
     finally:
@@ -1176,8 +1862,37 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
     # （实测：模型明明用模板渲染了，卡片却不显示来源模板）。
     # 又是"两处定义必须同源"，一份就够。
     drafts = [d for d in (_draft_of(_t) for _t in trace) if d]
+    # 数据来源摘要：按工具聚合（不逐条刷屏），给前端一行“数据来源：…”。
+    # 这不是装饰——HR 需要知道这句话是查出来的还是模型自己说的。
+    citations: list[dict] = []
+    _cite_by_tool: dict[str, dict] = {}
+    for _t in trace:
+        _tool = str(_t.get("tool") or "")
+        if not _tool:
+            continue
+        _brief = _result_brief(_t.get("result") or "")
+        if _tool in _cite_by_tool:
+            _c = _cite_by_tool[_tool]
+            _c["count"] += 1
+            if _brief and len(_c["summaries"]) < 3:
+                _c["summaries"].append(_brief)
+        else:
+            _c = {"tool": _tool,
+                  "label": _t.get("tool_label") or _tool,
+                  "count": 1,
+                  "summaries": [_brief] if _brief else [],
+                  "write": bool(_t.get("write")),
+                  "disabled": bool(_t.get("disabled"))}
+            _cite_by_tool[_tool] = _c
+            citations.append(_c)
     return {
         "answer": answer,
+        "thinking": thinking,
+        "route": list(getattr(ctx, "route", []) or []),
+        "skill": getattr(ctx, "skill", "") or "",
+        "skill_name": getattr(ctx, "skill_name", "") or "",
+        "context": getattr(ctx, "context", {}) or {},
+        "citations": citations[:10],
         "drafts": drafts,
         "trace": trace,
         "mode": mode,
@@ -1270,10 +1985,42 @@ def _rule_answer(question: str, ctx: ToolCtx, reason: str = "",
 
     handled = False
 
-    # 0) 岗位（v1.6）
+    # 0) 招聘进度（v4.0.16）
+    # 必须排在「管道/统计」之前：两者都认「进度 / 多少」，不先拦住就会答成
+    # 候选人阶段分布，而不是“本届应招多少、还差多少”。
+    recruit_q = any(k in q for k in
+                    ("招聘进度", "签约", "签约缺口", "完成率", "还差多少", "缺口"))
+    if recruit_q:
+        r = call("recruit_progress", {})
+        handled = True
+        lines.append("\n招聘进度：")
+        if r.get("error"):
+            lines.append(f"- 查询失败：{r['error']}"
+                         + (f"（{r.get('hint')}）" if r.get("hint") else ""))
+        else:
+            y = r.get("year") or {}
+            t = r.get("totals") or {}
+            rate = t.get("rate")
+            rate_s = f"{rate * 100:.1f}%" if rate is not None else "—"
+            lines.append(f"- {y.get('label') or '本届'}（{y.get('period_start')} 至 "
+                         f"{y.get('period_end')}）：应招 {t.get('should_hire')} 人，"
+                         f"已签 {t.get('signed_count')} 人，缺口 {t.get('gap')} 人，"
+                         f"完成率 {rate_s}")
+            for e in r.get("by_education") or []:
+                lines.append(f"  · {e.get('edu_level')}：应招 {e.get('should_hire')} / "
+                             f"已签 {e.get('signed_count')} / 缺口 {e.get('gap')}")
+            gaps = r.get("top_gaps") or []
+            if gaps:
+                lines.append("- 缺口最大：")
+                for g in gaps[:5]:
+                    lines.append(f"  · {g.get('unit')} / {g.get('education')}："
+                                 f"缺 {g.get('gap')} 人")
+
+    # 0b) 岗位（v1.6）
     # 必须有这一条、且必须排在"统计"之前：过去没有岗位分支，"发布了几个岗位"
     # 会被下面的"几个/多少"命中而返回人才库人数总览——**答非所问**。
-    job_q = any(k in q for k in ("岗位", "职位", "在招", "招什么", "招哪些", "招聘计划"))
+    job_q = any(k in q for k in ("岗位", "职位", "在招", "招什么", "招哪些", "招聘计划")) \
+        and not recruit_q
     if job_q:
         r = call("list_jobs", {})
         handled = True
@@ -1314,7 +2061,8 @@ def _rule_answer(question: str, ctx: ToolCtx, reason: str = "",
         lines.append("- 改邮箱账号/文件夹路径也请在「邮箱配置」页改（涉及密码，不进对话留痕）。")
 
     # 1) 统计 / 概览（问的是岗位时跳过，避免和岗位分支各答一半）
-    if not job_q and any(k in q for k in ("统计", "多少", "几个", "几人", "总览", "概览", "情况", "数量")):
+    if not job_q and not recruit_q and any(
+            k in q for k in ("统计", "多少", "几个", "几人", "总览", "概览", "情况", "数量")):
         s = call("pool_stats", {})
         handled = True
         lines.append("\n人才库总览：")
@@ -1329,7 +2077,7 @@ def _rule_answer(question: str, ctx: ToolCtx, reason: str = "",
                      f"（技能本体共 {nz.describe().get('canonical_count')} 条）")
 
     # 2) 管道
-    if any(k in q for k in ("管道", "进度", "流程", "积压", "阶段")):
+    if not recruit_q and any(k in q for k in ("管道", "进度", "流程", "积压", "阶段")):
         p = call("pipeline_overview", {})
         handled = True
         lines.append("\n招聘管道：")

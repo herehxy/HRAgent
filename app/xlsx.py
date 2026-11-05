@@ -119,4 +119,4 @@ def csv_bytes(rows: list[list], headers: list[str]) -> bytes:
 
 def meta_line(scope: str, filters: str, n: int) -> str:
     """表尾那一行（导出时间 / 范围 / 条数）。"""
-    return f"导出时间 {datetime.now():%Y-%m-%d %H:%M}｜范围 {scope}｜共 {n} 条｜由企业人才库工作台导出"
+    return f"导出时间 {datetime.now():%Y-%m-%d %H:%M}｜范围 {scope}｜共 {n} 条｜由人才库智能体导出"

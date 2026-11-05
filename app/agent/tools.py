@@ -20,9 +20,13 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 from .. import db, stages as stages_mod, tiers as tiers_mod
+from .. import export as export_mod
+from .. import recruit as recruit_mod
 from .. import search as search_mod
 from ..pipeline import normalize as nz
 from ..pipeline.analyze import analyze_fit, draft_interview
@@ -37,6 +41,7 @@ WRITE_TOOLS = {"set_stage", "set_tier", "add_tag", "merge_candidates", "add_note
                "save_mail_config", "update_interview_dict", "save_settings",
                "save_model_config", "update_candidate_fields", "reanalyze_candidate",
                "reanalyze_batch", "route_pending", "archive_by_year",
+               "bulk_initial_pass", "bulk_assign_job", "set_sign_status",
                "restore_source_files", "remove_source_files", "rebuild_brief",
                "clear_chat_history"}
 # ingest_resumes / export_resumes **不在** WRITE_TOOLS：它们是直接执行的
@@ -48,7 +53,7 @@ WRITE_TOOLS = {"set_stage", "set_tier", "add_tag", "merge_candidates", "add_note
 DISABLED_TOOLS = {"send_email", "send_message", "export_external", "delete_candidate",
                   "delete_resume", "reject_candidate", "notify_candidate"}
 
-READ_TOOLS = {"search_candidates", "get_candidate", "pool_stats", "search_by_skills",
+READ_TOOLS = {"search_candidates", "get_candidate", "get_candidates", "pool_stats", "search_by_skills",
               "semantic_search", "similar_candidates", "pipeline_overview",
               "mailbox_status", "list_audit", "list_proposals", "explain_grade",
               "list_jobs",
@@ -58,7 +63,16 @@ READ_TOOLS = {"search_candidates", "get_candidate", "pool_stats", "search_by_ski
               "get_interview_dict", "list_source_files", "list_removed_files",
               "list_agent_runs",
               # v2.0.7：学校查询（本地）与对外搜索（护栏 + 需配置）
-              "school_info", "web_search"}
+              "school_info", "web_search",
+              # v4.0.16：招聘进度（只读，不含电话）
+              "recruit_overview",
+              "recruit_progress", "recruit_gaps", "recruit_roster",
+              "recruit_signed_list", "recruit_health", "recruit_years",
+              # v4.3.0：生成名单下载链接（按阶段/面试日期）
+              "export_roster",
+              # v4.4.0：面试日程 Excel / .ics
+              "export_interview_schedule", "export_interview_ics",
+              "export_resume_bundle"}
 COMPUTE_TOOLS = {"analyze_fit", "compare_candidates", "draft_interview_questions",
                  "draft_email", "preview_mail"}
 
@@ -78,6 +92,13 @@ class ToolCtx:
     operator: str = "HR"
     role: str = "recruiter"
     cfg: dict = field(default_factory=dict)
+    #: 本轮路由命中的工具组（只用于观测与界面展示，不参与权限判断）
+    route: list[str] = field(default_factory=list)
+    #: 本轮命中的业务 SOP（skill）id / 展示名；未命中为空
+    skill: str = ""
+    skill_name: str = ""
+    #: 本轮上下文用量估算（窗口/已用/各项 token），供右栏展示
+    context: dict = field(default_factory=dict)
 
 
 def _spec(name: str, desc: str, props: dict | None = None, required: list[str] | None = None) -> dict:
@@ -90,12 +111,24 @@ def _spec(name: str, desc: str, props: dict | None = None, required: list[str] |
 TOOL_SPECS = [
     # ------------------------------ 读 ------------------------------
     _spec("search_candidates",
-          "按条件筛选候选人（档位/学历/年限/关键词/院校层次/阶段/**归岗岗位**）。返回真实库内数据，找不到就返回空，不要编造。"
+          "统一的候选人检索入口。`mode` 决定检索方式："
+          "keyword=按条件/关键词/技能（默认）；semantic=按自然语言描述找相似经历；"
+          "skills=按技能本体精确召回；similar=找和某人相似的人。"
+          "返回真实库内数据，找不到就返回空，不要编造。"
           "**keyword 是字面匹配**：院校请用全称（库里存的是『西安电子科技大学』，"
           "传『西电』会返回空——遇到简称先展开成全称再搜）。"
           "**问『某岗位有哪些候选人』用 job 参数**：它按**归岗关系**筛（只返回已归到该岗位下的人），"
           "不是技能匹配——不要用 skill/keyword 拼一个『岗位人选』出来。",
-          {"tier": {"type": "string", "description": tiers_mod.enum_str("/") + "/REVIEW/UNCONFIRMED/ALL"},
+          {"mode": {"type": "string",
+                    "description": "keyword（默认）/ semantic / skills / similar"},
+           "query": {"type": "string",
+                     "description": "mode=semantic 时的自然语言描述，如「做过钛合金热处理工艺的人」"},
+           "skills": {"type": "array", "items": {"type": "string"},
+                      "description": "mode=skills 时的技能名列表"},
+           "similar_to": {"type": "string",
+                          "description": "mode=similar 时的候选人 id 或姓名"},
+           "top_k": {"type": "integer", "description": "semantic/skills/similar 返回条数，默认 10"},
+           "tier": {"type": "string", "description": tiers_mod.enum_str("/") + "/REVIEW/UNCONFIRMED/ALL"},
            "job": {"type": "string",
                    "description": "岗位名称（如『科学研究』）。按**归岗关系**筛选：只返回归到该岗位下的人。"
                                   "岗位名以 list_jobs 的返回为准。"},
@@ -105,7 +138,7 @@ TOOL_SPECS = [
            "univ": {"type": "string",
                     "description": "院校层次：985 或 211。用户说『985/211 的人』时**必须用这个参数**，"
                                    "不要用 keyword 去猜校名（名单外会漏）。选 211 时 985 也算。"},
-           "skill": {"type": "string", "description": "技能关键词"},
+           "skill": {"type": "string", "description": "单个技能关键词（keyword 模式的快捷写法）"},
            "stage": {"type": "string", "description": "投递阶段，取值：" + "/".join(STAGES)},
            "limit": {"type": "integer", "description": "最多返回条数，默认 20"}}),
     _spec("get_candidate",
@@ -113,8 +146,20 @@ TOOL_SPECS = [
           {"candidate_id": {"type": "string",
                             "description": "候选人 id 或**姓名**（两种都行，系统自动解析）"}},
            ["candidate_id"]),
+    _spec("get_candidates",
+          "**批量**读取多个候选人的档案摘要（基本信息、投递、技能、标签）。"
+          "需要一次看 2 人以上时优先用这个，不要连续多次调用 get_candidate。"
+          "返回 count 与 items；个别人找不到会放在 errors 里，不影响其他人。",
+          {"candidate_ids": {"type": "array", "items": {"type": "string"},
+                             "description": "候选人 id 或姓名列表，最多 20 个"}},
+           ["candidate_ids"]),
     _spec("pool_stats",
-          "人才库总览：人数、投递数、各档位分布、各阶段分布、待确认/信息缺失数量。"),
+          "人才库总览：人数、投递数、各档位分布、各阶段分布、待确认/信息缺失数量。"
+          "要看某一维度的完整分布（做图表/汇报）时传 group_by，"
+          "返回 distribution.items（label/count/pct），数字可直接用于 Mermaid 图表。",
+          {"group_by": {"type": "string",
+                        "description": "可选：education（学历）/ school（学校）/ major（专业）/ "
+                                       "job（岗位）/ stage（阶段）/ tier（档位）/ gender（性别）"}}),
     _spec("search_by_skills",
           "按技能精确召回候选人。技能会先归一到本体（如 XRD = X射线衍射）。"
           "这是回答『做过 X 的人有哪些』的首选工具，结果可解释、每条都带原文证据。",
@@ -291,6 +336,69 @@ TOOL_SPECS = [
                              "description": "为空则导出全部在库的人"},
            "what": {"type": "string", "description": "resumes=简历原件包（默认）/ csv=人才清单"}},
           []),
+    _spec("export_resume_bundle",
+          "按岗位/阶段/投递时间段/关键词打包**简历原件 zip**，返回下载链接。"
+          "用户说“导出名单并下载简历附件”时，名单用 export_roster，附件用这个。",
+          {"job": {"type": "string", "description": "岗位名；留空=全部岗位"},
+           "stage": {"type": "string", "description": "阶段；留空=全部"},
+           "education": {"type": "string", "description": "学历精确匹配"},
+           "univ": {"type": "string", "description": "985 或 211"},
+           "keyword": {"type": "string", "description": "姓名/院校/专业关键词"},
+           "date_from": {"type": "string", "description": "投递开始日期 YYYY-MM-DD"},
+           "date_to": {"type": "string", "description": "投递结束日期 YYYY-MM-DD（含当天）"}},
+          []),
+    _spec("export_roster",
+          "生成候选人名单的下载链接（xlsx）。可按岗位/阶段/学历/院校/投递时间段/关键词筛选；"
+          "导出「待面试」时可再按面试日期筛选。返回 count 与 download_url，"
+          "回答时请把下载链接原样写成 Markdown 链接，不要编造文件。",
+          {"stage": {"type": "string",
+                     "description": "留空=全部；可选：" + "/".join(STAGES)},
+           "job": {"type": "string",
+                   "description": "岗位名（如「数字化工程师」）；按归岗关系筛选，留空=全部岗位"},
+           "education": {"type": "string",
+                         "description": "学历精确匹配：大专/本科/硕士/博士，多个用逗号分隔"},
+           "univ": {"type": "string", "description": "院校层次：985 或 211"},
+           "keyword": {"type": "string", "description": "姓名/院校/专业关键词"},
+           "date_from": {"type": "string", "description": "投递开始日期 YYYY-MM-DD"},
+           "date_to": {"type": "string", "description": "投递结束日期 YYYY-MM-DD（含当天）"},
+           "interview_date": {"type": "string",
+                              "description": "仅 stage=待面试 时有效，YYYY-MM-DD；留空=全部待面试"},
+           "scope": {"type": "string", "description": "文件名里的范围说明，可省略"}},
+          []),
+    _spec("export_interview_schedule",
+          "生成面试日程 Excel（xlsx）下载链接：日期/时段/单位/姓名/岗位/学历/学校/方式/阶段/电话。"
+          "可按日期范围筛选。只读。HR 要面试安排表、打印或发群时用这个。",
+          {"date_from": {"type": "string", "description": "面试开始日期 YYYY-MM-DD"},
+           "date_to": {"type": "string", "description": "面试结束日期 YYYY-MM-DD（含当天）"},
+           "stage": {"type": "string", "description": "默认 待面试；一般不用改"}},
+          []),
+    _spec("export_interview_ics",
+          "生成面试日程的 .ics 日历文件下载链接（可加日期范围），"
+          "可导入 Outlook / 企业日历。只读，不含电话。",
+          {"date_from": {"type": "string", "description": "面试开始日期 YYYY-MM-DD"},
+           "date_to": {"type": "string", "description": "面试结束日期 YYYY-MM-DD（含当天）"},
+           "stage": {"type": "string", "description": "默认 待面试；一般不用改"}},
+          []),
+    _spec("bulk_initial_pass",
+          "【需 HR 确认】批量把候选人推进到「初筛通过」，有建议岗位的会先采纳建议。只生成待确认提案。",
+          {"candidate_ids": {"type": "array", "items": {"type": "integer"},
+                             "description": "候选人 id 列表"}},
+          ["candidate_ids"]),
+    _spec("bulk_assign_job",
+          "【需 HR 确认】批量把候选人归到同一个岗位，并按该岗位 JD 重算建议档。只生成待确认提案。",
+          {"candidate_ids": {"type": "array", "items": {"type": "integer"},
+                             "description": "候选人 id 列表"},
+           "job": {"type": "string", "description": "岗位 id 或岗位名（唯一匹配才执行）"}},
+          ["candidate_ids", "job"]),
+    _spec("set_sign_status",
+          "【需 HR 确认】登记/修改签约情况（未签约/已签约/拒签/毁约），可同时填录用单位、"
+          "签约日期、入职最后期限。只生成待确认提案。",
+          {"application_id": {"type": "integer", "description": "投递编号"},
+           "status": {"type": "string", "description": "未签约/已签约/拒签/毁约"},
+           "hire_unit": {"type": "string", "description": "录用单位"},
+           "signed_at": {"type": "string", "description": "签约日期 YYYY-MM-DD"},
+           "onboard_deadline": {"type": "string", "description": "入职最后期限 YYYY-MM-DD"}},
+          ["application_id", "status"]),
     # ------------------------------ 面试字典 / 来源 / 回收站（v1.25） ------------------------------
     _spec("get_interview_dict",
           "读面试字典：面试单位、会议室、时段、联系人（含电话/部门）。"
@@ -453,6 +561,59 @@ TOOL_SPECS = [
                      "description": "公开信息类查询，如「西安电子科技大学 计算机 学科评估」。"
                                     "禁止包含人名/联系方式"}},
           ["query"]),
+    # ---- v4.0.16：招聘进度（只读，与页面/导出同一口径） ----
+    _spec("recruit_overview",
+          "**招聘进度统一入口**。`view` 决定看什么："
+          "progress=总进度/完成率/缺口摘要（默认）；gaps=缺口清单；"
+          "roster=面试总名单；signed=已签约名单；health=数据体检；years=届别列表。"
+          "用户问招聘进度、缺口、签约名单、面试名单、数据质量时优先用这个，"
+          "不要连续调多个 recruit_* 工具。只读，不含电话。",
+          {"view": {"type": "string",
+                    "description": "progress / gaps / roster / signed / health / years"},
+           "year": {"type": "string", "description": "届别名称，如 2027届；不传=当前届"},
+           "unit": {"type": "string", "description": "单位名，如 钛所；不传=全部"},
+           "education": {"type": "string", "description": "博士/硕士/本科/大专；不传=全部"},
+           "outcome": {"type": "string",
+                       "description": "roster 用：拟录用/不录用/已签约/拒签/毁约/未签约/未判；不传=全部"},
+           "limit": {"type": "integer", "description": "返回条数上限，默认 20~50"}}),
+    _spec("recruit_progress",
+          "查某届招聘进度：应招总数、已签人数、签约缺口、完成率、按学历汇总、"
+          "缺口最大的单位×学历。用户问「2027届招了多少 / 还差多少人 / 完成率多少」时用。"
+          "不传届别 = 当前届。只读，不含任何联系方式。",
+          {"year": {"type": "string", "description": "届别名称，如 2027届；不传=当前届"},
+           "unit": {"type": "string", "description": "单位名，如 钛所；不传=全部"},
+           "education": {"type": "string", "description": "博士/硕士/本科/大专；不传=全部"}}),
+    _spec("recruit_gaps",
+          "查某届签约缺口 > 0 的单位×学历，按缺口从大到小。"
+          "用户问「哪个单位还缺人 / 缺口最大」时用。只读。",
+          {"year": {"type": "string", "description": "届别名称；不传=当前届"},
+           "unit": {"type": "string", "description": "单位名；不传=全部"},
+           "education": {"type": "string", "description": "博士/硕士/本科/大专；不传=全部"},
+           "limit": {"type": "integer", "description": "最多返回条数，默认 20"}}),
+    _spec("recruit_roster",
+          "查某届面试总名单摘要：姓名、学校、学历、面试日期、单位、是否录用、录用函、"
+          "签约情况。**不含电话**。用户问「这届都面了谁 / 谁还没签」时用。",
+          {"year": {"type": "string", "description": "届别名称；不传=当前届"},
+           "unit": {"type": "string", "description": "单位名；不传=全部"},
+           "education": {"type": "string", "description": "博士/硕士/本科/大专；不传=全部"},
+           "outcome": {"type": "string",
+                       "description": "拟录用 / 不录用 / 已签约 / 拒签 / 毁约 / 未签约 / 未判；不传=全部"},
+           "limit": {"type": "integer", "description": "最多返回条数，默认 30"}}),
+    _spec("recruit_signed_list",
+          "查某届**已签约人员名单**：姓名、单位、学历、签约时间。"
+          "用户问「某单位签了谁 / 这届签约名单」时用；不含电话。",
+          {"year": {"type": "string", "description": "届别名称；不传=当前届"},
+           "unit": {"type": "string", "description": "单位名；不传=全部"},
+           "education": {"type": "string", "description": "博士/硕士/本科/大专；不传=全部"},
+           "limit": {"type": "integer", "description": "最多返回条数，默认 50"}}),
+    _spec("recruit_health",
+          "查某届招聘进度的数据质量问题：缺签约时间、缺录用单位、期外签约、"
+          "签约冲突、单位不在计划等。用户问「进度数据有没有问题 / 谁还没归属」时用。",
+          {"year": {"type": "string", "description": "届别名称；不传=当前届"},
+           "limit": {"type": "integer", "description": "每类最多返回条数，默认 20"}}),
+    _spec("recruit_years",
+          "列出系统里已有的招聘届别及起止日期。用户问「有哪些届 / 现在统计的是哪一届」时用。",
+          {}),
 ]
 
 
@@ -478,6 +639,34 @@ def _brief(c: dict) -> dict:
         "need_review": bool(c.get("needs_review")),
         "hit": c.get("hits") or [], "miss": c.get("miss") or [],
         "skills": (c.get("skills") or [])[:10],
+    }
+
+
+def _detail_brief(cid: int, d: dict) -> dict:
+    """单个候选人档案 → 工具返回的固定形状（get_candidate / get_candidates 共用）。"""
+    return {
+        "candidate_id": cid, "name": d.get("name"),
+        "education": d.get("edu_level"), "years": d.get("years_exp"),
+        "school": d.get("school"), "major": d.get("major"),
+        "current_org": d.get("current_org"),
+        "pool_status": d.get("pool_status"), "pii_level": d.get("pii_level"),
+        "tier_suggested": d.get("tier_suggested"), "tier_final": d.get("tier_final"),
+        "score": d.get("score"), "stage": d.get("stage"),
+        "reasons": d.get("reasons"), "risks": d.get("risks"),
+        "hit": d.get("hits"), "miss": d.get("miss"),
+        "needs_review": d.get("needs_review"),
+        "applications": [{"application_id": a["id"], "job": a.get("job_title"),
+                          "channel": a.get("channel"), "applied_at": a.get("applied_at"),
+                          "tier": a.get("tier_final") or a.get("tier_suggested"),
+                          "stage": a.get("stage"), "status": a.get("status"),
+                          "score": a.get("score")} for a in d.get("applications", [])],
+        "skills": [{"name": s["name"], "category": s.get("category"),
+                    "level": s.get("level"), "verified": s.get("verified"),
+                    "evidence": s.get("evidence")} for s in d.get("skills", [])],
+        "tags": [t["name"] for t in d.get("tags", [])],
+        "documents": [{"file": x.get("file_name"), "engine": x.get("parse_engine"),
+                       "parse_ok": x.get("parse_ok")} for x in d.get("documents", [])],
+        "raw_text_excerpt": (d.get("raw_text") or "")[:2000],
     }
 
 
@@ -577,6 +766,23 @@ def _resolve_job_id(conn, key: str) -> tuple[int | None, str | None]:
         return None, f"岗位名「{key}」对上了多个岗位（{names}），请用完整岗位名再试"
     titles = "、".join((j.get("title") or "") for j in jobs if j.get("active", 1))
     return None, f"没有名为「{key}」的岗位。当前岗位：" + (titles or "（暂无在招岗位）")
+
+
+def _resolve_recruit_year(conn, label: str | None) -> tuple[int | None, dict | None]:
+    """届别名 → year_id；不传就取当前届。找不到时把可选届别列出来。"""
+    key = str(label or "").strip()
+    if key:
+        y = db.get_recruit_year(conn, label=key)
+        if not y:
+            labels = "、".join(x.get("label") or "" for x in db.list_recruit_years(conn))
+            return None, {"error": f"未找到届别「{key}」",
+                          "hint": "可用届别：" + (labels or "（还没有，请先在招聘进度页创建/导入）")}
+        return int(y["id"]), None
+    y = db.get_default_recruit_year(conn)
+    if not y:
+        return None, {"error": "还没有招聘届别",
+                      "hint": "请先在「招聘进度」页创建/导入届别"}
+    return int(y["id"]), None
 
 
 def _find_template(conn, key: str) -> dict | None:
@@ -842,6 +1048,132 @@ def _merge_jd_args(jd: dict, args: dict) -> None:
         jd["note"] = note
 
 
+_DIST_LABELS = {
+    "education": "学历", "school": "学校", "major": "专业",
+    "job": "岗位", "stage": "阶段", "tier": "档位", "gender": "性别",
+}
+_DIST_ALIASES = {v: k for k, v in _DIST_LABELS.items()}
+
+_DATE_REL = {
+    "今天": 0, "今日": 0, "明天": 1, "明日": 1, "后天": 2, "大后天": 3,
+    "昨天": -1, "昨日": -1, "前天": -2,
+}
+
+
+def _resolve_date_arg(value) -> str:
+    """把“今天/明天/后天/11月6日/2024-11-06”统一成 YYYY-MM-DD。
+
+    模型可能把相对日期原样传给导出工具；工具层再兜一次，避免
+    “明天”和数据库里的 `YYYY-MM-DD` 做字符串比较永远为空。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    if s in _DATE_REL:
+        return (date.today() + timedelta(days=_DATE_REL[s])).isoformat()
+    for _k, _d in _DATE_REL.items():
+        if s.startswith(_k):
+            return (date.today() + timedelta(days=_d)).isoformat()
+    m = re.match(r"^(本周|这周|下周)([一二三四五六日天])$", s)
+    if m:
+        _idx = "一二三四五六日".find(m.group(2).replace("天", "日"))
+        _today = date.today()
+        _monday = _today - timedelta(days=_today.weekday())
+        if m.group(1) == "下周":
+            _monday += timedelta(days=7)
+        return (_monday + timedelta(days=_idx)).isoformat()
+    if s in ("下周", "下星期"):
+        _today = date.today()
+        return (_today - timedelta(days=_today.weekday()) + timedelta(days=7)).isoformat()
+    if s in ("月底", "月末"):
+        _today = date.today()
+        _nxt = ( _today.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return (_nxt - timedelta(days=1)).isoformat()
+    if s in ("月初",):
+        return date.today().replace(day=1).isoformat()
+    m = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$", s)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.match(r"^(\d{1,2})\s*[月/-]\s*(\d{1,2})\s*日?$", s)
+    if m:
+        return f"{date.today().year:04d}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    return s[:10]
+
+
+def _candidate_distribution(conn, field: str) -> dict | None:
+    """按单一维度统计未归档候选人分布（v4.3.3）。
+
+    为什么单独做：`pool_stats` 只给档位/阶段总数；HR 要"学历分布画饼图"时，
+    模型只能拉全量候选人再自己数，既慢又容易数错。这里用 SQL 聚合一次算好，
+    模型拿到的 `label/count/pct` 可以直接写进图表，数字可追溯。
+    """
+    field = str(field or "").strip()
+    field = _DIST_ALIASES.get(field, field)
+    if field not in _DIST_LABELS:
+        return None
+    arch = "COALESCE(c.archived_at, '') = ''"
+    latest = ("a.id = (SELECT id FROM applications WHERE candidate_id = c.id "
+              "ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT 1)")
+    if field in ("education", "school", "major", "gender"):
+        col = {"education": "c.edu_level", "school": "c.school",
+               "major": "c.major", "gender": "c.gender"}[field]
+        rows = conn.execute(
+            f"""SELECT COALESCE(NULLIF(TRIM({col}), ''), '未识别') AS k,
+                       COUNT(*) AS n
+                FROM candidates c
+                WHERE {arch} AND c.merged_into IS NULL
+                GROUP BY k""").fetchall()
+    elif field == "job":
+        rows = conn.execute(
+            f"""SELECT COALESCE(NULLIF(TRIM(j.title), ''), '待归岗') AS k,
+                       COUNT(*) AS n
+                FROM candidates c
+                LEFT JOIN applications a ON {latest}
+                LEFT JOIN jobs j ON j.id = a.job_id
+                WHERE {arch} AND c.merged_into IS NULL
+                GROUP BY k""").fetchall()
+    elif field == "stage":
+        rows = conn.execute(
+            f"""SELECT COALESCE(NULLIF(a.stage, ''), '新投递') AS k, COUNT(*) AS n
+                FROM candidates c
+                LEFT JOIN applications a ON {latest}
+                WHERE {arch} AND c.merged_into IS NULL
+                GROUP BY k""").fetchall()
+    else:  # tier
+        rows = conn.execute(
+            f"""SELECT COALESCE(NULLIF(COALESCE(a.tier_final, a.tier_suggested), ''),
+                               '未定') AS k, COUNT(*) AS n
+                FROM candidates c
+                LEFT JOIN applications a ON {latest}
+                WHERE {arch} AND c.merged_into IS NULL
+                GROUP BY k""").fetchall()
+
+    agg: dict[str, int] = {}
+    for r in rows:
+        k = str(r["k"] or "未识别").strip() or "未识别"
+        if field == "stage" and k not in STAGES:
+            k = "新投递"          # 与 pool_stats 的阶段环同一口径
+        elif field == "education":
+            # 专科→大专、研究生→硕士、学士→本科；认不出才归"未识别"。
+            # 与招聘进度表的学历口径一致，图表才不会出现"专科/大专"两截。
+            k = recruit_mod.normalize_edu(k) or "未识别"
+        agg[k] = agg.get(k, 0) + int(r["n"] or 0)
+    items = sorted(agg.items(), key=lambda kv: (-kv[1], kv[0]))
+    total = sum(n for _, n in items)
+    out = [{"label": k, "count": n,
+            "pct": round(n * 100.0 / total, 1) if total else 0}
+           for k, n in items]
+    # 学校这类高基数维度只回前 30 项，其余合并成"其他"，避免把上下文撑爆
+    truncated = 0
+    if len(out) > 30:
+        truncated = sum(x["count"] for x in out[29:])
+        out = out[:29]
+        out.append({"label": "其他", "count": truncated,
+                    "pct": round(truncated * 100.0 / total, 1) if total else 0})
+    return {"group_by": field, "label": _DIST_LABELS[field],
+            "total": total, "items": out}
+
+
 def execute(name: str, args: dict, ctx: ToolCtx) -> str:
     """执行工具，返回 JSON 字符串。任何异常都转成可读错误，绝不让循环崩掉。"""
     args = args or {}
@@ -854,12 +1186,80 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
     try:
         # ---------------- 读 ----------------
         if name == "search_candidates":
+            mode = str(args.get("mode") or "keyword").strip().lower()
+            if mode in ("semantic", "skills", "similar"):
+                top_k = max(1, min(int(args.get("top_k") or args.get("limit") or 10), 50))
+                if mode == "semantic":
+                    query = str(args.get("query") or args.get("keyword") or "").strip()
+                    if not query:
+                        return _err("semantic 模式需要 query（自然语言描述）")
+                    res = search_mod.semantic(conn, query, top_k=top_k)
+                elif mode == "skills":
+                    skills = args.get("skills") or []
+                    if isinstance(skills, str):
+                        skills = [x.strip() for x in re.split(r"[,，、;；]+", skills) if x.strip()]
+                    if not skills:
+                        return _err("skills 模式需要 skills 列表")
+                    res = search_mod.by_skills(
+                        conn, skills, mode=args.get("skill_mode") or "all",
+                        include_tier=args.get("tier"))
+                else:
+                    if not args.get("similar_to"):
+                        return _err("similar 模式需要 similar_to（候选人 id 或姓名）")
+                    _sim_cid, _sim_err = _resolve_cid(conn, args.get("similar_to"))
+                    if _sim_err:
+                        return _err(_sim_err["error"], _sim_err.get("hint"))
+                    res = search_mod.similar_to(conn, _sim_cid, top_k=top_k)
+
+                # 语义/技能/相似结果只带候选人 id；用同一份 list_candidates
+                # 回填完整字段，并应用 job/stage/education 等硬筛选。
+                all_items = {c["id"]: c for c in db.list_candidates(conn, archived=False)}
+                allowed = None
+                if any(args.get(k) for k in ("job", "education", "stage", "tier", "univ")):
+                    _job_id = ctx.job_id
+                    if args.get("job"):
+                        _job_id, _jerr = _resolve_job_id(conn, args["job"])
+                        if _jerr:
+                            return _err(_jerr)
+                    allowed = {c["id"] for c in db.list_candidates(
+                        conn, tier=args.get("tier"), education=args.get("education"),
+                        stage=args.get("stage"), univ=args.get("univ"),
+                        job_id=_job_id, archived=False)}
+                out = []
+                for r in (res.get("results") or []):
+                    try:
+                        rid = int(r.get("candidate_id"))
+                    except (TypeError, ValueError):
+                        continue
+                    c = all_items.get(rid)
+                    if not c:
+                        continue
+                    if allowed is not None and rid not in allowed:
+                        continue
+                    b = _brief(c)
+                    if r.get("score") is not None:
+                        b["score"] = r["score"]
+                    if r.get("matched_skills"):
+                        b["matched_skills"] = r["matched_skills"]
+                    out.append(b)
+                return _ok({"count": len(out), "mode": mode,
+                            "candidates": out[:top_k],
+                            "resolved": res.get("resolved"),
+                            "unknown_terms": res.get("unknown_terms"),
+                            "note": "结果是候选人摘要；需要完整档案再用 get_candidates。"})
+
+            # ---- keyword 模式 ----
             # 技能词先过本体（"XRD" → "X射线衍射"），再带上原词一起匹配：
             # 归一是为了让别名也能召回，保留原词是为了本体没收录的新技能
             # （如刚出现的框架名）仍能按字面命中，不至于"查无此人"。
+            _skills_arg = args.get("skills") or []
+            if isinstance(_skills_arg, str):
+                _skills_arg = [x.strip() for x in re.split(r"[,，、;；]+", _skills_arg) if x.strip()]
             raw_skill = (args.get("skill") or "").strip()
             skill_terms = None
-            if raw_skill:
+            if _skills_arg:
+                skill_terms = sorted(set(nz.resolve_query_terms(list(_skills_arg))) | set(_skills_arg))
+            elif raw_skill:
                 skill_terms = sorted(set(nz.resolve_query_terms([raw_skill])) | {raw_skill})
             # v1.29.8：「岗位」筛选按**归岗关系**（applications.job_id），
             # 不是技能/关键词字面匹配——HR 说"某岗位的人"指的是归岗，不是"技能像"。
@@ -880,6 +1280,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 archived=False)
             limit = int(args.get("limit") or 20)
             return _ok({"count": len(items), "returned": min(limit, len(items)),
+                        "mode": "keyword",
                         "candidates": [_brief(c) for c in items[:limit]]})
 
         if name == "get_candidate":
@@ -889,33 +1290,38 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             d = db.candidate_detail(conn, cid)
             if not d:
                 return _err(f"未找到候选人 #{cid}")
-            return _ok({
-                "candidate_id": cid, "name": d.get("name"),
-                "education": d.get("edu_level"), "years": d.get("years_exp"),
-                "school": d.get("school"), "major": d.get("major"),
-                "current_org": d.get("current_org"),
-                "pool_status": d.get("pool_status"), "pii_level": d.get("pii_level"),
-                "tier_suggested": d.get("tier_suggested"), "tier_final": d.get("tier_final"),
-                "score": d.get("score"), "stage": d.get("stage"),
-                "reasons": d.get("reasons"), "risks": d.get("risks"),
-                "hit": d.get("hits"), "miss": d.get("miss"),
-                "needs_review": d.get("needs_review"),
-                "applications": [{"application_id": a["id"], "job": a.get("job_title"),
-                                  "channel": a.get("channel"), "applied_at": a.get("applied_at"),
-                                  "tier": a.get("tier_final") or a.get("tier_suggested"),
-                                  "stage": a.get("stage"), "status": a.get("status"),
-                                  "score": a.get("score")} for a in d.get("applications", [])],
-                "skills": [{"name": s["name"], "category": s.get("category"),
-                            "level": s.get("level"), "verified": s.get("verified"),
-                            "evidence": s.get("evidence")} for s in d.get("skills", [])],
-                "tags": [t["name"] for t in d.get("tags", [])],
-                "documents": [{"file": x.get("file_name"), "engine": x.get("parse_engine"),
-                               "parse_ok": x.get("parse_ok")} for x in d.get("documents", [])],
-                "raw_text_excerpt": (d.get("raw_text") or "")[:2000],
-            })
+            return _ok(_detail_brief(cid, d))
+
+        if name == "get_candidates":
+            raw_ids = args.get("candidate_ids") or []
+            if isinstance(raw_ids, str):
+                raw_ids = [x.strip() for x in re.split(r"[,，、;；\s]+", raw_ids) if x.strip()]
+            if not isinstance(raw_ids, list):
+                return _err("candidate_ids 必须是 id 或姓名列表")
+            items, errors = [], []
+            for key in raw_ids[:20]:
+                cid, _cerr = _resolve_cid(conn, key)
+                if _cerr:
+                    errors.append({"input": str(key), "error": _cerr["error"]})
+                    continue
+                d = db.candidate_detail(conn, cid)
+                if not d:
+                    errors.append({"input": str(key), "error": f"未找到候选人 #{cid}"})
+                    continue
+                items.append(_detail_brief(cid, d))
+            return _ok({"count": len(items), "items": items,
+                        "errors": errors,
+                        "note": "多人档案已批量读取；缺失的人放在 errors 里。"})
 
         if name == "pool_stats":
             s = db.pool_stats(conn)
+            group_by = str(args.get("group_by") or "").strip()
+            if group_by:
+                dist = _candidate_distribution(conn, group_by)
+                if not dist:
+                    return _err(f"不支持的统计维度「{group_by}」",
+                                hint="可用：" + "/".join(_DIST_LABELS))
+                s["distribution"] = dist
             s["agent_cost"] = db.agent_cost_summary(conn)
             return _ok(s)
 
@@ -970,6 +1376,101 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                         "include_inactive": inc, "jobs": items,
                         "note": "open_count 为当前在招岗位数（不含已停用岗位与停用部门下的岗位）"})
 
+        # ---- v4.0.16：招聘进度（只读，和页面/导出同一套计算） ----
+        if name == "recruit_years":
+            years = db.list_recruit_years(conn)
+            return _ok({"count": len(years), "years": years})
+        if name in ("recruit_progress", "recruit_gaps", "recruit_roster",
+                    "recruit_signed_list", "recruit_health", "recruit_overview"):
+            _op = name
+            if name == "recruit_overview":
+                _op = str(args.get("view") or "progress").strip().lower()
+                if _op == "years":
+                    years = db.list_recruit_years(conn)
+                    return _ok({"count": len(years), "years": years})
+                _view_map = {"progress": "recruit_progress", "gaps": "recruit_gaps",
+                             "roster": "recruit_roster", "signed": "recruit_signed_list",
+                             "health": "recruit_health"}
+                if _op not in _view_map:
+                    return _err(f"不支持的 view「{_op}」",
+                                hint="可用：progress / gaps / roster / signed / health / years")
+                _op = _view_map[_op]
+            _yid, _yerr = _resolve_recruit_year(conn, args.get("year"))
+            if _yerr:
+                return _err(_yerr["error"], _yerr.get("hint"))
+            if _op == "recruit_signed_list":
+                p = recruit_mod.build_progress(
+                    conn, _yid, unit=args.get("unit"), edu=args.get("education"))
+                limit = max(1, min(int(args.get("limit") or 50), 200))
+                items = []
+                for r in p.get("rows") or []:
+                    for s in r.get("signees") or []:
+                        items.append({
+                            "candidate_id": s.get("candidate_id"),
+                            "name": s.get("name") or "",
+                            "unit": r.get("unit_name") or "",
+                            "education": r.get("edu_level") or "",
+                            "signed_at": s.get("signed_at") or "",
+                        })
+                items.sort(key=lambda x: (x.get("signed_at") or "", x.get("name") or ""))
+                return _ok({"year": p.get("year"), "count": len(items),
+                            "returned": min(limit, len(items)),
+                            "items": items[:limit]})
+            if _op == "recruit_health":
+                p = recruit_mod.build_progress(conn, _yid)
+                h = p.get("health") or {}
+                limit = max(1, min(int(args.get("limit") or 20), 100))
+                compact = {}
+                for k, v in h.items():
+                    if isinstance(v, dict) and k != "job_headcount":
+                        compact[k] = {"count": v.get("count", 0),
+                                      "items": (v.get("items") or [])[:limit]}
+                return _ok({"year": p.get("year"), "health": compact,
+                            "job_headcount": h.get("job_headcount")})
+            if _op == "recruit_progress":
+                p = recruit_mod.build_progress(
+                    conn, _yid, unit=args.get("unit"), edu=args.get("education"))
+                gaps = sorted(
+                    [r for r in (p.get("rows") or []) if int(r.get("gap") or 0) > 0],
+                    key=lambda r: int(r.get("gap") or 0), reverse=True)[:10]
+                return _ok({
+                    "year": p.get("year"), "totals": p.get("totals"),
+                    "by_education": p.get("by_education"),
+                    "summary": p.get("summary"),
+                    "top_gaps": [{
+                        "unit": r["unit_name"], "education": r["edu_level"],
+                        "should_hire": r["should_hire"], "signed": r["signed_count"],
+                        "gap": r["gap"], "rate": r["rate"]} for r in gaps],
+                })
+            if _op == "recruit_gaps":
+                p = recruit_mod.build_progress(
+                    conn, _yid, unit=args.get("unit"), edu=args.get("education"))
+                limit = max(1, min(int(args.get("limit") or 20), 100))
+                rows = sorted(
+                    [r for r in (p.get("rows") or []) if int(r.get("gap") or 0) > 0],
+                    key=lambda r: int(r.get("gap") or 0), reverse=True)[:limit]
+                return _ok({
+                    "year": p.get("year"), "count": len(rows),
+                    "items": [{"unit": r["unit_name"], "education": r["edu_level"],
+                               "should_hire": r["should_hire"],
+                               "signed": r["signed_count"], "gap": r["gap"]}
+                              for r in rows],
+                })
+            limit = max(1, min(int(args.get("limit") or 30), 100))
+            ro = recruit_mod.build_roster(
+                conn, _yid, unit=args.get("unit"), edu=args.get("education"),
+                outcome=args.get("outcome"), include_phone=False)
+            items = [{
+                "candidate_id": x.get("candidate_id"), "name": x.get("name"),
+                "school": x.get("school"), "education": x.get("edu_level"),
+                "interview_date": x.get("interview_date"), "unit": x.get("unit"),
+                "verdict": x.get("verdict_raw"), "offer_sent": x.get("offer_sent"),
+                "sign_status": x.get("sign_status"), "signed_at": x.get("signed_at"),
+                "onboard_status": x.get("onboard_status"),
+            } for x in (ro.get("items") or [])[:limit]]
+            return _ok({"year": ro.get("year"), "count": ro.get("count"),
+                        "returned": len(items), "items": items})
+
         if name == "pipeline_overview":
             p = db.pipeline_stats(conn)
             return _ok({
@@ -1004,6 +1505,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             })
 
         if name == "list_audit":
+            # v4.0.17：审计记录只对系统管理员开放；本机模式视为单管理员。
+            if str(ctx.role or "") != "admin" and not (ctx.cfg or {}).get("local"):
+                return _err("审计记录仅系统管理员可查看。",
+                            "如需核对操作记录，请让管理员在「账号管理」权限下查看。")
             rows = db.list_audit(conn, entity=args.get("entity"),
                                  entity_id=args.get("entity_id"),
                                  limit=int(args.get("limit") or 20))
@@ -1452,7 +1957,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                                  "（已提过的在 7 天内不重复提）。")})
 
         if name == "list_agent_runs":
-            runs = db.list_agent_runs(conn, limit=int(args.get("limit") or 10))
+            # v4.0.17：运行记录按账号隔离，助手只能看自己的
+            runs = db.list_agent_runs(conn, limit=int(args.get("limit") or 10),
+                                      operator=ctx.operator)
             return _ok({"count": len(runs),
                         "runs": [{"question": r.get("question"),
                                   "rounds": r.get("rounds"),
@@ -1684,8 +2191,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                     j = cands[0]
                 elif len(cands) > 1:
                     return _err(f"有 {len(cands)} 个岗位匹配「{kw}」",
-                                hint="请给岗位 id 或更完整的岗位名",
-                                jobs=[{"id": x["id"], "title": x.get("title")} for x in cands[:6]])
+                                hint="请给岗位 id 或更完整的岗位名：" +
+                                     "、".join(f"#{x['id']} {x.get('title')}"
+                                              for x in cands[:6]))
                 else:
                     return _err(f"没有匹配「{kw}」的在招岗位",
                                 hint="先用 list_jobs 看有哪些岗位，或 create_job 新建")
@@ -1844,6 +2352,256 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             return _ok({"what": "resumes", "candidate_ids": ids,
                         "note": f"简历原件打包 {len(ids) or '全部'} 份，"
                                 f"请在「人才库」勾选后点「批量下载选中」"})
+
+        if name == "export_resume_bundle":
+            filters: dict = {}
+            stage = str(args.get("stage") or "").strip()
+            if stage:
+                filters["stage"] = stage
+            job = str(args.get("job") or "").strip()
+            if job:
+                _jid, _jerr = _resolve_job_id(conn, job)
+                if _jerr:
+                    return _err(_jerr)
+                filters["job_id"] = _jid
+            for _k in ("education", "univ", "keyword"):
+                _v = str(args.get(_k) or "").strip()
+                if _v:
+                    filters[_k] = _v
+            df = _resolve_date_arg(args.get("date_from"))
+            dt = _resolve_date_arg(args.get("date_to"))
+            if df:
+                filters["date_from"] = df
+            if dt:
+                filters["date_to"] = dt
+            pairs = export_mod.build_resume_bundle(conn, **filters)
+            if not pairs:
+                return _ok({"count": 0,
+                            "note": "该筛选条件下没有可打包的简历原件"
+                                    "（可能未上传原件或已归档）。"})
+            qs = []
+            if filters.get("job_id"):
+                qs.append("job_id=" + str(filters["job_id"]))
+            if stage:
+                qs.append("stage=" + urllib.parse.quote(stage))
+            for _k in ("education", "univ", "keyword"):
+                if filters.get(_k):
+                    qs.append(_k + "=" + urllib.parse.quote(str(filters[_k])))
+            if df:
+                qs.append("date_from=" + urllib.parse.quote(df))
+            if dt:
+                qs.append("date_to=" + urllib.parse.quote(dt))
+            url = "/api/export/resume-bundle?" + "&".join(qs)
+            label = "简历附件" + (f"（{df or '最早'}至{dt or '最新'}）" if df or dt else "")
+            return _ok({"count": len(pairs), "scope": label,
+                        "download_url": url,
+                        "markdown": f"[下载{label}（{len(pairs)} 份）]({url})",
+                        "note": "把 download_url / markdown 原样给 HR；"
+                                "包内是每人最新一份简历原件，已按岗位-学历-学校-专业-姓名命名。"})
+
+        if name == "export_roster":
+            stage = str(args.get("stage") or "").strip()
+            if stage and stage not in STAGES:
+                return _err(f"阶段「{stage}」不存在", hint="可用：" + "/".join(STAGES))
+            interview_date = _resolve_date_arg(args.get("interview_date"))
+            if interview_date and stage != "待面试":
+                return _err("interview_date 只在 stage=待面试 时使用",
+                            hint="要按面试日期导出，请同时传 stage=待面试")
+            job = str(args.get("job") or "").strip()
+            job_id = None
+            job_title = ""
+            if job:
+                job_id, jerr = _resolve_job_id(conn, job)
+                if jerr:
+                    return _err(jerr, hint="岗位名以 list_jobs 的返回为准")
+                _j = db.get_job(conn, job_id) if job_id else None
+                job_title = (_j or {}).get("title") or job
+            kw = str(args.get("keyword") or "").strip()
+            edu = str(args.get("education") or "").strip()
+            univ = str(args.get("univ") or "").strip()
+            df = _resolve_date_arg(args.get("date_from"))
+            dt = _resolve_date_arg(args.get("date_to"))
+            filters: dict = {}
+            if stage:
+                filters["stage"] = stage
+            if interview_date:
+                filters["interview_date"] = interview_date
+            if job_id:
+                filters["job_id"] = job_id
+            if kw:
+                filters["keyword"] = kw
+            if edu:
+                filters["education"] = edu
+            if univ:
+                filters["univ"] = univ
+            if df:
+                filters["date_from"] = df
+            if dt:
+                filters["date_to"] = dt
+            headers, rows, tcols, n = export_mod.build_roster(
+                conn, operator=ctx.operator, role=ctx.role,
+                include_archived=True, **filters)
+            parts = []
+            if stage:
+                parts.append(stage)
+            if job_title:
+                parts.append(job_title)
+            if edu:
+                parts.append(edu)
+            if univ:
+                parts.append(univ + "院校")
+            if kw:
+                parts.append(kw)
+            if df or dt:
+                parts.append(f"{df or '最早'}至{dt or '最新'}投递")
+            if interview_date:
+                parts.append(f"{interview_date}面试")
+            label = "、".join(parts) or "全部候选人"
+            scope = str(args.get("scope") or "").strip()
+            if scope:
+                label = scope
+            if not n:
+                return _ok({"count": 0, "scope": label,
+                            "note": "没有符合条件的候选人，未生成文件。"
+                                    "请放宽岗位/阶段/日期条件后再试。"})
+            qs = []
+            if stage:
+                qs.append("stage=" + urllib.parse.quote(stage))
+            if interview_date:
+                qs.append("interview_date=" + urllib.parse.quote(interview_date))
+            if job_id:
+                qs.append("job_id=" + str(job_id))
+            if kw:
+                qs.append("kw=" + urllib.parse.quote(kw))
+            if edu:
+                qs.append("education=" + urllib.parse.quote(edu))
+            if univ:
+                qs.append("univ=" + urllib.parse.quote(univ))
+            if df:
+                qs.append("date_from=" + urllib.parse.quote(df))
+            if dt:
+                qs.append("date_to=" + urllib.parse.quote(dt))
+            qs.append("scope=" + urllib.parse.quote(label + "名单"))
+            url = "/api/export/roster?" + "&".join(qs)
+            return _ok({"count": n, "scope": label,
+                        "download_url": url,
+                        "markdown": f"[下载{label}名单]({url})",
+                        "note": ("名单已生成下载链接；请把 download_url / markdown 原样给 HR。"
+                                 "登录模式下如链接需要登录，请从人才库「导出名单」按钮下载。")})
+
+        if name == "export_interview_schedule":
+            stage = str(args.get("stage") or "待面试").strip()
+            if stage not in STAGES:
+                return _err(f"阶段「{stage}」不存在", hint="可用：" + "/".join(STAGES))
+            df = _resolve_date_arg(args.get("date_from"))
+            dt = _resolve_date_arg(args.get("date_to"))
+            _h, _r, _t, n = export_mod.build_interview_schedule(
+                conn, stage=stage, date_from=df, date_to=dt,
+                operator=ctx.operator, role=ctx.role)
+            label = "面试日程" + (f"（{df or '最早'}至{dt or '最新'}）" if df or dt else "")
+            if not n:
+                return _ok({"count": 0, "scope": label,
+                            "note": "该日期范围内没有面试安排，未生成文件。"
+                                    "请确认日期，或先看该阶段的待面试名单。"})
+            qs = ["stage=" + urllib.parse.quote(stage)]
+            if df:
+                qs.append("date_from=" + urllib.parse.quote(df))
+            if dt:
+                qs.append("date_to=" + urllib.parse.quote(dt))
+            url = "/api/export/interview-schedule?" + "&".join(qs)
+            return _ok({"count": n, "scope": label,
+                        "download_url": url,
+                        "markdown": f"[下载{label} Excel]({url})",
+                        "note": "把 download_url / markdown 原样给 HR；"
+                                "下载后可直接筛选、打印或发群。"})
+
+        if name == "export_interview_ics":
+            stage = str(args.get("stage") or "待面试").strip()
+            if stage not in STAGES:
+                return _err(f"阶段「{stage}」不存在", hint="可用：" + "/".join(STAGES))
+            df = _resolve_date_arg(args.get("date_from"))
+            dt = _resolve_date_arg(args.get("date_to"))
+            qs = ["stage=" + urllib.parse.quote(stage)]
+            if df:
+                qs.append("date_from=" + urllib.parse.quote(df))
+            if dt:
+                qs.append("date_to=" + urllib.parse.quote(dt))
+            url = "/api/export/interview-ics?" + "&".join(qs)
+            label = "面试日程" + (f"（{df or '最早'}至{dt or '最新'}）" if df or dt else "")
+            return _ok({"download_url": url,
+                        "markdown": f"[下载{label}]({url})",
+                        "note": "把 download_url / markdown 原样给 HR；"
+                                "下载后用 Outlook/企业日历导入即可。"})
+
+        if name == "bulk_initial_pass":
+            ids = []
+            for x in (args.get("candidate_ids") or []):
+                try:
+                    n = int(x)
+                except (TypeError, ValueError):
+                    continue
+                if n > 0 and n not in ids:
+                    ids.append(n)
+            if not ids:
+                return _err("请提供至少一位候选人")
+            return _propose(conn, ctx, "bulk_initial_pass",
+                            {"candidate_ids": ids},
+                            f"批量初筛通过：{len(ids)} 人（有建议岗位的会先采纳）",
+                            risk="中")
+
+        if name == "bulk_assign_job":
+            ids = []
+            for x in (args.get("candidate_ids") or []):
+                try:
+                    n = int(x)
+                except (TypeError, ValueError):
+                    continue
+                if n > 0 and n not in ids:
+                    ids.append(n)
+            if not ids:
+                return _err("请提供至少一位候选人")
+            jobs = db.list_jobs(conn, include_inactive=False)
+            kw = str(args.get("job") or "").strip()
+            j = next((x for x in jobs if str(x["id"]) == kw), None)
+            if not j:
+                cands = [x for x in jobs if kw and (kw in (x.get("title") or "")
+                                                     or kw in (x.get("department_name") or ""))]
+                if len(cands) == 1:
+                    j = cands[0]
+                elif len(cands) > 1:
+                    return _err(f"有 {len(cands)} 个岗位匹配「{kw}」",
+                                hint="请给岗位 id 或更完整的岗位名：" +
+                                     "、".join(f"#{x['id']} {x.get('title')}"
+                                              for x in cands[:6]))
+                else:
+                    return _err(f"没有匹配「{kw}」的在招岗位",
+                                hint="先用 list_jobs 看有哪些岗位")
+            return _propose(conn, ctx, "bulk_assign_job",
+                            {"candidate_ids": ids, "job_id": int(j["id"])},
+                            f"批量归岗：{len(ids)} 人 → 「{j.get('title')}」",
+                            risk="中")
+
+        if name == "set_sign_status":
+            aid = args.get("application_id")
+            try:
+                aid = int(aid)
+            except (TypeError, ValueError):
+                return _err("application_id 必须是投递编号")
+            app = db.get_application(conn, aid)
+            if not app:
+                return _err(f"未找到投递 #{aid}")
+            status = str(args.get("status") or "").strip()
+            if status not in db.SIGN_STATUSES:
+                return _err("签约情况只能是：" + "/".join(db.SIGN_STATUSES))
+            payload = {"application_id": aid, "status": status}
+            for k in ("hire_unit", "signed_at", "onboard_deadline"):
+                v = str(args.get(k) or "").strip()
+                if v and k in ("signed_at", "onboard_deadline"):
+                    v = _resolve_date_arg(v)
+                if v:
+                    payload[k] = v
+            return _propose(conn, ctx, "set_sign_status", payload,
+                            f"登记签约情况：投递 #{aid} → {status}", risk="中")
 
         if name == "set_stage":
             # v1.25：支持用**候选人**指定目标，而不只是投递 id。

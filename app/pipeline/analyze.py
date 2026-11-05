@@ -204,17 +204,28 @@ def _cand_brief(cand: dict) -> str:
 
 
 def _jd_brief(jd: dict) -> str:
-    must_skills = list(jd["must"]["skills_required"])
-    pref_skills = list(jd.get("preferred", {}).get("skills", []))
+    """岗位 JD 的提示词摘要。
+
+    ⚠️ 每个字段都要容错：库里 `jd_json` 是创建岗位时的快照，早期岗位可能
+    **没有 `must.skills_required` / `must.education_min`**（实测 job #1/#3）。
+    原来直接下标 `jd["must"]["skills_required"]`，一取就 `KeyError`，
+    面试提纲只会回一句"模型不可用"，把配置缺失伪装成模型故障。
+    """
+    must = jd.get("must") or {}
+    must_skills = list(must.get("skills_required") or [])
+    pref_skills = list((jd.get("preferred") or {}).get("skills") or [])
     # 部门为空时必须显式写"未指定"（v1.6 修复）：此前直接 `jd.get('department')`
     # 会渲染成 "部门:"，模型看到空值就自己挑一个填上——实测把软件岗的面试题
     # 写成了"如果加入我们材料工艺所"，把另一个岗位的部门安到了这个岗位上。
     dept = jd.get("department") or "未指定"
+    edu = must.get("education_min") or "不限"
+    years = must.get("years_min")
+    years_txt = "0" if years is None else str(years)
     return (
-        f"岗位:{jd.get('role')}；部门:{dept}\n"
-        f"最低学历:{jd['must']['education_min']}；最低年限:{jd['must']['years_min']}；"
-        f"必需技能:{'、'.join(must_skills)}\n"
-        f"加分技能:{'、'.join(pref_skills)}"
+        f"岗位:{jd.get('role') or '未指定'}；部门:{dept}\n"
+        f"最低学历:{edu}；最低年限:{years_txt}；"
+        f"必需技能:{'、'.join(must_skills) or '未指定'}\n"
+        f"加分技能:{'、'.join(pref_skills) or '未指定'}"
         f"\n岗位技能专业大类侧重:{_cat_text(must_skills + pref_skills)}"
         + (f"\n岗位职责/说明:{jd['note']}" if jd.get("note") else "")
     )

@@ -119,7 +119,7 @@ def _asgi(app, method: str, url: str, headers: dict | None = None,
     if body:
         raw_headers.append((b"content-length", str(len(body)).encode()))
     scope = {
-        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
         "http_version": "1.1", "method": method.upper(), "scheme": "http",
         "path": parts.path, "raw_path": parts.path.encode(),
         "query_string": parts.query.encode(), "root_path": "",
@@ -208,8 +208,12 @@ def main(verbose: bool = True) -> int:
                 "agent_runs", "proposals", "users", "sessions", "embeddings",
                 # settings 是"性别筛选开关"等设置项的落点，属于承重表，必须一并断言；
                 # 之前这里漏了它，于是"表少了"也不会被照出来。
-                "settings"}
-        c.ok(need <= tables, "17 张表全部建立", f"缺失 {sorted(need - tables)}" if need - tables else "")
+                "settings",
+                # v4.0.16：招聘进度
+                "recruit_years", "recruit_plans",
+                # v4.0.17：会话列表
+                "agent_conversations"}
+        c.ok(need <= tables, "20 张表全部建立", f"缺失 {sorted(need - tables)}" if need - tables else "")
         job_id = db.upsert_job(conn, JD)
         c.ok(isinstance(job_id, int) and job_id > 0, "岗位写入成功", f"job_id={job_id}")
         conn.close()
@@ -692,7 +696,9 @@ def main(verbose: bool = True) -> int:
         ans4 = agent_loop.run_agent("把陈志远的投递推进到待面试", ctx)
         # 规则路由不覆盖这个意图，故直接调工具验证提案机制
         from app.agent.tools import execute as tool_exec
-        raw = json.loads(tool_exec("set_stage", {"application_id": aid, "stage": "待面试",
+        # v4.0.6：新投递 → 待面试要求先填面试单位；本段只验证“写工具只出提案”，
+        # 用不要求前置字段的「初筛通过」，避免把提案机制测试和流程必填耦合在一起。
+        raw = json.loads(tool_exec("set_stage", {"application_id": aid, "stage": "初筛通过",
                                                  "reason": "简历评估通过"}, ctx))
         c.ok(raw.get("status") == "pending_confirmation",
              "写类工具返回『待确认』而不是『已完成』", json.dumps(raw, ensure_ascii=False)[:80])
@@ -719,8 +725,8 @@ def main(verbose: bool = True) -> int:
         res = actions.apply_proposal(db_path, pid, "approve", "hr", "hr")
         c.ok(res.get("ok") and res.get("status") == "已执行", "HR 确认后提案执行成功")
         conn = db.connect(db_path)
-        c.ok(db.get_application(conn, aid)["stage"] == "待面试",
-             "此刻才真正改库：阶段 = 待面试")
+        c.ok(db.get_application(conn, aid)["stage"] == "初筛通过",
+             "此刻才真正改库：阶段 = 初筛通过")
         tags_before = len(db.candidate_detail(conn, chen["id"])["tags"])
         conn.close()
 
@@ -1094,6 +1100,9 @@ def main(verbose: bool = True) -> int:
             ("GET", "/api/emails", {}, b""),
             ("GET", "/api/departments", {}, b""),
             ("GET", "/api/jobs", {}, b""),
+            ("GET", "/api/recruit/meta", {}, b""),
+            ("GET", "/api/recruit/progress", {}, b""),
+            ("GET", "/api/recruit/roster", {}, b""),
             ("GET", "/api/sources", {}, b""),
             ("GET", "/api/sources/removed", {}, b""),
             ("GET", "/api/settings", {}, b""),
@@ -1106,6 +1115,7 @@ def main(verbose: bool = True) -> int:
             ("GET", "/api/agent/tools", {}, b""),
             ("GET", "/api/agent/runs", {}, b""),
             ("GET", "/api/agent/status", {}, b""),
+            ("GET", "/api/agent/conversations", {}, b""),
             ("GET", "/api/proposals", {}, b""),
             ("GET", "/api/audit", {}, b""),
             ("GET", "/api/ontology", {}, b""),
@@ -1170,6 +1180,9 @@ def main(verbose: bool = True) -> int:
                 "GET /api/audit", "GET /api/ontology", "GET /api/policy",
                 "GET /api/settings", "GET /api/mailbox/config", "GET /api/mailbox/presets",
                 "GET /api/agent/status", "GET /api/search/status", "GET /api/meta",
+                "GET /api/agent/conversations",
+                "GET /api/recruit/meta", "GET /api/recruit/progress",
+                "GET /api/recruit/roster",
             ]
             empty_body = []
             errored = {b.split(" ")[0] + " " + b.split(" ")[1] for b in broken
@@ -2048,14 +2061,16 @@ def main(verbose: bool = True) -> int:
             _out_late = json.loads(_body_late)
             _conn_sc4 = db.connect(db_path)
             _row_late = _conn_sc4.execute(
-                "SELECT stage, outcome FROM applications WHERE id=?", (_aid_sc,)).fetchone()
+                "SELECT stage, outcome, sign_status FROM applications WHERE id=?",
+                (_aid_sc,)).fetchone()
             _conn_sc4.close()
             c.ok(_code_late == 200 and _row_late["stage"] == "已发放offer"
-                 and _row_late["outcome"] == "已签约"
+                 and _row_late["sign_status"] == "已签约"
+                 and _row_late["outcome"] != "已签约"
                  and not _out_late.get("advanced_to"),
-                 "只改结论：已在「已发放offer」时只改标签，不回退阶段",
+                 "签约动作：已在「已发放offer」时写签约情况，不覆盖面试结论、不回退阶段",
                  f"HTTP {_code_late} stage={_row_late['stage']} "
-                 f"outcome={_row_late['outcome']}")
+                 f"outcome={_row_late['outcome']} sign={_row_late['sign_status']}")
             # 助手提案走 actions.apply_proposal，不走阶段接口；同一条规则也要生效。
             _conn_sc3 = db.connect(db_path)
             _conn_sc3.execute(
@@ -2397,6 +2412,75 @@ def main(verbose: bool = True) -> int:
             c.ok(_znames == [_ro["filename"]],
                  "简历包：名单表确实被装进 zip（extra 内存通道，不落磁盘、不留残留）",
                  str(_znames))
+
+            # ---- v4.0.16 招聘进度：计划数学 / 体检 / 双导出 / 权限 ----
+            from app import recruit as _rc, recruit_export as _rx
+            _rcdb = db.connect(os.path.join(work, "recruit_selftest.db"))
+            _ry = _rc.create_year(_rcdb, "2099届", "2098-09-01", "2099-08-31")
+            c.ok(_ry.get("ok"), "招聘进度：届别创建成功")
+            _rid = _ry["id"]
+            for _u, _e, _n in (("钛所", "博士", 3), ("钛所", "硕士", 3),
+                               ("超导所", "博士", 2)):
+                db.save_recruit_plan(_rcdb, year_id=_rid, unit_name=_u, edu_level=_e,
+                                     plan_approved=_n, mode="overwrite")
+            _rcdb.commit()
+
+            def _mk_signed(_nm, _edu, _unit, _signed):
+                _cid = db.insert_candidate(_rcdb, {
+                    "identity_key": "rc:" + _nm, "name": _nm,
+                    "edu_level": _edu, "school": "测试大学"})
+                _aid = db.insert_application(_rcdb, {
+                    "candidate_id": _cid, "stage": "已发放offer"})
+                _f = {"outcome": "已签约"}
+                if _unit is not None:
+                    _f["hire_unit"] = _unit
+                if _signed is not None:
+                    _f["signed_at"] = _signed
+                db.update_application_fields(_rcdb, _aid, operator="t", role="hr", **_f)
+                return _cid, _aid
+
+            _mk_signed("甲", "博士", "钛所", "2098-10-01")
+            _mk_signed("乙", "硕士", "钛所", "2098-10-02")
+            _mk_signed("丙", "硕士", "钛所", None)          # 缺签约时间
+            _mk_signed("丁", "博士", None, "2098-10-03")    # 缺录用单位
+            _mk_signed("戊", "博士", "钛所", "2097-10-01")  # 期外
+            _cidf, _aidf = _mk_signed("己", "博士", "钛所", "2098-10-04")
+            _aidf2 = db.insert_application(_rcdb, {
+                "candidate_id": _cidf, "stage": "已发放offer"})
+            db.update_application_fields(
+                _rcdb, _aidf2, operator="t", role="hr", outcome="已签约",
+                hire_unit="超导所", signed_at="2098-10-05")   # 同一人归属冲突
+            _p = _rc.build_progress(_rcdb, _rid)
+            c.ok(_p["totals"]["should_hire"] == 8
+                 and _p["totals"]["signed_count"] == 2
+                 and _p["totals"]["gap"] == 6
+                 and abs(_p["totals"]["rate"] - 0.25) < 1e-9,
+                 "招聘进度：应招=审批+追加+转上年度-取消；缺口/完成率同口径",
+                 str(_p["totals"]))
+            c.ok(_p["health"]["missing_signed_at"]["count"] == 1
+                 and _p["health"]["missing_hire_unit"]["count"] == 1
+                 and _p["health"]["out_of_period"]["count"] == 1
+                 and _p["health"]["conflicting_signings"]["count"] == 1,
+                 "招聘进度：缺时间/缺单位/期外/签约冲突进体检，不静默计数",
+                 str({k: v["count"] for k, v in _p["health"].items()
+                      if isinstance(v, dict) and "count" in v}))
+            _off = _rx.official_workbook(
+                _p, _rc.build_roster(_rcdb, _rid, include_phone=True))
+            _wb = _oxl.load_workbook(io.BytesIO(_off))
+            c.ok(len(_wb.sheetnames) == 2 and "招聘进度表" in _wb.sheetnames[0]
+                 and "面试总名单" in _wb.sheetnames[1],
+                 "招聘进度：官方版式含进度表 + 面试总名单两个工作表",
+                 str(_wb.sheetnames))
+            _ws = _wb[_wb.sheetnames[0]]
+            c.ok(_ws["A1"].value and "招聘进度表" in str(_ws["A1"].value)
+                 and _ws["A2"].value == "序号" and _ws.max_column >= 21,
+                 "招聘进度：标题/表头/至少 10 个签约人列齐全")
+            _flat = _rx.flat_workbook(_p)
+            _wbf = _oxl.load_workbook(io.BytesIO(_flat))
+            c.ok(_wbf.active.max_row >= 4, "招聘进度：平铺版有表头 + 计划行")
+            c.ok(auth.can("hr", "edit_plan") and auth.can("admin", "edit_plan")
+                 and not auth.can("viewer", "edit_plan"),
+                 "招聘进度：edit_plan 只给 hr/admin，viewer 只读")
 
             # ---- v2.0.4 证件照抽取：**造一个最小 docx** 验，不依赖任何夹具文件 ----
             # 判据要两边都验：竖构图能抽到 / 横构图与纯文字**不能**硬凑
@@ -3721,7 +3805,7 @@ def main(verbose: bool = True) -> int:
             _old_env = {k: os.environ.pop(k) for k in
                         ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY") if k in os.environ}
             try:
-                _KEY = "dummy-not-a-real-key"
+                _KEY = "sk-test-1234567890abcd"
                 _, g0_body = _asgi(srv.app, "GET", "/api/model-config", {})
                 g0 = json.loads(g0_body)
                 c.ok(g0.get("key_set") is False and g0.get("key_masked") == ""
@@ -3735,7 +3819,7 @@ def main(verbose: bool = True) -> int:
                                                "api_key": _KEY}).encode())
                 p1 = json.loads(p1_body)
                 c.ok(p1.get("ok") and "api_key" in (p1.get("changed") or [])
-                     and p1.get("key_masked") == "dum****-key"
+                     and p1.get("key_masked") == "sk-****abcd"
                      and _KEY not in p1_body,
                      "保存后只回掩码（完整 key 不出现在任何响应里，含审计路径）",
                      str(p1.get("key_masked")))
@@ -3762,7 +3846,7 @@ def main(verbose: bool = True) -> int:
                      "模型地址/名写 model.json，key 只进 secrets.json（两文件分离）")
                 _, g1_body = _asgi(srv.app, "GET", "/api/model-config", {})
                 g1 = json.loads(g1_body)
-                c.ok(g1.get("key_masked") == "dum****-key" and g1.get("key_set") is True
+                c.ok(g1.get("key_masked") == "sk-****abcd" and g1.get("key_set") is True
                      and _KEY not in g1_body and "密钥文件" in (g1.get("key_source") or ""),
                      "回读只见掩码，来源如实标为密钥文件",
                      f"{g1.get('key_masked')} / {g1.get('key_source')}")
@@ -3785,7 +3869,7 @@ def main(verbose: bool = True) -> int:
                 _c.close()
                 _ad = _ar["after"] if _ar else ""
                 c.ok(bool(_ad) and "api_key" in _ad
-                     and _KEY not in _ad and "dum****" not in _ad,
+                     and _KEY not in _ad and "sk-****" not in _ad,
                      "审计记了改了哪些字段，但 key 的值与掩码都不进审计",
                      _ad[:40])
             finally:

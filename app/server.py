@@ -47,6 +47,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import queue
 import sqlite3
 import time as _time
 import re
@@ -63,7 +64,8 @@ import zipfile
 from datetime import datetime
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request, Query
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Response,
+                               StreamingResponse)
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -71,6 +73,8 @@ from . import actions, auth, db, feedback as feedback_mod
 from . import ingest as ingest_mod, mailbox as mb, regrade, search
 from . import mail_send as mail_send_mod
 from . import mail_template as mail_template_mod
+from . import recruit as recruit_mod
+from . import recruit_export as recruit_export_mod
 from . import univ as univ_mod
 # v1.29：阶段/结论的唯一真源。服务端要下发阶段配置给前端（看板与下拉都从这里来），
 # 并对阶段流转做校验，所以是顶层导入。
@@ -85,12 +89,14 @@ from . import avatar as avatar_mod
 from .agent import brief as brief_mod
 from .agent import llm
 from .agent import proactive as proactive_mod
-from .agent.loop import run_agent
+from .agent.loop import build_context_estimate, live_trace, run_agent
+from .agent.router import route_tools
 from .agent.tools import ToolCtx, catalog as tool_catalog
 from .pipeline import domains as domains_mod
 from .pipeline import majors as mj
 from .pipeline import normalize as nz
 from .pipeline import parse as parse_mod
+from .pipeline import projects as projects_mod
 from .pipeline import extract as extract_mod
 from .pipeline import freshness
 from .pipeline import sanitize
@@ -486,7 +492,8 @@ def _ctx(session: dict, conn=None) -> ToolCtx:
     jd, tiers = _jd_tiers()
     return ToolCtx(db_path=DB_PATH, jd=jd, tiers=tiers, job_id=None,
                    session_id=uuid.uuid4().hex[:12],
-                   operator=session.get("username", "HR"), role=session["role"])
+                   operator=session.get("username", "HR"), role=session["role"],
+                   cfg={"local": session.get("mode") == "local"})
 
 
 # ============================================================
@@ -592,7 +599,7 @@ def ping():
     """
     return JSONResponse(
         # no-store：这是"本机有没有人在跑"的实时判断，缓存会让判断失真
-        {"ok": True, "product": "HRAgent", "ui_build": PRODUCT_VERSION,
+        {"ok": True, "product": "人才库智能体", "ui_build": PRODUCT_VERSION,
          "pid": os.getpid()},
         headers={"Cache-Control": "no-store"},
     )
@@ -1664,6 +1671,9 @@ def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias=
                      s["username"], s["role"])
         latest_doc = d["documents"][0] if d.get("documents") else {}
         raw = d.get("raw_text") or ""
+        # v4.0.17：操作记录只给系统管理员（本机模式视为管理员）随详情下发；
+        # 其他角色即使能看档案，也不下发审计片段。
+        _audit_ok = (s.get("mode") == "local") or auth.can(s["role"], "manage_users")
         return {
             **auth.present_candidate(d),
             # 档位来源明细（与列表同一份口径）：完整档案是 HR 逐条核对的地方，
@@ -1684,7 +1694,8 @@ def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias=
             # 送进模型前剔除了哪些敏感信息（类别→条数）。原来算完就丢，
             # HR 无从核查"到底哪些内容没给模型看"——隐私红线应当是可核查的。
             "sensitive_removed": _sensitive_of(latest_doc),
-            "audit_snippet": db.candidate_audit(conn, cid, limit=20),
+            "audit_snippet": (db.candidate_audit(conn, cid, limit=20)
+                              if _audit_ok else []),
             # v1.25：这位**发过邮件没有**（含最近时间与主题）。
             # 用"发过没有"做标记，是为了避免重复发——同一个人被两个 HR
             # 各发一封面试邀请，是最难解释的那类事故。
@@ -1696,6 +1707,53 @@ def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias=
             "insight": db.get_insight(conn, cid),
             "tier_effective": d.get("tier_effective"),
         }
+    finally:
+        conn.close()
+
+
+@app.get("/api/candidates/{cid}/projects")
+def api_candidate_projects(cid: int,
+                           x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                           x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """AI 提炼项目经历（按需、缓存）。
+
+    为什么不在 `candidate_detail` 里同步调模型：打开档案是高频动作，
+    一次模型调用会把页面拖住十几秒。这里只返回缓存；没有缓存时前端再单独请求，
+    结果写回 `candidates.projects_json`，同一份简历永远只提炼一次。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        d = db.candidate_detail(conn, cid)
+        if not d:
+            raise HTTPException(status_code=404, detail="未找到该候选人")
+        if d.get("projects_checked"):
+            return {"ok": True, "cached": True,
+                    **(d.get("projects") or {"projects": [], "direction_summary": ""})}
+        raw = str(d.get("raw_text") or "").strip()
+        if not raw:
+            # 简历原文读不出来 → 记为“已检查、无项目”，避免每次打开都白跑一遍
+            empty = {"projects": [], "direction_summary": ""}
+            db.update_candidate(conn, cid, projects_json=json.dumps(empty, ensure_ascii=False))
+            return {"ok": True, "cached": False, **empty}
+        if not _llm_enabled():
+            return {"ok": False, "pending": True,
+                    "error": "模型未启用，暂时无法提炼项目经历"}
+        try:
+            cfg = llm.load_cfg()
+            if not cfg.get("api_key"):
+                return {"ok": False, "pending": True,
+                        "error": "模型未配置 API Key，暂时无法提炼项目经历"}
+            out = projects_mod.summarize(raw, cfg)
+        except Exception as exc:                               # noqa: BLE001
+            print(f"[projects] 项目经历提炼异常：{type(exc).__name__}: {exc}")
+            out = None
+        if out is None:
+            return {"ok": False, "pending": True,
+                    "error": "项目经历提炼失败，请稍后重试"}
+        db.update_candidate(conn, cid, projects_json=json.dumps(out, ensure_ascii=False))
+        return {"ok": True, "cached": False, **out}
     finally:
         conn.close()
 
@@ -1752,6 +1810,8 @@ def api_candidate_reanalyze(cid: int, full: bool = True, req: dict | None = None
                 }
             if not r.get("ok"):
                 return r
+            # 原件已重新解析：旧的 AI 项目总结可能来自上一版简历，清掉缓存下次重提炼
+            db.update_candidate(conn, cid, projects_json=None)
             r["insight"] = db.get_insight(conn, cid)
             r["note"] = ("完整重新分析完成：原件已重解析、字段已用模型重抽、"
                          "技能已重建、建议档已重算、分析结论已刷新。"
@@ -2367,9 +2427,11 @@ class InsightBatchReq(BaseModel):
 class ReanalyzeBatchReq(BaseModel):
     limit: int = 5                  # 每次调用处理几个（前端循环调用直到 remaining=0）
     only_heuristic: bool = True     # 只处理"还在规则通道"的；False = 全部重来一遍
+    ids: list[int] | None = None    # 指定候选人；None/空 = 全部（按 only_heuristic 过滤）
 
 
-def _needs_full_reanalysis(conn, limit: int, only_heuristic: bool) -> list[dict]:
+def _needs_full_reanalysis(conn, limit: int, only_heuristic: bool,
+                           ids: list[int] | None = None) -> list[dict]:
     """挑出需要完整重跑的人（排除归档）。
 
     默认只挑 `extract_mode != 'llm+rule'` 的——已经用模型抽过的人不必再花一次模型调用。
@@ -2381,10 +2443,22 @@ def _needs_full_reanalysis(conn, limit: int, only_heuristic: bool) -> list[dict]
               AND c.merged_into IS NULL
               AND a.id = (SELECT id FROM applications WHERE candidate_id = c.id
                           ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT 1)"""
+    params: list = []
     if only_heuristic:
         sql += " AND COALESCE(a.extract_mode, '') != 'llm+rule'"
+    if ids:
+        _ids = []
+        for x in ids:
+            try:
+                _ids.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        if _ids:
+            sql += " AND a.candidate_id IN (" + ",".join("?" * len(_ids)) + ")"
+            params.extend(_ids)
     sql += " ORDER BY COALESCE(a.applied_at, '') ASC, a.id ASC LIMIT ?"
-    return [dict(r) for r in conn.execute(sql, (int(limit),)).fetchall()]
+    params.append(int(limit))
+    return [dict(r) for r in conn.execute(sql, tuple(params)).fetchall()]
 
 
 @app.post("/api/candidates/reanalyze-batch")
@@ -2414,7 +2488,7 @@ def api_reanalyze_batch(req: ReanalyzeBatchReq,
 
     conn = db.connect(DB_PATH)
     try:
-        targets = _needs_full_reanalysis(conn, 20, req.only_heuristic)
+        targets = _needs_full_reanalysis(conn, 20, req.only_heuristic, req.ids)
         batch = targets[:limit]
         if not batch:
             return {"ok": True, "analyzed": 0, "failed": 0, "remaining": 0,
@@ -2582,6 +2656,92 @@ def api_route_pending(apply: int = 1,
         conn.close()
 
 
+class BulkInitialReq(BaseModel):
+    ids: list[int] | None = None
+
+
+@app.post("/api/candidates/bulk-initial-pass")
+def api_bulk_initial_pass(req: BulkInitialReq,
+                          x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                          x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """批量：采纳建议岗位（有则采纳）+ 推进到「初筛通过」。
+
+    只走现有的 assign_job / set_application_stage，审计与单条操作一致。
+    没有建议岗位的候选人仍会推进，结果里单列 `no_suggestion`，不替 HR 猜岗位。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "set_stage")
+    ids: list[int] = []
+    for x in (req.ids or []):
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="候选人编号不合法")
+        if n <= 0:
+            raise HTTPException(status_code=400, detail="候选人编号不合法")
+        if n not in ids:
+            ids.append(n)
+    if not ids:
+        raise HTTPException(status_code=400, detail="请先勾选候选人")
+    conn = db.connect(DB_PATH)
+    try:
+        out = regrade.bulk_initial_pass(
+            conn, ids, _load(TIERS_PATH),
+            operator=s["username"], role=s["role"])
+        out["ok"] = True
+        out["note"] = (f"已推进 {out['advanced']} 人，采纳建议岗位 {out['assigned']} 人"
+                       + (f"；{out['no_suggestion']} 人无建议岗位（已推进未归岗）"
+                          if out.get("no_suggestion") else "")
+                       + (f"；{out['already_passed']} 人已在初筛通过或更后"
+                          if out.get("already_passed") else "")
+                       + (f"；失败 {out['failed']} 人" if out.get("failed") else ""))
+        return out
+    finally:
+        conn.close()
+
+
+class BulkAssignReq(BaseModel):
+    ids: list[int] | None = None
+    job_id: int
+
+
+@app.post("/api/candidates/bulk-assign-job")
+def api_bulk_assign_job(req: BulkAssignReq,
+                        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """批量归岗：把勾选的人统一归到指定岗位（逐人走 assign_job）。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "set_stage")
+    ids: list[int] = []
+    for x in (req.ids or []):
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="候选人编号不合法")
+        if n <= 0:
+            raise HTTPException(status_code=400, detail="候选人编号不合法")
+        if n not in ids:
+            ids.append(n)
+    if not ids:
+        raise HTTPException(status_code=400, detail="请先勾选候选人")
+    conn = db.connect(DB_PATH)
+    try:
+        out = regrade.bulk_assign_job(
+            conn, ids, int(req.job_id), _load(TIERS_PATH),
+            operator=s["username"], role=s["role"])
+        if not out.get("ok", True):
+            raise HTTPException(status_code=400, detail=out.get("error") or "归岗失败")
+        out["ok"] = True
+        out["note"] = (f"已归岗 {out['assigned']} 人"
+                       + (f"；{out['unchanged']} 人已在该岗位"
+                          if out.get("unchanged") else "")
+                       + (f"；跳过 {out['skipped']} 人" if out.get("skipped") else "")
+                       + (f"；失败 {out['failed']} 人" if out.get("failed") else ""))
+        return out
+    finally:
+        conn.close()
+
+
 class ArchiveBatchReq(BaseModel):
     """批量归档：按 id 列表，或按"归档某年及以前的投递"。
 
@@ -2696,8 +2856,10 @@ def api_archive_purge_due(x_tp_token: str | None = Header(default=None, alias="X
     s = _session(x_tp_token, x_tp_role)
     require(s, "set_stage")
     out = _purge_expired(actor=s["username"], role=s["role"])
+    _skipped = len(out.get("skipped_signed") or [])
     out["note"] = (f"已彻底删除 {out['purged']} 人（归档满 {out['days']} 天），"
-                   f"原件已物理删除 {out['files_deleted']} 份")
+                   f"原件已物理删除 {out['files_deleted']} 份"
+                   + (f"；{_skipped} 人有已签约记录，已跳过" if _skipped else ""))
     return out
 
 
@@ -2723,6 +2885,13 @@ def api_candidate_purge(cid: int,
         out = _purge_expired(conn=conn, actor=s["username"], role=s["role"], only_ids=[cid])
         got = [p for p in out["people"] if p["id"] == cid]
         if not got:
+            _blocked = [x for x in (out.get("skipped_signed") or []) if x["id"] == cid]
+            if _blocked:
+                raise HTTPException(
+                    status_code=409,
+                    detail="未删除：该档案有签约/拒签/毁约记录，彻底删除会让招聘进度表"
+                           "或面试总名单少一条且不可恢复。请先更正签约情况/归属，"
+                           "或保留档案。")
             raise HTTPException(status_code=409,
                                 detail="未删除：该档案可能已被取消归档或并发改过。"
                                        "请刷新后重试")
@@ -3078,8 +3247,10 @@ def api_set_stage(aid: int, req: StageReq, x_tp_token: str | None = Header(defau
         # （它会先确认该人所有投递都已到终点）。原来这里还写了一份"看到已结束就归档"的
         # 无条件版本 —— 那人若同时在两个岗位流程里，结束一个就把整档收起来是错的。
         try:
+            # ⚠️ 必须用关键字传 operator/role：`sign_status` 插在它们之前，
+            # 位置传参会把用户名当成签约情况（→ 422「签约情况只能是…」）。
             r = db.set_application_stage(conn, aid, _actual_stage, req.outcome,
-                                         s["username"], s["role"])
+                                         operator=s["username"], role=s["role"])
         except ValueError as exc:
             # 非法阶段/非法结论：如实回 400 并说清可用取值，别让它变成 500
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -3099,7 +3270,8 @@ def api_set_stage(aid: int, req: StageReq, x_tp_token: str | None = Header(defau
 
 
 def _export_filters(overseas, bachelor, date_from, date_to,
-                    interview_unit, cet, univ, stage, education, kw) -> dict:
+                    interview_unit, cet, univ, stage, education, kw,
+                    interview_date=None, job_id=None) -> dict:
     """把导出接口的筛选参数收成 `list_candidates` 的 kwargs —— **一处转换**。
 
     为什么不让导出接口自己拼：界面上能筛、导出不能筛是这类需求最常见的漏。
@@ -3122,10 +3294,14 @@ def _export_filters(overseas, bachelor, date_from, date_to,
         _f["date_from"] = date_from
     if date_to:
         _f["date_to"] = date_to
+    if interview_date:
+        _f["interview_date"] = interview_date
     if interview_unit:
         _f["interview_unit"] = interview_unit
     if stage:
         _f["stage"] = stage
+    if job_id:
+        _f["job_id"] = int(job_id)
     return _f
 
 
@@ -3165,9 +3341,11 @@ def api_export_roster(scope: str = "候选人名单",
                        fmt: str = "xlsx", format: str | None = None,
                        overseas: str | None = None, bachelor: str | None = None,
                        date_from: str | None = None, date_to: str | None = None,
+                       interview_date: str | None = None,
                        interview_unit: str | None = None, cet: str | None = None,
                        univ: str | None = None, stage: str | None = None,
                        education: str | None = None, kw: str | None = None,
+                       job_id: int | None = None,
                        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
     """导出候选人名单 —— **唯一的导出入口**（业务方 2026-10-15 定调）。
@@ -3190,7 +3368,8 @@ def api_export_roster(scope: str = "候选人名单",
         headers, rows, tcols, n = export_mod.build_roster(
             conn, operator=s["username"], role=s["role"], include_archived=True,
             **_export_filters(overseas, bachelor, date_from, date_to,
-                              interview_unit, cet, univ, stage, education, kw))
+                              interview_unit, cet, univ, stage, education, kw,
+                              interview_date, job_id))
     finally:
         conn.close()
     meta = xlsx_mod.meta_line(scope, "（含已归档；未加其它筛选）", n)
@@ -3200,10 +3379,179 @@ def api_export_roster(scope: str = "候选人名单",
                             datetime.now().strftime("%Y%m%d-%H%M"))
 
 
+def _ics_escape(value) -> str:
+    s = str(value or "")
+    return (s.replace("\\", "\\\\").replace(";", "\\;")
+            .replace(",", "\\,").replace("\r", "").replace("\n", "\\n"))
+
+
+@app.get("/api/export/interview-ics")
+def api_export_interview_ics(date_from: str | None = None, date_to: str | None = None,
+                             stage: str = "待面试",
+                             x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                             x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
+    """把面试安排导出为 .ics 日历（Outlook / 企业日历可直接导入）。
+
+    只导出有 `interview_date` 的人；时段原文放进 DESCRIPTION，不强行解析成
+    具体时刻（HR 常写"上午/下午"，猜成 09:00 反而会误导）。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        items = db.list_candidates(conn, stage=stage or "待面试", archived=False)
+    finally:
+        conn.close()
+    df = str(date_from or "").strip()[:10]
+    dt = str(date_to or "").strip()[:10]
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    lines = [
+        "BEGIN:VCALENDAR", "VERSION:2.0", "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH", "PRODID:-//NIN//HRAgent Interview//CN",
+        "X-WR-CALNAME:招聘面试日程",
+    ]
+    n = 0
+    for it in items:
+        day = str(it.get("interview_date") or "").strip()[:10]
+        if not day:
+            continue
+        if df and day < df:
+            continue
+        if dt and day > dt:
+            continue
+        try:
+            datetime.strptime(day, "%Y-%m-%d")
+        except ValueError:
+            continue
+        n += 1
+        name = it.get("name") or "候选人"
+        job = it.get("job_title") or ""
+        unit = it.get("interview_unit") or ""
+        slot = it.get("interview_slot") or ""
+        mode = it.get("interview_mode") or ""
+        desc = "；".join(x for x in (
+            f"面试单位：{unit}" if unit else "",
+            f"时段：{slot}" if slot else "",
+            f"方式：{mode}" if mode else "",
+        ) if x)
+        lines += [
+            "BEGIN:VEVENT",
+            f"UID:candidate-{it.get('id')}-{day.replace('-', '')}@hra.local",
+            f"DTSTAMP:{stamp}",
+            f"DTSTART;VALUE=DATE:{day.replace('-', '')}",
+            f"SUMMARY:{_ics_escape('面试：' + name + (f'（{job}）' if job else ''))}",
+            f"DESCRIPTION:{_ics_escape(desc)}",
+            "END:VEVENT",
+        ]
+    lines.append("END:VCALENDAR")
+    body = "\r\n".join(lines) + "\r\n"
+    fname = f"interview-{df or 'all'}-{dt or 'all'}.ics"
+    return Response(content=body, media_type="text/calendar; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"',
+                             "X-Interview-Count": str(n)})
+
+
+@app.get("/api/export/interview-schedule")
+def api_export_interview_schedule(date_from: str | None = None, date_to: str | None = None,
+                                  stage: str = "待面试", fmt: str = "xlsx",
+                                  format: str | None = None,
+                                  x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
+    """面试日程 Excel（比 .ics 更适合 HR 直接筛选、打印、发群）。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    _export_operator[0], _export_operator[1] = s["username"], s["role"]
+    conn = db.connect(DB_PATH)
+    try:
+        headers, rows, tcols, n = export_mod.build_interview_schedule(
+            conn, stage=stage or "待面试", date_from=date_from, date_to=date_to,
+            operator=s["username"], role=s["role"])
+    finally:
+        conn.close()
+    span = f"（{date_from or '最早'} 至 {date_to or '最新'}）" if (date_from or date_to) else ""
+    meta = xlsx_mod.meta_line("面试日程", span, n)
+    return _export_response(headers, rows, tcols, meta, "面试日程", n,
+                            format or fmt, datetime.now().strftime("%Y%m%d-%H%M"))
+
+
+@app.get("/api/export/resume-bundle")
+def api_export_resume_bundle(job_id: int | None = None, stage: str | None = None,
+                             date_from: str | None = None, date_to: str | None = None,
+                             keyword: str | None = None, education: str | None = None,
+                             univ: str | None = None,
+                             x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                             x_tp_role: str | None = Header(default=None, alias="X-TP-Role")):
+    """按筛选条件打包**最新一份简历原件**（zip）。
+
+    用于“导出 10.30-11.5 的简历名单，并把简历附件一起下载”：
+    名单走 `/api/export/roster`，附件走这里。只打包当前仍未归档的人；
+    没有原件的人跳过，不阻塞其他人。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    filters: dict = {}
+    if job_id:
+        filters["job_id"] = int(job_id)
+    if stage:
+        filters["stage"] = stage
+    if date_from:
+        filters["date_from"] = str(date_from)[:10]
+    if date_to:
+        filters["date_to"] = str(date_to)[:10]
+    if keyword:
+        filters["keyword"] = keyword
+    if education:
+        filters["education"] = education
+    if univ:
+        filters["univ"] = univ
+    conn = db.connect(DB_PATH)
+    try:
+        pairs = export_mod.build_resume_bundle(conn, **filters)
+    finally:
+        conn.close()
+    if not pairs:
+        raise HTTPException(status_code=404,
+                            detail="该筛选条件下没有可打包的简历原件（可能未上传原件或已归档）")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    conn = db.connect(DB_PATH)
+    try:
+        db.add_audit(conn, "export", "resume-bundle", "bundle_download",
+                     f"{len(pairs)} 份", f"打包简历附件 {len(pairs)} 份｜{filters}",
+                     s["username"], s["role"])
+    finally:
+        conn.close()
+    return _zip_response(pairs, f"简历附件-{stamp}.zip")
+
+
+@app.get("/api/bundle/initial-pass/last")
+def api_bundle_initial_last(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                            x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """上次下载初筛简历的时间段（v4.0.19）。
+
+    只返回**下载成功时**记下的区间；从未下载过返回 `last: null`。
+    放在独立 GET 而不是跟着压缩包走：HR 点按钮时要先看到上次下到哪，
+    再决定这次选哪段，不能等下载完才知道。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        return {"ok": True, "last": db.get_setting(conn, "bundle_initial_last")}
+    finally:
+        conn.close()
+
+
 @app.post("/api/bundle/initial-pass")
-def api_bundle_initial_pass(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+def api_bundle_initial_pass(date_from: str | None = Query(default=None),
+                            date_to: str | None = Query(default=None),
+                            x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                             x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
     """把**初筛通过**人员的简历打包下载，文件名按 `匹配岗位-学历-学校-最高学历专业-姓名-性别`。
+
+    v4.1.1：支持按**投递时间**下载（`date_from` / `date_to`，含当天）：
+    在所选时间段投递、且**当前处于「初筛通过」**的人。注意口径不是
+    "在这段时间里变成初筛通过"——业务方明确要的是前一种。
+    时间段记进 settings，下一次点按钮时可以显示"上次下载到哪"。
 
     ⚠️ 只改**包内名**，不动归档原件的文件名（原件是审计凭据，见 `app/naming.py` 的规则 2）。
 
@@ -3213,23 +3561,62 @@ def api_bundle_initial_pass(x_tp_token: str | None = Header(default=None, alias=
     """
     s = _session(x_tp_token, x_tp_role)
     require(s, "read")
+
+    def _day(value, label: str) -> str:
+        v = str(value or "").strip()[:10]
+        if not v:
+            return ""
+        try:
+            datetime.strptime(v, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=422,
+                                detail=f"{label}格式应为 YYYY-MM-DD")
+        return v
+
+    d_from = _day(date_from, "开始日期")
+    d_to = _day(date_to, "结束日期")
+    if d_from and d_to and d_from > d_to:
+        raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
+    filters = {}
+    if d_from:
+        filters["date_from"] = d_from
+    if d_to:
+        filters["date_to"] = d_to
+
     conn = db.connect(DB_PATH)
     try:
-        zname, pairs = export_mod.bundle_name(conn, {}, operator=s["username"],
+        zname, pairs = export_mod.bundle_name(conn, filters, operator=s["username"],
                                               role=s["role"], scope="初筛通过",
                                               n=0)
         # 表是**每次点击现查库**生成的，没有磁盘路径 → 走 _zip_response 的 extra 通道
-        roster = export_mod.bundle_roster(conn, operator=s["username"], role=s["role"])
+        roster = export_mod.bundle_roster(
+            conn, operator=s["username"], role=s["role"],
+            date_from=d_from or None, date_to=d_to or None)
+        _span = f"{d_from or '最早'} 至 {d_to or '最新'}"
+        if not pairs:
+            raise HTTPException(
+                status_code=404,
+                detail=f"{_span} 没有可打包的简历（只有在该时间段投递、"
+                       f"当前处于初筛通过且留了原件的人）")
+        # 先真的把 zip 构造出来（超 200 份 / 超 500MB / 文件消失都会在这里报错）。
+        # 只有构造成功才写「上次下载」与审计——否则失败的下载会被记成成功。
+        resp = _zip_response(pairs, zname,
+                             extra=[(roster["filename"], roster["data"])])
+        db.set_setting(conn, "bundle_initial_last", {
+            "date_from": d_from,
+            "date_to": d_to,
+            "downloaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "files": len(pairs),
+            "roster": roster["n"],
+            "operator": s["username"],
+        })
         db.add_audit(conn, "bundle", "initial-pass", "bundle_download", "",
-                     f"下载初筛通过简历 {len(pairs)} 份，附名单表 {roster['n']} 条",
+                     f"下载初筛通过简历（{_span}）{len(pairs)} 份，"
+                     f"附名单表 {roster['n']} 条",
                      s["username"], s["role"])
+        return resp
     finally:
         conn.close()
-    if not pairs:
-        raise HTTPException(status_code=404,
-                            detail="当前筛选下没有可打包的简历（只有已入库并留了原件的候选人）")
-    return _zip_response(pairs, zname,
-                         extra=[(roster["filename"], roster["data"])])
 
 
 @app.post("/api/applications/{aid}/interview-info")
@@ -3248,7 +3635,8 @@ def api_interview_info(aid: int, req: dict,
     不在这里做名单/口径判断 —— 那是配置（universities.json / interview.json）的事。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    # 面试/录用/签约信息是写操作，必须与改阶段同级；只用 chat 会让只读账号也能改。
+    require(s, "set_stage")
     conn = db.connect(DB_PATH)
     try:
         if not db.get_application(conn, aid):
@@ -3268,6 +3656,7 @@ def api_interview_info(aid: int, req: dict,
                 patch[key] = (str(req.get(key) or "").strip()[:maxlen] or None)
 
         _text("interview_unit", 40)        # 面试单位（=面试部门）
+        _text("hire_unit", 40)             # v4.0.16：录用单位（招聘进度归属）
         _text("interview_slot", 24)        # 面试时段原文
         _text("interview_mode", 16)        # 面试方式（现场 / 线上）
         _text("signed_at", 32)             # 签约时间
@@ -3299,7 +3688,7 @@ def api_interview_info(aid: int, req: dict,
                                          skip_auto_archive=True)
                 advanced = True          # outcome 由 set_application_stage 写，不重复
             else:
-                patch["outcome"] = v or None
+                patch["outcome"] = v or ""
         # v1.29.2：录用函发送时间。发录用函时**系统自动写**；这里允许人事手填
         # （比如函是纸质/由别人代发的）。手填前端会弹一次确认。
         if "offer_sent_at" in req:
@@ -3314,6 +3703,28 @@ def api_interview_info(aid: int, req: dict,
                 raise HTTPException(status_code=422,
                                     detail=f"入职情况只能是：{'、'.join(ONBOARD_STATUS)}")
             patch["onboard_status"] = v or None
+        # v4.0.17：签约情况与面试结论分开。已签约自动补今天的签约日期，
+        # 保证“录用单位 + 已签约”能立即进入招聘进度；未签约/拒签清掉日期。
+        if "sign_status" in req:
+            v = str(req.get("sign_status") or "").strip()
+            if v and v not in db.SIGN_STATUSES:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"签约情况只能是：{'、'.join(db.SIGN_STATUSES)}")
+            v = v or "未签约"
+            patch["sign_status"] = v
+            # v4.0.17：签约情况落库时清掉历史遗留的 outcome=已签约/拒签/毁约，
+            # 否则“未签约 + outcome=已签约”会让 verdict 与进度口径矛盾。
+            _cur = db.get_application(conn, aid) or {}
+            if "outcome" not in req and str(_cur.get("outcome") or "") in (
+                    "已签约", "拒签", "毁约"):
+                patch["outcome"] = ""
+            if v == "已签约":
+                if not str(req.get("signed_at") or "").strip() and not str(
+                        (db.get_application(conn, aid) or {}).get("signed_at") or "").strip():
+                    patch["signed_at"] = datetime.now().strftime("%Y-%m-%d")
+            elif v in ("未签约", "拒签") and "signed_at" not in req:
+                patch["signed_at"] = None
         # 只带日期没带时段时，把时段起始时间补进 interview_date
         #（导出列要显示到分钟；HR 事后只改日期的也走这条）
         if ("interview_date" in patch and patch.get("interview_date")
@@ -3662,7 +4073,7 @@ def api_sources(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"
                     "account": (f"{ic.get('user')} @ {ic.get('host')}"
                                 if ic.get("user") and ic.get("host") else ""),
                     "cursor": cursor},
-        "recycle": {"dir": os.path.relpath(REMOVED_DIR, BASE), "count": len(removed),
+        "recycle": {"dir": _rel_or_abs(REMOVED_DIR), "count": len(removed),
                     "items": removed[:60], "last_remove": last_remove},
         "last_ingest": recent,
     }
@@ -4062,7 +4473,7 @@ def api_sources_remove(req: SourceNamesReq,
             # 两边都还在、不影响使用，只是这次删除没成功。
             skipped.append({"name": base, "why": f"移入回收目录失败：{exc}"})
             continue
-        rel = os.path.relpath(dest, BASE)
+        rel = _rel_or_abs(dest)
         conn = db.connect(DB_PATH)
         try:
             db.add_audit(conn, "source_file", base, "remove", base,
@@ -4077,7 +4488,7 @@ def api_sources_remove(req: SourceNamesReq,
         # 台账口径要跟着变：这些文件已不在来源目录，清单不该还列着它们
         _remember_remove(moved, s.get("username") or "hr")
     return {"moved": moved, "skipped": skipped,
-            "recycle_dir": os.path.relpath(folder, BASE),
+            "recycle_dir": _rel_or_abs(folder),
             "note": ("已移入回收目录，可随时恢复。原件区（data/archive）只增不改，"
                      "已入库的附件下载不受影响。"
                      if moved else "没有任何文件被移动。")}
@@ -4122,7 +4533,7 @@ def api_sources_removed(x_tp_token: str | None = Header(default=None, alias="X-T
         last = db.get_setting(conn, "last_remove")
     finally:
         conn.close()
-    return {"count": len(items), "items": items, "recycle_dir": os.path.relpath(REMOVED_DIR, BASE),
+    return {"count": len(items), "items": items, "recycle_dir": _rel_or_abs(REMOVED_DIR),
             "last_remove": last,
             "note": "这里是「删除」的来源简历。恢复到来源文件夹后即可重新导入；"
                     "若来源文件夹已有同名文件，需先处理同名冲突（系统不覆盖）。"}
@@ -4297,6 +4708,9 @@ def api_search_status(x_tp_token: str | None = Header(default=None, alias="X-TP-
 class ChatReq(BaseModel):
     message: str
     history: list[dict] | None = None
+    # v4.0.17：一条会话的稳定 id。前端“新对话”生成，后续每轮都带同一个值；
+    # 不传时仍按旧行为每次生成随机 id（兼容脚本/旧客户端）。
+    session_id: str | None = None
 
 
 class FocusReq(BaseModel):
@@ -4313,9 +4727,78 @@ def api_agent_chat(req: ChatReq, x_tp_token: str | None = Header(default=None, a
         ctx = _ctx(s, conn)
     finally:
         conn.close()
+    if req.session_id:
+        _cid = re.sub(r"[^A-Za-z0-9_-]", "", str(req.session_id))[:64]
+        if _cid:
+            ctx.session_id = _cid
     out = run_agent(req.message, ctx, req.history)
     out["session"] = {"role": s["role"], "mode": s.get("mode")}
     return out
+
+
+def _sse_pack(ev: dict) -> str:
+    return "data: " + json.dumps(ev, ensure_ascii=False, default=str) + "\n\n"
+
+
+@app.post("/api/agent/chat/stream")
+def api_agent_chat_stream(req: ChatReq,
+                          x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                          x_tp_role: str | None = Header(default=None, alias="X-TP-Role")):
+    """流式版助手：思考与答复逐块推送（SSE）。
+
+    与 `/api/agent/chat` 共用同一个 `run_agent`，只是多传一个 `emit` 回调。
+    模型端点不支持流式时，`llm.chat_stream` / `_turn` 会自动退回非流式，
+    这里仍然只发一个 done —— 旧模型/旧代理不会因此不可用。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    conn = db.connect(DB_PATH)
+    try:
+        ctx = _ctx(s, conn)
+    finally:
+        conn.close()
+    if req.session_id:
+        _cid = re.sub(r"[^A-Za-z0-9_-]", "", str(req.session_id))[:64]
+        if _cid:
+            ctx.session_id = _cid
+    q: queue.Queue = queue.Queue()
+    cancel = threading.Event()
+
+    def _emit(ev: dict) -> None:
+        q.put(ev)
+
+    def _work() -> None:
+        try:
+            out = run_agent(req.message, ctx, req.history, emit=_emit,
+                            should_stop=cancel.is_set)
+            out["session"] = {"role": s["role"], "mode": s.get("mode")}
+            q.put({"type": "done", **out})
+        except Exception as exc:                              # noqa: BLE001
+            q.put({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+
+    threading.Thread(target=_work, name="agent-stream", daemon=True).start()
+
+    def _gen():
+        try:
+            while True:
+                try:
+                    ev = q.get(timeout=15)
+                except queue.Empty:
+                    # 模型思考久时保持连接，避免代理/浏览器把空闲连接掐掉
+                    yield ": ping\n\n"
+                    continue
+                yield _sse_pack(ev)
+                if ev.get("type") in ("done", "error"):
+                    break
+        finally:
+            # 浏览器断开 / 用户点停止：告诉仍在跑的那一轮不要再开新工具
+            cancel.set()
+
+    return StreamingResponse(_gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    })
 
 
 @app.get("/api/agent/tools")
@@ -4326,19 +4809,87 @@ def api_agent_tools(x_tp_token: str | None = Header(default=None, alias="X-TP-To
 
 
 @app.get("/api/agent/history")
-def api_agent_history(limit: int = 300,
+def api_agent_history(limit: int = 300, conversation_id: str | None = None,
                       x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    """对话历史（v1.6）：刷新页面、换设备、重启服务后仍能看到。
+    """对话历史（v1.6 / v4.0.17）。
 
-    内容来自 `agent_runs`（本来就已经落库），不是新存的一份——过去看不到只是因为
-    前端把对话放在内存数组里，一刷新就空。**没点清空就不该丢**是这里的口径。
+    - 带 `conversation_id`：只回这一条会话，且**必须属于当前账号**；
+    - 不带：保持旧的全局口径（兼容旧客户端），但同样按账号过滤。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "read")
+    require(s, "chat")
     conn = db.connect(DB_PATH)
     try:
-        return db.chat_history(conn, limit=limit)
+        if conversation_id and not db.get_conversation(
+                conn, conversation_id, s.get("username", "HR")):
+            raise HTTPException(status_code=404, detail="未找到该会话")
+        return db.chat_history(conn, limit=limit, conversation_id=conversation_id,
+                               operator=s.get("username", "HR"))
+    finally:
+        conn.close()
+
+
+@app.get("/api/agent/trace")
+def api_agent_trace(session_id: str,
+                    x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                    x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """v4.0.17：当前会话的实时调用轨迹（进程内，供右侧面板轮询）。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    out = live_trace(session_id, s.get("username", "HR"))
+    if not out:
+        return {"status": "none", "mode": None, "rounds": 0, "trace": []}
+    return out
+
+
+@app.get("/api/agent/conversations")
+def api_agent_conversations(limit: int = 80,
+                            x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                            x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """当前账号的会话列表（Claude 式左侧历史）。**只返回本人**。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    conn = db.connect(DB_PATH)
+    try:
+        items = db.list_conversations(conn, s.get("username", "HR"), limit=limit)
+        return {"count": len(items), "items": items}
+    finally:
+        conn.close()
+
+
+@app.patch("/api/agent/conversations/{cid}")
+def api_agent_conversation_rename(cid: str, req: dict = Body(...),
+                                  x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    conn = db.connect(DB_PATH)
+    try:
+        out = db.rename_conversation(
+            conn, cid, s.get("username", "HR"), req.get("title") or "",
+            actor=s.get("username", "HR"), role=s["role"])
+        if not out:
+            raise HTTPException(status_code=404, detail="未找到该会话")
+        return {"ok": True, "conversation": out}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/agent/conversations/{cid}")
+def api_agent_conversation_delete(cid: str,
+                                  x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    conn = db.connect(DB_PATH)
+    try:
+        ok = db.archive_conversation(
+            conn, cid, s.get("username", "HR"),
+            actor=s.get("username", "HR"), role=s["role"])
+        if not ok:
+            raise HTTPException(status_code=404, detail="未找到该会话")
+        return {"ok": True, "note": "会话已从列表删除（运行记录保留给成本与审计）"}
     finally:
         conn.close()
 
@@ -4359,7 +4910,11 @@ def api_agent_clear(x_tp_token: str | None = Header(default=None, alias="X-TP-To
     与档案"归档满 30 天才彻底删除"、来源文件"移入回收目录"完全同一套规则。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    # 旧的“全局清空”只留给管理员/本机模式；普通账号用会话列表逐条删除。
+    if s.get("mode") != "local":
+        require(s, "manage_users")
+    else:
+        require(s, "chat")
     conn = db.connect(DB_PATH)
     try:
         out = db.clear_chat(conn, operator=s.get("username", "HR"), role=s["role"])
@@ -4381,7 +4936,10 @@ def api_agent_restore(x_tp_token: str | None = Header(default=None, alias="X-TP-
     ——"系统还没删的，人能捞回"。真的删掉之后清空点被复位，恢复会返回 `ok=False`。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    if s.get("mode") != "local":
+        require(s, "manage_users")
+    else:
+        require(s, "chat")
     conn = db.connect(DB_PATH)
     try:
         out = db.restore_chat(conn, operator=s.get("username", "HR"), role=s["role"])
@@ -4420,11 +4978,94 @@ def api_agent_runs(limit: int = 30, x_tp_token: str | None = Header(default=None
     require(s, "read")
     conn = db.connect(DB_PATH)
     try:
-        return {"count": db.agent_cost_summary(conn)["runs"],
-                "cost": db.agent_cost_summary(conn),
-                "runs": db.list_agent_runs(conn, limit=limit)}
+        runs = db.list_agent_runs(conn, limit=limit,
+                                  operator=s.get("username", "HR"))
+        out = {"count": len(runs), "runs": runs}
+        # 全局 token 成本只给管理员/本机模式；普通账号只看自己的运行
+        if s.get("mode") == "local" or auth.can(s["role"], "manage_users"):
+            out["cost"] = db.agent_cost_summary(conn)
+        return out
     finally:
         conn.close()
+
+
+@app.get("/api/agent/context")
+def api_agent_context(session_id: str | None = None,
+                      x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                      x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """当前会话的上下文用量基线（不提问也能看到）。
+
+    真实一轮回答会返回**精确到本轮路由工具/SOP**的估算；这个接口用于
+    打开旧会话或空白页时，先按默认工具集 + 历史消息 + 记忆给一个基线。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    operator = s.get("username", "HR")
+    hist = {"messages": []}
+    memory = ""
+    if session_id:
+        conn = db.connect(DB_PATH)
+        try:
+            hist = db.chat_history(conn, conversation_id=session_id, operator=operator)
+            memory = db.conversation_memory(conn, session_id, operator)
+        finally:
+            conn.close()
+    msgs = [m for m in (hist.get("messages") or [])
+            if m.get("role") in ("user", "assistant")][-8:]
+    text = "\n".join(str(m.get("content") or "") for m in msgs)
+    specs, _ = route_tools("", None)
+    cfg = llm.load_cfg()
+    _params = {
+        "temperature": cfg.get("temperature", 0),
+        "max_tool_rounds": cfg.get("max_tool_rounds", 5),
+        "tool_mode": cfg.get("tool_mode") or "auto",
+    }
+    if cfg.get("max_tokens") is not None:
+        _params["max_tokens"] = cfg.get("max_tokens")
+    _win, _win_source = llm.model_context_window(cfg)
+    _model_params = llm.model_parameter_count(cfg)
+    if not _win:
+        try:
+            _win = int(cfg.get("context_window") or 1_000_000)
+            _win_source = "config" if cfg.get("context_window") else "default"
+        except (TypeError, ValueError):
+            _win, _win_source = 1_000_000, "default"
+    return build_context_estimate(
+        window=_win, messages_text=text, allowed_specs=specs, memory=memory,
+        model=str(cfg.get("model") or ""), params=_params,
+        window_source=_win_source, model_params=_model_params)
+
+
+@app.get("/api/agent/metrics")
+def api_agent_metrics(days: int = 7,
+                      x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                      x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """助手运行指标（近 N 天）：请求数、成功率、延迟分位、token、估算成本。
+
+    成本单价是**可选配置**：`config/model.json` 里加
+    `price_in_per_1k` / `price_out_per_1k`（单位：元/千 token）才会算；
+    没配就如实返回 `cost=None`，不编一个假金额。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    conn = db.connect(DB_PATH)
+    try:
+        out = db.agent_metrics(conn, days=days)
+    finally:
+        conn.close()
+    cfg = llm.load_cfg()
+    pi, po = cfg.get("price_in_per_1k"), cfg.get("price_out_per_1k")
+    if pi is not None and po is not None:
+        try:
+            out["cost"] = round(out["tokens_in"] / 1000.0 * float(pi) +
+                                out["tokens_out"] / 1000.0 * float(po), 4)
+            out["currency"] = cfg.get("currency") or "¥"
+        except (TypeError, ValueError):
+            out["cost"] = None
+    else:
+        out["cost"] = None
+        out["cost_note"] = "未配置单价"
+    return out
 
 
 @app.get("/api/agent/status")
@@ -4552,7 +5193,11 @@ def api_decide(pid: int, req: DecideReq, x_tp_token: str | None = Header(default
                x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     s = _session(x_tp_token, x_tp_role)
     require(s, "confirm")
-    r = actions.apply_proposal(DB_PATH, pid, req.decision, s["username"], s["role"])
+    try:
+        r = actions.apply_proposal(DB_PATH, pid, req.decision, s["username"], s["role"])
+    except ValueError as exc:
+        # 必填字段缺失等业务校验：如实 400，不能变成 HTML 500。
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not r.get("ok"):
         raise HTTPException(status_code=400, detail=r.get("error"))
     return r
@@ -4563,7 +5208,12 @@ def api_audit(entity: str | None = None, entity_id: str | None = None, limit: in
               x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
               x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     s = _session(x_tp_token, x_tp_role)
-    require(s, "read")
+    # v4.0.17：审计记录只对系统管理员开放；HR/只读角色不看。
+    # 本机模式（未开登录）只有一个操作者，视为管理员；登录模式严格按角色。
+    if s.get("mode") != "local":
+        require(s, "manage_users")
+    else:
+        require(s, "read")
     conn = db.connect(DB_PATH)
     try:
         items = db.list_audit(conn, entity=entity, entity_id=entity_id, limit=limit)
@@ -4712,6 +5362,7 @@ class ModelCfgReq(BaseModel):
     base_url: str | None = None
     model: str | None = None
     api_key: str | None = None
+    enabled: bool | None = None      # 启用/关闭模型（None = 不改）
 
 
 @app.get("/api/model-config")
@@ -4736,6 +5387,7 @@ def api_model_config_get(x_tp_token: str | None = Header(default=None, alias="X-
         src = "config/model.json" if key else "未配置"
     env_set = [k for k in ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY") if os.environ.get(k)]
     return {"base_url": c.get("base_url") or "", "model": c.get("model") or "",
+            "enabled": bool(c.get("enabled", True)),
             "key_masked": llm.mask_key(key), "key_set": bool(key),
             "key_source": src, "env_override": env_set,
             "note": "API Key 只显示掩码；保存写 config/secrets.json（0600，不入库不提交），"
@@ -4755,13 +5407,16 @@ def api_model_config_set(req: ModelCfgReq,
     require(s, "settings")
     if req.base_url is not None and req.base_url.strip() and not req.base_url.strip().startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="模型地址要以 http:// 或 https:// 开头")
-    r = llm.save_cfg(base_url=req.base_url, model=req.model, api_key=req.api_key)
+    r = llm.save_cfg(base_url=req.base_url, model=req.model,
+                     api_key=req.api_key, enabled=req.enabled)
     if not r["changed"]:
         return {"ok": True, "changed": [], "note": "没有需要保存的修改（API Key 留空 = 不修改）。"}
     conn = db.connect(DB_PATH)
     try:
         # 审计只记字段名：base_url/model 属配置可记，api_key 只记"已更新"
-        fields = "、".join(("api_key（值不记录）" if f == "api_key" else f) for f in r["changed"])
+        _label = {"enabled": "模型启用状态"}
+        fields = "、".join(("api_key（值不记录）" if f == "api_key"
+                            else _label.get(f, f)) for f in r["changed"])
         db.add_audit(conn, "settings", "model-config", "update",
                      "", f"更新模型配置：{fields}", s["username"], s["role"])
     finally:
@@ -5251,6 +5906,367 @@ def api_job_activate(jid: int, x_tp_token: str | None = Header(default=None, ali
         if not r:
             raise HTTPException(status_code=404, detail="未找到该岗位")
         return {"ok": True, "job": r}
+    finally:
+        conn.close()
+
+
+# ============================================================
+# 招聘届别 / 年度计划（v4.0.16）
+# ============================================================
+
+def _recruit_year_or_404(conn, year_id: int | None):
+    y = (db.get_recruit_year(conn, year_id=year_id) if year_id
+         else db.get_default_recruit_year(conn))
+    if not y:
+        raise HTTPException(status_code=404, detail="还没有招聘届别，请先创建或导入计划")
+    return y
+
+
+@app.get("/api/recruit/meta")
+def api_recruit_meta(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                     x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        return recruit_mod.build_meta(
+            conn, can_edit=auth.can(s["role"], "edit_plan"),
+            can_export=auth.can(s["role"], "export"))
+    finally:
+        conn.close()
+
+
+@app.get("/api/recruit/progress")
+def api_recruit_progress(year_id: int | None = None, unit: str | None = None,
+                         edu: str | None = None,
+                         x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        return recruit_mod.build_progress(conn, year_id=year_id, unit=unit, edu=edu)
+    finally:
+        conn.close()
+
+
+@app.get("/api/recruit/roster")
+def api_recruit_roster(year_id: int | None = None,
+                       date_from: str | None = None, date_to: str | None = None,
+                       unit: str | None = None, edu: str | None = None,
+                       outcome: str | None = None, keyword: str | None = None,
+                       x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        return recruit_mod.build_roster(
+            conn, year_id=year_id, date_from=date_from, date_to=date_to,
+            unit=unit, edu=edu, outcome=outcome, keyword=keyword,
+            include_phone=auth.can(s["role"], "view_full_contact"))
+    finally:
+        conn.close()
+
+
+def _recruit_download(data: bytes, filename: str) -> Response:
+    name = urllib.parse.quote(filename)
+    return Response(
+        content=data,
+        media_type=("application/vnd.openxmlformats-officedocument"
+                    ".spreadsheetml.sheet"),
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{name}"})
+
+
+@app.get("/api/recruit/export")
+def api_recruit_export(year_id: int | None = None, fmt: str = "official",
+                       format: str | None = None, unit: str | None = None,
+                       edu: str | None = None,
+                       x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
+    """官方版式 / 平铺版。**导出是受控动作**：require export + 写审计。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "export")
+    conn = db.connect(DB_PATH)
+    try:
+        year = _recruit_year_or_404(conn, year_id)
+        progress = recruit_mod.build_progress(conn, year_id=year["id"], unit=unit, edu=edu)
+        mode = str(format or fmt or "official").lower()
+        label = year.get("label") or "招聘进度"
+        stamp = datetime.now().strftime("%Y%m%d-%H%M")
+        if mode == "flat":
+            data = recruit_export_mod.flat_workbook(progress)
+            filename = f"{label}招聘进度-平铺-{stamp}.xlsx"
+        else:
+            # 官方版两个 sheet 必须同一口径：Sheet1 已按 unit/edu 过滤，
+            # Sheet2 若不跟着过滤，会出现“计划只剩钛所、名单却是全院”。
+            roster = recruit_mod.build_roster(conn, year_id=year["id"],
+                                              unit=unit, edu=edu, include_phone=True)
+            data = recruit_export_mod.official_workbook(progress, roster)
+            filename = f"{label}招聘进度表-{stamp}.xlsx"
+        db.add_audit(conn, "export", f"{label}招聘进度表", "export",
+                     f"{len(progress.get('rows') or [])} 行",
+                     f"导出「{label}」招聘进度（{mode}）", s["username"], s["role"])
+        return _recruit_download(data, filename)
+    finally:
+        conn.close()
+
+
+@app.get("/api/recruit/roster/export")
+def api_recruit_roster_export(year_id: int | None = None,
+                              date_from: str | None = None, date_to: str | None = None,
+                              unit: str | None = None, edu: str | None = None,
+                              outcome: str | None = None, keyword: str | None = None,
+                              x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                              x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "export")
+    conn = db.connect(DB_PATH)
+    try:
+        year = _recruit_year_or_404(conn, year_id)
+        roster = recruit_mod.build_roster(
+            conn, year_id=year["id"], date_from=date_from, date_to=date_to,
+            unit=unit, edu=edu, outcome=outcome, keyword=keyword, include_phone=True)
+        data = recruit_export_mod.roster_workbook(roster)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M")
+        label = year.get("label") or "面试名单"
+        db.add_audit(conn, "export", f"{label}面试总名单", "export",
+                     f"{roster.get('count') or 0} 行",
+                     f"导出「{label}」面试总名单", s["username"], s["role"])
+        return _recruit_download(data, f"{label}面试总名单-{stamp}.xlsx")
+    finally:
+        conn.close()
+
+
+@app.post("/api/recruit/years")
+def api_recruit_year_create(req: dict = Body(...),
+                            x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                            x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "edit_plan")
+    conn = db.connect(DB_PATH)
+    try:
+        out = recruit_mod.create_year(
+            conn, req.get("label"), req.get("period_start"), req.get("period_end"),
+            org_label=req.get("org_label") or "院本部", note=req.get("note") or "",
+            operator=s["username"], role=s["role"])
+        if not out.get("ok"):
+            raise HTTPException(status_code=400, detail="；".join(out.get("errors") or []))
+        return out
+    finally:
+        conn.close()
+
+
+@app.patch("/api/recruit/years/{yid}")
+def api_recruit_year_update(yid: int, req: dict = Body(...),
+                            x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                            x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "edit_plan")
+    conn = db.connect(DB_PATH)
+    try:
+        out = recruit_mod.update_year(conn, yid, req or {},
+                                      operator=s["username"], role=s["role"])
+        if not out.get("ok"):
+            raise HTTPException(status_code=400, detail="；".join(out.get("errors") or []))
+        return out
+    finally:
+        conn.close()
+
+
+@app.post("/api/recruit/plans/batch")
+def api_recruit_plans_batch(req: dict = Body(...),
+                            x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                            x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "edit_plan")
+    conn = db.connect(DB_PATH)
+    try:
+        year = db.get_recruit_year(conn, year_id=int(req.get("year_id") or 0))
+        if not year:
+            raise HTTPException(status_code=404, detail="未找到该届别")
+        rows = req.get("rows") or []
+        errors = recruit_mod.validate_plan_rows(rows)
+        if errors:
+            raise HTTPException(status_code=400, detail="；".join(errors))
+        changed = db.update_recruit_plans_batch(
+            conn, year["id"], rows, operator=s["username"], role=s["role"])
+        return {"ok": True, "changed": len(changed), "rows": changed,
+                "note": "计划已保存" if changed else "没有变化"}
+    finally:
+        conn.close()
+
+
+@app.post("/api/recruit/plans")
+def api_recruit_plan_add(req: dict = Body(...),
+                         x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "edit_plan")
+    conn = db.connect(DB_PATH)
+    try:
+        year = db.get_recruit_year(conn, year_id=int(req.get("year_id") or 0))
+        if not year:
+            raise HTTPException(status_code=404, detail="未找到该届别")
+        unit_name = str(req.get("unit_name") or "").strip()
+        if not unit_name:
+            raise HTTPException(status_code=400, detail="单位名称不能为空")
+        if len(unit_name) > 40:
+            raise HTTPException(status_code=400, detail="单位名称最多 40 个字符")
+        try:
+            _sort_order = int(req.get("sort_order") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="sort_order 必须是整数")
+        levels = req.get("edu_levels") or list(recruit_mod.EDU_LEVELS)
+        levels = [x for x in levels if x in recruit_mod.EDU_LEVELS]
+        if not levels:
+            raise HTTPException(status_code=400, detail="学历必须包含至少一档")
+        added = 0
+        for i, edu in enumerate(levels):
+            out = db.save_recruit_plan(
+                conn, year_id=year["id"], unit_name=unit_name, edu_level=edu,
+                sort_order=_sort_order + i, mode="merge")
+            added += 1 if out["action"] == "inserted" else 0
+        db.add_audit(conn, "recruit_plan", str(year["id"]), "add_unit", "",
+                     f"{unit_name}：新增 {added} 行", s["username"], s["role"])
+        return {"ok": True, "added": added,
+                "plans": db.list_recruit_plans(conn, year["id"])}
+    finally:
+        conn.close()
+
+
+@app.post("/api/recruit/plans/delete-unit")
+def api_recruit_unit_delete(req: dict = Body(...),
+                            x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                            x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """删除某届一个单位的全部计划行（编辑模式里的“删除单位”）。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "edit_plan")
+    conn = db.connect(DB_PATH)
+    try:
+        year = db.get_recruit_year(conn, year_id=int(req.get("year_id") or 0))
+        if not year:
+            raise HTTPException(status_code=404, detail="未找到该届别")
+        unit_name = str(req.get("unit_name") or "").strip()
+        if not unit_name:
+            raise HTTPException(status_code=400, detail="单位名称不能为空")
+        out = db.delete_recruit_unit(
+            conn, year["id"], unit_name,
+            operator=s["username"], role=s["role"])
+        if not out.get("deleted"):
+            raise HTTPException(status_code=404, detail="未找到该单位的计划行")
+        return {"ok": True, **out,
+                "note": (f"已删除「{unit_name}」的 {out['deleted']} 行计划"
+                         + (f"；{out['signed_count']} 名已签约人员进入「单位不在计划」，"
+                            f"请重新归属" if out.get("signed_count") else ""))}
+    finally:
+        conn.close()
+
+
+@app.post("/api/recruit/import")
+async def api_recruit_import(request: Request,
+                             year_id: int | None = Query(default=None),
+                             label: str | None = Query(default=None),
+                             period_start: str | None = Query(default=None),
+                             period_end: str | None = Query(default=None),
+                             mode: str = Query(default="merge"),
+                             dry_run: int = Query(default=1),
+                             name: str | None = Query(default=None),
+                             x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                             x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """上传 xlsx：先预览（dry_run=1），确认后写库（dry_run=0）。
+
+    不用 multipart：本项目的上传入口一直是 raw body + `?name=`，
+    打包环境没有装 python-multipart。扩展名/大小/行数在这里挡，
+    真正的解析放到线程池，避免阻塞 uvicorn 事件循环。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "edit_plan")
+    if name and not str(name).lower().endswith(".xlsx"):
+        raise HTTPException(status_code=415, detail="只支持 .xlsx 文件（不收 .xls / .xlsm）")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="文件为空")
+    if len(body) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="文件超过 10 MB，请确认是不是招聘进度表")
+    parsed = await run_in_threadpool(recruit_mod.parse_plan_xlsx, body)
+    if not parsed.get("rows") and parsed.get("errors"):
+        raise HTTPException(status_code=422, detail="；".join(parsed["errors"][:8]))
+    if not parsed.get("rows"):
+        raise HTTPException(status_code=422, detail="没有解析到任何计划行（检查表头是否为「单位 / 学历 / 上会审批…」）")
+    if dry_run:
+        return {"ok": True, "dry_run": True, **parsed}
+    conn = db.connect(DB_PATH)
+    try:
+        year = (db.get_recruit_year(conn, year_id=year_id) if year_id
+                else db.get_recruit_year(conn, label=(label or "").strip()))
+        warnings = list(parsed.get("warnings") or [])
+        if not year:
+            lbl = (label or "").strip()
+            if not lbl:
+                raise HTTPException(status_code=400, detail="首次导入请填写届别名称（如 2027届）")
+            tp = parsed.get("title_period") or {}
+            ps = (period_start or tp.get("period_start")
+                  or recruit_mod.suggest_year()["period_start"])
+            pe = (period_end or tp.get("period_end")
+                  or recruit_mod.suggest_year()["period_end"])
+            out = recruit_mod.create_year(
+                conn, lbl, ps, pe, operator=s["username"], role=s["role"])
+            if not out.get("ok"):
+                raise HTTPException(status_code=400, detail="；".join(out.get("errors") or []))
+            year = out["year"]
+        tp = parsed.get("title_period") or {}
+        if tp and (tp.get("period_start") != year.get("period_start")
+                   or tp.get("period_end") != year.get("period_end")):
+            warnings.append(
+                f"文件标题的起止日期（{tp.get('period_start')} 至 {tp.get('period_end')}）"
+                f"与所选届别（{year.get('period_start')} 至 {year.get('period_end')}）不一致，"
+                f"请确认没导错届别；本次仍按所选届别写入。")
+        report = recruit_mod.apply_plan_import(
+            conn, parsed, year["id"], mode=mode,
+            operator=s["username"], role=s["role"])
+        return {"ok": True, "dry_run": False, "year": year,
+                "warnings": warnings, "errors": parsed.get("errors") or [], **report}
+    finally:
+        conn.close()
+
+
+@app.post("/api/recruit/signings/{aid}/hire-unit")
+def api_recruit_hire_unit(aid: int, req: dict = Body(...),
+                          x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                          x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """数据体检里的快速归属：给**指定投递**补录用单位/签约时间。
+
+    必须按 `aid` 而不是按候选人：一个人可能有多条投递，签约的那条不一定是
+    最新一条；按候选人改会改错行。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "edit_plan")
+    conn = db.connect(DB_PATH)
+    try:
+        if not db.get_application(conn, aid):
+            raise HTTPException(status_code=404, detail="未找到该投递")
+        patch: dict = {}
+        if "hire_unit" in req:
+            patch["hire_unit"] = str(req.get("hire_unit") or "").strip()[:40] or None
+        if "signed_at" in req:
+            v = str(req.get("signed_at") or "").strip()[:32]
+            if v and not re.fullmatch(r"\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?", v):
+                raise HTTPException(status_code=422,
+                                    detail="签约时间格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH:MM")
+            patch["signed_at"] = v.replace("T", " ") or None
+        if not patch:
+            raise HTTPException(status_code=400, detail="没有要修改的字段")
+        out = db.update_application_fields(
+            conn, aid, operator=s["username"], role=s["role"], **patch)
+        warnings = []
+        hu = str((out or {}).get("hire_unit") or "").strip()
+        if hu:
+            units = {db.recruit_unit_key(x) for x in db.list_recruit_plan_units(conn)}
+            if db.recruit_unit_key(hu) not in units:
+                warnings.append(f"录用单位「{hu}」不在任何一届计划里，进度表会把它列为"
+                                f"「单位不在计划」")
+        return {"ok": True, "application": out, "warnings": warnings}
     finally:
         conn.close()
 

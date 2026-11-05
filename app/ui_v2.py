@@ -50,49 +50,86 @@ _PAGE = r"""<!DOCTYPE html>
 <link rel="icon" type="image/png" href="__BRAND_ICON__">
 <style>
 :root{
-  /* ============ 配色：**完全沿用原版**（`ui.py` 的 :root）============
-     业务方 2026-10-20 13:42 明确：「整个系统配色使用原本的系统配色」。
-     所以这里不是"新设计"，而是把原版那套令牌**原样搬过来**，保证两个版本观感一致。
-
-     原版配色的三条由来（原注释里写得很清楚，这里照抄结论）：
-       ① 页面底是浅灰、卡片是纯白，靠**明度差**把卡片托起来；
-       ② 主色是饱和的蓝，只用在「可点 / 当前选中 / 进行中」，面积控制在 5% 以内；
-       ③ 中性色偏冷（#F5F6F7 / #DEE0E3 这一族），不用暖灰。
-     ⚠️ 色值**不照抄飞书官方**：实测飞书主蓝 #3370FF 对白只有 4.28、弱文字 #8F959E 只有 3.02、
-        绿 #34C724 只有 2.25 —— 小字遍地的高密度工具必须守住 4.5。原版已经把每个值算过了。 */
-  --ground:#f5f6f7;          /* 原版 paper：页面底 */
-  --surface:#ffffff;         /* 卡片/面板 */
-  --surface-2:#f2f3f5;       /* 次级面（hover、表头） */
-  --nav:#e9ebee;             /* 侧栏：比页面底明显更深，与内容区分开 */
-  --ink:#1f2329;             /* 主文字（对白 15.78） */
-  --ink-2:#51565d;           /* 次要文字（对白 7.40） */
-  --ink-3:#646a73;           /* 弱化文字（对白 5.45） */
-  --line:#dee0e3;            /* 分隔线 */
-  --line-2:#c9cdd4;          /* 强分隔线 */
-  --accent:#3370ff;          /* 主蓝：边框、选中线、图标（只做图形） */
-  --accent-ink:#1d5fd6;      /* 深蓝：所有文字形态（对白 5.74） */
-  --accent-soft:#f0f5ff;     /* 浅蓝底：按钮底、选中底 */
+  /* 原始配色（v4.0 及更早）：冷灰画布 + 纯白内容区 + 蓝色功能色。
+     布局与组件形状保持 v4.1，仅颜色回到原版。 */
+  color-scheme:light;
+  --ground:#f5f6f7;
+  --surface:#ffffff;
+  --surface-2:#f2f3f5;
+  --nav:#e9ebee;
+  --ink:#1f2329;
+  --ink-2:#51565d;
+  --ink-3:#646a73;
+  --line:#dee0e3;
+  --line-2:#c9cdd4;
+  --accent:#3370ff;
+  --accent-ink:#1d5fd6;
+  --accent-soft:#f0f5ff;
   --accent-line:#ccdcff;
-  --accent-hi:#e1ecff;       /* hover 底 */
-  /* 状态色（-soft 底 / -line 描边 / 本身作文字，全部满足 4.5） */
-  --ok:#1f7a3d;   --ok-soft:#e8f5eb;   --ok-line:#b8dfc4;
+  --accent-hi:#e1ecff;
+  /* 导航 / 列表“选中”统一用这一套（聊天页也不跟着内容变色） */
+  --sel:#f0f5ff; --sel-ink:#1d5fd6; --sel-line:#ccdcff;
+  --row-alt:#F7F9FB; --row-unit:#EEF2F6;
+  /* 非聊天页的“暖色”强调位沿用主蓝；智能助手页会单独覆盖成 Claude 暖色。 */
+  --warm:#3370ff; --warm-soft:#f0f5ff; --warm-line:#ccdcff;
+  --plum:#7b61ff; --plum-soft:#f3efff;
+  --ok:#1f7a3d;   --ok-soft:#e8f5eb;   --ok-line:#b8dfc4;   --ok-hi:#ddeee2;
   --warn:#a85b00; --warn-soft:#fff3e0; --warn-line:#f5d5a8;
   --bad:#c93a2e;  --bad-soft:#ffefee;  --bad-line:#f5cfcb;
-  /* 档位色：与状态色**分开一套**（B 档不用主蓝，主蓝对白 4.28 不够） */
   --tier-b:#146b9e; --tier-b-soft:#e8f1f8;
-  --r:8px; --r-s:6px;
+  --r:10px; --r-s:7px;
+  --shadow:0 8px 24px rgba(31,35,41,.07);
+}
+/* Manual dark theme (set on <html> by the account menu) */
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --ground:#17181b; --surface:#1f2024; --surface-2:#282a2f; --nav:#1a1b1f;
+  --ink:#f2f3f5; --ink-2:#b5b9c2; --ink-3:#8a8f99;
+  --line:#35373d; --line-2:#4a4d55;
+  --accent:#7aa2ff; --accent-ink:#a8c4ff; --accent-soft:#232c3f;
+  --accent-line:#3a4a6b; --accent-hi:#2c3a55;
+  --sel:#232c3f; --sel-ink:#a8c4ff; --sel-line:#3a4a6b;
+  --row-alt:#26282C; --row-unit:#2D3035;
+  --warm:#7aa2ff; --warm-soft:#232c3f; --warm-line:#3a4a6b;
+  --plum:#b8a4ff; --plum-soft:#332c4a;
+  --ok:#7fd39a; --ok-soft:#24362b; --ok-line:#3b5a45; --ok-hi:#2d4435;
+  --warn:#e0b174; --warn-soft:#3a3225; --warn-line:#5a4a33;
+  --bad:#e58f86; --bad-soft:#3b2c29; --bad-line:#5a3e39;
+  --tier-b:#8fb8d8; --tier-b-soft:#28343c;
+  --shadow:0 8px 24px rgba(0,0,0,.22);
+}
+/* OS dark mode, unless the user explicitly chose light in the account menu. */
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --ground:#17181b; --surface:#1f2024; --surface-2:#282a2f; --nav:#1a1b1f;
+    --ink:#f2f3f5; --ink-2:#b5b9c2; --ink-3:#8a8f99;
+    --line:#35373d; --line-2:#4a4d55;
+    --accent:#7aa2ff; --accent-ink:#a8c4ff; --accent-soft:#232c3f;
+    --accent-line:#3a4a6b; --accent-hi:#2c3a55;
+    --sel:#232c3f; --sel-ink:#a8c4ff; --sel-line:#3a4a6b;
+    --row-alt:#26282C; --row-unit:#2D3035;
+    --warm:#7aa2ff; --warm-soft:#232c3f; --warm-line:#3a4a6b;
+    --plum:#b8a4ff; --plum-soft:#332c4a;
+    --ok:#7fd39a; --ok-soft:#24362b; --ok-line:#3b5a45; --ok-hi:#2d4435;
+    --warn:#e0b174; --warn-soft:#3a3225; --warn-line:#5a4a33;
+    --bad:#e58f86; --bad-soft:#3b2c29; --bad-line:#5a3e39;
+    --tier-b:#8fb8d8; --tier-b-soft:#28343c;
+    --shadow:0 8px 24px rgba(0,0,0,.22);
+  }
 }
 *{box-sizing:border-box}
 html,body{height:100%}
 body{
   margin:0; background:var(--ground); color:var(--ink);
-  font:15px/1.58 "PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
-  -webkit-font-smoothing:antialiased;
-  display:grid;grid-template-columns:196px 1fr;height:100vh;overflow:hidden;
+  font:14px/1.62 Inter,"HarmonyOS Sans SC","Source Han Sans SC","Noto Sans CJK SC",
+       "PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+  display:grid;grid-template-columns:232px 1fr;height:100vh;overflow:hidden;
 }
-button,input,select{font:inherit;color:inherit}
+button,input,select,textarea{font:inherit;color:inherit}
 button{cursor:pointer}
-.num{font-variant-numeric:tabular-nums}
+.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
 
 /* ---------------- 顶栏 ---------------- */
 .top{
@@ -182,11 +219,11 @@ button{cursor:pointer}
    而 CSS 规定：只要有一个轴不是 visible，另一个轴就会被算成 auto —— 于是浮层
    被工具栏那 44px 的高度整个裁掉，点开「批量维护」只看得到一条边（v3.1.16 修）。
    改成 fixed 后跳出裁切，位置由 `placeBatchPanel()` 按按钮的实时坐标算。 */
-#batchPanel{flex-direction:column;flex-wrap:nowrap;gap:2px;padding:5px;min-width:170px;
+#batchPanel,#batchOpsPanel{flex-direction:column;flex-wrap:nowrap;gap:2px;padding:5px;min-width:170px;
   max-width:none;position:fixed;top:0;left:0}
-#batchPanel .btn{width:100%;text-align:left;border-color:transparent;background:transparent;
+#batchPanel .btn,#batchOpsPanel .btn{width:100%;text-align:left;border-color:transparent;background:transparent;
   padding:8px 10px;font-size:13.5px}
-#batchPanel .btn:hover{background:var(--accent-soft);border-color:transparent;
+#batchPanel .btn:hover,#batchOpsPanel .btn:hover{background:var(--accent-soft);border-color:transparent;
   color:var(--accent-ink)}
 /* 面板里所有筛选框**同宽同字号**（业务方 2026-10-21：四楞八样的宽度和字号看着乱）。
    `.sel` 原来由文字长度决定宽度，勾选式下拉又自带 min/max-width —— 统一成一把尺子。 */
@@ -290,6 +327,10 @@ button{cursor:pointer}
 .msg pre code{background:none;padding:0}
 /* 管道表格：模型做"全员对比"时几乎一定输出表格，没有它整块以原始 `|` 文本怼在页面上 */
 .mdtable-wrap{margin:8px 0;overflow-x:auto}
+.mdtable-bar{display:flex;gap:6px;justify-content:flex-end;margin-bottom:4px}
+.mdt-btn{border:1px solid var(--line);background:var(--surface);color:var(--ink-3);
+  border-radius:5px;padding:2px 8px;font-size:11.5px;cursor:pointer}
+.mdt-btn:hover{color:var(--ink);border-color:var(--line-2);background:var(--surface-2)}
 .mdtable{border-collapse:collapse;font-size:13px;min-width:100%}
 .mdtable th,.mdtable td{border:1px solid var(--line);padding:5px 9px;text-align:left;
   vertical-align:top}
@@ -302,8 +343,9 @@ button{cursor:pointer}
 .chatinput textarea{
   width:100%;min-height:calc(3 * 1.72em);max-height:calc(10 * 1.72em);
   padding:14px 92px 16px 11px;border:1px solid var(--line-2);
-  border-radius:var(--r-s);font:inherit;resize:none;outline:none;overflow-y:hidden;
-  line-height:1.72;transition:padding-right .15s ease,border-color .15s ease;
+  border-radius:var(--r-s);font:inherit;font-size:15px;resize:none;outline:none;
+  overflow-y:hidden;line-height:1.72;
+  transition:padding-right .15s ease,border-color .15s ease;
 }
 .chatinput #detail textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 /* 发送/停止键：业务方 2026-10-21 要求"变大一点"。
@@ -323,16 +365,86 @@ button{cursor:pointer}
 #chatStop:hover{background:var(--bad-soft);filter:brightness(.97)}
 #chatSend.busy{opacity:.5;pointer-events:none}
 .chatside{border-left:1px solid var(--line);background:var(--surface);padding:16px 18px;overflow-y:auto}
+.metricpanel{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--ink-2)}
+.metric-row{display:flex;justify-content:space-between;gap:8px;padding:6px 9px;
+  background:var(--surface-2);border-radius:6px}
+.metric-k{color:var(--ink-3);flex:none;font-size:12.5px}
+.metric-v{font-variant-numeric:tabular-nums;text-align:right;min-width:0;font-size:13px}
+.ctxpanel{font-size:13px;color:var(--ink-2)}
+.ctxmodel{font-size:14px;color:var(--ink-3);line-height:1.55;margin-bottom:6px;
+  word-break:break-word}
+.ctxmodel b{color:var(--ink);font-weight:700;font-size:15px}
+.ctxhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px}
+.ctxhead b{font-size:15px;color:var(--ink)}
+.ctxhead span{color:var(--ink-3);font-size:12.5px}
+.ctxbar{display:flex;height:8px;border-radius:5px;overflow:hidden;
+  background:var(--surface-2);margin:0 0 8px}
+.ctxseg{height:100%;min-width:0}
+.ctxrow{display:flex;align-items:center;gap:7px;padding:3px 0;font-size:12.5px}
+.ctxdot{width:8px;height:8px;border-radius:2px;flex:none}
+.ctxname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ctxnum{font-variant-numeric:tabular-nums;color:var(--ink-3);font-size:12.5px;flex:none}
+.outpanel{display:flex;flex-direction:column;gap:4px;font-size:13px}
+.outitem{display:flex;align-items:center;gap:7px;padding:6px 8px;
+  border:1px solid var(--line);border-radius:6px;background:var(--surface-2);
+  cursor:pointer;color:var(--ink-2);text-align:left;width:100%;font:inherit;
+  font-size:12.5px}
+.outitem:hover{border-color:var(--line-2);color:var(--ink)}
+.outicon{width:17px;text-align:center;flex:none;color:var(--accent-ink)}
+.outname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.outtag{font-size:11px;color:var(--ink-3);flex:none}
+/* v4.0.17：右侧实时调用轨迹 */
+.tracepanel{display:flex;flex-direction:column}
+.tp-step{position:relative;padding:0 0 16px 22px}
+.tp-step:before{content:"";position:absolute;left:5px;top:14px;bottom:0;width:1px;background:var(--line)}
+.tp-step:last-child:before{display:none}
+.tp-dot{position:absolute;left:0;top:3px;width:11px;height:11px;border-radius:50%;
+  background:var(--accent);border:2px solid var(--surface);box-sizing:content-box}
+.tp-dot.m{background:var(--plum)}
+.tp-dot.t{background:var(--accent)}
+.tp-dot.a{background:var(--ok)}
+.tp-title{font-size:13px;font-weight:600;color:var(--ink)}
+.tp-meta{font-size:11.5px;color:var(--ink-3);margin-top:2px;line-height:1.5;word-break:break-all}
+.tp-badge{display:inline-block;margin:4px 6px 0 0;padding:1px 6px;border-radius:4px;
+  font-size:10.5px;background:var(--warn-soft);color:var(--warn)}
+.tp-badge.disabled{background:var(--bad-soft);color:var(--bad)}
+.tp-running .tp-dot{animation:tpPulse 1s infinite}
+.trace-empty{font-size:12.5px;color:var(--ink-3);line-height:1.7;padding:8px 0}
+@keyframes tpPulse{0%,100%{opacity:1}50%{opacity:.35}}
 .asks{display:flex;flex-direction:column;gap:6px;align-items:flex-start}
 .askhead{display:flex;align-items:center;gap:8px}
 .askhead .btn{margin-left:auto}
 .ask{border:1px solid var(--line-2);background:var(--surface);border-radius:14px;
   padding:4px 11px;font-size:13px;color:var(--ink-2);text-align:left}
 .ask:hover{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-soft)}
+.src-line{margin-top:6px;font-size:11.5px;color:var(--ink-3);line-height:1.6}
+.msg-actions{margin-top:6px;display:flex;gap:6px}
 .tracebox{margin-top:8px;font-size:13px}
 .tracebox summary{cursor:pointer;color:var(--ink-3)}
 .trace{margin-top:4px;padding:6px 9px;background:var(--surface-2);border-radius:5px;
   color:var(--ink-2);line-height:1.7}
+/* 思考过程：生成中展开显示，答复落地后自动收成一个可点开的折叠块 */
+.thinkbox{margin:0 0 10px;border:1px solid var(--line);border-radius:8px;
+  background:var(--surface-2);overflow:hidden}
+.thinkbox>summary{display:flex;align-items:center;gap:7px;padding:6px 10px;
+  cursor:pointer;font-size:12.5px;color:var(--ink-3);user-select:none;list-style:none}
+.thinkbox>summary::-webkit-details-marker{display:none}
+.thinkbox>summary::before{content:'▸';font-size:10px;transition:transform .15s}
+.thinkbox[open]>summary::before{transform:rotate(90deg)}
+.thinkbox .think-meta{margin-left:auto;font-size:11.5px;color:var(--ink-3)}
+.think-body{padding:0 11px 9px;font-size:12.5px;line-height:1.72;color:var(--ink-2);
+  word-break:break-word;max-height:150px;overflow:auto}
+.think-live{margin:0 0 8px;padding:8px 10px;border:1px dashed var(--accent-line);
+  border-radius:8px;background:var(--accent-soft)}
+.think-live-h{font-size:12px;color:var(--accent-ink);margin-bottom:4px}
+/* 流式阶段先按纯文本追加（逐字可见），完成后再用 mdLite 渲染成排版 */
+.think-live .think-body{white-space:pre-wrap}
+.stream-answer{min-height:8px}
+/* Mermaid 图表：饼图 / 折线图 / 柱状图，直接内联 SVG，不依赖外部库 */
+.mchart{margin:10px 0;padding:8px;border:1px solid var(--line);border-radius:8px;
+  background:var(--surface);overflow-x:auto}
+.mchart-bar{display:flex;justify-content:flex-end;margin-bottom:2px}
+.mchart svg{display:block;width:100%;height:auto;max-width:620px;margin:0 auto}
 .dcard{margin-top:9px;padding:10px 12px;border:1px solid var(--accent-line);
   border-radius:var(--r-s);background:var(--accent-soft)}
 .dcard.prop{border-color:var(--warn-line);background:var(--warn-soft)}
@@ -350,7 +462,11 @@ button{cursor:pointer}
 .plink{color:var(--accent-ink);text-decoration:none;border-bottom:1px dashed var(--accent-line);
   cursor:pointer}
 .plink:hover{color:var(--accent);border-bottom-style:solid}
-.proprow-a{margin-top:6px;display:flex;gap:6px}
+.proprow-a{margin-top:6px;display:flex;gap:6px;align-items:center}
+/* 提案的前后值：让 HR 在卡片上核对完再点，不用跳档案盲签 */
+.proprow-c{font-size:12.5px;color:var(--ink-2);margin-top:4px;line-height:1.55}
+.proprow-c b{color:var(--ink-3);font-weight:500;margin:0 2px}
+.proprow-st{font-size:12.5px;color:var(--ink-3)}
 .stg{font-size:12px;line-height:1;padding:2px 7px;border-radius:4px;margin-left:7px;
   font-weight:600;white-space:nowrap;display:inline-block;vertical-align:1px}
 .ochip{font-size:13px;line-height:1;padding:3px 9px;border-radius:5px;margin-left:6px;
@@ -489,13 +605,27 @@ button{cursor:pointer}
 .dimbtn.on{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent-ink);font-weight:600}
 /* 概览第一行：环 + 库存并排 */
 .ovrow{display:grid;grid-template-columns:minmax(300px,.9fr) minmax(400px,1.1fr);
-  gap:22px;align-items:start}
+  gap:22px;align-items:stretch}
 .ovcol{min-width:0;background:var(--surface);border:1px solid var(--line);
-  border-radius:8px;padding:14px 16px}
+  border-radius:8px;padding:14px 16px;display:flex;flex-direction:column}
 .ovcol > h3{margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line);
-  font-size:15px;font-weight:650;color:var(--ink)}
+  font-size:15px;font-weight:650;color:var(--ink);flex:none}
+.ov-todos{flex:1 1 auto;min-height:0}
 .ov-progress .anaring{display:flex;justify-content:center}
 .ov-progress .anaringtip{text-align:center;max-width:420px;margin:10px auto 0}
+/* v4.0.17：投递进度下方补“岗位投递人数”横向柱，填掉原来那块空白 */
+.ov-jobs{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.ov-jobs h3{font-size:14px;margin:0 0 4px;color:var(--ink)}
+.ov-jobs .ov-jobs-note{font-size:12px;color:var(--ink-3);margin:0 0 10px}
+.ovjob-list{max-height:300px;overflow:auto;padding-right:4px}
+.ovjob{margin-bottom:10px}
+.ovjob-head{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;
+  color:var(--ink-2);margin-bottom:5px}
+.ovjob-head span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ovjob-head b{font-variant-numeric:tabular-nums;color:var(--ink);flex:none}
+.ovjob-track{height:9px;background:var(--surface-2);border-radius:999px;overflow:hidden}
+.ovjob-track i{display:block;height:100%;border-radius:999px;min-width:2px;
+  background:linear-gradient(90deg,var(--accent),#6f9bff)}
 .ovcol .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
 .ovgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 26px;
   align-items:start;grid-auto-flow:row dense}
@@ -579,8 +709,9 @@ body.v-org  .top,body.v-org  .top2,body.v-org  .tabbar,body.v-org  .pipe,body.v-
 body.v-archive .top,body.v-archive .top2,body.v-archive .tabbar,body.v-archive .pipe,body.v-archive .wrap,
 body.v-sys  .top,body.v-sys  .top2,body.v-sys  .tabbar,body.v-sys  .pipe,body.v-sys  .wrap,
 body.v-users .top,body.v-users .top2,body.v-users .tabbar,body.v-users .pipe,body.v-users .wrap,
-body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-chat .wrap{display:none!important}
-#mailView,#orgView,#archView,#sysView,#usersView,#chatView{display:none;flex:1;min-height:0;overflow:hidden}
+body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-chat .wrap,
+body.v-recruit .top,body.v-recruit .top2,body.v-recruit .tabbar,body.v-recruit .pipe,body.v-recruit .wrap{display:none!important}
+#mailView,#orgView,#archView,#sysView,#usersView,#chatView,#recruitView{display:none;flex:1;min-height:0;overflow:hidden}
 #usersView.on{display:block;overflow-y:auto}
 /* 写邮件：左侧准备材料，右侧专心编辑正文。去掉收件人预览后，编辑区获得主要宽度。 */
 #mailView.on{display:grid;grid-template-columns:minmax(360px,.82fr) minmax(560px,1.18fr)}
@@ -595,7 +726,51 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
 #archView.on{display:grid;grid-template-columns:392px 1fr;grid-template-rows:auto 1fr}
 #sysView.on{display:block;overflow-y:auto;padding:18px 24px 40px}
 #sysView > *{max-width:820px}
-#chatView.on{display:grid;grid-template-columns:1fr 392px}
+/* 招聘进度：整页滚动，表格自己横向滚动 + 表头 sticky。
+   和系统配置页不同，这里内容很宽（单位×学历×签约人），不能限制 820px。 */
+#recruitView.on{display:block;overflow-y:auto;padding:18px 24px 40px}
+#chatView.on{display:grid;grid-template-columns:250px minmax(0,1fr) 320px}
+/* v4.0.17：Claude 式会话栏 */
+.chatconv{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line);
+  background:var(--surface)}
+.chatconv-head{padding:16px 14px 10px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.chatconv-head h3{font-size:14px;margin:0}
+.chatconv-list{flex:1;overflow-y:auto;padding:0 8px 14px;min-height:0}
+.chatconv-item{position:relative;padding:10px 30px 10px 10px;border-radius:6px;cursor:pointer;margin-bottom:3px}
+.chatconv-item:hover{background:var(--surface-2)}
+.chatconv-item.on{background:var(--accent-soft)}
+.cc-title{font-size:13.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cc-meta{font-size:11.5px;color:var(--ink-3);margin-top:2px}
+.cc-del{position:absolute;right:4px;top:50%;transform:translateY(-50%);border:0;background:transparent;
+  color:var(--ink-3);font-size:16px;line-height:1;padding:3px 6px;border-radius:4px;opacity:0}
+.cc-ren{position:absolute;right:26px;top:50%;transform:translateY(-50%);border:0;background:transparent;
+  color:var(--ink-3);font-size:13px;line-height:1;padding:3px 5px;border-radius:4px;opacity:0}
+.chatconv-item:hover .cc-del,.chatconv-item:hover .cc-ren{opacity:1}
+.cc-del:hover{background:var(--bad-soft);color:var(--bad)}
+.cc-ren:hover{background:var(--accent-soft);color:var(--accent-ink)}
+.chatconv-empty{padding:22px 12px;color:var(--ink-3);font-size:12.5px;text-align:center;line-height:1.8}
+/* 新会话欢迎区：输入第一句后由 pushMsg 移除 */
+.chatwelcome{max-width:760px;margin:4vh auto 0;padding:0 2px 20px}
+.cw-mark{width:46px;height:46px;border-radius:14px;background:var(--accent-soft);
+  display:flex;align-items:center;justify-content:center;color:var(--accent-ink);font-weight:800;font-size:16px;
+  letter-spacing:.5px;margin-bottom:18px}
+.chatwelcome h2{font-size:27px;line-height:1.3;margin:0 0 8px;letter-spacing:-.4px}
+.chatwelcome p{color:var(--ink-3);font-size:14px;margin:0 0 22px;max-width:620px}
+.cw-asks{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.cw-card{text-align:left;background:var(--surface);border:1px solid var(--line);border-radius:8px;
+  padding:12px 14px;cursor:pointer;transition:border-color .15s ease,background .15s ease}
+.cw-card:hover{border-color:var(--accent-line);background:var(--accent-soft)}
+.cw-card .cw-q{display:block;color:var(--ink);font-size:13.5px;line-height:1.5}
+.cw-config{margin-top:12px;text-align:right}
+@media(max-width:1280px){
+  #chatView.on{grid-template-columns:220px minmax(0,1fr)}
+  #chatView .chatside{display:none}
+}
+@media(max-width:900px){
+  #chatView.on{grid-template-columns:1fr}
+  #chatView .chatconv{display:none}
+  .cw-asks{grid-template-columns:1fr}
+}
 #archBar{grid-column:1 / -1;border-bottom:1px solid var(--line)}
 .mform{padding:18px 22px 40px;overflow-y:auto;background:var(--ground);
   border-right:1px solid var(--line)}
@@ -978,7 +1153,7 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
    对比度：#2f5a33 on #eef4ec ≈ 7.5:1；按钮文字同色，hover 反白。 */
 .srcbar{display:flex;align-items:center;gap:12px;margin:14px 0 0;padding:9px 12px;
   background:#eef4ec;border:1px solid #dbe7d8;border-radius:var(--r);
-  font-size:13.5px;min-width:0}
+  font-size:13.5px;min-width:0;flex-wrap:wrap}
 .srcbar > .srck{flex:none;color:#4b7a51;font-weight:600}
 .srcbar > .srcmail{display:flex;align-items:baseline;gap:8px;min-width:0;flex:1 1 auto;
   overflow:hidden;white-space:nowrap}
@@ -988,10 +1163,19 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
   white-space:nowrap;flex:1 1 auto;min-width:180px}
 .srcbar .srcmeta{color:#5c7a60;flex:none;font-size:13px;max-width:18ch;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.srcbar > .srcfile{flex:none;display:inline-flex;align-items:center;gap:6px;
-  border-left:1px solid #cfe0cc;padding-left:12px;min-width:0}
-.srcbar > .srcfile .fn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+/* 同一封邮件可能带 2 份以上简历（2026-11-05 业务方反馈“显示共两份、在线打开只有一个”）。
+   一份时和原来一样贴在右侧；多份时整块换到第二行，逐份列出，每份都有自己的打开/下载。 */
+.srcbar > .srcfiles{flex:none;display:flex;flex-direction:column;gap:5px;min-width:0;
+  border-left:1px solid #cfe0cc;padding-left:12px}
+.srcbar > .srcfiles.many{flex:1 1 100%;border-left:0;padding-left:0;margin-top:1px;
+  padding-top:7px;border-top:1px solid #d3e2d0}
+.srcbar > .srcfiles .srccount{max-width:none;color:#4b7a51;font-weight:600}
+.srcbar .srcfile{display:flex;align-items:center;gap:6px;min-width:0}
+.srcbar .srcfile .fn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   color:#3c6b41;max-width:20ch}
+.srcbar > .srcfiles.many .srcfile{width:100%}
+.srcbar > .srcfiles.many .srcfile .fn{max-width:40ch;flex:0 1 auto}
+.srcbar > .srcfiles.many .srcfile .btn:first-of-type{margin-left:auto}
 /* 按钮跟着这一行的绿走：默认白底绿字，hover 反白。
    不用 btn.primary（那是蓝色的"主操作"语义），这里只是同一族里的次级动作。 */
 .srcbar .btn{height:26px;padding:0 9px;font-size:13px;background:#fff;
@@ -1115,6 +1299,29 @@ body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-
 /* 每条荣誉做成一个浅色块：这篇档案里它是"加分事实"，不该和普通正文一个观感 */
 .honosec .ev{background:var(--surface-2);border-radius:var(--r-s);
   padding:7px 11px;margin-top:6px;line-height:1.7}
+/* 荣誉/论文/专利逐条展示：序号 + 自动换行，条目多时不再挤成一行 */
+.honosec .honor-list{margin:5px 0 0;padding-left:22px;list-style:decimal}
+.honosec .honor-list li{margin:2px 0;line-height:1.7;overflow-wrap:anywhere;
+  word-break:break-word}
+/* 项目经历（v4.0.18）：AI 短摘要，不是简历原文。
+   方向总结用强调底高亮，项目本身一条一块；摘要固定两行，避免长文把档案拉得很长。 */
+.projectsec .ai-tag{display:inline-block;margin-left:8px;padding:1px 7px;
+  border-radius:999px;background:var(--warm-soft);border:1px solid var(--warm-line);
+  color:var(--warm);font-size:11.5px;font-weight:600;vertical-align:2px}
+.proj-dir{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;
+  padding:8px 11px;margin:2px 0 10px;border-radius:var(--r-s);
+  background:var(--warm-soft);border:1px solid var(--warm-line);line-height:1.65}
+.proj-dir span{font-size:12px;color:var(--warm);font-weight:650;flex:none}
+.proj-dir b{font-size:14.5px;color:var(--ink);font-weight:650}
+.proj-list{display:flex;flex-direction:column;gap:8px}
+.proj-item{padding:9px 12px;border-left:3px solid var(--accent-line);
+  background:var(--surface-2);border-radius:0 var(--r-s) var(--r-s) 0}
+.proj-name{font-size:14px;font-weight:650;color:var(--ink);line-height:1.5;
+  overflow-wrap:anywhere}
+.proj-sum{font-size:13.5px;color:var(--ink-2);line-height:1.65;margin-top:2px;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;
+  overflow:hidden;overflow-wrap:anywhere}
+.projectsec .proj-loading{padding:4px 0 2px}
 /* 四六级那一行：标签名加粗，值用同一套淡灰可点控件 */
 .honosec .cetrow b{color:var(--accent-ink);font-weight:650}
 .honosec .cetrow .edv{vertical-align:middle;margin-left:2px}
@@ -1246,6 +1453,16 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
 .btn.busy{border-color:var(--accent-line);color:var(--accent-ink);background:var(--accent-soft)}
 .dlg .db{line-height:1.8;font-size:15px;white-space:pre-wrap;color:var(--ink)}
 .dlg .dbar{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
+/* 下载初筛简历：时间段选择（v4.0.19） */
+.bundle-dates{display:flex;gap:14px;flex-wrap:wrap;margin:12px 0}
+.bundle-dates label{display:flex;flex-direction:column;gap:5px;font-size:13px;
+  color:var(--ink-2);min-width:180px}
+.bundle-dates input{height:36px;padding:0 10px;border:1px solid var(--line-2);
+  border-radius:var(--r-s);background:var(--surface);font:inherit;color:var(--ink)}
+.bundle-dates input:focus{border-color:var(--accent);outline:none;
+  box-shadow:0 0 0 3px var(--accent-soft)}
+.bundle-last{margin-top:4px;padding:9px 11px;border-radius:var(--r-s);
+  background:var(--surface-2);color:var(--ink-2);font-size:13px;line-height:1.6}
 /* ---- 按钮变体：**全部照搬原版**（ui.py 的同名规则）----
    原版的规矩（业务方 2026-10-14 定）：
      · 导入/收取组 = **浅蓝底深蓝字**（btn-primary）且**加大一档**（btn-lg）——每日常用动作；
@@ -1503,7 +1720,541 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   .top .search{flex:1 1 220px;width:auto;min-width:160px}
   #count{display:none}
 }
+/* ---------------- 招聘进度（v4.0.16） ---------------- */
+.rp-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.rp-head h2{font-size:20px;margin:0 8px 0 0}
+.rp-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+.rp-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}
+.rp-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;position:relative;overflow:hidden}
+.rp-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--accent)}
+.rp-card.c-blue::before{background:var(--accent)}
+.rp-card.c-green::before{background:var(--ok)}
+.rp-card.c-amber::before{background:var(--warn)}
+.rp-card.c-red::before{background:var(--bad)}
+.rp-card.c-purple::before{background:#7b61ff}
+.rp-card .k{font-size:13px;color:var(--ink-3)}
+.rp-card .v{font-size:32px;font-weight:800;line-height:1.15;margin-top:2px;
+  font-variant-numeric:tabular-nums}
+.rp-card.c-blue .v{color:var(--accent-ink)}
+.rp-card.c-green .v{color:var(--ok)}
+.rp-card.c-amber .v{color:var(--warn)}
+.rp-card.c-red .v{color:var(--bad)}
+.rp-card.c-purple .v{color:#6b4fe0}
+.rp-card .s{font-size:12px;color:var(--ink-3);margin-left:6px;font-weight:400}
+.rp-degrees{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
+.rp-degree{background:var(--surface);border:1px solid var(--line);border-left:5px solid var(--line-2);
+  border-radius:var(--r);padding:12px 14px}
+.rp-degree .dt{font-size:16px;font-weight:700;margin-bottom:6px}
+.rp-degree .dm{display:flex;gap:12px;flex-wrap:wrap;font-size:13px;color:var(--ink-2)}
+.rp-degree .dm b{font-size:15px;color:var(--ink);font-variant-numeric:tabular-nums}
+.rp-degree .gap.pos b{color:var(--warn)}
+.rp-degree .gap.zero b{color:var(--ok)}
+.rp-degree .gap.neg b{color:var(--bad)}
+.rp-degree.d-doctor{border-left-color:#7b61ff}
+.rp-degree.d-master{border-left-color:var(--accent)}
+.rp-degree.d-bachelor{border-left-color:var(--ok)}
+.rp-degree.d-college{border-left-color:#d97706}
+/* v4.0.17：招聘进度主视觉（替代 8 个同构卡片） */
+.recruit-hero{display:grid;grid-template-columns:210px minmax(0,1fr);gap:26px;
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  padding:20px 22px;margin-bottom:16px;position:relative;overflow:hidden}
+.recruit-hero::after{content:"";position:absolute;right:-70px;top:-90px;width:260px;height:260px;
+  border-radius:50%;background:radial-gradient(circle,var(--accent-soft),transparent 70%);
+  pointer-events:none}
+.rh-left{position:relative;z-index:1;display:flex;align-items:center;justify-content:center}
+.rh-ring{position:relative;width:190px;height:190px}
+.rh-ring svg{width:190px;height:190px;display:block}
+.rh-ring-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:2px}
+.rh-ring-center b{font-size:32px;font-weight:800;letter-spacing:-1px;font-variant-numeric:tabular-nums}
+.rh-ring-center span{font-size:12px;color:var(--ink-3);white-space:nowrap}
+.rh-right{position:relative;z-index:1;min-width:0}
+.rh-kpis{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--line);
+  padding-bottom:14px;margin-bottom:14px}
+.rh-kpi{padding:0 14px;border-left:1px solid var(--line)}
+.rh-kpi:first-child{border-left:0;padding-left:0}
+.rh-k{display:block;font-size:12px;color:var(--ink-3);white-space:nowrap}
+.rh-v{display:block;font-size:26px;font-weight:800;line-height:1.25;font-variant-numeric:tabular-nums}
+.rh-v.blue{color:var(--accent-ink)}
+.rh-v.green{color:var(--ok)}
+.rh-v.amber{color:var(--warn)}
+.rh-v.red{color:var(--bad)}
+.rh-v.purple{color:#6b4fe0}
+.rh-degrees{display:grid;grid-template-columns:repeat(4,1fr);gap:0;
+  border-top:1px solid var(--line);padding-top:12px}
+.rh-degree{min-width:0;padding:0 14px;border-left:1px solid var(--line)}
+.rh-degree:first-child{border-left:0;padding-left:0}
+.rh-dhead{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2);
+  margin-bottom:4px}
+.rh-dot{width:8px;height:8px;border-radius:50%;flex:none}
+.rh-dot.doctor{background:#7b61ff}
+.rh-dot.master{background:var(--accent)}
+.rh-dot.bachelor{background:var(--ok)}
+.rh-dot.college{background:#d97706}
+.rh-dname{font-weight:600;color:var(--ink)}
+.rh-dstat{display:block;font-size:12px;color:var(--ink-3);margin-top:1px;white-space:nowrap}
+.rh-dstat b{font-size:15px;font-variant-numeric:tabular-nums;color:var(--ink)}
+.rh-dstat.gap.pos b{color:var(--warn)}
+.rh-dstat.gap.zero b{color:var(--ok)}
+.rh-dstat.gap.neg b{color:var(--bad)}
+@media(max-width:900px){
+  .recruit-hero{grid-template-columns:1fr;gap:16px}
+  .rh-kpis{grid-template-columns:1fr 1fr;gap:12px 0}
+  .rh-kpi:nth-child(3){border-left:0;padding-left:0}
+  .rh-degrees{grid-template-columns:1fr 1fr;gap:14px 0}
+  .rh-degree:nth-child(3){border-left:0;padding-left:0}
+}
+.rp-tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:12px}
+.rp-tab{border:0;background:transparent;padding:8px 14px;color:var(--ink-3);border-bottom:2px solid transparent;font-size:14px}
+.rp-tab.on{color:var(--accent-ink);border-bottom-color:var(--accent);font-weight:600}
+.rp-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.rp-wrap{overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);max-height:calc(100vh - 300px)}
+.rp-table{border-collapse:separate;border-spacing:0;width:100%;font-size:13px;min-width:980px}
+.rp-table th{position:sticky;top:0;z-index:2;background:var(--surface-2);color:var(--ink-2);font-weight:600;font-size:12px;text-align:center;padding:9px 8px;border-bottom:1px solid var(--line-2);white-space:nowrap}
+.rp-table th.plan{background:#fff8e1;color:#8a5a00}
+.rp-table th.calc{background:#eef4ff;color:var(--accent-ink)}
+.rp-table th.sign{background:#f3efff;color:#6b4fe0}
+.rp-table td{padding:8px;border-bottom:1px solid var(--line);text-align:center;vertical-align:middle}
+.rp-table tr.unit-start td{border-top:1px solid var(--line-2)}
+.rp-table tr.has-sign td{background:#f6fcf8}
+.rp-table td.unit{font-weight:600;background:var(--surface)}
+.rp-unit-del{margin-left:6px;border:0;background:var(--bad-soft);color:var(--bad);
+  border-radius:4px;font-size:12px;line-height:1.4;padding:1px 6px;cursor:pointer}
+.rp-unit-del:hover{background:var(--bad);color:#fff}
+.rp-table td.num{font-variant-numeric:tabular-nums}
+.rp-table td.gap-pos{color:var(--warn);font-weight:600}
+.rp-table td.gap-neg{color:var(--bad);font-weight:600}
+.rp-table td.signed-pos{color:var(--ok);font-weight:700}
+.rp-table td.rate-good{color:var(--ok);font-weight:600}
+.rp-table td.rate-mid{color:var(--accent-ink);font-weight:600}
+.rp-table td.rate-zero{color:var(--ink-3)}
+.rp-table td.rate-none{color:var(--ink-3)}
+.rp-table input.rp-num{width:64px;height:30px;text-align:center;border:1px solid var(--line-2);border-radius:4px;padding:0 4px}
+.rp-signee{display:inline-block;margin:2px 3px 2px 0;padding:2px 7px;border-radius:999px;background:var(--accent-soft);color:var(--accent-ink);cursor:pointer;font-size:12px}
+.rp-signee:hover{background:var(--accent-hi)}
+.rp-empty{background:var(--surface);border:1px dashed var(--line-2);border-radius:var(--r);padding:36px 20px;text-align:center;color:var(--ink-3)}
+.rp-health{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+.rp-health-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px}
+.rp-health-card h4{margin:0 0 6px;font-size:14px;display:flex;justify-content:space-between;gap:8px}
+.rp-health-card .n{color:var(--warn);font-weight:700}
+.rp-health-item{padding:6px 0;border-top:1px dashed var(--line);font-size:13px;display:flex;gap:8px;align-items:center;justify-content:space-between}
+.rp-health-item .m{color:var(--ink-3);font-size:12px}
+.rp-health-item .a{display:flex;gap:6px;flex-shrink:0}
+.rp-import-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.rp-import-table th,.rp-import-table td{border-bottom:1px solid var(--line);padding:5px 6px;text-align:center}
+.rp-form{display:flex;flex-direction:column;gap:10px}
+.rp-form label{font-size:13px;color:var(--ink-3);margin-bottom:-4px}
+.rp-form > input{height:34px;border:1px solid var(--line-2);border-radius:6px;padding:0 10px;font-size:14px}
+.rp-form > input:focus{outline:none;border-color:var(--accent)}
+.rp-date-range{display:flex;align-items:center;gap:8px}
+.rp-date-range input{height:34px;border:1px solid var(--line-2);border-radius:6px;padding:0 10px;
+  font-size:14px;width:170px}
+.rp-date-range input:focus{outline:none;border-color:var(--accent)}
+.rp-date-range .dash{color:var(--ink-3);user-select:none}
+@media(max-width:900px){.rp-cards,.rp-degrees{grid-template-columns:repeat(2,1fr)}}
+
+/* ============================================================================
+   v4.1 — Warm Minimal design system (Anthropic / Claude-inspired)
+   ----------------------------------------------------------------------------
+   This block intentionally sits last: it re-skins the existing business pages
+   through shared tokens and base components without changing any DOM contract,
+   route, permission or data path. Business logic stays frozen.
+   ============================================================================ */
+::selection{background:var(--accent-soft);color:var(--ink)}
+*{scrollbar-color:var(--line-2) transparent;scrollbar-width:thin}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:999px}
+a{color:var(--accent-ink)}
+.loadbar{background:var(--accent)}
+h1,h2,h3,h4{letter-spacing:-.01em}
+
+/* ---- Navigation / chrome ------------------------------------------------ */
+body{grid-template-columns:232px 1fr}
+.side{padding:20px 12px 12px;background:var(--nav);border-right:1px solid var(--line)}
+.sbrand{padding:2px 12px 18px;gap:10px;font-size:15px;letter-spacing:0}
+.sbrand img{width:28px;height:28px;border-radius:8px;box-shadow:none}
+.sbrand b{font-weight:600;letter-spacing:0}
+.sgroup{padding:16px 12px 7px;font-size:10.5px;font-weight:600;
+  letter-spacing:.12em;color:var(--ink-3)}
+.side button{height:38px;padding:0 11px;gap:11px;border-radius:8px;
+  font-size:13.5px;color:var(--ink-2);
+  transition:background-color .18s ease,color .18s ease,box-shadow .18s ease}
+.side button .ico{width:18px;height:18px;opacity:.62;stroke-width:1.55}
+.side button:hover{background:var(--surface-2);color:var(--ink)}
+.side button:hover .ico{opacity:.85}
+.side button.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+.side button.on .ico{opacity:1;stroke-width:1.7}
+.sfoot{padding:10px 2px 2px}
+.acct{height:44px;border-radius:8px;transition:background-color .18s ease}
+.acct:hover{background:var(--surface-2)}
+.acctMenu{border-radius:10px;box-shadow:var(--shadow);padding:5px}
+.acctMenu button{border-radius:6px}
+.acctMenu .ver{font-size:10.5px;letter-spacing:.02em}
+
+.top{height:56px;padding:0 22px;gap:9px;background:var(--surface);
+  border-bottom:1px solid var(--line)}
+.top2{padding:9px 22px;gap:7px;background:var(--surface);
+  border-bottom:1px solid var(--line)}
+.tabbar{padding:0 22px;background:var(--surface);border-bottom:1px solid var(--line)}
+.brand{font-size:14px;font-weight:600}
+.brand i{width:7px;height:7px;border-radius:2px;background:var(--accent)}
+.search{width:280px;height:34px;border-radius:7px;border-color:transparent;
+  background:var(--surface-2);font-size:13px;
+  transition:background-color .18s ease,border-color .18s ease,box-shadow .18s ease}
+.search:hover{background:var(--surface-2);border-color:var(--line)}
+.search:focus{background:var(--surface);border-color:var(--accent-line);
+  box-shadow:0 0 0 3px var(--accent-soft)}
+.sel,.msel > .msbtn{height:34px;border-radius:7px;border-color:var(--line);
+  background:var(--surface);color:var(--ink-2);font-size:13px}
+.sel:hover,.msel > .msbtn:hover{border-color:var(--line-2);color:var(--ink)}
+.count{font-size:12px;color:var(--ink-3)}
+.count b{font-size:14px;font-weight:600}
+.vdiv{background:var(--line)}
+.mchip,.tochip{border-radius:999px}
+
+/* ---- Buttons / forms ---------------------------------------------------- */
+.btn{height:32px;padding:0 13px;border-radius:7px;border-color:var(--line);
+  background:var(--surface);font-size:13px;font-weight:500;
+  transition:background-color .18s ease,border-color .18s ease,color .18s ease}
+.btn:hover{background:var(--surface-2);border-color:var(--line-2);color:var(--ink)}
+.btn.primary{background:var(--accent-soft);border-color:var(--accent-line);
+  color:var(--accent-ink);font-weight:600}
+.btn.primary:hover{background:var(--accent-hi);border-color:var(--accent);
+  color:var(--accent-ink)}
+.btn-primary{background:var(--accent-soft);border-color:var(--accent-line);
+  color:var(--accent-ink);font-weight:600}
+.btn-primary:hover{background:var(--accent-hi);border-color:var(--accent);
+  color:var(--accent-ink)}
+.btn-green{background:var(--ok-soft);border-color:var(--ok-line);color:var(--ok)}
+.btn-green:hover{background:var(--ok-hi);border-color:var(--ok-line);color:var(--ok)}
+.btn.danger{background:var(--bad-soft);border-color:var(--bad-line);color:var(--bad)}
+.btn.danger:hover{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
+.btn-lg{height:34px;padding:0 14px;font-size:13.5px}
+.top2 .btn-lg{height:32px;padding:0 12px;font-size:12.5px}
+.btn:disabled{opacity:.42}
+.btn:focus-visible,.side button:focus-visible,.row:focus-visible,
+.tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.seg{border-radius:8px;overflow:hidden}
+.seg button{font-size:12.5px;padding:6px 14px;transition:background-color .18s ease}
+.seg button.on{background:var(--accent-soft);color:var(--accent-ink);
+  box-shadow:inset 0 0 0 1px var(--accent-line)}
+input:not([type=checkbox]):not([type=radio]),select,textarea{
+  border-color:var(--line);border-radius:7px;background:var(--surface);
+  transition:border-color .18s ease,box-shadow .18s ease,background-color .18s ease}
+input:not([type=checkbox]):not([type=radio]):hover,select:hover,textarea:hover{
+  border-color:var(--line-2)}
+input:not([type=checkbox]):not([type=radio]):focus,select:focus,textarea:focus{
+  outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
+
+/* ---- Candidate list ----------------------------------------------------- */
+.wrap{grid-template-columns:380px 1fr}
+.listwrap{background:var(--surface);border-right:1px solid var(--line)}
+.row{padding:11px 14px 11px 0;gap:9px;border-bottom-color:var(--line);
+  transition:background-color .18s ease}
+.row:hover{background:var(--surface-2)}
+.row.on{background:var(--accent-soft)}
+.row .nm{font-size:14px;font-weight:600}
+.row .sub{font-size:12.5px;color:var(--ink-3)}
+.rowbar{width:2px;min-height:38px;border-radius:0}
+.row.on .rowbar{background:var(--accent)}
+.av{background:var(--surface-2);color:var(--ink-3);font-size:11px}
+.pager{background:var(--surface);border-top-color:var(--line);font-size:12px}
+.tier{border-radius:5px;font-weight:600}
+
+/* ---- Detail / content --------------------------------------------------- */
+.detail{padding:0 30px 48px;background:var(--surface)}
+.detail-toolbar{background:var(--surface);border-bottom:1px solid var(--line);
+  box-shadow:none;padding:16px 0 12px}
+.dname{font-size:24px;font-weight:600;letter-spacing:-.015em}
+.dmeta{font-size:14px;color:var(--ink-2);gap:7px 10px}
+#detail .dmeta .chipl{font-size:13.5px}
+.dmeta .edv{font-size:14px;background:var(--surface-2)}
+.dmeta.dmeta2 .stagechip{background:var(--surface-2);border-color:var(--line);
+  color:var(--ink)}
+.av-lg{border-radius:10px;background:var(--surface-2)}
+.sec{margin-top:24px}
+.sec > h3,#detail .sec > h3{font-size:16px;font-weight:600;letter-spacing:0;
+  color:var(--ink);border-bottom:1px solid var(--line);padding-bottom:8px;
+  margin-bottom:14px}
+.sec.tier-sec > h3{font-size:16px;border-bottom:0;padding-bottom:0}
+.profile-layout{font-size:14px;gap:0 28px}
+.profile-layout .ev,#detail .ev{font-size:14px;line-height:1.75}
+.profile-layout .sum,#detail .sum{font-size:15px;line-height:1.75}
+.profile-layout .edu-line{font-size:14px}
+.profile-layout .hint{font-size:12.5px}
+.honosec .ev{background:var(--surface-2);border-radius:7px}
+.chipl,.jchip,.rk,.stg,.ochip{border-radius:999px;font-weight:500}
+.chipl{font-size:12px;padding:3px 9px}
+.rk{font-size:12px;padding:2px 8px}
+.srcbar{background:var(--ok-soft);border-color:var(--ok-line)}
+.srcbar > .srck{color:var(--ok)}
+.srcbar .srcsub,.srcbar .srcfile .fn{color:var(--ok)}
+.srcbar .srcmeta{color:var(--ok)}
+.srcbar .srcfile{border-left-color:var(--ok-line)}
+.srcbar > .srcfiles{border-left-color:var(--ok-line);border-top-color:var(--ok-line)}
+.srcbar .btn{background:var(--surface);border-color:var(--ok-line);color:var(--ok)}
+.srcbar .btn:hover{background:var(--ok);border-color:var(--ok);color:var(--surface)}
+.btn.reviewed{background:var(--ok-soft);border-color:var(--ok-line);color:var(--ok)}
+.btn.reviewed:hover{background:var(--ok-hi);border-color:var(--ok);color:var(--ok)}
+.pv{background:var(--surface)}
+.auditbox{border-color:var(--line);border-radius:8px}
+.auditbox th{background:var(--surface-2)}
+.mdtable th{background:var(--surface-2);font-weight:600}
+.mdtable tbody tr:nth-child(even){background:transparent}
+.mdtable tbody tr:hover{background:var(--surface-2)}
+
+/* ---- Overview / stats / recruit ---------------------------------------- */
+.ovcol,.rp-card,.rp-degree,.recruit-hero,.rp-wrap,.rp-health-card,
+.ana-workbench,.ov-analysis,.stat{background:var(--surface);border-color:var(--line);
+  border-radius:10px;box-shadow:none}
+.ovcol{padding:18px 20px}
+.ovcol > h3{font-size:16px;font-weight:600;padding-bottom:10px}
+.rp-card{padding:18px 20px}
+.rp-card::before{display:none}
+.rp-card .v{font-size:30px;font-weight:650;letter-spacing:-.02em}
+.rp-card .k{font-size:12.5px;color:var(--ink-3)}
+.rp-degree{border-left-width:2px;padding:14px 16px;border-radius:8px}
+.rp-degree .dt{font-size:15px;font-weight:600}
+.rp-degree.d-doctor{border-left-color:var(--plum)}
+.rp-degree.d-college{border-left-color:var(--warn)}
+.recruit-hero{padding:22px 24px;border-radius:10px}
+.recruit-hero::after{display:none}
+.rh-ring-center b{font-size:30px;font-weight:650}
+.rh-ring-track{stroke:var(--surface-2)}
+.rp-card.c-purple::before{display:none}
+.rp-card.c-purple .v,.rh-v.purple{color:var(--plum)}
+.rh-dot.doctor{background:var(--plum)}
+.rh-dot.college{background:var(--warn)}
+.rh-kpis{border-bottom-color:var(--line)}
+.rh-degrees{border-top-color:var(--line)}
+.rh-degree{border-left-color:var(--line)}
+.rp-wrap{border-radius:10px}
+.rp-table{font-size:14.5px}
+.rp-table th{background:var(--surface-2);color:var(--ink-2);font-size:12.5px;
+  letter-spacing:.02em;font-weight:600;padding:11px 9px;border-bottom-color:var(--line-2)}
+.rp-table th.plan{background:var(--warn-soft);color:var(--warn)}
+.rp-table th.calc{background:var(--accent-soft);color:var(--accent-ink)}
+.rp-table th.sign{background:var(--plum-soft);color:var(--plum)}
+.rp-table td{padding:11px 9px;border-bottom-color:var(--line)}
+/* 每个单位交替底色，扫表时能一眼分出单位边界（v4.3.0） */
+.rp-table tbody tr.unit-even td{background:var(--row-alt)}
+.rp-table tbody tr.unit-even td.unit{background:var(--row-unit);font-weight:650}
+.rp-table tbody tr.unit-even.has-sign td{background:#f3faf6}
+.rp-table tbody tr.unit-even.has-sign td.unit{background:#e7f4ea}
+.rp-table .rp-signee{font-size:13.5px}
+.rp-table .rp-signee .rp-deadline{font-style:normal;color:var(--ink-3);font-size:12px;margin-left:1px}
+/* 签约人全部展示、不折叠：单元格保持单行，表格横向滚动查看；
+   前三列（序号/单位/学历）固定，滚动时始终可见。 */
+.rp-table td.signee-cell{text-align:left;white-space:nowrap;min-width:420px}
+.rp-table .sticky-seq,.rp-table .sticky-unit,.rp-table .sticky-edu{
+  position:sticky;z-index:4;background:var(--surface)}
+.rp-table th.sticky-seq,.rp-table th.sticky-unit,.rp-table th.sticky-edu{z-index:7}
+.rp-table .sticky-seq,.rp-table .sticky-unit,.rp-table .sticky-edu{white-space:nowrap}
+.rp-table .sticky-seq{left:0}
+.rp-table .sticky-unit{left:var(--freeze1,52px)}
+.rp-table .sticky-edu{left:var(--freeze2,148px);box-shadow:2px 0 0 var(--line)}
+.rp-table tbody tr.unit-even .sticky-unit{background:var(--row-unit)}
+.rp-table tbody tr.unit-even .sticky-seq,
+.rp-table tbody tr.unit-even .sticky-edu{background:var(--row-alt)}
+/* 鼠标悬停必须有变化：交替底色/已签底色的选择器更具体，
+   普通 tr:hover 会被盖掉，这里显式提高优先级。 */
+.rp-table tbody tr:hover td,
+.rp-table tbody tr.unit-even:hover td,
+.rp-table tbody tr.unit-odd:hover td,
+.rp-table tbody tr.has-sign:hover td{background:var(--surface-2)!important}
+.rp-table tr.has-sign td{background:var(--ok-soft)}
+.rp-table td.unit{background:var(--surface)}
+.rp-table input.rp-num{height:30px;border-radius:6px}
+.rp-signee{background:var(--accent-soft);color:var(--accent-ink);font-size:11.5px}
+.rp-signee:hover{background:var(--accent-hi)}
+.rp-health-card h4{font-size:14px}
+.rp-tab{font-size:13px;padding:9px 14px;font-weight:500}
+.rp-tab.on{font-weight:600}
+.rp-head h2{font-size:24px;font-weight:600;letter-spacing:-.015em}
+.rp-empty{border-color:var(--line-2);background:var(--surface)}
+.ovjob-track{height:7px;background:var(--surface-2)}
+.ovjob-track i{background:var(--accent)}
+.ovjob-head{font-size:12px}
+.ovjob{margin-bottom:12px}
+.lgitem{border-radius:5px;font-size:12.5px}
+.lgitem:hover{background:var(--surface-2)}
+.tier-donut svg .td-seg{transition:stroke-width .18s ease}
+.tier-donut svg .td-seg:hover{stroke-width:17}
+.stat{padding:12px 14px}
+.stat-n{font-size:28px;font-weight:600;letter-spacing:-.01em}
+.stat-l{font-size:12.5px;color:var(--ink-2)}
+.stat-h{font-size:11.5px;color:var(--ink-3)}
+.stats{gap:12px}
+
+/* ---- Mail / editor / system pages -------------------------------------- */
+#sysView.on{padding:26px 30px 48px}
+#sysView > *{max-width:1080px}
+#recruitView.on{padding:26px 30px 48px}
+#mailView.on,#orgView.on,#archView.on,#chatView.on{background:var(--surface)}
+.medit{padding:22px 30px 0;background:var(--surface)}
+.mrow > label{font-size:12.5px;color:var(--ink-3)}
+.richeditor,#mBody{border-color:var(--line);background:var(--surface)}
+.cw-mark{width:44px;height:44px;border-radius:12px;background:var(--accent-soft);
+  color:var(--accent-ink);box-shadow:none}
+.cw-card{border-radius:9px;transition:background-color .18s ease,border-color .18s ease}
+.cw-card:hover{background:var(--surface-2);border-color:var(--line-2)}
+.chatconv{border-right-color:var(--line)}
+.chatconv-item{border-radius:7px}
+.chatconv-item:hover{background:var(--surface-2)}
+.chatconv-item.on{background:var(--accent-soft)}
+.chatinput{background:var(--surface);border-top-color:var(--line)}
+.chatside{background:var(--surface);border-left-color:var(--line)}
+.msg{border-radius:9px;font-size:15.5px;line-height:1.75}
+.msg.user{background:var(--surface-2);border-color:var(--line)}
+.msg.assistant{background:var(--surface);border-color:var(--line)}
+/* 回答里的结构：小标题加粗、段间距拉开，长答案不再是一整块文字 */
+#chatView .msg h3{font-size:16.5px;font-weight:700;margin:14px 0 7px;
+  letter-spacing:-.01em;line-height:1.5}
+#chatView .msg h4{font-size:15.5px;font-weight:700;margin:12px 0 6px;line-height:1.55}
+#chatView .msg p{margin:0 0 8px}
+#chatView .msg p:last-child{margin-bottom:0}
+#chatView .msg ul,#chatView .msg ol{margin:6px 0 10px;line-height:1.75}
+#chatView .msg li{margin:3px 0}
+#chatView .msg strong{font-weight:700;color:var(--ink)}
+#chatView .msg .mdtable{font-size:14px}
+#chatView .msg blockquote{margin:8px 0;padding:6px 12px}
+.ask{border-radius:999px;border-color:var(--line);font-size:12.5px}
+.ask:hover{background:var(--surface-2);border-color:var(--line-2);color:var(--ink)}
+/* Empty chat: put the welcome block in the optical centre of the canvas
+   instead of leaving a tall band of dead space under it. */
+.chatlog:has(.chatwelcome){display:flex;flex-direction:column;justify-content:center}
+.chatlog:has(.chatwelcome) .chatwelcome{margin:0 auto;padding-bottom:5vh}
+.chatwelcome h2{font-size:26px;font-weight:600;letter-spacing:-.03em}
+.chatwelcome p{color:var(--ink-2);font-size:13px}
+.cw-card{background:var(--surface);border-color:var(--line)}
+.cw-card:hover{background:var(--surface-2);border-color:var(--line-2)}
+.cw-brief{margin-top:18px;display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+.cw-brief-h{font-size:12px;color:var(--ink-3);margin-bottom:2px}
+.cw-brief-card{align-items:flex-start;text-align:left}
+.cw-w{display:block;font-size:12px;color:var(--ink-3);margin-top:3px;line-height:1.5}
+
+/* 智能助手页：Claude Code 暖色（第一版）。只作用于聊天内容区；
+   左侧主导航与会话列表的“选中/点击”统一用原始蓝色，避免同一列里两种强调色。 */
+#chatView .chatwrap{
+  --accent:#C56A45; --accent-ink:#A34E2F; --accent-soft:#F1EAE5;
+  --accent-line:#E4D2C7; --accent-hi:#EADDD4;
+}
+:root[data-theme="dark"] #chatView .chatwrap{
+  --accent:#D98A65; --accent-ink:#E7A985; --accent-soft:#382F29;
+  --accent-line:#5A4438; --accent-hi:#42352E;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) #chatView .chatwrap{
+    --accent:#D98A65; --accent-ink:#E7A985; --accent-soft:#382F29;
+    --accent-line:#5A4438; --accent-hi:#42352E;
+  }
+}
+/* 会话列表选中态：与左侧主导航同一套蓝色，不再跟着聊天内容变暖色 */
+.chatconv-item.on{background:var(--sel);color:var(--sel-ink)}
+.chatconv-item.on .cc-title{color:var(--sel-ink)}
+#chatView .chatlog:has(.chatwelcome){display:block}
+#chatView .chatlog:has(.chatwelcome) .chatwelcome{margin:4vh auto 0;padding-bottom:20px}
+#chatView .chatwelcome h2{font-size:27px;line-height:1.3;font-weight:650;letter-spacing:-.4px;margin:0 0 8px}
+#chatView .chatwelcome p{font-size:14px;line-height:1.65;color:var(--ink-3);max-width:620px}
+#chatView .cw-mark{width:44px;height:44px;border-radius:12px;background:var(--accent-soft);
+  color:var(--accent-ink);box-shadow:none}
+#chatView .cw-card{border-radius:8px}
+#chatView .cw-card:hover{background:var(--accent-soft);border-color:var(--accent-line)}
+#chatView #chatSend{background:var(--ink);border-color:var(--ink);color:var(--surface)}
+#chatView #chatSend:hover{background:var(--ink);border-color:var(--ink);color:var(--surface);
+  filter:brightness(.94)}
+
+/* ---- Dialogs / overlays ------------------------------------------------ */
+.mask{background:rgba(41,40,36,.34)}
+.dlg{border:1px solid var(--line);border-radius:14px;
+  box-shadow:0 24px 64px rgba(41,40,36,.16);padding:24px 26px}
+.dlg h3{font-size:17px;font-weight:600;letter-spacing:-.01em}
+.dlg .db{font-size:14px;line-height:1.75}
+.dlg .dbar{margin-top:22px;gap:9px}
+.mask.on .dlg{animation:tpDlgIn .18s cubic-bezier(.2,.7,.3,1) both}
+@keyframes tpDlgIn{from{opacity:0;transform:scale(.985)}to{opacity:1;transform:none}}
+.msel .msPanel,.morePanel,.batchPanel,.acctMenu{box-shadow:var(--shadow);
+  border-color:var(--line);border-radius:10px}
+.toast{border-radius:8px;box-shadow:var(--shadow);font-size:12.5px}
+.toast.ok,.toast.danger,.toast.info{color:var(--surface)}
+.rp-unit-del:hover,.morePanel .clearRow .btn:hover,.dupwarn .btn:hover{
+  background:var(--bad);border-color:var(--bad);color:var(--surface)}
+.richeditor td,.richeditor th{border-color:var(--line-2)}
+
+/* ---- Login -------------------------------------------------------------- */
+/* 登录页保留原始的三层背景（白蒙版 + 淡蓝光晕 + 大楼照片），
+   只是尺寸/圆角沿用 v4.1 的组件形状。 */
+.loginwrap{background:
+  linear-gradient(135deg,rgba(255,255,255,.93) 0%,rgba(255,255,255,.78) 45%,
+                  rgba(238,244,255,.72) 100%),
+  radial-gradient(circle at 72% 28%,rgba(51,112,255,.10),transparent 58%),
+  url("/login-bg.jpg") center 42% / cover no-repeat,
+  linear-gradient(160deg,#eef2f8 0%,#e6ecf6 100%)}
+.loginbox{background:var(--surface);border:1px solid var(--line);
+  border-radius:14px;box-shadow:0 24px 64px rgba(24,32,48,.16);padding:32px 30px 26px}
+.loginbrand{font-size:18px;font-weight:600}
+.logindot{background:var(--accent);border-radius:2px}
+.logininput{background:var(--surface-2);border-color:transparent}
+.logininput:focus{background:var(--surface);border-color:var(--accent-line)}
+.loginbtn{border-radius:8px;font-weight:600}
+
+/* ---- Dark-mode fixes for legacy hard-coded colours --------------------- */
+:root[data-theme="dark"] .loginwrap{
+  background:linear-gradient(135deg,rgba(23,24,27,.95),rgba(31,32,36,.9)),
+    url("/login-bg.jpg") center 42% / cover no-repeat,var(--ground)}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) .loginwrap{
+    background:linear-gradient(135deg,rgba(23,24,27,.95),rgba(31,32,36,.9)),
+      url("/login-bg.jpg") center 42% / cover no-repeat,var(--ground)}
+}
+:root[data-theme="dark"] .msg.user{background:var(--surface-2)}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) .msg.user{background:var(--surface-2)}
+}
+:root[data-theme="dark"] .toast{background:var(--surface-2);color:var(--ink)}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) .toast{background:var(--surface-2);color:var(--ink)}
+}
+:root[data-theme="dark"] .pv,
+:root[data-theme="dark"] .loginbox{background:var(--surface)}
+
+/* ---- Responsive -------------------------------------------------------- */
+@media (max-width:1280px){
+  body{grid-template-columns:200px 1fr}
+  .wrap{grid-template-columns:340px 1fr}
+  .search{width:230px}
+  .detail{padding:0 22px 40px}
+}
+@media (max-width:1100px){
+  body{grid-template-columns:64px 1fr}
+  .side{padding:12px 6px}
+  .side button{justify-content:center;padding:0;box-shadow:none}
+  .side button.on{box-shadow:none}
+  .wrap{grid-template-columns:1fr}
+  .detail{padding:0 18px 36px}
+  .top{height:auto;min-height:52px;flex-wrap:wrap;gap:6px;padding:6px 14px}
+}
+@media (max-width:720px){
+  .dlg{padding:20px}
+  .dname{font-size:22px}
+  .rp-head h2{font-size:22px}
+}
+@media (prefers-reduced-motion: reduce){
+  .mask.on .dlg{animation:none!important}
+  .btn,.row,.side button,.cw-card,.lgitem,.seg button{transition:none!important}
+}
 </style>
+<script>
+(function(){
+  try{
+    var t = localStorage.getItem('tp_theme');
+    if(t === 'dark' || t === 'light'){ document.documentElement.setAttribute('data-theme', t); }
+  }catch(e){}
+})();
+</script>
 </head>
 <body>
 <div class="loadbar" id="loadBar" aria-hidden="true"></div>
@@ -1516,15 +2267,18 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     <img src="__BRAND_ICON__" alt="">
     <!-- 副标题「西北有色院 · 人事」已删（2026-10-28）：产品名本身已经说清是什么，
          这一行在窄侧栏里只会折成两行小字。 -->
-    <span><b>HRAgent 工作台</b></span>
+    <span><b>人才库智能体</b></span>
   </div>
   <div class="sgroup">招聘</div>
-  <button data-view="pool" class="on">
-    <svg class="ico" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.6 19.2c.5-3.3 2.7-5.2 5.4-5.2s4.9 1.9 5.4 5.2"/><path d="M16.2 5.6a3 3 0 0 1 0 5.9"/><path d="M17.6 19.2c-.2-2.3-1-4-2.4-4.9 2.7-.3 5.1 1.5 5.4 4.9"/></svg>
-    <span>人才库</span></button>
-  <button data-view="chat">
+  <button data-view="chat" class="on">
     <svg class="ico" viewBox="0 0 24 24"><path d="M20.5 12a8.5 8.5 0 0 1-12.2 7.6L3.5 20.5l.9-4.8A8.5 8.5 0 1 1 20.5 12Z"/><path d="M8.6 11.8h.01M12 11.8h.01M15.4 11.8h.01"/></svg>
     <span>智能助手</span></button>
+  <button data-view="pool">
+    <svg class="ico" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.6 19.2c.5-3.3 2.7-5.2 5.4-5.2s4.9 1.9 5.4 5.2"/><path d="M16.2 5.6a3 3 0 0 1 0 5.9"/><path d="M17.6 19.2c-.2-2.3-1-4-2.4-4.9 2.7-.3 5.1 1.5 5.4 4.9"/></svg>
+    <span>人才库</span></button>
+  <button data-view="recruit">
+    <svg class="ico" viewBox="0 0 24 24"><rect x="3.2" y="4.5" width="17.6" height="15" rx="2"/><path d="M3.2 9.2h17.6M8.4 9.2v10.3M15.6 9.2v10.3"/><path d="M7 6.8h.01M10.2 6.8h.01"/></svg>
+    <span>招聘进度</span></button>
   <button data-view="mail">
     <svg class="ico" viewBox="0 0 24 24"><rect x="3" y="5.5" width="18" height="13" rx="2.2"/><path d="m3.8 7.2 7.1 5.2a2 2 0 0 0 2.2 0l7.1-5.2"/></svg>
     <span>写邮件</span></button>
@@ -1550,6 +2304,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
     </button>
     <div class="acctMenu" id="acctMenu" role="menu">
       <button role="menuitem" onclick="acctGo('users')" id="acctUsers" hidden>账号管理</button>
+      <button role="menuitem" onclick="toggleTheme()" id="acctTheme">深色模式</button>
       <button role="menuitem" onclick="doLogout()" id="acctLogout" hidden>退出登录</button>
       <div class="ver">__V2_BUILD__</div>
     </div>
@@ -1630,6 +2385,16 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   <button class="btn btn-green btn-lg" onclick="doBundle()">下载初筛简历</button>
   <span class="vdiv"></span>
   <label class="allbox"><input type="checkbox" id="chkAll"> 全选</label>
+  <!-- v4.3.0：批量初筛通过 + 批量归岗收进「批量操作」菜单 -->
+  <div class="more" id="moreBatchOps">
+    <button class="btn btn-primary btn-lg" id="btnBatchOps" onclick="toggleBatchOpsMenu()">批量操作 ▾</button>
+    <div class="morePanel" id="batchOpsPanel">
+      <button class="btn" id="btnInitial" onclick="toggleBatchOpsMenu();initialPassChecked()" disabled>批量初筛通过（0）</button>
+      <button class="btn" id="btnBulkAssign" onclick="toggleBatchOpsMenu();bulkAssignChecked()" disabled>批量归岗（0）</button>
+      <button class="btn" onclick="toggleBatchOpsMenu();batchReanalyze()">批量重新分析</button>
+      <button class="btn" onclick="toggleBatchOpsMenu();analyzePending()">分析未分析的人</button>
+    </div>
+  </div>
   <button class="btn btn-lg" id="btnArch" onclick="archiveChecked()" disabled>归档勾选（0）</button>
   <button class="btn btn-lg" id="btnCompare" onclick="compareChecked()" disabled>对比档案（0/10）</button>
   <span class="vdiv"></span>
@@ -1639,17 +2404,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
        放在工具栏里既占位置、也让人以为它管的是别的东西。 -->
   <span class="vdiv"></span>
   <button class="btn btn-primary btn-lg" id="btnProp" onclick="toggleProps()">待确认提案</button>
-  <!-- 「批量按模型重跑」「分析待分析的人」收进菜单（业务方 2026-10-27 要求
-       工具栏必须一行）。这两个是**运维动作**，不是日常动作：一个花钱重跑
-       全部模型、一个给历史漏分析的补课，一天也用不上一次，却各占 112px，
-       正是它们把工具栏顶到第二行。菜单里保留原文案，行为一字不改。 -->
-  <div class="more" id="moreBatch">
-    <button class="btn btn-lg" id="btnBatch" onclick="toggleBatchMenu()">批量维护 ▾</button>
-    <div class="morePanel" id="batchPanel">
-      <button class="btn" onclick="toggleBatchMenu();batchReanalyze()">批量按模型重跑</button>
-      <button class="btn" onclick="toggleBatchMenu();analyzePending()">分析待分析的人</button>
-    </div>
-  </div>
 </div>
 <div class="tabbar"><div class="tabs" id="tabs"></div></div>
 
@@ -1658,6 +2412,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 <div id="sysView"></div>
 <div id="usersView"></div>
 <div id="chatView"></div>
+<div id="recruitView"></div>
 <div id="archView"></div>
 
 <div class="pipe" id="pipe"></div>
@@ -1683,7 +2438,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
        CSS 里再给它 z-index:0 / 登录框 z-index:1 兜一层。 -->
   <canvas id="loginNet" aria-hidden="true"></canvas>
   <form class="loginbox" id="loginForm" autocomplete="on">
-    <div class="loginbrand"><i class="logindot"></i>HRAgent 工作台</div>
+    <div class="loginbrand"><i class="logindot"></i>人才库智能体</div>
     <!-- 副标题「西北有色院 · 人事」已删（2026-10-28）：同一句话不再出现在界面上 -->
     <label class="loginlabel" for="loginUser">账号</label>
     <input id="loginUser" class="logininput" autocomplete="username" required>
@@ -1759,10 +2514,50 @@ function plainResponse(raw){
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ')
     .replace(/\s+/g, ' ').trim().slice(0, 600);
 }
+/* 错误值可能是字符串、FastAPI 的 detail 数组、或普通对象。
+   直接丢给 textContent 会显示成 `[object Object]`——先归一成一句人话。 */
+function errText(v){
+  if(v === null || v === undefined) return '';
+  if(typeof v === 'string') return v;
+  if(Array.isArray(v)){
+    return v.map(function(x){
+      if(typeof x === 'string') return x;
+      if(x && typeof x === 'object') return x.msg || x.detail || x.message || JSON.stringify(x);
+      return String(x);
+    }).filter(Boolean).join('；');
+  }
+  if(typeof v === 'object'){
+    return v.detail || v.message || v.error || JSON.stringify(v);
+  }
+  return String(v);
+}
+/* 智能助手生成的「下载名单」链接：登录模式下 <a> 带不上请求头，
+   这里拦下来用 fetch 带 token 下载，避免点开新标签页只看到 401。 */
+document.addEventListener('click', function(ev){
+  var a = ev.target && ev.target.closest
+    ? ev.target.closest('a[href^="/api/export/roster"],a[href^="/api/export/interview-schedule"]')
+    : null;
+  if(!a) return;
+  ev.preventDefault();
+  toast('正在导出…');
+  var href = a.getAttribute('href') || '';
+  var fallback = href.indexOf('interview-schedule') >= 0
+    ? ('面试日程-' + todayStamp() + '.xlsx')
+    : ('候选人名单-' + todayStamp() + '.xlsx');
+  fetch(href, {headers: hdr({})})
+    .then(function(r){
+      if(!r.ok){ throw new Error('HTTP ' + r.status); }
+      return r.blob().then(function(blob){
+        return {blob: blob, name: exportFilename(r, fallback)};
+      });
+    })
+    .then(function(x){ saveBlob(x.blob, x.name); toast('已导出', 'ok'); })
+    .catch(function(e){ toast('导出失败：' + e.message, 'danger'); });
+});
 function toast(msg, kind){
   var t = document.getElementById('toast');
   if(!t) return;
-  t.textContent = msg;
+  t.textContent = errText(msg);
   t.className = 'toast on ' + (kind || 'info');
   clearTimeout(t._h); t._h = setTimeout(function(){ t.classList.remove('on'); }, 2200);
 }
@@ -1791,6 +2586,8 @@ async function api(path, opt){
            __err: '服务端返回了非 JSON 响应（HTTP ' + r.status + '）'};
     }
     if(!r.ok && !j.__err) j.__err = j.detail || ('HTTP ' + r.status);
+    /* 422 的 detail 是对象数组（Pydantic），归一后 toast/页面才读得懂 */
+    if(j.__err) j.__err = errText(j.__err);
     /* 401 = 没登录 / 会话过期 / 被管理员踢下线。统一回到登录页。
        **不能只靠登录时的判断**：会话 12 小时过期，HR 开着页面过夜就会遇到。 */
     if(r.status === 401 && AUTH_ENABLED){
@@ -1909,11 +2706,8 @@ document.addEventListener('click', function(ev){
    于是"选了强势"等于没筛，界面却显示已筛选。 */
 fillSel('fUniv', '院校层次', [['985','985'],['211','211'],
                   ['特殊','特殊（强校）'],['未识别','未识别']]);
-  /* 面试结论：拟录用 / 不录用 / 已签约 / 拒签（值域来自 stages.json 的 outcomes） */
-  var _outs = [];
-  var _oMap = STAGE_CFG.outcomes || {};
-  Object.keys(_oMap).forEach(function(k){ _oMap[k].forEach(function(v){ if(_outs.indexOf(v) < 0) _outs.push(v); }); });
-  fillSel('fOutcome', '面试结论', _outs.map(function(v){ return [v, v]; }));
+  /* v4.0.17：面试结论只有未判/拟录用/不录用；签约状态在档案与面试名单里看。 */
+  fillSel('fOutcome', '面试结论', [['拟录用','拟录用'],['不录用','不录用'],['未判','未判']]);
   fillSel('fBachelor', '第一学历', [['985','985'],['211','211'],['特殊','特殊'],['未识别','未识别']]);
 fillSel('fOverseas', '海外院校', [['海外','海外'],['非海外','非海外'],['未识别','未识别']]);
   msFill('msCet', '四六级', [['六级','六级'],['四级','四级'],['专业八级','专业八级'],
@@ -2027,6 +2821,29 @@ function toggleBatchMenu(){
   p.classList.toggle('on');
   if(p.classList.contains('on')) placeBatchPanel();
 }
+/* v4.3.0：批量操作菜单（初筛通过 / 批量归岗）与「批量维护」同一套开合规矩 */
+function placeBatchOpsPanel(){
+  var p = document.getElementById('batchOpsPanel');
+  var b = document.getElementById('btnBatchOps');
+  if(!p || !b || !p.classList.contains('on')) return;
+  var r = b.getBoundingClientRect();
+  var w = p.offsetWidth || 180;
+  var left = Math.min(r.left, window.innerWidth - w - 8);
+  p.style.left = Math.max(8, left) + 'px';
+  p.style.top = Math.round(r.bottom + 4) + 'px';
+}
+function toggleBatchOpsMenu(){
+  var p = document.getElementById('batchOpsPanel');
+  var m = document.getElementById('morePanel');
+  var b = document.getElementById('batchPanel');
+  if(m) m.classList.remove('on');
+  if(b) b.classList.remove('on');
+  if(!p) return;
+  p.classList.toggle('on');
+  if(p.classList.contains('on')) placeBatchOpsPanel();
+}
+window.addEventListener('resize', placeBatchOpsPanel);
+window.addEventListener('scroll', placeBatchOpsPanel, true);
 /* 开着的时候窗口缩放 / 任一容器滚动（工具栏自己会横向滚），面板必须跟着走位，
    否则会停在旧坐标上，看起来像"又飘到别处去了"。 */
 window.addEventListener('resize', placeBatchPanel);
@@ -2050,12 +2867,21 @@ document.addEventListener('click', function(ev){
   if(panel.contains(ev.target) || (btn && btn.contains(ev.target))) return;
   panel.classList.remove('on');
 }, true);
+document.addEventListener('click', function(ev){
+  var panel = document.getElementById('batchOpsPanel');
+  if(!panel || !panel.classList.contains('on')) return;
+  var btn = document.getElementById('btnBatchOps');
+  if(panel.contains(ev.target) || (btn && btn.contains(ev.target))) return;
+  panel.classList.remove('on');
+}, true);
 document.addEventListener('keydown', function(ev){
   if(ev.key !== 'Escape') return;
   var panel = document.getElementById('morePanel');
   if(panel) panel.classList.remove('on');
   var batch = document.getElementById('batchPanel');
   if(batch) batch.classList.remove('on');
+  var ops = document.getElementById('batchOpsPanel');
+  if(ops) ops.classList.remove('on');
 });
 function clearFilters(){
   ['kw','fEdu','fStage','fTier','fGender','fUniv','fBachelor','fCet','fOutcome',
@@ -2581,8 +3407,8 @@ async function showOverview(){
   box.innerHTML = '<div class="hint">读取概览…</div>';
   /* 两个请求互不依赖，必须并行（v3.0.3）。原来是串行 await，
      等于白白多等一个完整往返 —— 而这是**打开页面第一眼**看到的东西。 */
-  var _ov = await Promise.all([api('/api/stats'), api('/api/brief/today')]);
-  var st = _ov[0], br = _ov[1];
+  var _ov = await Promise.all([api('/api/stats'), api('/api/brief/today'), api('/api/jobs')]);
+  var st = _ov[0], br = _ov[1], jobsResp = _ov[2];
   if(st.__err){ box.innerHTML = '<div class="hint">' + esc(st.__err) + '</div>'; return; }
   var tiers = st.tiers || {}, stages = st.stages || {};
   function num(label, v, hint){
@@ -2590,13 +3416,21 @@ async function showOverview(){
       '<div class="stat-l">' + label + '</div>' +
       (hint ? '<div class="stat-h">' + hint + '</div>' : '') + '</div>';
   }
-  anaLoad(st);               /* 复用上面刚拿到的 stats，不再重复请求 */
-  var todo = (br.priorities || []).map(function(x, i){
+  var _dismissed = briefDismissedMap();
+  var _prios = (br.priorities || []).filter(function(x){
+    return !_dismissed[String(x.title || '')];
+  });
+  var todo = _prios.map(function(x, i){
     return '<div class="todo"><div class="todo-i num">' + (i + 1) + '</div>' +
       '<div style="min-width:0"><div class="todo-t">' + esc(x.title || '') + '</div>' +
       (x.why ? '<div class="todo-w">' + esc(x.why) + '</div>' : '') +
       (x.action ? '<div class="todo-a">' + esc(x.action) + '</div>' : '') + '</div></div>';
   }).join('');
+  /* 规则版摘要把第一条待办原样当 headline，下面又列一遍 → 看起来重复。
+     只有 headline 确实是一句独立的总结时才显示。 */
+  var _head = String(br.headline || '').trim();
+  var _first = String(((br.priorities || [])[0] || {}).title || '').trim();
+  if(_head && _head === _first) _head = '';
   box.innerHTML =
     '<div class="dhead"><div style="min-width:0">' +
       '<div class="dname">今日概览</div>' +
@@ -2614,21 +3448,17 @@ async function showOverview(){
     '<div class="sec ovrow">' +
       '<div class="ovcol ov-progress"><h3>投递进度</h3>' +
         '<div class="anaring">' + stageRing(stages, {size: 190}) +
-        '</div></div>' +
+        '</div>' +
+        '<div class="ov-jobs"><h3>岗位投递人数</h3>' +
+          '<div class="ov-jobs-note">按未归档投递数统计</div>' +
+          jobBars(jobsResp) + '</div></div>' +
       '<div class="ovcol"><h3>今日待办' +
-        (br.total ? '（' + br.total + '）' : '') + '</h3>' +
-        (br.headline ? '<div class="sum">' + esc(br.headline) + '</div>' : '') +
-        (todo ? '<div style="margin-top:10px">' + todo + '</div>'
-              : '<div class="hint">今天没有需要优先处理的事</div>') +
-        (br.disclaimer ? '<div class="ev">' + esc(br.disclaimer) + '</div>' : '') +
+        (_prios.length ? '（' + _prios.length + '）' : '') + '</h3>' +
+        (_head ? '<div class="sum">' + esc(_head) + '</div>' : '') +
+        (todo ? '<div class="ov-todos">' + todo + '</div>'
+              : '<div class="hint ov-todos">今天没有需要优先处理的事</div>') +
       '</div>' +
-    '</div>' +
-
-    /* 下方只保留一整个自助分析区，图表和条件使用整栏宽度。 */
-    '<div class="sec ov-analysis"><h3>自助分析（勾条件 → 自动出图）' +
-      '<span class="hint" id="anaScope" style="margin-left:8px">统计范围：全部候选人</span>' +
-      '</h3><div id="anaCustom"></div></div>' +
-    '';
+    '</div>';
   document.getElementById('count').innerHTML =
     '共 <b class="num">' + st.people + '</b> 人';
 }
@@ -2923,6 +3753,50 @@ function edInit(root){
     });
   });
 }
+/* ---------- 项目经历：按需拉取 + 缓存 ----------
+   同一个人可能因面试字典异步到货而二次渲染；用一个共享 Promise，
+   避免两次渲染各发一次模型请求。 */
+var PROJECT_CACHE = {}, PROJECT_JOBS = {};
+function projectFill(wrap, data){
+  var html = projectSectionHtml(data);
+  if(!html){
+    if(wrap && wrap.parentNode){ wrap.parentNode.removeChild(wrap); }
+    return;
+  }
+  wrap.outerHTML = html;
+}
+async function loadProjects(d, box){
+  var key = String(d.id);
+  var wrap = box.querySelector('#projectWrap');
+  if(!wrap) return;
+  if(Object.prototype.hasOwnProperty.call(PROJECT_CACHE, key)){
+    projectFill(wrap, PROJECT_CACHE[key]);
+    return;
+  }
+  var timer = setTimeout(function(){
+    if(wrap.isConnected){
+      wrap.innerHTML = '<h3>项目经历<span class="ai-tag">AI 总结</span></h3>' +
+        '<div class="hint proj-loading">正在从简历中提炼项目经历…</div>';
+    }
+  }, 350);
+  if(!PROJECT_JOBS[key]){
+    PROJECT_JOBS[key] = api('/api/candidates/' + d.id + '/projects');
+  }
+  var r;
+  try{ r = await PROJECT_JOBS[key]; }
+  catch(e){ r = {__err: String(e)}; }
+  clearTimeout(timer);
+  delete PROJECT_JOBS[key];
+  if(!r || r.__err || !r.ok){
+    if(wrap && wrap.parentNode){ wrap.parentNode.removeChild(wrap); }
+    return;
+  }
+  var data = {projects: r.projects || [], direction_summary: r.direction_summary || ''};
+  PROJECT_CACHE[key] = data;
+  var live = box.querySelector('#projectWrap');
+  if(!live || box.dataset.cid !== key) return;
+  projectFill(live, data);
+}
 function openDetail(d){
   /* 多选初值：库里是顿号连接的串 */
   MULTI_IVUNIT = String(d.interview_unit || '').split(/[、，,;；]+/)
@@ -2946,6 +3820,8 @@ function openDetail(d){
   hydrateAvatars(box);       /* 详情里的头像同样按可见性加载（见 fullDetail 的说明） */
   /* 淡灰可点击字段：点一下才变输入框（渲染后绑定） */
   edInit(box);
+  /* 项目经历是 AI 总结、需要调模型：已有缓存同步渲染，没有则异步补上 */
+  if(!d.projects_checked) loadProjects(d, box);
   /* 操作记录必须**每次渲染后都填一次**：面试字典是异步加载的，到货会再走一遍
      `openDetail`，`innerHTML` 一换，之前填好的审计内容就被重置回「正在读…」，
      而外面那个 `loadAudit` 只会在首次调用时跑一次（业务方 2026-10-21 实测卡在这里）。 */
@@ -2955,6 +3831,21 @@ function openDetail(d){
      不做逐段 stagger：那是装饰，不是反馈。 */
   box.classList.remove('swap'); void box.offsetWidth; box.classList.add('swap');
   killAutofill();
+}
+function projectSectionHtml(p){
+  var items = (p && p.projects) || [];
+  if(!items.length) return '';
+  var dir = String((p && p.direction_summary) || '').trim();
+  return '<div class="sec projectsec profile-wide"><h3>项目经历' +
+      '<span class="ai-tag">AI 总结</span></h3>' +
+    (dir ? '<div class="proj-dir"><span>项目方向</span><b>' + esc(dir) + '</b></div>' : '') +
+    '<div class="proj-list">' + items.map(function(x){
+      return '<div class="proj-item">' +
+        '<div class="proj-name">' + esc(x.name || '') + '</div>' +
+        '<div class="proj-sum" title="' + esc(x.summary || '') + '">' +
+          esc(x.summary || '') + '</div>' +
+      '</div>';
+    }).join('') + '</div></div>';
 }
 function fullDetail(d){
   var stage = d.stage || '';
@@ -3198,15 +4089,37 @@ function fullDetail(d){
       if(name && evidence && name !== evidence) return name + '：' + evidence;
       return evidence || name;
     }).filter(Boolean);
-    return '<div class="ev"><b>' + esc(k) + '</b>：' + esc(rows.join('；')) + '</div>';
+    /* 论文/专利条目可能很多：一条一行 + 序号，不能挤成一段不换行的长句。 */
+    return '<div class="ev"><b>' + esc(k) + '</b>' +
+      '<ol class="honor-list">' +
+      rows.map(function(r){ return '<li>' + esc(r) + '</li>'; }).join('') +
+      '</ol></div>';
   }).join('') || '<div class="hint">无</div>';
+  /* 项目经历：已有 AI 缓存就直接渲染；没有缓存先留一个空挂载点，
+     等 `openDetail` 异步拉取（避免打开档案就被模型调用卡住）。 */
+  var projHtml = projectSectionHtml(d.projects);
+  if(!projHtml && !d.projects_checked && MODE !== 'compare'){
+    projHtml = '<div class="sec projectsec profile-wide" id="projectWrap"></div>';
+  }
 
   /* 投递来源（2026-10-28）：来源邮件 + 简历原件合成**一行**，放在档位上方。
      这两件事回答的是同一个问题——"这份档案从哪来的"，原来分两块沉在页面最底部，
      HR 判断"要不要推进"时得来回滚动才能对上是谁怎么投的。 */
   var srcMail = d.source_mail || {};
   var srcDocs = d.resume_documents || [];
-  var srcDoc0 = srcDocs[0] || null;
+  /* 一份邮件可能同时带简历 + 成绩单/作品集，过去这里只显示第一份，
+     “共 2 份”却只有一个“在线打开”，业务方看不到另一份（2026-11-05）。
+     现在逐份列出，每份保留自己的打开/下载入口。 */
+  var srcFileRows = srcDocs.map(function(doc){
+    return '<span class="srcfile">' +
+      '<span class="fn" title="' + esc(doc.file_name || '') + '">' +
+        esc(doc.file_name || '简历原件') + '</span>' +
+      (doc.archived_path
+        ? '<button class="btn" onclick="openDoc(' + doc.id + ',1)">在线打开</button>' +
+          '<button class="btn" onclick="openDoc(' + doc.id + ',0)">下载</button>'
+        : '<span class="srcmeta">原件未留档</span>') +
+    '</span>';
+  }).join('');
   var srcRow = '<div class="srcbar">' +
     '<span class="srck">投递来源</span>' +
     '<span class="srcmail">' +
@@ -3219,17 +4132,14 @@ function fullDetail(d){
             ? '<span class="srcmeta">' + esc(String(srcMail.received_at).slice(5, 16)) + '</span>' : '')
         : '<span class="srcmeta">文件夹导入</span>') +
     '</span>' +
-    (srcDoc0
-      ? '<span class="srcfile">' +
-          '<span class="fn" title="' + esc(srcDoc0.file_name || '') + '">' +
-            esc(srcDoc0.file_name || '简历原件') + '</span>' +
-          (srcDocs.length > 1 ? '<span class="srcmeta">共 ' + srcDocs.length + ' 份</span>' : '') +
-          (srcDoc0.archived_path
-            ? '<button class="btn" onclick="openDoc(' + srcDoc0.id + ',1)">在线打开</button>' +
-              '<button class="btn" onclick="openDoc(' + srcDoc0.id + ',0)">下载</button>'
-            : '<span class="srcmeta">未留档</span>') +
+    (srcDocs.length
+      ? '<span class="srcfiles' + (srcDocs.length > 1 ? ' many' : '') + '">' +
+          (srcDocs.length > 1
+            ? '<span class="srcmeta srccount">简历原件 · 共 ' + srcDocs.length + ' 份</span>'
+            : '') +
+          srcFileRows +
         '</span>'
-      : '<span class="srcfile"><span class="srcmeta">无简历原件</span></span>') +
+      : '<span class="srcfiles"><span class="srcfile"><span class="srcmeta">无简历原件</span></span></span>') +
   '</div>';
 
   /* 档案操作条独立于个人信息：横跨右侧详情栏，滚动时固定在右上角。
@@ -3337,9 +4247,8 @@ function fullDetail(d){
     qualityHtml +
     eduBlock +
 
-    /* 荣誉/论文/专利紧跟教育经历（业务方 2026-10-21）：
-       这几项都是"这个人在学校期间的产出"，跟学历背景是同一段经历的两面，
-       分开放会被后面的判断区块隔断，读起来是两件事。 */
+    /* v4.3.0：项目经历放到荣誉/论文/专利之前（业务方要求互换位置）。 */
+    projHtml +
     /* 荣誉 / 论文 / 专利 + **英语四六级**（业务方 2026-10-21：四六级从头部挪到这里 ——
        它是"资质"，和荣誉/论文/专利是同一类东西；放在姓名下面那排身份信息里显得突兀）。
        标题也跟着改成实情，不再只写三项。 */
@@ -3414,11 +4323,16 @@ function fullDetail(d){
       '</div>' +
       /* 录用与入职：第二行，与面试事实之间一条细线 —— 它是"面试之后"的事。 */
       '<div class="ivrow">' +
-        '<span class="fld"><span class="fl">入职情况</span>' +
-          '<select id="obStatus">' +
-            ['', '未入职', '已入职', '放弃'].map(function(v){
-              return opt(v, d.onboard_status, v || '未填'); }).join('') +
-          '</select></span>' +
+        /* v4.0.16：录用单位是招聘进度表的归属维度，和“面试单位”分开。
+           没有 edit_plan 的角色只读；本机模式/HR 可编辑。
+           这里先给免费输入 + datalist，届别单位还没导入时也不挡手输。 */
+        '<span class="fld"><span class="fl">录用单位</span>' +
+          '<input id="obHireUnit" list="dlHireUnit" placeholder="如：钛所" value="' +
+            esc(d.hire_unit || '') + '"' + (can('edit_plan') ? '' : ' disabled') + '></span>' +
+        '<datalist id="dlHireUnit">' + (RECRUIT_UNITS || []).map(function(u){
+          return '<option value="' + esc(u) + '"></option>'; }).join('') + '</datalist>' +
+        '<span class="fld"><span class="fl">签约情况</span>' +
+          signStatusField(d) + '</span>' +
         '<span class="fld"><span class="fl">录用函发出</span>' +
           '<input id="obOffer" type="datetime-local" value="' +
             esc(String(d.offer_sent_at || '').replace(' ', 'T').slice(0, 16)) + '"></span>' +
@@ -3484,11 +4398,12 @@ function fullDetail(d){
       ? '<div class="sec quiet"><h3>其他附件（' + d.other_documents.length + '）</h3>' +
         docRows(d.other_documents) + '</div>' : '') +
     /* 操作记录（2026-10-20 补齐；2026-10-21 去掉「档位来源」—— 业务方只要操作记录）。
-       审计调 `/api/audit` 按候选人过滤，v2 之前**零调用** —— 谁在什么时候改了
-       档位/阶段/复核，界面上查不到，HR 不敢在生产上用。异步拉，不阻塞档案渲染。 */
-    '<div class="sec profile-wide"><h3>操作记录</h3>' +
-      '<div id="auditBox" class="hint">正在读操作记录…</div>' +
-    '</div>' +
+       v4.0.17：审计只对系统管理员展示；其他角色连区块都不出现。 */
+    (can('manage_users')
+      ? '<div class="sec profile-wide"><h3>操作记录</h3>' +
+        '<div id="auditBox" class="hint">正在读操作记录…</div>' +
+        '</div>'
+      : '') +
 
     '</div>';
 }
@@ -4208,21 +5123,146 @@ function saveBlob(blob, name){
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(function(){ URL.revokeObjectURL(a.href); }, 4000);
 }
+function todayStamp(){
+  var d = new Date();
+  var m = String(d.getMonth() + 1), day = String(d.getDate());
+  if(m.length < 2) m = '0' + m;
+  if(day.length < 2) day = '0' + day;
+  return d.getFullYear() + m + day;
+}
+/* 导出文件名优先用服务端 Content-Disposition，避免所有下载都叫“候选人名单”。 */
+function exportFilename(resp, fallback){
+  try{
+    var cd = resp.headers.get('Content-Disposition') || '';
+    var m = cd.match(/filename\*=UTF-8''([^;]+)/i);
+    if(m) return decodeURIComponent(m[1]);
+    m = cd.match(/filename="?([^";]+)"?/i);
+    if(m) return m[1];
+  }catch(e){}
+  return fallback;
+}
+/* v4.3.0：导出不再默认全库，先选范围（全部 / 指定阶段 / 待面试的某一天） */
+function askExportScope(){
+  return new Promise(function(resolve){
+    var stages = (STAGE_CFG.order || []);
+    document.getElementById('dlgTitle').textContent = '导出名单';
+    var editorBody = document.getElementById('edDlgBody');
+    if(editorBody){ editorBody.style.display = 'none'; editorBody.innerHTML = ''; }
+    var body = document.getElementById('dlgBody');
+    body.style.display = '';
+    body.innerHTML =
+      '<div class="hint" style="margin-bottom:10px">选择要导出的人员范围；' +
+        '导出含已归档人员（「是否录用」列需要他们）。</div>' +
+      '<label style="display:block;font-size:13px;color:var(--ink-2);margin-bottom:6px">范围' +
+        '<select id="expStage" style="display:block;width:100%;height:36px;margin-top:5px;' +
+        'border:1px solid var(--line-2);border-radius:var(--r-s);padding:0 10px;font:inherit">' +
+          '<option value="">全部候选人</option>' +
+          stages.map(function(s){ return '<option value="' + esc(s) + '">' + esc(s) + '</option>'; }).join('') +
+        '</select></label>' +
+      '<label id="expDateWrap" style="display:none;font-size:13px;color:var(--ink-2);margin-top:10px">' +
+        '面试日期（留空 = 全部待面试）' +
+        '<input id="expDate" type="date" style="display:block;width:100%;height:36px;margin-top:5px;' +
+        'border:1px solid var(--line-2);border-radius:var(--r-s);padding:0 10px;font:inherit"></label>';
+    var sel = document.getElementById('expStage');
+    var wrap = document.getElementById('expDateWrap');
+    sel.onchange = function(){
+      wrap.style.display = sel.value === '待面试' ? '' : 'none';
+      if(sel.value !== '待面试') document.getElementById('expDate').value = '';
+    };
+    document.getElementById('dlgNo').textContent = '取消';
+    var yes = document.getElementById('dlgYes');
+    yes.textContent = '导出'; yes.className = 'btn primary';
+    yes.onclick = function(){
+      var stage = sel.value || '';
+      var date = (document.getElementById('expDate').value || '').trim();
+      closeDlg({stage: stage, date: stage === '待面试' ? date : ''});
+    };
+    document.getElementById('dlgNo').onclick = function(){ closeDlg(null); };
+    document.getElementById('mask').onclick = function(ev){
+      if(ev.target === ev.currentTarget) closeDlg(null);
+    };
+    window.__dlgResolve = resolve;
+    document.getElementById('mask').classList.add('on');
+    sel.focus();
+  });
+}
 async function doExport(){
+  var sc = await askExportScope();
+  if(!sc) return;
+  var p = [];
+  if(sc.stage) p.push('stage=' + encodeURIComponent(sc.stage));
+  if(sc.date) p.push('interview_date=' + encodeURIComponent(sc.date));
+  var label = sc.stage ? (sc.stage + (sc.date ? '（' + sc.date + ' 面试）' : '')) : '全部候选人';
+  p.push('scope=' + encodeURIComponent(label + '名单'));
   toast('正在导出名单…');
-  var r = await fetch(withToken('/api/export/roster' + query()), {headers: hdr({})});
+  var r = await fetch(withToken('/api/export/roster?' + p.join('&')), {headers: hdr({})});
   if(!r.ok){ toast('导出失败 HTTP ' + r.status); return; }
-  saveBlob(await r.blob(), '候选人名单.xlsx');
-  toast('已导出');
+  saveBlob(await r.blob(), exportFilename(r, label + '名单-' + todayStamp() + '.xlsx'));
+  toast('已导出：' + label);
+}
+function bundleLastText(last){
+  if(!last) return '上次下载：还没有下载记录';
+  var f = String(last.date_from || ''), t = String(last.date_to || '');
+  var span = (!f && !t) ? '全部初筛通过' : ((f || '最早') + ' 至 ' + (t || '最新'));
+  var at = String(last.downloaded_at || '').slice(0, 16);
+  var files = (last.files == null) ? '' : (' · ' + last.files + ' 份');
+  return '上次下载：' + span + (at ? (' · ' + at) : '') + files;
+}
+function askBundleRange(last){
+  return new Promise(function(resolve){
+    document.getElementById('dlgTitle').textContent = '下载初筛简历';
+    var editorBody = document.getElementById('edDlgBody');
+    if(editorBody){ editorBody.style.display = 'none'; editorBody.innerHTML = ''; }
+    document.getElementById('dlgBody').style.display = '';
+    document.getElementById('dlgBody').innerHTML =
+      '<div class="hint" style="margin-bottom:10px">按<b>投递时间</b>筛选：' +
+        '只打包这段时间投递、且当前处于「初筛通过」的简历；' +
+        '留空表示不限，也可以只选开始或结束日期。</div>' +
+      '<div class="bundle-dates">' +
+        '<label>开始日期<input type="date" id="bundleFrom"></label>' +
+        '<label>结束日期<input type="date" id="bundleTo"></label>' +
+      '</div>' +
+      '<div class="bundle-last">' + esc(bundleLastText(last)) + '</div>';
+    document.getElementById('dlgNo').textContent = '取消';
+    var yes = document.getElementById('dlgYes');
+    yes.textContent = '开始下载'; yes.className = 'btn primary';
+    function done(v){ closeDlg(v); }
+    yes.onclick = function(){
+      var f = document.getElementById('bundleFrom').value || '';
+      var t = document.getElementById('bundleTo').value || '';
+      if(f && t && f > t){
+        toast('开始日期不能晚于结束日期');
+        return;
+      }
+      done({date_from:f, date_to:t});
+    };
+    document.getElementById('dlgNo').onclick = function(){ done(null); };
+    document.getElementById('mask').onclick = function(ev){
+      if(ev.target === ev.currentTarget) done(null);
+    };
+    window.__dlgResolve = resolve;
+    document.getElementById('mask').classList.add('on');
+    var inp = document.getElementById('bundleFrom');
+    if(inp) inp.focus();
+  });
 }
 async function doBundle(){
+  var lastResp = await api('/api/bundle/initial-pass/last');
+  var last = (lastResp && !lastResp.__err) ? lastResp.last : null;
+  var range = await askBundleRange(last);
+  if(!range) return;
+  var qs = [];
+  if(range.date_from) qs.push('date_from=' + encodeURIComponent(range.date_from));
+  if(range.date_to) qs.push('date_to=' + encodeURIComponent(range.date_to));
   toast('正在打包初筛简历…');
-  var r = await fetch(withToken('/api/bundle/initial-pass'),
+  var r = await fetch(withToken('/api/bundle/initial-pass' +
+                               (qs.length ? ('?' + qs.join('&')) : '')),
     {method:'POST', headers:hdr({})});
   if(!r.ok){ var j = await r.json().catch(function(){ return {}; });
     toast(j.detail || ('打包失败 HTTP ' + r.status)); return; }
-  saveBlob(await r.blob(), '初筛通过.zip');
-  toast('已打包');
+  var span = (range.date_from || '不限') + '至' + (range.date_to || '不限');
+  saveBlob(await r.blob(), '初筛通过-' + span + '.zip');
+  toast('已打包：' + span);
 }
 function setAll(on){
   Object.keys(ITEMS.reduce(function(m, x){ m[x.id] = 1; return m; }, {})).forEach(function(k){
@@ -4238,6 +5278,22 @@ function syncSel(){
   var b = document.getElementById('btnArch');
   b.textContent = '归档勾选（' + n + '）';
   b.disabled = n === 0;
+  var ops = document.getElementById('btnBatchOps');
+  if(ops){
+    ops.textContent = '批量操作（' + n + '） ▾';
+    /* 菜单本身始终可开：没勾选时里面两项禁用，HR 能看到有哪些操作 */
+    ops.disabled = false;
+  }
+  var ini = document.getElementById('btnInitial');
+  if(ini){
+    ini.textContent = '批量初筛通过（' + n + '）';
+    ini.disabled = n === 0;
+  }
+  var ba = document.getElementById('btnBulkAssign');
+  if(ba){
+    ba.textContent = '批量归岗（' + n + '）';
+    ba.disabled = n === 0;
+  }
   var c = document.getElementById('btnCompare');
   if(c){
     c.textContent = '对比档案（' + n + '/' + COMPARE_MAX + '）';
@@ -4245,6 +5301,83 @@ function syncSel(){
     c.title = n > 5 ? '最多固定 5 个档案，请减少勾选' : '选择 2-5 人后打开固定档案标签';
   }
 }
+async function initialPassChecked(){
+  var ids = Object.keys(SEL).filter(function(k){ return SEL[k]; }).map(Number);
+  if(!ids.length) return;
+  var ok = await askConfirm({
+    title: '批量初筛通过',
+    okText: '推进',
+    body: '把勾选的 ' + ids.length + ' 人推进到「初筛通过」？\n\n' +
+          '有系统建议岗位的会先采纳建议并重算；没有建议岗位的仍会推进，' +
+          '但保持「待指定」，需要你后续指定岗位。'
+  });
+  if(!ok) return;
+  var r = await api('/api/candidates/bulk-initial-pass', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({ids: ids})});
+  if(r.__err){ toast(r.__err, 'danger'); return; }
+  toast(r.note || '已处理');
+  SEL = {}; syncSel();
+  var chk = document.getElementById('chkAll');
+  if(chk) chk.checked = false;
+  await load();
+  if(CUR) pick(CUR);
+}
+
+/* v4.3.0：批量归岗 —— 弹窗选择在招岗位，确认后逐人归岗 */
+function askJobSelect(jobs){
+  return new Promise(function(resolve){
+    document.getElementById('dlgTitle').textContent = '批量归岗';
+    var editorBody = document.getElementById('edDlgBody');
+    if(editorBody){ editorBody.style.display = 'none'; editorBody.innerHTML = ''; }
+    var body = document.getElementById('dlgBody');
+    body.style.display = '';
+    body.innerHTML = '<div class="hint" style="margin-bottom:10px">把勾选的候选人归到哪个岗位？</div>' +
+      '<select id="bulkJobSel" style="width:100%;height:36px;border:1px solid var(--line-2);' +
+      'border-radius:var(--r-s);padding:0 10px;font:inherit">' +
+      jobs.map(function(j){
+        return '<option value="' + esc(j.id) + '">' + esc(j.title || ('#' + j.id)) +
+          (j.department_name ? '（' + esc(j.department_name) + '）' : '') + '</option>';
+      }).join('') + '</select>';
+    document.getElementById('dlgNo').textContent = '取消';
+    var yes = document.getElementById('dlgYes');
+    yes.textContent = '归岗'; yes.className = 'btn primary';
+    yes.onclick = function(){
+      var el = document.getElementById('bulkJobSel');
+      closeDlg(el ? el.value : null);
+    };
+    document.getElementById('dlgNo').onclick = function(){ closeDlg(null); };
+    document.getElementById('mask').onclick = function(ev){
+      if(ev.target === ev.currentTarget) closeDlg(null);
+    };
+    window.__dlgResolve = resolve;
+    document.getElementById('mask').classList.add('on');
+    var sel = document.getElementById('bulkJobSel');
+    if(sel) sel.focus();
+  });
+}
+async function bulkAssignChecked(){
+  var ids = Object.keys(SEL).filter(function(k){ return SEL[k]; }).map(Number);
+  if(!ids.length) return;
+  var jr = await api('/api/jobs');
+  if(jr.__err){ toast(jr.__err, 'danger'); return; }
+  var jobs = (jr.items || []).filter(function(x){
+    return x && x.active !== 0 && x.active !== false;
+  });
+  if(!jobs.length){ toast('还没有在招岗位，请先到「岗位管理」新建岗位', 'warn'); return; }
+  var jobId = await askJobSelect(jobs);
+  if(!jobId) return;
+  var r = await api('/api/candidates/bulk-assign-job', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ids: ids, job_id: Number(jobId)})});
+  if(r.__err){ toast(r.__err, 'danger'); return; }
+  toast(r.note || '已归岗');
+  SEL = {}; syncSel();
+  var chk = document.getElementById('chkAll');
+  if(chk) chk.checked = false;
+  await load();
+  if(CUR) pick(CUR);
+}
+
 async function archiveChecked(){
   var ids = Object.keys(SEL).filter(function(k){ return SEL[k]; }).map(Number);
   if(!ids.length) return;
@@ -4299,7 +5432,9 @@ var FORM_FIELDS = [
   ['面试与录用','ivUnit','interview_unit'], ['面试与录用','ivDate','interview_date'],
   ['面试与录用','ivSlot','interview_slot'], ['面试与录用','ivMode','interview_mode'],
   ['面试与录用','obOffer','offer_sent_at'], ['面试与录用','obSigned','signed_at'],
-  ['面试与录用','obDeadline','onboard_deadline'], ['面试与录用','obStatus','onboard_status'],
+  ['面试与录用','obDeadline','onboard_deadline'],
+  ['面试与录用','obHireUnit','hire_unit'],
+  ['面试与录用','obSignStatus','sign_status'],
 ];
 function formSnapshot(){
   var m = {};
@@ -4541,8 +5676,18 @@ async function bootAfterLogin(){
      应用区于是从 98.5% 淡入展开 —— 和登录层的淡出是同时的。 */
   applyUrlState();          /* 刷新/收藏进来的筛选条件先落回控件 */
   URL_READY = true;
+  enterDefaultView();       /* 默认进入智能助手；hash 有视图时尊重 hash */
+  applyPermissions();
+  recruitLoadUnits();       /* 提前拿单位列表，档案页“录用单位”下拉才有候选 */
   await load({push:false});
   await showOverview();
+}
+async function recruitLoadUnits(){
+  var j = await api('/api/recruit/meta');
+  if(j && !j.__err){
+    RECRUIT.meta = j;
+    RECRUIT_UNITS = j.units || [];
+  }
 }
 async function loadMe(){
   var j = await api('/api/me');
@@ -4593,6 +5738,28 @@ function closeAcct(){
 function acctGo(view){
   closeAcct();
   setView(view);
+}
+/* 主题：默认跟随系统；在账号菜单里手动切换后记住选择。
+   只改 <html data-theme>，颜色全部由 CSS Token 接管，不触碰业务逻辑。 */
+function themeIsDark(){
+  var t = document.documentElement.getAttribute('data-theme');
+  if(t === 'dark') return true;
+  if(t === 'light') return false;
+  return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+}
+function syncThemeBtn(){
+  var b = document.getElementById('acctTheme');
+  if(b) b.textContent = themeIsDark() ? '浅色模式' : '深色模式';
+}
+function toggleTheme(){
+  var next = themeIsDark() ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  try{ localStorage.setItem('tp_theme', next); }catch(e){}
+  syncThemeBtn();
+}
+if(window.matchMedia){
+  var _themeMQ = window.matchMedia('(prefers-color-scheme: dark)');
+  if(_themeMQ.addEventListener) _themeMQ.addEventListener('change', syncThemeBtn);
 }
 document.addEventListener('click', function(ev){
   var box = document.getElementById('sfoot');
@@ -4932,7 +6099,7 @@ var M_MAIL_TASK_ACK = '';
 
 /* 当前模块记在 **URL hash** 里：整页刷新（F5）后还停在原模块，
    不会莫名其妙跳回人才库。浏览器前进/后退也跟着走。 */
-var VIEWS = ['pool', 'chat', 'mail', 'org', 'archive', 'sys', 'users'];
+var VIEWS = ['pool', 'recruit', 'chat', 'mail', 'org', 'archive', 'sys', 'users'];
 function setView(v, fromHash){
   VIEW = v;
   if(!fromHash){
@@ -4946,7 +6113,7 @@ function setView(v, fromHash){
      而视图名是 'archive'，对不上 → 归档页永远不显示。
      用显式映射，别耍小聪明。 */
   var MAP = {mailView:'mail', orgView:'org', archView:'archive',
-             sysView:'sys', chatView:'chat', usersView:'users'};
+             sysView:'sys', chatView:'chat', usersView:'users', recruitView:'recruit'};
   Object.keys(MAP).forEach(function(id){
     var el = document.getElementById(id);
     if(el) el.classList.toggle('on', MAP[id] === v);
@@ -4958,9 +6125,19 @@ function setView(v, fromHash){
 
   if(v === 'org') initOrg();
   if(v === 'archive') initArch();
+  if(v === 'recruit') initRecruit();
   if(v === 'sys') initSys();
   if(v === 'users') initUsers();
   if(v === 'chat') initChat();
+}
+/* v4.0.17：登录/启动完成后的默认视图。
+   没有 hash → 智能助手；有 hash → 尊重刷新前的视图（#recruit 等）。
+   ⚠️ setView 会重写 body.className，所以在它之后要再 applyPermissions()
+   把 readonly / locked 补回来。 */
+function enterDefaultView(){
+  var h = (location.hash || '').replace('#', '');
+  if(VIEWS.indexOf(h) >= 0){ setView(h, true); return; }
+  setView('chat', true);
 }
 /* 进页面时按 hash 恢复模块；hash 变了（前进/后退）也跟着切 */
 (function restoreView(){
@@ -5620,6 +6797,28 @@ function anaConfigConds(){
 }
 function anaSaveConds(){ closeProgDlg(); anaRenderCustom(); }
 
+/* v4.0.17：投递进度下方的岗位横向柱。
+   数据来自 `/api/jobs` 的 applications_count（只数未归档投递，与岗位页一致）。
+   不做点击跳转：人才库的岗位筛选不是这个口径，做成可点会承诺一个不存在的动作。 */
+function jobBars(resp){
+  var list = ((resp && resp.items) || []).filter(function(j){
+    return j && (Number(j.active) !== 0 || (j.applications_count || 0) > 0);
+  });
+  list.sort(function(a, b){
+    return (b.applications_count || 0) - (a.applications_count || 0);
+  });
+  if(!list.length) return '<div class="hint">还没有岗位投递</div>';
+  var max = 1;
+  list.forEach(function(j){ max = Math.max(max, j.applications_count || 0); });
+  return '<div class="ovjob-list">' + list.map(function(j){
+    var n = j.applications_count || 0;
+    var pct = Math.round(n / max * 100);
+    return '<div class="ovjob"><div class="ovjob-head"><span>' +
+      esc(j.title || '未命名岗位') + '</span><b class="num">' + n + '</b></div>' +
+      '<div class="ovjob-track"><i style="width:' + pct + '%"></i></div></div>';
+  }).join('') + '</div>';
+}
+
 /* ---- 原版的投递进度环（原样搬：点环段/图例 → 跳人才库并按该阶段筛选）---- */
 function stageRing(st, opts){
   var o = opts || {};
@@ -5643,7 +6842,9 @@ function stageRing(st, opts){
     acc += len;
     return el;
   }).join('');
-  var legend = segs.map(function(x){
+  /* 图例只列**有人的阶段**：0 人的阶段留在环里没有意义，还会让右侧待办
+     看起来比左侧短一截（业务方 2026-11-04）。 */
+  var legend = segs.filter(function(x){ return x[1] > 0; }).map(function(x){
     return '<div class="lgitem" onclick="anaPickStage(\'' + x[0] + '\')" ' +
       'title="' + x[0] + '：' + x[1] + ' 人 —— 点击筛选">' +
       '<i style="background:' + x[2] + '"></i><span>' + x[0] + '</span><b class="num">' + x[1] + '</b></div>';
@@ -6602,7 +7803,7 @@ function renderUsers(){
         '</tbody></table>' +
       '<div class="uhead" style="margin-top:26px"><h3>角色权限</h3>' +
         '<span class="usub">✓ = 该角色拥有此权限</span></div>' +
-      /* 权限矩阵：表头用**竖排**（每个权限两字一行），13 列才排得下。
+      /* 权限矩阵：表头用**竖排**（每个权限两字一行），14 列才排得下。
          横排会被挤成"查看查看使用让助…"这种没法读的东西。 */
       '<table class="utable pmtable"><thead><tr><th style="width:190px">角色</th><td>' +
         Object.keys(USERS.perm_labels || {}).map(function(p){
@@ -6613,6 +7814,760 @@ function renderUsers(){
       '<div class="hint" style="margin-top:16px">密码至少 ' + (USERS.min_password_len || 8) +
         ' 位。修改角色或停用账号会**立即清除该账号的登录状态**。</div>' +
     '</div>';
+}
+
+/* ============================================================
+   招聘进度（v4.0.16）
+   页面、导出、智能助手都读同一套后端口径；这里只做展示与交互。
+   三条展示原则：
+     · 计划数可编辑，但必须点“保存计划”才落库（不会边输入边改库）；
+     · 签约人只读，点名字跳档案；归属在“数据体检”里改；
+     · 数据不齐的人不会“消失”，会出现在体检里。
+   ============================================================ */
+var RECRUIT = {meta:null, data:null, roster:null, yearId:null, tab:'progress',
+               edit:false, expanded:{}, filters:{unit:'', edu:'', onlyGap:false},
+               rosterFilters:{date_from:'', date_to:'', unit:'', edu:'',
+                              outcome:'', keyword:''},
+               pendingFile:null};
+var RECRUIT_UNITS = [];
+
+function rpPct(v){
+  return (v === null || v === undefined) ? '—' : (Number(v) * 100).toFixed(1) + '%';
+}
+function rpNum(v){
+  return (v === null || v === undefined || v === '') ? 0 : Number(v);
+}
+
+async function initRecruit(){
+  var box = document.getElementById('recruitView');
+  if(!box) return;
+  box.innerHTML = '<div class="hint" style="padding:20px">读取招聘进度…</div>';
+  var meta = await api('/api/recruit/meta');
+  if(meta.__err){
+    box.innerHTML = '<div class="rp-empty">' + esc(meta.__err) + '</div>';
+    return;
+  }
+  RECRUIT.meta = meta;
+  RECRUIT_UNITS = meta.units || [];
+  if(!RECRUIT.yearId){
+    RECRUIT.yearId = meta.default_year_id
+      || (meta.years && meta.years[0] && meta.years[0].id) || null;
+  }
+  if(!RECRUIT.yearId){
+    RECRUIT.data = null; RECRUIT.roster = null;
+    renderRecruitPage();
+    return;
+  }
+  await recruitLoad();
+}
+
+async function recruitLoad(){
+  var d = await api('/api/recruit/progress?year_id=' + encodeURIComponent(RECRUIT.yearId));
+  if(d.__err){ toast('读取进度失败：' + d.__err, 'danger'); return; }
+  RECRUIT.data = d;
+  RECRUIT.roster = null;
+  /* 单位列表可能因新增/删除单位变化，档案页的录用单位 datalist 跟着刷新 */
+  if(d && d.units){
+    RECRUIT_UNITS = d.units;
+    if(RECRUIT.meta) RECRUIT.meta.units = d.units;
+  }
+  if(RECRUIT.tab === 'roster') await recruitLoadRoster();
+  renderRecruitPage();
+}
+
+async function recruitPickYear(id){
+  RECRUIT.yearId = Number(id);
+  RECRUIT.edit = false;
+  await recruitLoad();
+}
+
+async function recruitTab(tab){
+  RECRUIT.tab = tab;
+  if(tab === 'roster' && !RECRUIT.roster) await recruitLoadRoster();
+  renderRecruitPage();
+}
+
+async function recruitLoadRoster(){
+  var f = RECRUIT.rosterFilters || {};
+  var q = '/api/recruit/roster?year_id=' + encodeURIComponent(RECRUIT.yearId);
+  Object.keys(f).forEach(function(k){
+    if(f[k]) q += '&' + k + '=' + encodeURIComponent(f[k]);
+  });
+  var d = await api(q);
+  if(d.__err){ toast('读取面试名单失败：' + d.__err, 'danger'); return; }
+  RECRUIT.roster = d;
+}
+
+function rpCard(k, v, s, tone){
+  return '<div class="rp-card c-' + (tone || 'blue') + '"><div class="k">' +
+    esc(k) + '</div><div class="v">' + esc(v) +
+    (s ? '<span class="s">' + esc(s) + '</span>' : '') + '</div></div>';
+}
+function rpTab(id, label){
+  return '<button class="rp-tab' + (RECRUIT.tab === id ? ' on' : '') +
+    '" onclick="recruitTab(\'' + id + '\')">' + esc(label) + '</button>';
+}
+
+function rhKpi(label, value, tone){
+  return '<div class="rh-kpi"><span class="rh-k">' + esc(label) + '</span>' +
+    '<b class="rh-v ' + tone + '">' + esc(value) + '</b></div>';
+}
+
+/* 招聘进度主视觉：一个完成率环 + 四个关键数 + 学历分布条。
+   替换原来 4 张 KPI 卡 + 4 张学历卡（8 个同构卡片）；这里只保留一个
+   视觉锚点（环），其余用紧凑的数字与进度条，颜色只表达状态。 */
+function recruitHero(t, byEdu){
+  var should = rpNum(t.should_hire), signed = rpNum(t.signed_count), gap = rpNum(t.gap);
+  var rate = t.rate;
+  var ringPct = (rate === null || rate === undefined)
+    ? 0 : Math.max(0, Math.min(1, Number(rate)));
+  var ringColor = (rate === null || rate === undefined)
+    ? 'var(--line-2)' : (rate >= 1 ? 'var(--ok)' : (rate > 0 ? 'var(--accent)' : 'var(--line-2)'));
+  var ringText = (rate === null || rate === undefined)
+    ? 'var(--ink-3)' : (rate >= 1 ? 'var(--ok)' : (rate > 0 ? 'var(--accent-ink)' : 'var(--ink-3)'));
+  var C = 2 * Math.PI * 48;
+  var dash = (C * ringPct).toFixed(1), rest = (C - C * ringPct).toFixed(1);
+  var ring = '<div class="rh-ring">' +
+    '<svg viewBox="0 0 120 120" role="img" aria-label="招聘完成率">' +
+      '<circle class="rh-ring-track" cx="60" cy="60" r="48" fill="none" stroke-width="12"/>' +
+      '<circle cx="60" cy="60" r="48" fill="none" stroke="' + ringColor + '" ' +
+        'stroke-width="12" stroke-linecap="round" stroke-dasharray="' + dash + ' ' + rest + '" ' +
+        'transform="rotate(-90 60 60)"/>' +
+    '</svg>' +
+    '<div class="rh-ring-center"><b style="color:' + ringText + '">' + rpPct(rate) + '</b>' +
+      '<span>已签 ' + signed + ' / 应招 ' + should + '</span></div></div>';
+  var kpis = '<div class="rh-kpis">' +
+    rhKpi('应招总数', should, 'blue') +
+    rhKpi('已签人数', signed, 'green') +
+    rhKpi('签约缺口', gap, gap < 0 ? 'red' : 'amber') +
+    rhKpi('完成率', rpPct(rate), 'purple') + '</div>';
+  var degrees = (byEdu || []).map(function(x){
+    var n = rpNum(x.should_hire), sg = rpNum(x.signed_count), gp = rpNum(x.gap);
+    var tone = {'博士':'doctor', '硕士':'master', '本科':'bachelor', '大专':'college'}[x.edu_level] || '';
+    var gcls = gp > 0 ? 'pos' : (gp < 0 ? 'neg' : 'zero');
+    return '<div class="rh-degree"><div class="rh-dhead">' +
+      '<span class="rh-dot ' + tone + '"></span>' +
+      '<span class="rh-dname">' + esc(x.edu_level) + '</span></div>' +
+      '<div class="rh-dstat">应招 <b>' + n + '</b></div>' +
+      '<div class="rh-dstat">已签 <b>' + sg + '</b></div>' +
+      '<div class="rh-dstat gap ' + gcls + '">缺口 <b>' + gp + '</b></div></div>';
+  }).join('');
+  return '<section class="recruit-hero"><div class="rh-left">' + ring + '</div>' +
+    '<div class="rh-right">' + kpis + '<div class="rh-degrees">' + degrees + '</div></div></section>';
+}
+
+function renderRecruitPage(){
+  var box = document.getElementById('recruitView');
+  if(!box) return;
+  var meta = RECRUIT.meta || {years:[], can_edit:false, can_export:false};
+  var d = RECRUIT.data;
+  var year = d && d.year;
+  var h = '<div class="rp-head"><h2>招聘进度</h2>';
+  if(year){
+    h += '<span class="hint">' + esc(year.period_start) + ' 至 ' +
+         esc(year.period_end) + '</span>';
+  }
+  h += '<div class="rp-toolbar">';
+  if(meta.years && meta.years.length){
+    h += '<select class="sel" onchange="recruitPickYear(this.value)">' +
+      meta.years.map(function(y){
+        return '<option value="' + y.id + '"' +
+          (String(y.id) === String(RECRUIT.yearId) ? ' selected' : '') + '>' +
+          esc(y.label) + '（' + esc(y.period_start) + '~' + esc(y.period_end) + '）' +
+          '</option>';
+      }).join('') + '</select>';
+  }
+  if(meta.can_edit) h += '<button class="btn" onclick="recruitNewYear()">新建届别</button>';
+  if(meta.can_edit) h += '<button class="btn primary" onclick="recruitImport()">导入计划</button>';
+  if(meta.can_export){
+    h += '<select class="sel" id="rpExportKind">' +
+      '<option value="official">官方版式</option>' +
+      '<option value="flat">平铺明细</option>' +
+      '<option value="roster">面试总名单</option></select>' +
+      '<button class="btn btn-green" onclick="recruitExport()">导出</button>';
+  }
+  h += '<button class="btn" onclick="initRecruit()">刷新</button>';
+  if(can('chat')){
+    h += '<button class="btn" onclick="recruitAskAssistant()">让助手总结</button>';
+  }
+  h += '</div></div>';
+
+  if(!year){
+    h += '<div class="rp-empty"><h3 style="margin:0 0 8px">还没有招聘届别</h3>' +
+      '<div>导入现有的《2027届招聘进度表》，或先建一个空白届别。</div>' +
+      '<div style="margin-top:14px">' +
+      (meta.can_edit ? '<button class="btn primary" onclick="recruitImport()">导入 2027届招聘进度表</button> ' +
+        '<button class="btn" onclick="recruitNewYear()">新建空白届别</button>' : '') +
+      '</div></div>';
+    box.innerHTML = h;
+    return;
+  }
+
+  var t = (d && d.totals) || {};
+  h += recruitHero(t, d.by_education || []);
+  var hc = (d.health && d.health.count) || 0;
+  h += '<div class="rp-tabs">' + rpTab('progress', '进度总表') +
+    rpTab('roster', '面试总名单') +
+    rpTab('health', '数据体检' + (hc ? '（' + hc + '）' : '')) +
+    '</div><div id="rpBody"></div>';
+  box.innerHTML = h;
+  renderRecruitTab();
+}
+
+function renderRecruitTab(){
+  var body = document.getElementById('rpBody');
+  if(!body) return;
+  if(!RECRUIT.data || !RECRUIT.data.year){ body.innerHTML = ''; return; }
+  if(RECRUIT.tab === 'roster'){ renderRecruitRoster(body); return; }
+  if(RECRUIT.tab === 'health'){ renderRecruitHealth(body); return; }
+  renderRecruitProgress(body);
+}
+
+function recruitFilter(k, v){
+  RECRUIT.filters[k] = v;
+  renderRecruitTab();
+}
+function recruitToggleEdit(on){
+  RECRUIT.edit = !!on;
+  renderRecruitTab();
+}
+
+function rpInput(r, field){
+  var labels = {plan_approved:'上会审批', plan_extra:'追加',
+                plan_carryover:'转上年度', plan_cancel:'应取消'};
+  return '<td><input class="rp-num" id="rp-' + field + '-' + r.plan_id +
+    '" data-plan="' + r.plan_id + '" data-field="' + field +
+    '" type="number" min="0" value="' + rpNum(r[field]) + '" title="' +
+    labels[field] + '" oninput="recruitRecalc(' + r.plan_id + ')"></td>';
+}
+
+/* 横向滚动时前三列固定：left 偏移必须按**实际列宽**算，
+   写死 52/148 会因为单元格内边距而错位，出现固定列之间的缝隙。 */
+function recruitFreezeCols(){
+  var t = document.querySelector('#recruitView .rp-table');
+  if(!t) return;
+  var ths = t.querySelectorAll('thead th');
+  if(ths.length < 3) return;
+  var w1 = ths[0].getBoundingClientRect().width;
+  var w2 = ths[1].getBoundingClientRect().width;
+  t.style.setProperty('--freeze1', w1 + 'px');
+  t.style.setProperty('--freeze2', (w1 + w2) + 'px');
+}
+window.addEventListener('resize', recruitFreezeCols);
+function renderRecruitProgress(body){
+  var d = RECRUIT.data || {};
+  var rows = (d.rows || []).slice();
+  var f = RECRUIT.filters || {};
+  if(f.unit) rows = rows.filter(function(r){ return r.unit_name === f.unit; });
+  if(f.edu) rows = rows.filter(function(r){ return r.edu_level === f.edu; });
+  if(f.onlyGap) rows = rows.filter(function(r){ return rpNum(r.gap) > 0; });
+
+  var h = '<div class="rp-bar">' +
+    '<select class="sel" onchange="recruitFilter(\'unit\',this.value)">' +
+      '<option value="">单位：全部</option>' +
+      (d.units || []).map(function(u){
+        return '<option' + (f.unit === u ? ' selected' : '') + '>' + esc(u) + '</option>';
+      }).join('') + '</select>' +
+    '<select class="sel" onchange="recruitFilter(\'edu\',this.value)">' +
+      '<option value="">学历：全部</option>' +
+      ['博士','硕士','本科','大专'].map(function(e){
+        return '<option' + (f.edu === e ? ' selected' : '') + '>' + esc(e) + '</option>';
+      }).join('') + '</select>' +
+    '<label class="allbox"><input type="checkbox" ' + (f.onlyGap ? 'checked' : '') +
+      ' onchange="recruitFilter(\'onlyGap\',this.checked)"> 只看有缺口</label>';
+  if(RECRUIT.meta && RECRUIT.meta.can_edit){
+    h += RECRUIT.edit
+      ? '<button class="btn primary" onclick="recruitSavePlans()">保存计划</button>' +
+        '<button class="btn" onclick="recruitToggleEdit(false)">取消</button>'
+      : '<button class="btn" onclick="recruitToggleEdit(true)">编辑计划</button>';
+    h += '<button class="btn" onclick="recruitAddUnit()">新增单位</button>';
+  }
+  h += '</div>';
+
+  if(!rows.length){
+    body.innerHTML = h + '<div class="rp-empty">当前筛选下没有计划行。' +
+      (d.needs_plan ? '请先“导入计划”。' : '') + '</div>';
+    return;
+  }
+
+  var groups = [], map = {};
+  rows.forEach(function(r){
+    var k = r.unit_key || r.unit_name;
+    if(!map[k]){ map[k] = []; groups.push({unit:r.unit_name, rows:map[k]}); }
+    map[k].push(r);
+  });
+
+  var head = '<tr><th class="sticky-seq" style="width:52px">序号</th>' +
+    '<th class="sticky-unit" style="width:96px">单位</th>' +
+    '<th class="sticky-edu" style="width:64px">学历</th>' +
+    '<th class="plan">上会审批</th><th class="plan">追加</th>' +
+    '<th class="plan">转上年度</th><th class="plan">应取消</th>' +
+    '<th class="calc">应招总数</th><th class="calc">已签</th>' +
+    '<th class="calc">签约缺口</th><th class="calc">完成率</th>' +
+    '<th class="sign" style="min-width:420px">签约人</th></tr>';
+  var bodyRows = '', seq = 0;
+  groups.forEach(function(g){
+    seq++;
+    var byEdu = {};
+    g.rows.forEach(function(r){ byEdu[r.edu_level] = r; });
+    var list = ['博士','硕士','本科','大专'].map(function(e){ return byEdu[e]; })
+      .filter(Boolean);
+    if(!list.length) return;
+    list.forEach(function(r, idx){
+      var trCls = (idx === 0 ? 'unit-start ' : '') +
+                  (rpNum(r.signed_count) > 0 ? 'has-sign ' : '') +
+                  (seq % 2 ? 'unit-odd' : 'unit-even');
+      bodyRows += '<tr class="' + trCls + '">';
+      if(idx === 0){
+        bodyRows += '<td rowspan="' + list.length + '" class="num sticky-seq">' + seq + '</td>' +
+          '<td rowspan="' + list.length + '" class="unit sticky-unit">' + esc(g.unit) +
+          (RECRUIT.edit
+            ? ' <button class="rp-unit-del" title="删除单位" onclick="recruitDeleteUnit(' +
+              jq(g.unit) + ')">×</button>'
+            : '') +
+          '</td>';
+      }
+      bodyRows += '<td class="sticky-edu">' + esc(r.edu_level) + '</td>';
+      if(RECRUIT.edit && r.plan_id){
+        bodyRows += rpInput(r, 'plan_approved') + rpInput(r, 'plan_extra') +
+          rpInput(r, 'plan_carryover') + rpInput(r, 'plan_cancel');
+      }else{
+        bodyRows += '<td class="num">' + rpNum(r.plan_approved) + '</td>' +
+          '<td class="num">' + rpNum(r.plan_extra) + '</td>' +
+          '<td class="num">' + rpNum(r.plan_carryover) + '</td>' +
+          '<td class="num">' + rpNum(r.plan_cancel) + '</td>';
+      }
+      var rate = r.rate;
+      var rateCls = (rate === null || rate === undefined) ? 'rate-none'
+                  : (rate >= 1 ? 'rate-good' : (rate > 0 ? 'rate-mid' : 'rate-zero'));
+      bodyRows += '<td class="num" id="rp-should-' + r.plan_id + '">' +
+          rpNum(r.should_hire) + '</td>' +
+        '<td class="num ' + (rpNum(r.signed_count) > 0 ? 'signed-pos' : '') +
+          '" id="rp-signed-' + r.plan_id + '" data-v="' +
+          rpNum(r.signed_count) + '">' + rpNum(r.signed_count) + '</td>' +
+        '<td class="num ' + (rpNum(r.gap) < 0 ? 'gap-neg' : (rpNum(r.gap) > 0 ? 'gap-pos' : '')) +
+          '" id="rp-gap-' + r.plan_id + '">' + rpNum(r.gap) + '</td>' +
+        '<td class="num ' + rateCls + '" id="rp-rate-' + r.plan_id + '">' + rpPct(r.rate) + '</td>' +
+        '<td class="signee-cell">' + (function(){
+          var ss = r.signees || [];
+          if(!ss.length) return '<span class="hint">—</span>';
+          return ss.map(function(s){
+            var dl = s.onboard_deadline ? String(s.onboard_deadline).slice(0, 10) : '未填';
+            return '<span class="rp-signee" title="签约：' + esc(s.signed_at || '—') +
+              '；入职期限：' + esc(dl) +
+              '" onclick="recruitOpenCandidate(' + s.candidate_id + ')">' +
+              esc(s.name) + '<i class="rp-deadline">（' + esc(dl) + '）</i></span>';
+          }).join('');
+        })() + '</td></tr>';
+    });
+  });
+  body.innerHTML = h + '<div class="rp-wrap"><table class="rp-table"><thead>' +
+    head + '</thead><tbody>' + bodyRows + '</tbody></table></div>';
+  recruitFreezeCols();
+}
+
+function recruitRecalc(planId){
+  var get = function(field){
+    var el = document.getElementById('rp-' + field + '-' + planId);
+    return el ? (parseInt(el.value || '0', 10) || 0) : 0;
+  };
+  var should = get('plan_approved') + get('plan_extra') +
+               get('plan_carryover') - get('plan_cancel');
+  var signedEl = document.getElementById('rp-signed-' + planId);
+  var signed = signedEl ? (parseInt(signedEl.getAttribute('data-v') || '0', 10) || 0) : 0;
+  var gap = should - signed;
+  var rate = should ? signed / should : null;
+  var s = document.getElementById('rp-should-' + planId);
+  if(s) s.textContent = should;
+  var g = document.getElementById('rp-gap-' + planId);
+  if(g){
+    g.textContent = gap;
+    g.className = 'num ' + (gap < 0 ? 'gap-neg' : (gap > 0 ? 'gap-pos' : ''));
+  }
+  var rt = document.getElementById('rp-rate-' + planId);
+  if(rt){
+    rt.textContent = rpPct(rate);
+    rt.className = 'num ' + (rate === null ? 'rate-none'
+      : (rate >= 1 ? 'rate-good' : (rate > 0 ? 'rate-mid' : 'rate-zero')));
+  }
+}
+
+async function recruitDeleteUnit(name){
+  name = String(name || '').trim();
+  if(!name) return;
+  var ok = await askConfirm({
+    title: '删除单位', danger: true, okText: '删除',
+    body: '从本届计划删除「' + name + '」的全部学历行？\n\n' +
+          '已签约人员不会被删除，但会进入「单位不在计划」，需要重新归属。'
+  });
+  if(!ok) return;
+  var r = await api('/api/recruit/plans/delete-unit', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({year_id:RECRUIT.yearId, unit_name:name})
+  });
+  if(r.__err){ toast('删除失败：' + r.__err, 'danger'); return; }
+  toast(r.note || ('已删除单位：' + name), r.signed_count ? 'warn' : 'ok');
+  await recruitLoad();
+}
+
+async function recruitAddUnit(){
+  var name = await askText('新增单位', '', '如：钛所');
+  if(!name || name === true) return;
+  var r = await api('/api/recruit/plans', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({year_id:RECRUIT.yearId, unit_name:String(name).trim()})
+  });
+  if(r.__err){ toast('新增失败：' + r.__err, 'danger'); return; }
+  toast('已新增单位：' + name);
+  await recruitLoad();
+}
+
+async function recruitSavePlans(){
+  var rows = {};
+  Array.prototype.forEach.call(document.querySelectorAll('.rp-num'), function(el){
+    var pid = el.getAttribute('data-plan');
+    if(!pid) return;
+    if(!rows[pid]) rows[pid] = {id:Number(pid)};
+    rows[pid][el.getAttribute('data-field')] = parseInt(el.value || '0', 10) || 0;
+  });
+  var r = await api('/api/recruit/plans/batch', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({year_id:RECRUIT.yearId,
+      rows:Object.keys(rows).map(function(k){ return rows[k]; })})
+  });
+  if(r.__err){ toast('保存失败：' + r.__err, 'danger'); return; }
+  toast(r.note || '计划已保存');
+  RECRUIT.edit = false;
+  await recruitLoad();
+}
+
+function renderRecruitRoster(body){
+  var r = RECRUIT.roster;
+  var f = RECRUIT.rosterFilters || {};
+  var units = (RECRUIT.data && RECRUIT.data.units) || [];
+  var h = '<div class="rp-bar">' +
+    '<input id="rpFrom" type="text" class="sel" placeholder="开始日期" value="' +
+      esc(f.date_from || '') + '" onfocus="this.type=\'date\'" ' +
+      'onblur="if(!this.value)this.type=\'text\'">' +
+    '<span class="hint">~</span>' +
+    '<input id="rpTo" type="text" class="sel" placeholder="结束日期" value="' +
+      esc(f.date_to || '') + '" onfocus="this.type=\'date\'" ' +
+      'onblur="if(!this.value)this.type=\'text\'">' +
+    '<select class="sel" id="rpRUnit"><option value="">单位：全部</option>' +
+      units.map(function(u){
+        return '<option' + (f.unit === u ? ' selected' : '') + '>' + esc(u) + '</option>';
+      }).join('') + '</select>' +
+    '<select class="sel" id="rpREdu"><option value="">学历：全部</option>' +
+      ['博士','硕士','本科','大专'].map(function(e){
+        return '<option' + (f.edu === e ? ' selected' : '') + '>' + esc(e) + '</option>';
+      }).join('') + '</select>' +
+    '<select class="sel" id="rpROutcome"><option value="">结论：全部</option>' +
+      ['拟录用','不录用','未签约','已签约','拒签','毁约','未判'].map(function(o){
+        return '<option' + (f.outcome === o ? ' selected' : '') + '>' + esc(o) + '</option>';
+      }).join('') + '</select>' +
+    '<input id="rpKw" class="search" placeholder="姓名/学校/单位" value="' +
+      esc(f.keyword || '') + '">' +
+    '<button class="btn primary" onclick="recruitRosterSearch()">查询</button>' +
+    '<button class="btn" onclick="recruitRosterReset()">重置</button></div>';
+  if(!r){ body.innerHTML = h + '<div class="rp-empty">读取面试名单…</div>'; return; }
+  if(!r.items || !r.items.length){
+    body.innerHTML = h + '<div class="rp-empty">本届还没有面试/签约记录。</div>';
+    return;
+  }
+  var heads = ['序号','面试日期','单位','姓名','学校','学历','面试方式','电话',
+               '是否录用','录用函','发放时间','签约情况','签约时间','毕业时间',
+               '入职情况','备注'];
+  var trs = r.items.map(function(x){
+    var vals = [x.seq, x.interview_date, x.unit, x.name, x.school, x.edu_level,
+                x.interview_mode, x.phone, x.verdict, x.offer_sent,
+                x.offer_sent_at, x.sign_status, x.signed_at, x.grad_date,
+                x.onboard_status, x.note];
+    return '<tr>' + vals.map(function(v, i){
+      return '<td' + (i === 15 ? ' style="text-align:left;min-width:160px"' : '') +
+        '>' + esc(v || '—') + '</td>';
+    }).join('') + '</tr>';
+  }).join('');
+  body.innerHTML = h + '<div class="rp-wrap"><table class="rp-table"><thead><tr>' +
+    heads.map(function(x){ return '<th>' + esc(x) + '</th>'; }).join('') +
+    '</tr></thead><tbody>' + trs + '</tbody></table></div>';
+}
+
+async function recruitRosterSearch(){
+  var v = function(id){
+    var el = document.getElementById(id);
+    return el ? String(el.value || '').trim() : '';
+  };
+  RECRUIT.rosterFilters = {
+    date_from:v('rpFrom'), date_to:v('rpTo'), unit:v('rpRUnit'),
+    edu:v('rpREdu'), outcome:v('rpROutcome'), keyword:v('rpKw')
+  };
+  RECRUIT.roster = null;
+  await recruitLoadRoster();
+  renderRecruitTab();
+}
+
+async function recruitRosterReset(){
+  RECRUIT.rosterFilters = {date_from:'', date_to:'', unit:'', edu:'',
+                           outcome:'', keyword:''};
+  RECRUIT.roster = null;
+  await recruitLoadRoster();
+  renderRecruitTab();
+}
+
+function renderRecruitHealth(body){
+  var d = RECRUIT.data || {};
+  var h = d.health || {};
+  var defs = [
+    ['missing_signed_at','待补签约时间','已签约但没填签约时间，未计入'],
+    ['invalid_signed_at','签约时间无效','格式无法识别，未计入'],
+    ['signed_without_conclusion','已签约但结论未判','签约情况为已签约，但面试结论不是拟录用'],
+    ['out_of_period','期外签约','签约时间不在本届'],
+    ['stage_mismatch','结论与阶段不一致','已签约但阶段不是已发放offer'],
+    ['missing_hire_unit','待归属录用单位','缺少录用单位，未计入'],
+    ['unknown_edu','学历异常','不在博士/硕士/本科/大专四档'],
+    ['unit_not_in_plan','单位不在计划','录用单位不在本届计划'],
+    ['conflicting_signings','签约冲突','同一人多条已签约且归属不一致，全部未计入'],
+    ['duplicate_signed','重复签约','同单位同学历多条，已按 1 人计'],
+    ['signed_without_plan','无计划签约','计划为 0 但有签约'],
+    ['many_signees','签约人超过 10 列','导出会自动扩展列'],
+    ['duplicate_names','重名签约人','同一计划行有重名，请核对']
+  ];
+  var cards = defs.map(function(d0){
+    var b = h[d0[0]] || {count:0, items:[]};
+    if(!b.count) return '';
+    var items = (b.items || []).map(function(it){
+      var meta = [it.unit, it.edu_level, it.signed_at].filter(Boolean).join(' · ');
+      var actions = '';
+      if(it.application_id && d0[0] === 'missing_signed_at'){
+        actions += '<button class="btn sm" onclick="recruitQuickFixDate(' +
+          it.application_id + ')">补时间</button>';
+      }
+      if(it.application_id && (d0[0] === 'missing_hire_unit' ||
+          d0[0] === 'unit_not_in_plan' || d0[0] === 'conflicting_signings')){
+        actions += '<button class="btn sm" onclick="recruitQuickFix(' +
+          it.application_id + ')">归属</button>';
+      }
+      if(it.candidate_id){
+        actions += '<button class="btn sm" onclick="recruitOpenCandidate(' +
+          it.candidate_id + ')">档案</button>';
+      }
+      return '<div class="rp-health-item"><div><b>' + esc(it.name || '—') +
+        '</b><div class="m">' + esc(meta) + ' · ' + esc(it.reason || '') +
+        (it.suggested_unit ? ' · 建议：' + esc(it.suggested_unit) : '') +
+        '</div></div><div class="a">' + actions + '</div></div>';
+    }).join('');
+    return '<div class="rp-health-card"><h4>' + esc(d0[1]) +
+      '<span class="n">' + b.count + '</span></h4><div class="m">' +
+      esc(d0[2]) + '</div>' + items + '</div>';
+  }).join('');
+  var hc = h.job_headcount || {};
+  var extra = '<div class="rp-health-card"><h4>岗位招聘数量 vs 年度计划</h4>' +
+    '<div class="m">岗位管理里的 headcount 合计 ' + rpNum(hc.count) +
+    ' 人；年度应招 ' + rpNum(hc.plan_total) + ' 人；差异 ' +
+    rpNum(hc.diff) + ' 人。</div>' +
+    '<div class="hint" style="margin-top:6px">两者粒度不同（岗位 vs 单位×学历），' +
+    '系统不会自动同步，仅作提示。</div></div>';
+  body.innerHTML = '<div class="rp-bar"><span class="hint">数据体检只统计本届；' +
+    '带“归属”的条目可直接补录用单位。</span></div>' +
+    '<div class="rp-health">' +
+    (cards || '<div class="rp-empty">本届没有发现数据问题。</div>') + extra + '</div>';
+}
+
+async function recruitQuickFix(aid){
+  var unit = await askText('设置录用单位', '', '如：钛所');
+  if(!unit || unit === true) return;
+  var r = await api('/api/recruit/signings/' + aid + '/hire-unit', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({hire_unit:String(unit).trim()})
+  });
+  if(r.__err){ toast('保存失败：' + r.__err, 'danger'); return; }
+  toast('已更新录用单位');
+  await recruitLoad();
+}
+
+async function recruitQuickFixDate(aid){
+  var d = await askText('补签约时间', '', 'YYYY-MM-DD');
+  if(!d || d === true) return;
+  var r = await api('/api/recruit/signings/' + aid + '/hire-unit', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({signed_at:String(d).trim()})
+  });
+  if(r.__err){ toast('保存失败：' + r.__err, 'danger'); return; }
+  toast('已补签约时间');
+  await recruitLoad();
+}
+
+function recruitAskAssistant(){
+  var year = RECRUIT.data && RECRUIT.data.year;
+  var label = year ? year.label : '本届';
+  setView('chat');
+  setTimeout(function(){
+    var inp = document.getElementById('chatIn');
+    if(!inp) return;
+    inp.value = '请总结' + label + '的招聘进度：应招总数、已签人数、签约缺口、' +
+      '完成率，并按学历和缺口最大的单位说明重点。';
+    inp.dispatchEvent(new Event('input', {bubbles:true}));
+    var btn = document.getElementById('chatSend');
+    if(btn) btn.click();
+  }, 80);
+}
+
+async function recruitOpenCandidate(cid){
+  if(!cid) return;
+  setView('pool');
+  await pick(cid);
+}
+
+function recruitNewYear(){
+  var s = (RECRUIT.meta && RECRUIT.meta.suggested) || {};
+  openProgDlg('新建届别',
+    '<div class="rp-form">' +
+      '<label>届别名称</label>' +
+      '<input id="rnLabel" placeholder="如：2028届" value="' + esc(s.label || '') + '">' +
+      '<label>届期（开始 ~ 结束）</label>' +
+      '<div class="rp-date-range">' +
+        '<input id="rnStart" type="date" value="' +
+          esc(s.period_start || '') + '">' +
+        '<span class="dash">~</span>' +
+        '<input id="rnEnd" type="date" value="' +
+          esc(s.period_end || '') + '">' +
+      '</div>' +
+      '<label>单位称呼（总结句用）</label>' +
+      '<input id="rnOrg" value="' + esc(s.org_label || '院本部') + '" placeholder="如：院本部">' +
+    '</div>' +
+    '<div class="bar" style="margin-top:16px;justify-content:flex-end">' +
+      '<button class="btn" onclick="closeProgDlg()">取消</button>' +
+      '<button class="btn primary" onclick="recruitNewYearCreate()">创建</button>' +
+    '</div>');
+}
+
+async function recruitNewYearCreate(){
+  var v = function(id){
+    var el = document.getElementById(id);
+    return el ? String(el.value || '').trim() : '';
+  };
+  var label = v('rnLabel'), start = v('rnStart'), end = v('rnEnd');
+  var org = v('rnOrg') || '院本部';
+  if(!label){ toast('请填届别名称'); return; }
+  if(!start || !end){ toast('请选择开始和结束日期'); return; }
+  var r = await api('/api/recruit/years', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({label:label, period_start:start, period_end:end,
+                         org_label:org})
+  });
+  if(r.__err){ toast('创建失败：' + r.__err, 'danger'); return; }
+  closeProgDlg();
+  toast('已创建 ' + label);
+  RECRUIT.yearId = r.id;
+  RECRUIT.data = null; RECRUIT.roster = null;
+  await initRecruit();
+}
+
+function recruitImport(){
+  var inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.xlsx';
+  inp.onchange = async function(){
+    var f = inp.files && inp.files[0];
+    if(!f) return;
+    RECRUIT.pendingFile = f;
+    toast('正在解析 Excel…');
+    var r = await fetch('/api/recruit/import?dry_run=1&name=' +
+        encodeURIComponent(f.name),
+      {method:'POST', headers:hdr({'Content-Type':'application/octet-stream'}),
+       body:await f.arrayBuffer()});
+    var j = await r.json().catch(function(){ return {}; });
+    if(!r.ok){ toast(j.detail || ('解析失败 HTTP ' + r.status), 'danger'); return; }
+    var rows = j.rows || [];
+    var total = rows.reduce(function(a, x){
+      return a + Number(x.plan_approved || 0) + Number(x.plan_extra || 0) +
+             Number(x.plan_carryover || 0) - Number(x.plan_cancel || 0);
+    }, 0);
+    var head = '<div style="margin-bottom:8px">解析到 <b>' + rows.length +
+      '</b> 行计划，合计应招 <b>' + total + '</b> 人。' +
+      (j.title_period ? '<span class="hint">文件标题届期：' +
+        esc(j.title_period.period_start) + ' 至 ' +
+        esc(j.title_period.period_end) + '</span>' : '') + '</div>';
+    var warn = (j.warnings || []).map(function(x){
+      return '<div class="hint">· ' + esc(x) + '</div>';
+    }).join('');
+    var errs = (j.errors || []).slice(0, 10).map(function(x){
+      return '<div style="color:var(--bad)">· ' + esc(x) + '</div>';
+    }).join('');
+    var table = '<div style="max-height:300px;overflow:auto;margin-top:8px">' +
+      '<table class="rp-import-table"><thead><tr><th>单位</th><th>学历</th>' +
+      '<th>审批</th><th>追加</th><th>转上年度</th><th>应取消</th><th>应招</th>' +
+      '</tr></thead><tbody>' + rows.slice(0, 100).map(function(x){
+        return '<tr><td>' + esc(x.unit_name) + '</td><td>' + esc(x.edu_level) +
+          '</td><td>' + rpNum(x.plan_approved) + '</td><td>' + rpNum(x.plan_extra) +
+          '</td><td>' + rpNum(x.plan_carryover) + '</td><td>' +
+          rpNum(x.plan_cancel) + '</td><td>' +
+          rpNum(x.plan_approved + x.plan_extra + x.plan_carryover - x.plan_cancel) +
+          '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+    openProgDlg('导入招聘计划（预览）', head + warn + errs + table +
+      '<div class="bar" style="margin-top:14px;justify-content:flex-end">' +
+      '<button class="btn" onclick="closeProgDlg()">取消</button>' +
+      '<button class="btn" onclick="recruitApplyImport(\'merge\')">合并导入（只补缺行）</button>' +
+      '<button class="btn primary" onclick="recruitApplyImport(\'overwrite\')">覆盖导入</button></div>');
+  };
+  inp.click();
+}
+
+async function recruitApplyImport(mode){
+  var f = RECRUIT.pendingFile;
+  if(!f){ toast('请重新选择文件', 'danger'); return; }
+  var q = '/api/recruit/import?dry_run=0&mode=' + encodeURIComponent(mode) +
+          '&name=' + encodeURIComponent(f.name);
+  var y = RECRUIT.data && RECRUIT.data.year;
+  if(y){
+    q += '&year_id=' + encodeURIComponent(y.id);
+  }else{
+    var s = (RECRUIT.meta && RECRUIT.meta.suggested) || {};
+    q += '&label=' + encodeURIComponent(s.label || '') +
+         '&period_start=' + encodeURIComponent(s.period_start || '') +
+         '&period_end=' + encodeURIComponent(s.period_end || '');
+  }
+  var r = await fetch(q, {
+    method:'POST', headers:hdr({'Content-Type':'application/octet-stream'}),
+    body:await f.arrayBuffer()});
+  var j = await r.json().catch(function(){ return {}; });
+  if(!r.ok){ toast(j.detail || ('导入失败 HTTP ' + r.status), 'danger'); return; }
+  closeProgDlg();
+  toast('导入完成：新增 ' + j.inserted + ' 行，覆盖 ' + j.updated + ' 行', 'ok');
+  if(j.year && j.year.id) RECRUIT.yearId = j.year.id;
+  RECRUIT.pendingFile = null;
+  RECRUIT.data = null; RECRUIT.roster = null;
+  await initRecruit();
+}
+
+async function recruitExport(){
+  var sel = document.getElementById('rpExportKind');
+  var kind = sel ? sel.value : 'official';
+  var q = 'year_id=' + encodeURIComponent(RECRUIT.yearId);
+  if(kind === 'roster'){
+    var f = RECRUIT.rosterFilters || {};
+    Object.keys(f).forEach(function(k){
+      if(f[k]) q += '&' + k + '=' + encodeURIComponent(f[k]);
+    });
+    q = '/api/recruit/roster/export?' + q;
+  }else{
+    /* 官方/平铺进度表始终导出全届：页面的单位/学历筛选是“看”的，
+       带进导出会让官方表只出现一部分单位，容易被当成全貌。 */
+    q = '/api/recruit/export?' + q + '&fmt=' + encodeURIComponent(kind);
+  }
+  toast('正在导出…');
+  var r = await fetch(withToken(q), {headers:hdr({})});
+  if(!r.ok){
+    var j = await r.json().catch(function(){ return {}; });
+    toast(j.detail || ('导出失败 HTTP ' + r.status), 'danger');
+    return;
+  }
+  var cd = r.headers.get('Content-Disposition') || '';
+  var m = /filename\*=UTF-8''([^;]+)/.exec(cd);
+  var name = m ? decodeURIComponent(m[1]) : '招聘进度.xlsx';
+  saveBlob(await r.blob(), name);
+  toast('已导出');
 }
 
 async function userCreate(){
@@ -6700,6 +8655,9 @@ async function initSys(){
     '</div></div>' +
 
     '<div class="sec cfgsec" data-g="model"><h3>模型与密钥' + '<span class="cfgacts">' + '<button class="btn sm" data-cfg-g="edit">修改</button>' + '<button class="btn primary sm" data-cfg-g="save" style="display:none">保存</button>' + '<button class="btn sm" data-cfg-g="cancel" style="display:none">取消</button>' + '</span></h3>' +
+      /* 启用开关：关闭后所有 AI 功能走规则/不可用；以前只能改 config/model.json。 */
+      cfgEdit('mcEnabled', '启用模型', m.enabled ? '1' : '0', '', 'select', false, null,
+              [['1', '开'], ['0', '关']]) +
       cfgEdit('mcBaseUrl', '接口地址', m.base_url, 'https://…/compatible-mode/v1', 'text') +
       cfgEdit('mcModel', '模型名', m.model, '', 'text') +
       cfgEdit('mcKey', 'API Key', m.key_set ? ('已配置（' + m.key_masked + '）') : '未配置',
@@ -6945,7 +8903,8 @@ async function sysAct(act){
     return;
   }
   if(act === 'model'){
-    var body = {base_url: v('mcBaseUrl'), model: v('mcModel')};
+    var body = {base_url: v('mcBaseUrl'), model: v('mcModel'),
+                enabled: v('mcEnabled') === '1'};
     if(v('mcKey')) body.api_key = v('mcKey');
     var r = await api('/api/model-config', {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
@@ -7167,6 +9126,237 @@ async function delTpl(id){
    但有 [已拦截] 时默认展开（那是"这件事没做"的原因，HR 必须看见）。
    ============================================================ */
 var CHAT = [], CHAT_HIST = [];
+/* 当前对话累计的产出（下载/草稿/提案），不随新一轮回答覆盖 */
+var CHAT_OUTPUTS = [];
+/* v4.0.17：当前会话 id、会话列表、是否已完成首次进入初始化 */
+var CHAT_CONV_ID = '', CHAT_CONVS = [], CHAT_BOOTED = false;
+/* ---------- Mermaid 图表 → 内联 SVG ----------
+   模型按 Mermaid 语法输出图表（pie / xychart-beta）。内网/离线环境不能加载
+   mermaid.js，所以这里只实现这两类最常用的图，直接生成 SVG：不依赖外部库、
+   不联网，颜色与文字跟随深/浅色主题。 */
+function chartEsc(s){
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function chartUnesc(s){
+  return String(s == null ? '' : s).replace(/&lt;/g,'<').replace(/&gt;/g,'>')
+    .replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&');
+}
+function chartStripQuotes(s){
+  return String(s == null ? '' : s).trim().replace(/^["']|["']$/g,'').trim();
+}
+function chartShort(s, n){
+  s = String(s == null ? '' : s);
+  return s.length > n ? s.slice(0, n - 1) + '…' : s;
+}
+function chartSplitList(s){
+  var out = [], re = /"([^"]*)"|'([^']*)'|([^,]+)/g, m;
+  while((m = re.exec(String(s || '')))){
+    var v = (m[1] !== undefined ? m[1] : (m[2] !== undefined ? m[2] : m[3]));
+    v = chartStripQuotes(v);
+    if(v !== '') out.push(v);
+  }
+  return out;
+}
+function chartNiceMax(v){
+  if(!isFinite(v) || v <= 0) return 1;
+  var p = Math.pow(10, Math.floor(Math.log(v) / Math.LN10));
+  var n = v / p;
+  var step = n <= 1 ? 1 : (n <= 2 ? 2 : (n <= 5 ? 5 : 10));
+  return step * p;
+}
+var CHART_COLORS = ['#C56A45','#4E79A7','#59A14F','#E15759','#B07AA1',
+                    '#76B7B2','#EDC948','#9C755F'];
+
+function parseMermaidPie(code){
+  var title = '', rows = [];
+  String(code || '').split(/\r?\n/).forEach(function(line){
+    var t = line.trim();
+    if(!t) return;
+    if(/^pie\b/i.test(t)){
+      var mt = t.match(/title\s+(.+)$/i);
+      if(mt) title = chartStripQuotes(mt[1]);
+      return;
+    }
+    var m = t.match(/^title\s+(.+)$/i);
+    if(m){ title = chartStripQuotes(m[1]); return; }
+    m = t.match(/^["']?(.+?)["']?\s*:\s*(-?[0-9]+(?:\.[0-9]+)?)\s*$/);
+    if(m) rows.push({label: chartStripQuotes(m[1]), value: parseFloat(m[2])});
+  });
+  return {title: title, rows: rows.filter(function(r){ return r.value > 0; })};
+}
+function pieChartSvg(code){
+  var p = parseMermaidPie(code), rows = p.rows;
+  if(!rows.length) return null;
+  var total = rows.reduce(function(a, r){ return a + r.value; }, 0);
+  if(!total) return null;
+  var W = 620, H = Math.max(300, 84 + rows.length * 26);
+  var cx = 176, cy = H / 2 + 8, r = Math.min(104, H / 2 - 58);
+  var paths = '', labels = '', a0 = -Math.PI / 2;
+  if(rows.length === 1){
+    paths = '<circle cx="' + cx + '" cy="' + cy + '" r="' + r +
+      '" fill="' + CHART_COLORS[0] + '"></circle>';
+  } else {
+    rows.forEach(function(row, i){
+      var frac = row.value / total, a1 = a0 + frac * Math.PI * 2;
+      var x0 = cx + r * Math.cos(a0), y0 = cy + r * Math.sin(a0);
+      var x1 = cx + r * Math.cos(a1), y1 = cy + r * Math.sin(a1);
+      var large = frac > 0.5 ? 1 : 0;
+      paths += '<path d="M' + cx + ' ' + cy + ' L' + x0 + ' ' + y0 +
+        ' A' + r + ' ' + r + ' 0 ' + large + ' 1 ' + x1 + ' ' + y1 + ' Z" fill="' +
+        CHART_COLORS[i % CHART_COLORS.length] + '" stroke="var(--surface,#fff)"' +
+        ' stroke-width="2"></path>';
+      if(frac >= 0.055){
+        var am = (a0 + a1) / 2;
+        var lx = cx + r * 0.62 * Math.cos(am), ly = cy + r * 0.62 * Math.sin(am);
+        labels += '<text x="' + lx + '" y="' + ly + '" text-anchor="middle"' +
+          ' dominant-baseline="middle" font-size="12" font-weight="600"' +
+          ' fill="#fff">' + (frac * 100).toFixed(1) + '%</text>';
+      }
+      a0 = a1;
+    });
+  }
+  var legendX = 318, legendY = Math.max(50, (H - rows.length * 26) / 2 + 8);
+  var legend = rows.map(function(row, i){
+    var y = legendY + i * 26;
+    return '<rect x="' + legendX + '" y="' + (y - 10) + '" width="12" height="12"' +
+      ' rx="3" fill="' + CHART_COLORS[i % CHART_COLORS.length] + '"></rect>' +
+      '<text x="' + (legendX + 20) + '" y="' + y + '" font-size="13"' +
+      ' fill="var(--ink,#333)">' + chartEsc(chartShort(row.label, 13)) + '</text>' +
+      '<text x="' + (W - 22) + '" y="' + y + '" text-anchor="end" font-size="12.5"' +
+      ' fill="var(--ink-2,#666)">' + row.value + '（' +
+      (row.value / total * 100).toFixed(1) + '%）</text>';
+  }).join('');
+  var title = p.title ? '<text x="' + (W / 2) + '" y="26" text-anchor="middle"' +
+    ' font-size="15" font-weight="600" fill="var(--ink,#222)">' +
+    chartEsc(p.title) + '</text>' : '';
+  return '<div class="mchart"><div class="mchart-bar">' +
+    '<button class="mdt-btn" data-chart-svg>下载 SVG</button></div>' +
+    '<svg viewBox="0 0 ' + W + ' ' + H + '"' +
+    ' role="img" aria-label="' + chartEsc(p.title || '饼图') + '">' +
+    title + paths + labels + legend + '</svg></div>';
+}
+
+function parseXYChart(code){
+  var o = {title:'', x:[], yLabel:'', yMin:0, yMax:null, series:[]};
+  String(code || '').split(/\r?\n/).forEach(function(line){
+    var t = line.trim();
+    if(!t || /^xychart(-beta)?$/i.test(t) || t.indexOf('%%') === 0) return;
+    var m = t.match(/^title\s+(.+)$/i);
+    if(m){ o.title = chartStripQuotes(m[1]); return; }
+    m = t.match(/^x-axis\s*\[(.*)\]\s*$/i);
+    if(m){ o.x = chartSplitList(m[1]); return; }
+    m = t.match(/^y-axis\s*(?:"([^"]*)")?\s*(-?[0-9]+(?:\.[0-9]+)?)?\s*-->\s*(-?[0-9]+(?:\.[0-9]+)?)/i);
+    if(m){
+      o.yLabel = m[1] || '';
+      if(m[2] !== undefined) o.yMin = parseFloat(m[2]);
+      if(m[3] !== undefined) o.yMax = parseFloat(m[3]);
+      return;
+    }
+    m = t.match(/^(line|bar)\s*\[(.*)\]\s*$/i);
+    if(m){
+      o.series.push({type: m[1].toLowerCase(),
+        values: chartSplitList(m[2]).map(function(v){ return Number(v); })
+          .filter(function(v){ return isFinite(v); })});
+    }
+  });
+  return o;
+}
+function xyChartSvg(code){
+  var o = parseXYChart(code);
+  if(!o.series.length) return null;
+  var n = Math.max(o.x.length, o.series.reduce(function(a, s){
+    return Math.max(a, s.values.length);
+  }, 0));
+  if(!n) return null;
+  var all = [];
+  o.series.forEach(function(s){ all = all.concat(s.values); });
+  var yMax = (o.yMax !== null && isFinite(o.yMax) && o.yMax > o.yMin)
+    ? o.yMax : chartNiceMax(Math.max.apply(null, all.concat([1])));
+  var yMin = isFinite(o.yMin) ? o.yMin : 0;
+  var W = 620, H = 350, padL = 58, padR = 30, padT = 54, padB = 58;
+  var plotW = W - padL - padR, plotH = H - padT - padB;
+  var yOf = function(v){ return padT + plotH * (1 - (v - yMin) / (yMax - yMin)); };
+  var xOf = function(i){ return padL + plotW * (i + 0.5) / n; };
+  var grid = '';
+  for(var g = 0; g <= 4; g++){
+    var val = yMin + (yMax - yMin) * g / 4;
+    var gy = yOf(val);
+    grid += '<line x1="' + padL + '" y1="' + gy + '" x2="' + (W - padR) +
+      '" y2="' + gy + '" stroke="var(--line,#e3e3e3)" stroke-width="1"></line>' +
+      '<text x="' + (padL - 8) + '" y="' + (gy + 4) + '" text-anchor="end"' +
+      ' font-size="11" fill="var(--ink-3,#888)">' +
+      (Math.round(val * 10) / 10) + '</text>';
+  }
+  var bars = '', lines = '', dots = '';
+  var barSeries = o.series.filter(function(s){ return s.type === 'bar'; });
+  var barGroup = plotW / n * 0.62;
+  var barW = barSeries.length ? barGroup / barSeries.length : 0;
+  o.series.forEach(function(s, si){
+    var color = CHART_COLORS[si % CHART_COLORS.length];
+    if(s.type === 'bar'){
+      var bi = barSeries.indexOf(s);
+      s.values.forEach(function(v, i){
+        var x = padL + plotW * (i + 0.5) / n - barGroup / 2 + bi * barW;
+        var y = yOf(v);
+        bars += '<rect x="' + x + '" y="' + y + '" width="' + Math.max(2, barW - 3) +
+          '" height="' + Math.max(0, padT + plotH - y) + '" rx="3" fill="' +
+          color + '"></rect>';
+      });
+    } else {
+      var pts = s.values.map(function(v, i){ return xOf(i) + ',' + yOf(v); }).join(' ');
+      lines += '<polyline points="' + pts + '" fill="none" stroke="' + color +
+        '" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"></polyline>';
+      s.values.forEach(function(v, i){
+        var x = xOf(i), y = yOf(v);
+        dots += '<circle cx="' + x + '" cy="' + y + '" r="3.6" fill="' + color +
+          '" stroke="var(--surface,#fff)" stroke-width="1.5"></circle>';
+        if(n <= 12){
+          dots += '<text x="' + x + '" y="' + (y - 9) + '" text-anchor="middle"' +
+            ' font-size="11" fill="var(--ink-2,#666)">' + v + '</text>';
+        }
+      });
+    }
+  });
+  var xLabels = '';
+  for(var i = 0; i < n; i++){
+    var label = o.x[i] !== undefined ? o.x[i] : String(i + 1);
+    xLabels += '<text x="' + (padL + plotW * (i + 0.5) / n) + '" y="' + (H - 32) +
+      '" text-anchor="middle" font-size="' + (n > 10 ? 10 : 11.5) +
+      '" fill="var(--ink-2,#666)">' + chartEsc(chartShort(label, 8)) + '</text>';
+  }
+  var legend = o.series.map(function(s, si){
+    return '<rect x="' + (W - 128 + si * 62) + '" y="14" width="10" height="10"' +
+      ' rx="2" fill="' + CHART_COLORS[si % CHART_COLORS.length] + '"></rect>' +
+      '<text x="' + (W - 114 + si * 62) + '" y="23" font-size="11.5"' +
+      ' fill="var(--ink-2,#666)">' + (s.type === 'bar' ? '柱状' : '折线') + '</text>';
+  }).join('');
+  var title = o.title ? '<text x="' + padL + '" y="26" font-size="15"' +
+    ' font-weight="600" fill="var(--ink,#222)">' + chartEsc(o.title) + '</text>' : '';
+  var yLabel = o.yLabel ? '<text x="' + padL + '" y="' + (padT - 4) + '"' +
+    ' font-size="11.5" fill="var(--ink-3,#888)">' + chartEsc(o.yLabel) + '</text>' : '';
+  return '<div class="mchart"><div class="mchart-bar">' +
+    '<button class="mdt-btn" data-chart-svg>下载 SVG</button></div>' +
+    '<svg viewBox="0 0 ' + W + ' ' + H + '"' +
+    ' role="img" aria-label="' + chartEsc(o.title || '图表') + '">' +
+    title + legend + yLabel + grid + bars + lines + dots + xLabels +
+    '<line x1="' + padL + '" y1="' + (padT + plotH) + '" x2="' + (W - padR) +
+    '" y2="' + (padT + plotH) + '" stroke="var(--line-2,#ccc)" stroke-width="1"></line>' +
+    '</svg></div>';
+}
+function mermaidChartSvg(raw){
+  var code = chartUnesc(raw);
+  var first = '';
+  var ls = code.split(/\r?\n/);
+  for(var i = 0; i < ls.length; i++){
+    var t = ls[i].trim();
+    if(t && t.indexOf('%%') !== 0){ first = t.toLowerCase(); break; }
+  }
+  if(first.indexOf('pie') === 0) return pieChartSvg(code);
+  if(first.indexOf('xychart') === 0) return xyChartSvg(code);
+  return null;
+}
+
 function mdLite(src){
   /* Markdown 渲染（2026-10-20 补齐）。原来这个函数只做标题/粗体/斜体/行内代码/单一列表，
      **模型做"全员对比"时输出的管道表格整块以原始 `|` 文本怼在页面上**
@@ -7178,6 +9368,16 @@ function mdLite(src){
   /* 代码块先占位，避免里面的标记被后续替换吃掉 */
   var blocks = [];
   s = s.replace(/```[ \t]*([A-Za-z0-9+#._-]*)\s*\n?([\s\S]*?)```/g, function(m, lang, code){
+    var lc = String(lang || '').toLowerCase();
+    /* Mermaid 图表直接生成 SVG；解析失败才退回普通代码块 */
+    if(lc === 'mermaid' || lc === 'pie' || lc === 'xychart' ||
+       lc === 'xychart-beta' || lc === ''){
+      var svg = mermaidChartSvg(code);
+      if(svg){
+        blocks.push(svg);
+        return '\n<pre>ZBLOCK' + (blocks.length - 1) + 'Z</pre>\n';
+      }
+    }
     blocks.push('<pre><code>' + code.replace(/^\n+|\n+$/g, '') + '</code></pre>');
     return '\n<pre>ZBLOCK' + (blocks.length - 1) + 'Z</pre>\n';
   });
@@ -7231,7 +9431,11 @@ function mdLite(src){
         for(var k = 0; k < cols; k++) o.push(cell(r[k] == null ? '' : r[k]));
         return o;
       };
-      var html = '<div class="mdtable-wrap"><table class="mdtable"><thead><tr>'
+      var html = '<div class="mdtable-wrap">' +
+        '<div class="mdtable-bar">' +
+        '<button class="mdt-btn" data-mdtable-copy>复制表格</button>' +
+        '<button class="mdt-btn" data-mdtable-csv>下载 CSV</button>' +
+        '</div><table class="mdtable"><thead><tr>'
         + head.map(function(h){ return '<th>' + cell(h) + '</th>'; }).join('')
         + '</tr></thead><tbody>';
       body.forEach(function(r){
@@ -7263,31 +9467,102 @@ function mdLite(src){
   flushLi(); flushPara();
   s = out.join('');
   /* 把代码块占位符换回真实内容 */
-  s = s.replace(/<pre>\s*ZBLOCK(\d+)\s*<\/pre>/g, function(m, i){ return blocks[+i]; });
+  s = s.replace(/<pre>\s*ZBLOCK(\d+)Z?\s*<\/pre>/g, function(m, i){ return blocks[+i]; });
   s = s.replace(/ZBLOCK(\d+)Z/g, function(m, i){ return blocks[+i]; });
   return s;
 }
+/* ---------- 对话里的表格 / 图表：复制、下载 ----------
+   模型给的表格以前只能看；HR 要拿去汇报时得自己选中复制。
+   这里用事件委托，所有 mdLite 生成的表格/图表都自动带上按钮。 */
+function csvCell(v){
+  v = String(v == null ? '' : v);
+  return '"' + v.replace(/"/g, '""') + '"';
+}
+function downloadCsv(rows, name){
+  var txt = '﻿' + rows.map(function(r){
+    return r.map(csvCell).join(',');
+  }).join('\r\n');
+  saveBlob(new Blob([txt], {type:'text/csv;charset=utf-8'}), name || '表格.csv');
+}
+function mdTableRows(table){
+  var out = [];
+  Array.prototype.forEach.call(table.querySelectorAll('tr'), function(tr){
+    var cells = [];
+    Array.prototype.forEach.call(tr.querySelectorAll('th,td'), function(td){
+      cells.push(String(td.innerText || td.textContent || '').replace(/\s+/g, ' ').trim());
+    });
+    if(cells.length) out.push(cells);
+  });
+  return out;
+}
+document.addEventListener('click', function(e){
+  var t = e.target;
+  if(!t || !t.closest) return;
+  var retry = t.closest('[data-retry]');
+  if(retry){ retryAgent(retry); return; }
+  var dl = t.closest('[data-out-dl]');
+  if(dl){
+    var _url = dl.getAttribute('data-out-dl');
+    var _name = dl.getAttribute('data-out-name') || '下载文件';
+    fetch(_url, {headers: hdr({})}).then(function(r){
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      return r.blob();
+    }).then(function(b){ saveBlob(b, _name); toast('已下载'); })
+      .catch(function(e){ toast('下载失败：' + e, 'danger'); });
+    return;
+  }
+  var btn = t.closest('[data-mdtable-copy],[data-mdtable-csv],[data-chart-svg]');
+  if(!btn) return;
+  var wrap = btn.closest('.mdtable-wrap');
+  if(wrap){
+    var table = wrap.querySelector('table');
+    if(!table) return;
+    var rows = mdTableRows(table);
+    if(btn.hasAttribute('data-mdtable-copy')){
+      copyText(rows.map(function(r){ return r.join('\t'); }).join('\n'));
+    }else{
+      downloadCsv(rows, '助手表格.csv');
+    }
+    return;
+  }
+  var chart = btn.closest('.mchart');
+  if(chart){
+    var svg = chart.querySelector('svg');
+    if(svg){
+      saveBlob(new Blob([svg.outerHTML], {type:'image/svg+xml;charset=utf-8'}), '助手图表.svg');
+    }
+  }
+});
+
 /* ---------- 快捷问题：**可配置**（增删改，存本地） ----------
    每个人常用的问题不一样（HR 问的、主管问的、面试官问的都不一样），
    写死一组对谁都不合适 —— 让人自己配。 */
 var CHAT_ASKS = null;
 function chatAsksLoad(){
   if(CHAT_ASKS) return CHAT_ASKS;
+  var defaults = [
+    '2027届招聘进度怎么样？还差多少人？',
+    '哪些单位缺口最大？',
+    '这届面试了谁？谁还没签约？',
+    '人才库里 A 档有多少人？',
+    '有哪些人还缺联系方式？',
+    '给我一份面试提纲'
+  ];
   try{
-    var raw = localStorage.getItem('chat_asks');
-    CHAT_ASKS = raw ? JSON.parse(raw) :
-      ['人才库里现在有几个人？', '帮我看看有哪些人是 A 档', '有哪些人还缺联系方式？', '给我一份面试提纲'];
+    var raw = localStorage.getItem('chat_welcome_asks');
+    CHAT_ASKS = raw ? JSON.parse(raw) : defaults;
   }catch(e){
-    CHAT_ASKS = ['人才库里现在有几个人？', '帮我看看有哪些人是 A 档',
-                 '有哪些人还缺联系方式？', '给我一份面试提纲'];
+    CHAT_ASKS = defaults;
   }
-  if(!CHAT_ASKS.length) CHAT_ASKS = ['人才库里现在有几个人？'];
+  if(!CHAT_ASKS.length) CHAT_ASKS = defaults;
   return CHAT_ASKS;
 }
 function chatAsksSave(list){
   CHAT_ASKS = list;
-  try{ localStorage.setItem('chat_asks', JSON.stringify(list)); }catch(e){}
-  chatAsksRender();
+  try{ localStorage.setItem('chat_welcome_asks', JSON.stringify(list)); }catch(e){}
+  /* v4.0.17：这组问题现在配置的是**欢迎页**，右侧不再有“可以这样问”。
+     保存后如果欢迎页正开着，立刻重画。 */
+  if(document.getElementById('chatWelcome')) renderWelcome();
 }
 function chatAsksRender(){
   var box = document.getElementById('chatAsks');
@@ -7310,12 +9585,13 @@ function chatAsksConfig(){
       '<div class="cinput"><input class="ced" data-ak="' + i + '" value="' + esc(q) + '">' +
       '<button class="btn sm" onclick="chatAskDel(' + i + ')">删除</button></div></div>';
   }).join('');
-  openProgDlg('配置快捷问题',
+  openProgDlg('配置欢迎问题',
     rows +
     '<div class="crow" style="margin-top:8px"><label>新增</label>' +
-      '<div class="cinput"><input class="ced" id="chatAskNew" placeholder="写一条常用问题">' +
+      '<div class="cinput"><input class="ced" id="chatAskNew" placeholder="写一条欢迎页问题">' +
       '<button class="btn sm" onclick="chatAskAdd()">添加</button></div></div>' +
-    '<div class="hint" style="margin-top:8px">改完点「保存」生效；这些只存在你自己的浏览器里。</div>' +
+    '<div class="hint" style="margin-top:8px">这些问题会显示在智能助手欢迎页；' +
+      '改完点「保存」生效，只存在你自己的浏览器里。</div>' +
     '<div class="bar" style="margin-top:16px;justify-content:flex-end">' +
       '<button class="btn primary" onclick="chatAsksSaveNow()">保存</button></div>');
 }
@@ -7327,7 +9603,7 @@ function chatAsksSaveNow(){
   });
   chatAsksSave(list);
   closeProgDlg();
-  toast('已保存 ' + list.length + ' 条快捷问题');
+  toast('已保存 ' + list.length + ' 条欢迎问题');
 }
 function chatAskDel(i){
   var list = chatAsksLoad().slice();
@@ -7350,22 +9626,39 @@ async function initChat(){
   var box = document.getElementById('chatView');
   if(!document.getElementById('chatLog')){
     box.innerHTML =
+      '<div class="chatconv">' +
+        '<div class="chatconv-head"><h3>对话</h3>' +
+          '<button class="btn sm" id="chatNew">新对话</button></div>' +
+        '<div class="chatconv-list" id="chatConvList"></div>' +
+      '</div>' +
       '<div class="chatwrap">' +
         '<div class="chatlog" id="chatLog"></div>' +
         '<div class="chatinput"><div class="ciwrap">' +
-          '<textarea id="chatIn" rows="3" placeholder="输入指令或问题"></textarea>' +
+          '<textarea id="chatIn" rows="3" placeholder="输入指令或问题，Enter 发送"></textarea>' +
           '<button class="btn primary" id="chatSend">发送</button>' +
           '<button class="btn stop" id="chatStop" style="display:none">停止</button>' +
         '</div></div>' +
       '</div>' +
       '<div class="chatside">' +
-        '<div class="sec" style="margin-top:0"><h3 class="askhead">可以这样问' +
-          '<button class="btn sm" onclick="chatAsksConfig()">配置</button></h3>' +
-          '<div class="asks" id="chatAsks"></div></div>' +
-        '<div class="sec"><h3>工具清单</h3><div class="hint" id="chatTools">读取中…</div></div>' +
-        '<div class="sec"><h3>最近运行</h3><div id="chatRuns"></div></div>' +
-        '<div class="sec"><button class="btn" id="chatClear">清空对话</button> ' +
-          '<button class="btn" id="chatRestore">恢复对话</button></div>' +
+        '<div class="sec chat-side-metrics" id="chatMetricsSec" style="margin-top:0">' +
+          '<h3 class="askhead">运行指标' +
+          '<span class="hint" id="metricState">近 7 天</span></h3>' +
+          '<div id="chatMetrics" class="metricpanel">' +
+            '<div class="hint">读取中…</div></div></div>' +
+        '<div class="sec chat-side-context" id="chatContextSec">' +
+          '<h3 class="askhead">上下文' +
+          '<span class="hint" id="ctxState"></span></h3>' +
+          '<div id="chatContext" class="ctxpanel">' +
+            '<div class="hint">提问后显示</div></div></div>' +
+        '<div class="sec chat-side-outputs" id="chatOutputsSec">' +
+          '<h3 class="askhead">本次产出' +
+          '<span class="hint" id="outState">—</span></h3>' +
+          '<div id="chatOutputs" class="outpanel">' +
+            '<div class="hint">回答后显示下载 / 草稿 / 提案</div></div></div>' +
+        '<div class="sec chat-side-trace" id="chatTraceSec">' +
+          '<h3 class="askhead">调用轨迹' +
+          '<span class="hint" id="traceState">等待提问</span></h3>' +
+          '<div id="chatTrace" class="tracepanel"></div></div>' +
       '</div>';
     var inp = document.getElementById('chatIn');
     inp.addEventListener('keydown', function(ev){
@@ -7377,68 +9670,578 @@ async function initChat(){
     document.getElementById('chatStop').addEventListener('click', function(){
       if(CHAT_CTRL){ CHAT_CTRL.abort(); toast('已停止'); }
     });
-    document.getElementById('chatRestore').addEventListener('click', restoreChat);
-    document.getElementById('chatClear').addEventListener('click', async function(){
-      var ok = await askConfirm({title: '清空对话', danger: true, okText: '清空',
-        body: '清空与智能助手的全部对话记录？'});
-      if(!ok) return;
-      await api('/api/agent/clear', {method:'POST'});
-      CHAT = [];
-      document.getElementById('chatLog').innerHTML = '';
-      toast('已清空');
-    });
-    chatAsksRender();
+    document.getElementById('chatNew').addEventListener('click', newChat);
+    renderTrace(null);
+    loadChatMetrics();
+    loadChatContext();
+    renderOutputs(null, true);
+    syncChatSidebar();
   }
-  /* ⚠️ `/api/agent/history` 返回的是**对象** `{messages, restorable, purge_after…}`
-     （`db.py:3836chat_history`），不是数组。原来写的是 `if(h && h.length)`
-     —— 数组才有 length，对象恒为 undefined → **历史永远回显不出来**，
-     刷新页面就只剩空白（而这正是这个接口存在的理由："没点清空就不该丢"）。
-     另外要带上卡片：v1.25 起每轮还会带 draft/proposal 卡。 */
-  var h = await api('/api/agent/history');
-  var hmsgs = (h && h.messages) || [];
-  var chatLog = document.getElementById('chatLog');
-  if(chatLog) chatLog.innerHTML = '';
-  if(hmsgs.length){
-    hmsgs.forEach(function(m){
-      var node = pushMsg(m.role, m.content);
-      if(m.role === 'assistant'){
-        var bits = [];
-        if(m.mode) bits.push('模式：' + m.mode);
-        if(m.rounds) bits.push('轮数 ' + m.rounds);
-        if(m.latency_ms) bits.push(m.latency_ms + ' ms');
-        if((m.tools || []).length) bits.push('工具：' + m.tools.map(function(x){ return x.tool; }).join(' → '));
-        if(bits.length){
-          node.insertAdjacentHTML('beforeend',
-            '<details class="tracebox"><summary>本次调用详情</summary>' +
-            '<div class="trace">' + esc(bits.join(' · ')) + '</div></details>');
-        }
-      }
-      if((m.drafts || []).length) renderDraftCards(node, m.drafts);
-      if((m.proposals || []).length) renderProposalCards(node, m.proposals);
-    });
+  if(!CHAT_BOOTED){
+    CHAT_BOOTED = true;
+    if(!CHAT_CONV_ID) newChat();
   }
-  CHAT = hmsgs.map(function(x){ return {role: x.role, content: x.content}; });
-  if(h && h.restorable === false && hmsgs.length){
-    toast('历史对话已超过保留期，这一段可能看不全', 'warn');
-  }
-  var t = await api('/api/agent/tools');
-  var el = document.getElementById('chatTools');
-  if(t && t.total){
-    el.innerHTML = '<div class="hint">共 ' + t.total + ' 个工具：读 ' +
-      ((t.read || []).length) + ' · 算 ' + ((t.compute || []).length) + ' · 写 ' +
-      ((t.write_requires_confirmation || []).length) + '（写操作一律要你确认）</div>';
-  }
-  var runs = await api('/api/agent/runs');
-  var rb = document.getElementById('chatRuns');
-  var runItems = (runs && runs.runs) || [];
-  if(runItems.length){
-    rb.innerHTML = runItems.slice(0, 8).map(function(r){
-      return '<div class="doc"><span class="doc-n">' + esc(String(r.started_at || '').slice(5, 16)) +
-        '　' + esc(r.question || r.prompt || '').slice(0, 24) + '</span>' +
-        '<span class="doc-a"><span class="chipl gray">' + esc(r.mode || '') + '</span></span></div>';
-    }).join('');
-  }else{ rb.innerHTML = '<div class="hint">还没有运行记录</div>'; }
+  await loadConversations();
   killAutofill();
+}
+
+function newConvId(){
+  return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+async function loadConversations(){
+  var r = await api('/api/agent/conversations');
+  if(r && !r.__err){
+    CHAT_CONVS = r.items || [];
+    renderConvList();
+  }
+}
+
+function renderConvList(){
+  var box = document.getElementById('chatConvList');
+  if(!box) return;
+  if(!CHAT_CONVS.length){
+    box.innerHTML = '<div class="chatconv-empty">还没有对话<br>点「新对话」开始</div>';
+    return;
+  }
+  box.innerHTML = CHAT_CONVS.map(function(c){
+    var active = (c.id === CHAT_CONV_ID) ? ' on' : '';
+    var title = c.title || '新对话';
+    var meta = (c.message_count || 0) + ' 轮 · ' + esc(String(c.updated_at || '').slice(5, 16));
+    return '<div class="chatconv-item' + active + '" onclick="openConversation(\'' +
+        esc(c.id) + '\')">' +
+      '<div class="cc-title">' + esc(title) + '</div>' +
+      '<div class="cc-meta">' + meta + '</div>' +
+      '<button class="cc-ren" title="重命名" onclick="event.stopPropagation();renameConversation(\'' +
+        esc(c.id) + '\')">✎</button>' +
+      '<button class="cc-del" title="删除会话" onclick="event.stopPropagation();deleteConversation(\'' +
+        esc(c.id) + '\')">×</button></div>';
+  }).join('');
+}
+
+/* 今日建议点过就开始处理了：当天不再重复出现。
+   只存标题，不存数据；第二天自动失效。 */
+function briefDateKey(){
+  var d = new Date();
+  var m = String(d.getMonth() + 1), day = String(d.getDate());
+  if(m.length < 2) m = '0' + m;
+  if(day.length < 2) day = '0' + day;
+  return d.getFullYear() + '-' + m + '-' + day;
+}
+function briefDismissedMap(){
+  try{
+    var raw = localStorage.getItem('chat_brief_dismissed');
+    if(!raw) return {};
+    var o = JSON.parse(raw);
+    if(!o || o.date !== briefDateKey()) return {};
+    var map = {};
+    (o.keys || []).forEach(function(k){ map[k] = 1; });
+    return map;
+  }catch(e){ return {}; }
+}
+function dismissBrief(title){
+  title = String(title || '').trim();
+  if(!title) return;
+  try{
+    var map = briefDismissedMap();
+    map[title] = 1;
+    localStorage.setItem('chat_brief_dismissed',
+      JSON.stringify({date: briefDateKey(), keys: Object.keys(map)}));
+  }catch(e){}
+}
+function renderWelcome(){
+  var log = document.getElementById('chatLog');
+  if(!log) return;
+  var asks = chatAsksLoad();
+  log.innerHTML = '<div class="chatwelcome" id="chatWelcome">' +
+    '<div class="cw-mark">AI</div>' +
+    '<h2>今天想先处理哪件事？</h2>' +
+    '<p>查人、推进流程、汇总招聘进度都可以直接说。写操作会先停在「待确认提案」，你确认后才生效。</p>' +
+    '<div class="cw-asks">' + asks.map(function(q){
+      return '<button class="cw-card" data-q="' + esc(q) + '">' +
+        '<span class="cw-q">' + esc(q) + '</span></button>';
+    }).join('') + '</div>' +
+    '<div class="cw-config"><button class="btn sm" onclick="chatAsksConfig()">' +
+      '配置这些问题</button></div></div>';
+  Array.prototype.forEach.call(log.querySelectorAll('.cw-card'), function(b){
+    b.addEventListener('click', function(){
+      var inp = document.getElementById('chatIn');
+      if(inp){ inp.value = b.dataset.q; askAgent(); }
+    });
+  });
+  /* 主动建议：复用概览页同一份「今日待办」（规则版或模型判断版）。
+     没有待办就不显示，避免把一个空区块挂在欢迎页上。 */
+  api('/api/brief/today').then(function(br){
+    var box = document.getElementById('chatWelcome');
+    if(!box || box.getAttribute('data-brief') === '1') return;
+    if(!br || br.__err || !(br.priorities || []).length) return;
+    box.setAttribute('data-brief', '1');
+    var _dismissed = briefDismissedMap();
+    var items = (br.priorities || []).filter(function(p){
+      return !_dismissed[String(p.title || '')];
+    }).slice(0, 3);
+    if(!items.length) return;
+    var html = '<div class="cw-brief"><div class="cw-brief-h">今日建议' +
+      (br.source === 'rule' ? ' · 规则排序' : '') + '</div>' +
+      items.map(function(p){
+        var q = '帮我处理：' + (p.title || '') +
+          (p.why ? '（' + p.why + '）' : '');
+        return '<button class="cw-card cw-brief-card" data-q="' + esc(q) +
+          '" data-brief-title="' + esc(p.title || '') + '">' +
+          '<span class="cw-q">' + esc(p.title || '') + '</span>' +
+          (p.why ? '<span class="cw-w">' + esc(p.why) + '</span>' : '') +
+          '</button>';
+      }).join('') + '</div>';
+    box.insertAdjacentHTML('beforeend', html);
+    Array.prototype.forEach.call(box.querySelectorAll('.cw-brief-card'), function(b){
+      b.addEventListener('click', function(){
+        var inp = document.getElementById('chatIn');
+        if(!inp || CHAT_CTRL) return;
+        dismissBrief(b.dataset.briefTitle || '');
+        inp.value = b.dataset.q;
+        askAgent();
+        /* askAgent 在第一个 await 前已同步设置 CHAT_CTRL。
+           确认真的开始运行后，把**这一条**待办从快捷区移除；
+           如果整个欢迎页已被 pushMsg 移除，这段自然是空操作。 */
+        setTimeout(function(){
+          if(!CHAT_CTRL) return;
+          var sec = b.closest('.cw-brief');
+          b.remove();
+          if(sec && !sec.querySelector('.cw-brief-card')) sec.remove();
+        }, 0);
+      });
+    });
+  });
+}
+
+var CHAT_TRACE_TIMER = null;
+
+function thinkingHtml(text, open){
+  text = String(text || '').trim();
+  if(!text) return '';
+  return '<details class="thinkbox"' + (open ? ' open' : '') + '>' +
+    '<summary>思考过程<span class="think-meta">' + text.length + ' 字</span></summary>' +
+    '<div class="think-body">' + mdLite(text) + '</div></details>';
+}
+/* 等待模型时把已经拿到的思维链实时显示出来；答复落地后整体换成折叠块。 */
+function renderThinkingLive(holder, text){
+  text = String(text || '').trim();
+  if(!holder || !text) return;
+  var body = holder.querySelector('.think-live .think-body');
+  if(!body){
+    holder.innerHTML = '<div class="think-live"><div class="think-live-h">思考过程</div>' +
+      '<div class="think-body"></div></div><div class="hint">正在生成回答…</div>';
+    body = holder.querySelector('.think-live .think-body');
+  }
+  if(body && body.getAttribute('data-n') !== String(text.length)){
+    body.setAttribute('data-n', String(text.length));
+    body.innerHTML = mdLite(text);
+    body.scrollTop = body.scrollHeight;   /* 思考在增长，视线跟着走 */
+  }
+}
+/* 连续同名工具合并：模型批量读 5 个人时，界面上只占一行
+   “读取档案 ×5（孙跃跃、贾业婷…）”，不再刷 5 行。 */
+function groupTrace(trace){
+  var out = [];
+  (trace || []).forEach(function(t){
+    var last = out[out.length - 1];
+    if(last && last.tool === t.tool){
+      last.items.push(t);
+      last.count = last.items.length;
+      last.write = last.write || !!t.write;
+      last.disabled = last.disabled || !!t.disabled;
+      last.recovered = last.recovered || !!t.recovered;
+    } else {
+      out.push({tool: t.tool, tool_label: t.tool_label || t.tool,
+                items: [t], count: 1,
+                write: !!t.write, disabled: !!t.disabled, recovered: !!t.recovered});
+    }
+  });
+  return out;
+}
+function traceArgText(t){
+  var a = t.args || {};
+  var keys = ['candidate_id', 'name', 'job', 'keyword', 'stage', 'tier',
+              'application_id', 'education', 'unit', 'query', 'similar_to',
+              'skills', 'view', 'outcome', 'date_from', 'date_to'];
+  var vals = [];
+  keys.forEach(function(k){
+    var v = a[k];
+    if(v === null || v === undefined || v === '') return;
+    if(Array.isArray(v)) vals = vals.concat(v);
+    else vals.push(v);
+  });
+  var seen = {}, out = [];
+  vals.forEach(function(v){
+    var s = String(v);
+    if(s && !seen[s]){ seen[s] = 1; out.push(s); }
+  });
+  return out.slice(0, 8).join('、') + (out.length > 8 ? '…' : '');
+}
+function traceGroupMeta(g){
+  var seen = {}, out = [];
+  (g.items || []).forEach(function(t){
+    var s = traceArgText(t);
+    if(!s) return;
+    s.split('、').forEach(function(x){
+      x = x.replace(/…$/, '');
+      if(x && !seen[x]){ seen[x] = 1; out.push(x); }
+    });
+  });
+  return out.slice(0, 10).join('、') + (out.length > 10 ? '…' : '');
+}
+function traceStepHtml(dot, title, meta, badges){
+  return '<div class="tp-step"><span class="tp-dot ' + dot + '"></span>' +
+    '<div class="tp-box"><div class="tp-title">' + esc(title) + '</div>' +
+    (meta ? '<div class="tp-meta">' + esc(meta) + '</div>' : '') +
+    (badges || '') + '</div></div>';
+}
+function traceToolStep(t){
+  var count = t.count || 1;
+  var label = t.tool_label || t.tool || '工具';
+  var meta;
+  if(count > 1){
+    label += ' ×' + count;
+    meta = traceGroupMeta(t);
+  } else {
+    var args = t.args || {};
+    meta = Object.keys(args).length ? JSON.stringify(args) : '';
+  }
+  if(meta.length > 140) meta = meta.slice(0, 140) + '…';
+  var badges = '';
+  if(t.write) badges += '<span class="tp-badge write">写 · 待确认</span>';
+  if(t.disabled) badges += '<span class="tp-badge disabled">已拦截</span>';
+  return traceStepHtml('t', label, meta, badges);
+}
+async function loadChatMetrics(){
+  var box = document.getElementById('chatMetrics');
+  if(!box) return;
+  var m = await api('/api/agent/metrics?days=7');
+  if(!m || m.__err){
+    box.innerHTML = '<div class="hint">指标读取失败</div>';
+    return;
+  }
+  function fmt(ms){
+    if(!ms) return '—';
+    return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms) + 'ms';
+  }
+  var costRow = '';
+  if(m.cost !== null && m.cost !== undefined){
+    costRow = '<div class="metric-row"><span class="metric-k">成本</span>' +
+      '<span class="metric-v">' + esc((m.currency || '¥') + ' ' + m.cost) + '</span></div>';
+  }
+  box.innerHTML =
+    '<div class="metric-row"><span class="metric-k">请求</span>' +
+      '<span class="metric-v">' + (m.runs || 0) + ' 次 · 成功 ' + (m.ok_rate || 0) + '%</span></div>' +
+    '<div class="metric-row"><span class="metric-k">延迟</span>' +
+      '<span class="metric-v">P50 ' + fmt(m.latency_p50) + ' · P95 ' + fmt(m.latency_p95) + '</span></div>' +
+    '<div class="metric-row"><span class="metric-k">今日 Token</span>' +
+      '<span class="metric-v">' + fmtTokens(m.today_tokens || 0) + '</span></div>' +
+    '<div class="metric-row" title="服务商需在 usage 中返回 cached_tokens / prompt_cache_hit_tokens 才能计算">' +
+      '<span class="metric-k">缓存命中</span>' +
+      '<span class="metric-v">' +
+        (m.today_cache_rate === null || m.today_cache_rate === undefined
+          ? '未上报' : m.today_cache_rate + '%') +
+      '</span></div>' +
+    costRow;
+}
+async function loadChatContext(){
+  if(CHAT_CTRL) return;                     /* 正在回答时以实际上下文为准 */
+  var q = CHAT_CONV_ID ? ('?session_id=' + encodeURIComponent(CHAT_CONV_ID)) : '';
+  var c = await api('/api/agent/context' + q);
+  if(c && !c.__err) renderContext(c);
+}
+function fmtTokens(n){
+  n = Number(n) || 0;
+  if(n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+  if(n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  return String(n);
+}
+function renderContext(c){
+  var box = document.getElementById('chatContext');
+  if(!box) return;
+  var _st = document.getElementById('ctxState');
+  if(_st) _st.title = '窗口优先取模型端点 /models 的 context_length；取不到时用 config/model.json 的 context_window；再取不到按 1M 默认。token 为估算值。';
+  box.title = '窗口优先取模型端点 /models 的 context_length；取不到时用 config/model.json 的 context_window；再取不到按 1M 默认。参数量取不到时显示 —，可在 config/model.json 的 parameter_count 指定。';
+  if(!c || !c.window){
+    box.innerHTML = '<div class="hint">提问后显示</div>';
+    return;
+  }
+  var colors = {messages:'#4E79A7', system_tools:'#E15759',
+                system_prompt:'#59A14F', skills:'#C56A45',
+                memory:'#B07AA1', free:'#e2e2e2'};
+  var parts = c.parts || [];
+  var segs = parts.map(function(p){
+    var pct = Math.max(0, Math.min(100, (Number(p.tokens) || 0) / c.window * 100));
+    return '<div class="ctxseg" style="width:' + pct + '%;background:' +
+      (colors[p.key] || '#ccc') + '" title="' + esc(p.label) + '"></div>';
+  }).join('');
+  var rows = parts.map(function(p){
+    var pct = (Number(p.tokens) || 0) / c.window * 100;
+    return '<div class="ctxrow"><span class="ctxdot" style="background:' +
+      (colors[p.key] || '#ccc') + '"></span><span class="ctxname">' +
+      esc(p.label) + '</span><span class="ctxnum">' + fmtTokens(p.tokens) +
+      ' · ' + pct.toFixed(1) + '%</span></div>';
+  }).join('');
+  var modelLine = c.model
+    ? '<div class="ctxmodel"><b>' + esc(c.model) + '</b></div>'
+    : '';
+  box.innerHTML = modelLine + '<div class="ctxhead"><b>' +
+    (Number(c.percent) || 0).toFixed(1) + '% 已用</b><span>' +
+    fmtTokens(c.used) + ' / ' + fmtTokens(c.window) + '</span></div>' +
+    '<div class="ctxbar">' + segs + '</div>' + rows;
+}
+function collectOutputs(r){
+  var out = [], seen = {};
+  (r.trace || []).forEach(function(t){
+    var d = t.download || null;
+    if(!d){
+      try{ d = JSON.parse(t.result || '{}'); }catch(e){ return; }
+    }
+    if(!d || !d.download_url || seen[d.download_url]) return;
+    seen[d.download_url] = 1;
+    var url = d.download_url;
+    var ext = url.indexOf('interview-schedule') >= 0 || url.indexOf('export/roster') >= 0
+      ? '.xlsx' : (url.indexOf('bundle') >= 0 ? '.zip' : '');
+    out.push({kind:'file', icon:'↓', tag:'下载',
+              label:(d.scope || t.tool_label || '导出文件') + '-' + todayStamp() + ext,
+              url:url});
+  });
+  /* 历史回放：下载链接存在 agent_runs.tool_calls[].download 里 */
+  (r.tools || []).forEach(function(t){
+    var dl = t.download;
+    if(!dl && t.download_url){
+      dl = {download_url: t.download_url, scope: t.scope || ''};
+    }
+    if(!dl || !dl.download_url || seen[dl.download_url]) return;
+    seen[dl.download_url] = 1;
+    var url = dl.download_url;
+    var ext = url.indexOf('interview-schedule') >= 0 || url.indexOf('export/roster') >= 0
+      ? '.xlsx' : (url.indexOf('bundle') >= 0 ? '.zip' : '');
+    out.push({kind:'file', icon:'↓', tag:'下载',
+              label:(dl.scope || t.tool_label || '导出文件') + '-' + todayStamp() + ext,
+              url:url});
+  });
+  (r.downloads || []).forEach(function(dl){
+    if(!dl || !dl.download_url || seen[dl.download_url]) return;
+    seen[dl.download_url] = 1;
+    var url = dl.download_url;
+    var ext = url.indexOf('interview-schedule') >= 0 || url.indexOf('export/roster') >= 0
+      ? '.xlsx' : (url.indexOf('bundle') >= 0 ? '.zip' : '');
+    out.push({kind:'file', icon:'↓', tag:'下载',
+              label:(dl.scope || '导出文件') + '-' + todayStamp() + ext,
+              url:url});
+  });
+  (r.drafts || []).forEach(function(d){
+    out.push({kind:'draft', icon:'✉', tag:'草稿',
+              label:(d.subject || d.name || '邮件草稿')});
+  });
+  (r.pending_proposals || r.proposals || []).forEach(function(p){
+    out.push({kind:'proposal', icon:'✓', tag:'待确认',
+              label:(p.summary || ('提案 #' + (p.proposal_id || '')))});
+  });
+  return out;
+}
+function outputKey(x){
+  return x.kind + '|' + (x.url || x.label || '');
+}
+function mergeOutputs(items){
+  var seen = {};
+  CHAT_OUTPUTS.forEach(function(x){ seen[outputKey(x)] = 1; });
+  (items || []).forEach(function(x){
+    var k = outputKey(x);
+    if(!seen[k]){ seen[k] = 1; CHAT_OUTPUTS.push(x); }
+  });
+}
+function renderOutputs(r, reset){
+  var box = document.getElementById('chatOutputs');
+  if(!box) return;
+  if(reset) CHAT_OUTPUTS = [];
+  if(r) mergeOutputs(collectOutputs(r));
+  var items = CHAT_OUTPUTS;
+  var st = document.getElementById('outState');
+  if(st) st.textContent = items.length ? (items.length + ' 项') : '—';
+  if(!items.length){
+    box.innerHTML = '<div class="hint">当前对话还没有下载 / 草稿 / 提案</div>';
+    return;
+  }
+  box.innerHTML = items.map(function(x){
+    if(x.kind === 'file'){
+      return '<button class="outitem" data-out-dl="' + esc(withToken(x.url)) +
+        '" data-out-name="' + esc(x.label) + '"><span class="outicon">↓</span>' +
+        '<span class="outname">' + esc(x.label) + '</span>' +
+        '<span class="outtag">' + esc(x.tag) + '</span></button>';
+    }
+    return '<div class="outitem" style="cursor:default"><span class="outicon">' +
+      esc(x.icon) + '</span><span class="outname">' + esc(x.label) + '</span>' +
+      '<span class="outtag">' + esc(x.tag) + '</span></div>';
+  }).join('');
+}
+function renderTrace(r, question){
+  var box = document.getElementById('chatTrace');
+  if(!box) return;
+  var state = document.getElementById('traceState');
+  if(!r){
+    if(state) state.textContent = '等待提问';
+    box.innerHTML = '<div class="trace-empty">提问后这里会显示模型与工具调用链。</div>';
+    return;
+  }
+  if(state){
+    state.textContent = r.mode === 'rule' ? '规则模式'
+      : (r.mode === 'offline' ? '离线模式'
+        : (r.mode === 'simple' ? '快捷回复' : '模型模式'));
+  }
+  var steps = [];
+  var modeText = r.mode === 'rule' ? '规则路由（模型未就绪）'
+    : (r.mode === 'offline' ? '离线规则'
+      : (r.mode === 'simple' ? '快捷回复（未调模型）' : 'LLM'));
+  steps.push(traceStepHtml('m', '模型', modeText +
+    (r.rounds ? ' · ' + r.rounds + ' 轮' : '') +
+    (r.latency_ms ? ' · ' + r.latency_ms + ' ms' : '')));
+  groupTrace(r.trace || []).forEach(function(t){ steps.push(traceToolStep(t)); });
+  steps.push(traceStepHtml('a', '生成回答', question ? ('问题：' + question) : ''));
+  box.innerHTML = steps.join('');
+}
+function renderTraceLive(t, question){
+  var box = document.getElementById('chatTrace');
+  if(!box) return;
+  var state = document.getElementById('traceState');
+  if(state) state.textContent = '运行中';
+  var steps = [traceStepHtml('m', '模型', '正在思考…')];
+  groupTrace(t.trace || []).forEach(function(x){ steps.push(traceToolStep(x)); });
+  steps.push('<div class="tp-step tp-running"><span class="tp-dot t"></span>' +
+    '<div class="tp-box"><div class="tp-title">运行中</div><div class="tp-meta">' +
+    esc(question ? ('问题：' + question) : '等待下一步') + '</div></div></div>');
+  box.innerHTML = steps.join('');
+}
+function renderTraceRunning(question){
+  var box = document.getElementById('chatTrace');
+  if(!box) return;
+  var state = document.getElementById('traceState');
+  if(state) state.textContent = '运行中';
+  box.innerHTML = traceStepHtml('m', '模型', '正在思考…') +
+    '<div class="tp-step tp-running"><span class="tp-dot t"></span>' +
+    '<div class="tp-box"><div class="tp-title">运行中</div><div class="tp-meta">' +
+    esc(question || '') + '</div></div></div>';
+}
+function startTracePoll(question, holder){
+  stopTracePoll();
+  CHAT_TRACE_TIMER = setInterval(async function(){
+    if(!CHAT_CTRL) return;
+    var t = await api('/api/agent/trace?session_id=' + encodeURIComponent(CHAT_CONV_ID));
+    if(t && !t.__err){
+      // 思考过程实时显示；工具链照旧更新右侧面板
+      if(t.thinking && !CHAT_STREAMING) renderThinkingLive(holder, t.thinking);
+      if(t.trace && t.trace.length) renderTraceLive(t, question);
+    }
+  }, 700);
+}
+function stopTracePoll(){
+  if(CHAT_TRACE_TIMER){ clearInterval(CHAT_TRACE_TIMER); CHAT_TRACE_TIMER = null; }
+}
+function renderTraceFromMessages(hmsgs){
+  var last = null;
+  (hmsgs || []).forEach(function(m){ if(m.role === 'assistant') last = m; });
+  if(!last){ renderTrace(null); return; }
+  renderTrace({trace: last.tools || [], mode: last.mode, rounds: last.rounds,
+               latency_ms: last.latency_ms});
+}
+
+function newChat(){
+  if(CHAT_CTRL){ toast('请先停止当前回答'); return; }
+  CHAT_CONV_ID = newConvId();
+  CHAT = [];
+  var log = document.getElementById('chatLog');
+  if(log) log.innerHTML = '';
+  renderWelcome();
+  renderTrace(null);
+  renderContext(null);
+  renderOutputs(null, true);
+  loadChatContext();
+  syncChatSidebar();
+  renderConvList();
+  var inp = document.getElementById('chatIn');
+  if(inp){ inp.value = ''; inp.focus(); chatGrow(inp); }
+}
+
+function renderChatMessages(hmsgs){
+  var log = document.getElementById('chatLog');
+  if(!log) return;
+  log.innerHTML = '';
+  CHAT_OUTPUTS = [];
+  var lastAsst = null;
+  (hmsgs || []).forEach(function(m){
+    var node = pushMsg(m.role, m.content || '');
+    if(m.role === 'assistant' && m.thinking){
+      node.insertAdjacentHTML('afterbegin', thinkingHtml(m.thinking));
+    }
+    if(m.role === 'assistant'){
+      lastAsst = m;
+      var bits = [];
+      if(m.mode) bits.push('模式：' + m.mode);
+      if(m.rounds) bits.push('轮数 ' + m.rounds);
+      if(m.latency_ms) bits.push(m.latency_ms + ' ms');
+      if((m.tools || []).length){
+        bits.push('工具：' + m.tools.map(function(x){ return x.tool; }).join(' → '));
+      }
+      if(bits.length){
+        node.insertAdjacentHTML('beforeend',
+          '<details class="tracebox"><summary>本次调用详情</summary>' +
+          '<div class="trace">' + esc(bits.join(' · ')) + '</div></details>');
+      }
+    }
+    if((m.drafts || []).length) renderDraftCards(node, m.drafts);
+    if((m.proposals || []).length) renderProposalCards(node, m.proposals);
+  });
+  CHAT = (hmsgs || []).map(function(x){ return {role: x.role, content: x.content}; });
+  if(!hmsgs || !hmsgs.length) renderWelcome();
+  renderTraceFromMessages(hmsgs);
+  renderContext(lastAsst && lastAsst.context ? lastAsst.context : null);
+  (hmsgs || []).forEach(function(m){
+    if(m.role === 'assistant') mergeOutputs(collectOutputs(m));
+  });
+  renderOutputs(null);
+  syncChatSidebar();
+  return lastAsst;
+}
+
+async function openConversation(cid){
+  if(CHAT_CTRL){ toast('请先停止当前回答'); return; }
+  var h = await api('/api/agent/history?conversation_id=' + encodeURIComponent(cid));
+  if(h.__err){ toast('读取会话失败：' + h.__err, 'danger'); return; }
+  CHAT_CONV_ID = cid;
+  var _last = renderChatMessages(h.messages || []);
+  if(!_last || !_last.context) loadChatContext();
+  renderConvList();
+  var inp = document.getElementById('chatIn');
+  if(inp) inp.focus();
+}
+
+async function renameConversation(cid){
+  var cur = (CHAT_CONVS || []).filter(function(c){ return c.id === cid; })[0] || {};
+  var name = await askText('重命名会话', cur.title || '', '给这条对话起个名字');
+  if(!name || name === true) return;
+  var r = await api('/api/agent/conversations/' + encodeURIComponent(cid), {
+    method:'PATCH', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({title:String(name).trim()})
+  });
+  if(r.__err){ toast('重命名失败：' + r.__err, 'danger'); return; }
+  await loadConversations();
+}
+
+async function deleteConversation(cid){
+  if(!cid) return;
+  var ok = await askConfirm({
+    title: '删除会话', danger: true, okText: '删除',
+    body: '从左侧列表删除这条对话？底层运行记录会保留给成本与审计。'
+  });
+  if(!ok) return;
+  var r = await api('/api/agent/conversations/' + encodeURIComponent(cid),
+                    {method:'DELETE'});
+  if(r.__err){ toast('删除失败：' + r.__err, 'danger'); return; }
+  toast('已删除');
+  if(cid === CHAT_CONV_ID) newChat();
+  await loadConversations();
 }
 /* 输入框随内容长高：先压回 auto 量出真实高度，再夹到 10 行上限；
    超过上限就改成可滚动（内容从底部往上滚，而不是把框继续撑高）。 */
@@ -7453,18 +10256,35 @@ function chatGrow(inp){
   inp.style.overflowY = (need > max) ? 'auto' : 'hidden';
   if(need > max) inp.scrollTop = inp.scrollHeight;
 }
+/* 首页（还没有对话）只显示运行指标；进入对话后隐藏指标，
+   显示上下文 / 本次产出 / 调用轨迹。 */
+function syncChatSidebar(){
+  var log = document.getElementById('chatLog');
+  var has = !!(log && log.querySelector('.msg'));
+  var metrics = document.getElementById('chatMetricsSec');
+  if(metrics) metrics.style.display = has ? 'none' : '';
+  ['chatContextSec', 'chatOutputsSec', 'chatTraceSec'].forEach(function(id){
+    var el = document.getElementById(id);
+    if(el) el.style.display = has ? '' : 'none';
+  });
+}
 function pushMsg(role, content){
   var log = document.getElementById('chatLog');
+  var welcome = document.getElementById('chatWelcome');
+  if(welcome) welcome.remove();
   var el = document.createElement('div');
   el.className = 'msg ' + role;
   el.innerHTML = role === 'assistant' ? mdLite(content) : esc(content);
   log.appendChild(el);
   log.scrollTop = log.scrollHeight;
+  syncChatSidebar();
   return el;
 }
 /* 模型一次调用可能要几十秒 —— 必须能**中断**，否则 HR 只能干等或刷新页面。
    用 AbortController 挂在 fetch 上：点「停止」直接 abort，界面立刻回到可输入状态。 */
 var CHAT_CTRL = null;
+/* SSE 正在逐字推送时，右侧轨迹轮询不要再改写同一条消息里的思考块 */
+var CHAT_STREAMING = false;
 function chatBusy(on){
   var send = document.getElementById('chatSend');
   var stop = document.getElementById('chatStop');
@@ -7482,38 +10302,71 @@ function chatBusy(on){
     ta.style.paddingRight = need + 'px';
   }
 }
-async function askAgent(){
-  var inp = document.getElementById('chatIn');
-  var q = (inp.value || '').trim();
-  if(!q || CHAT_CTRL) return;
-  inp.value = '';
-  chatGrow(inp);
-  pushMsg('user', q);
-  var holder = pushMsg('assistant', '思考中…');
-  holder.innerHTML = '<span class="hint">思考中…</span>';
-  CHAT_CTRL = new AbortController();
-  chatBusy(true);
-  var r = await api('/api/agent/chat', {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({message: q, history: CHAT}),
-    signal: CHAT_CTRL.signal});
-  CHAT_CTRL = null;
-  chatBusy(false);
-  if(r.__err && /abort/i.test(r.__err)){
-    holder.innerHTML = '<span class="hint">已停止。</span>';
-    return;
+/* 流式读取 SSE：每个 `data:` 块回调一次；`: ping` 注释直接忽略。 */
+async function readAgentSSE(resp, onEvent){
+  var reader = resp.body.getReader();
+  var dec = new TextDecoder('utf-8');
+  var buf = '';
+  function handle(block){
+    var lines = block.split('\n'), data = [];
+    for(var i = 0; i < lines.length; i++){
+      var ln = lines[i].trim();
+      if(ln.indexOf('data:') === 0) data.push(ln.slice(5).trim());
+    }
+    if(!data.length) return;
+    var payload = data.join('\n');
+    if(payload === '[DONE]') return;
+    try{ onEvent(JSON.parse(payload)); }catch(e){ /* 半个 JSON 不打断整条流 */ }
   }
+  while(true){
+    var r = await reader.read();
+    if(r.done) break;
+    buf += dec.decode(r.value, {stream:true});
+    if(buf.indexOf('\r') >= 0) buf = buf.replace(/\r\n/g, '\n');
+    var idx;
+    while((idx = buf.indexOf('\n\n')) >= 0){
+      handle(buf.slice(0, idx));
+      buf = buf.slice(idx + 2);
+    }
+  }
+  if(buf.trim()) handle(buf);
+}
+function chatAutoScroll(){
+  var log = document.getElementById('chatLog');
+  if(!log) return;
+  /* 只有用户本来就在底部时才跟随；向上翻看历史时不要把他拽回来 */
+  if(log.scrollHeight - log.scrollTop - log.clientHeight < 180){
+    log.scrollTop = log.scrollHeight;
+  }
+}
+/* 一轮回答的最终渲染：思考默认折叠、答案 Markdown、工具链折叠、卡片。 */
+function renderAgentResult(holder, r, q){
+  if(r.answer || (r.trace || []).length) renderTrace(r, q);
+  else renderTrace(null);
   var answer = r.answer || (r.detail || '（无回复）');
-  holder.innerHTML = mdLite(answer);
+  holder.innerHTML = thinkingHtml(r.thinking) + mdLite(answer);
+  if((r.citations || []).length){
+    var srcs = r.citations.map(function(c){
+      return esc(c.label || c.tool) + (c.count > 1 ? ' ×' + c.count : '');
+    }).join(' · ');
+    holder.insertAdjacentHTML('beforeend',
+      '<div class="src-line">数据来源：' + srcs + '</div>');
+  }
   if(r.trace && r.trace.length){
     /* 工具轨迹**默认折叠** —— HR 不关心函数名和 JSON 参数。
        但有 [已拦截] 时**默认展开**：那是"这件事没做"的原因，不能藏起来。 */
     var blocked = r.trace.some(function(t){ return t.disabled; });
-    var lines = r.trace.map(function(t){
-      return '→ ' + esc(t.tool_label || t.tool) + '（' + esc(JSON.stringify(t.args)) + '）' +
-        (t.write ? ' <b>[写·需确认]</b>' : '') +
-        (t.disabled ? ' <b>[已拦截]</b>' : '') +
-        (t.recovered ? ' <b>[已补做]</b>' : '');
+    var lines = groupTrace(r.trace).map(function(g){
+      var meta = g.count > 1
+        ? traceGroupMeta(g)
+        : (Object.keys((g.items[0] || {}).args || {}).length
+            ? JSON.stringify(g.items[0].args) : '');
+      var at = meta ? '（' + esc(meta) + '）' : '';
+      return '→ ' + esc(g.tool_label || g.tool) +
+        (g.count > 1 ? ' ×' + g.count : '') + at +
+        (g.write ? ' <b>[写·需确认]</b>' : '') +
+        (g.disabled ? ' <b>[已拦截]</b>' : '') +
+        (g.recovered ? ' <b>[已补做]</b>' : '');
     }).join('<br>');
     holder.insertAdjacentHTML('beforeend',
       '<details class="tracebox"' + (blocked ? ' open' : '') + '>' +
@@ -7521,14 +10374,225 @@ async function askAgent(){
       '<div class="trace">' + lines + '</div></details>');
   }
   if(r.mode){
+    var route = (r.route || []).filter(function(x){ return x && x !== 'core'; });
+    var modeLabel = r.mode === 'simple' ? '快捷回复'
+      : (r.mode === 'stopped' ? '已停止' : r.mode);
     holder.insertAdjacentHTML('beforeend',
-      '<div class="trace">模式：' + esc(r.mode) + ' · 轮数 ' + (r.rounds || 0) +
-      ' · ' + (r.latency_ms || 0) + ' ms</div>');
+      '<div class="trace">模式：' + esc(modeLabel) + ' · 轮数 ' + (r.rounds || 0) +
+      ' · ' + (r.latency_ms || 0) + ' ms' +
+      (route.length ? ' · 工具组：' + esc(route.join('/')) : '') +
+      (r.skill_name ? ' · SOP：' + esc(r.skill_name) : '') + '</div>');
+  }
+  if(q){
+    holder.setAttribute('data-q', q);
+    holder.insertAdjacentHTML('beforeend',
+      '<div class="msg-actions"><button class="mdt-btn" data-retry>重新生成</button></div>');
   }
   CHAT.push({role:'user', content:q}, {role:'assistant', content: r.answer || ''});
   if((r.drafts || []).length) renderDraftCards(holder, r.drafts);
   if((r.pending_proposals || []).length) renderProposalCards(holder, r.pending_proposals);
+  if(r.session_id) CHAT_CONV_ID = r.session_id;
+  loadConversations();          /* 首轮回答后，左侧出现这条会话的标题 */
+  loadChatMetrics();            /* 运行指标随每次回答刷新 */
+  if(r.context && r.context.window) renderContext(r.context);  /* 上下文用量 */
+  renderOutputs(r);             /* 本次下载/草稿/提案 */
   killAutofill();
+}
+function retryAgent(btn){
+  if(CHAT_CTRL) return;
+  var holder = btn.closest('.msg');
+  var q = holder ? (holder.getAttribute('data-q') || '') : '';
+  if(!holder || !q) return;
+  var prev = holder.previousElementSibling;
+  holder.remove();
+  if(prev && prev.classList && prev.classList.contains('user')) prev.remove();
+  // 同步回退内存里的历史，避免重试后上下文里出现两份同样的问答
+  if(CHAT.length >= 2 && CHAT[CHAT.length - 2].role === 'user'){
+    CHAT.splice(-2, 2);
+  }
+  var inp = document.getElementById('chatIn');
+  if(inp){ inp.value = q; askAgent(); }
+}
+async function askAgentNonStream(q, holder){
+  holder.innerHTML = '<span class="hint">思考中…</span>';
+  CHAT_CTRL = new AbortController();
+  chatBusy(true);
+  renderTraceRunning(q);
+  startTracePoll(q, holder);
+  var r = await api('/api/agent/chat', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({message: q, history: CHAT, session_id: CHAT_CONV_ID}),
+    signal: CHAT_CTRL.signal});
+  CHAT_CTRL = null;
+  chatBusy(false);
+  stopTracePoll();
+  if(r.__err && /abort/i.test(r.__err)){
+    holder.innerHTML = '<span class="hint">已停止。</span>';
+    renderTrace(null);
+    return;
+  }
+  if(r.__err && !r.answer){
+    holder.innerHTML = '<span class="hint">' + esc(r.__err) + '</span>';
+    renderTrace(null);
+    return;
+  }
+  renderAgentResult(holder, r, q);
+}
+async function askAgent(){
+  var inp = document.getElementById('chatIn');
+  var q = (inp.value || '').trim();
+  if(!q || CHAT_CTRL) return;
+  if(!CHAT_CONV_ID) CHAT_CONV_ID = newConvId();
+  inp.value = '';
+  chatGrow(inp);
+  pushMsg('user', q);
+  var holder = pushMsg('assistant', '');
+  holder.innerHTML = '<div class="stream-status hint">正在思考…</div>' +
+    '<div class="stream-answer"></div>';
+  var answerEl = holder.querySelector('.stream-answer');
+  var liveThink = '', liveAns = '', thinkBody = null, answerTimer = null;
+  var sawAny = false;
+  var t0 = Date.now(), lastEvent = Date.now(), tick = null, timedOut = false;
+  var statusBase = '正在思考…';
+  function setStatus(t){
+    if(t) statusBase = t;
+    var s = holder.querySelector('.stream-status');
+    if(!s) return;
+    var sec = Math.round((Date.now() - t0) / 1000);
+    var extra = liveAns ? (' · 已 ' + liveAns.length + ' 字') : '';
+    s.textContent = statusBase + ' · ' + sec + 's' + extra;
+  }
+  function ensureThink(){
+    if(thinkBody) return thinkBody;
+    var d = document.createElement('div');
+    d.className = 'think-live';
+    d.innerHTML = '<div class="think-live-h">思考过程</div><div class="think-body"></div>';
+    holder.insertBefore(d, answerEl);
+    thinkBody = d.querySelector('.think-body');
+    return thinkBody;
+  }
+  function flushAnswer(){
+    if(answerTimer){ clearTimeout(answerTimer); answerTimer = null; }
+    if(answerEl) answerEl.innerHTML = liveAns ? mdLite(liveAns) : '';
+    chatAutoScroll();
+  }
+  function scheduleAnswer(){
+    if(answerTimer) return;
+    answerTimer = setTimeout(function(){ answerTimer = null; flushAnswer(); }, 90);
+  }
+  function onEvent(ev){
+    if(!ev || !ev.type) return;
+    sawAny = true;
+    lastEvent = Date.now();
+    if(ev.type === 'thinking_delta'){
+      liveThink += ev.text || '';
+      var b = ensureThink();
+      if(b){ b.textContent = liveThink; b.scrollTop = b.scrollHeight; }
+      setStatus('正在思考…');
+      chatAutoScroll();
+    } else if(ev.type === 'answer_delta'){
+      liveAns += ev.text || '';
+      setStatus('正在生成回答…');
+      scheduleAnswer();
+    } else if(ev.type === 'answer_reset'){
+      liveAns = '';
+      flushAnswer();
+    } else if(ev.type === 'tool_start'){
+      setStatus('正在调用：' + (ev.tool_label || ev.tool || '工具') + '…');
+    } else if(ev.type === 'tool_result'){
+      setStatus((ev.ok === false ? '工具返回错误：' : '已完成：') +
+        (ev.tool_label || ev.tool || '工具'));
+    } else if(ev.type === 'answer_complete'){
+      setStatus('回答已生成，正在收尾…');
+    } else if(ev.type === 'error'){
+      setStatus('出错：' + (ev.message || '未知错误'));
+    }
+  }
+  CHAT_CTRL = new AbortController();
+  CHAT_STREAMING = true;
+  chatBusy(true);
+  renderTraceRunning(q);
+  startTracePoll(q, holder);
+  var done = null;
+  tick = setInterval(function(){
+    var sec = Math.round((Date.now() - t0) / 1000);
+    if(!sawAny && sec >= 15){
+      statusBase = '模型响应较慢，仍在等待…（可点停止）';
+    }
+    /* 2 分钟没有任何增量就认为链路卡住，主动停止，避免界面永远停在“正在生成” */
+    if(Date.now() - lastEvent > 120000){
+      timedOut = true;
+      statusBase = '模型长时间无响应，已停止';
+      setStatus();
+      if(CHAT_CTRL) CHAT_CTRL.abort();
+      return;
+    }
+    setStatus();
+  }, 1000);
+  try{
+    var resp = await fetch('/api/agent/chat/stream', {method:'POST',
+      headers: hdr(),
+      body: JSON.stringify({message: q, history: CHAT, session_id: CHAT_CONV_ID}),
+      signal: CHAT_CTRL.signal});
+    if(resp.status === 401 && AUTH_ENABLED){
+      setToken(''); ME = null;
+      if(!LOGIN_SHOWN) showLogin('登录已失效，请重新登录');
+    }
+    if(!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+    await readAgentSSE(resp, function(ev){
+      if(ev && ev.type === 'done') done = ev;
+      else onEvent(ev);
+    });
+    if(!done) throw new Error('流式连接结束但没有收到最终答复');
+    CHAT_CTRL = null;
+    CHAT_STREAMING = false;
+    chatBusy(false);
+    stopTracePoll();
+    if(tick){ clearInterval(tick); tick = null; }
+    if(answerTimer){ clearTimeout(answerTimer); answerTimer = null; }
+    renderAgentResult(holder, done, q);
+  }catch(e){
+    var aborted = String((e && e.name) || '') === 'AbortError' || /abort/i.test(String(e));
+    CHAT_CTRL = null;
+    CHAT_STREAMING = false;
+    chatBusy(false);
+    stopTracePoll();
+    if(tick){ clearInterval(tick); tick = null; }
+    if(aborted){
+      if(liveAns || liveThink){
+        /* 已经生成的内容不能因为点停止就丢掉——尤其答案看起来已经出完、
+           只是服务端还在收尾时，保留它比显示一句"已停止"有用得多。 */
+        if(answerTimer){ clearTimeout(answerTimer); answerTimer = null; }
+        holder.innerHTML = thinkingHtml(liveThink) + mdLite(liveAns) +
+          '<div class="trace">' +
+          (timedOut ? '模型长时间无响应，已保留已生成内容。' : '已停止，已保留已生成内容。') +
+          '</div>';
+        CHAT.push({role:'user', content:q}, {role:'assistant', content:liveAns});
+      } else {
+        holder.innerHTML = '<span class="hint">' +
+          (timedOut ? '模型长时间无响应，已停止。' : '已停止。') + '</span>';
+      }
+      renderTrace(null);
+      return;
+    }
+    /* 流式不可用（老代理/老端点）→ 自动退回非流式；已经显示了一半则保留半成品。 */
+    if(liveAns || liveThink){
+      if(answerTimer){ clearTimeout(answerTimer); answerTimer = null; }
+      holder.innerHTML = thinkingHtml(liveThink) + mdLite(liveAns) +
+        '<div class="trace">流式连接中断：' + esc(String((e && e.message) || e)) + '</div>';
+      CHAT.push({role:'user', content:q}, {role:'assistant', content:liveAns});
+      return;
+    }
+    if(sawAny){
+      /* 已经执行过工具（可能已生成提案），绝不能重跑一遍造成重复。
+         如实告诉 HR 连接断了，让他刷新后看提案列表。 */
+      holder.innerHTML = '<div class="trace">流式连接中断：' +
+        esc(String((e && e.message) || e)) + '</div>';
+      renderTrace(null);
+      return;
+    }
+    await askAgentNonStream(q, holder);
+  }
 }
 function renderDraftCards(holder, drafts){
   drafts.forEach(function(d){
@@ -7554,16 +10618,7 @@ function renderDraftCards(holder, drafts){
     var b = el.querySelector('button[data-draft]');
     if(b) b.addEventListener('click', function(){
       var raw = window.__DRAFTS || {};
-      var dd = raw[d.id] || d;
-      setView('mail');
-      setTimeout(function(){
-        var s = document.getElementById('mSubject');
-        var bd = document.getElementById('mBody');
-        if(s) s.value = dd.subject || '';
-        if(bd) bd.innerHTML = dd.body || dd.html || '';
-        if(dd.to) { var t = document.getElementById('mToManual'); if(t) t.value = dd.to; }
-        toast('已填入写邮件页');
-      }, 400);
+      openDraftInMailer(raw[d.id] || d);
     });
   });
 }
@@ -7573,26 +10628,91 @@ function renderProposalCards(holder, props){
   /* 每条提案**直接在卡片上确认/拒绝**（业务方 2026-10-21：原版有、v2 缺）。
      原来这里只有一句"需要你在对应页面确认" —— 等于把 HR 从助手页赶去人才库，
      而助手恰恰是他刚提问的地方。写操作仍需人点头，只是把这个"点头"放到手边。 */
+  var pendingCount = props.filter(function(p){
+    return (p.status || '待确认') === '待确认';
+  }).length;
+  var batchCount = props.filter(function(p){
+    return (p.status || '待确认') === '待确认' && p.current_turn;
+  }).length;
   el.innerHTML = '<div class="dcard-t">待确认提案（' + props.length + '）</div>' +
     props.map(function(p){
-      return '<div class="proprow">' +
+      /* ⚠️ 助手返回的字段是 `proposal_id`，不是 `id`。
+         原来写 `p.id` → data-prop="undefined" → 请求 /api/proposals/NaN/decide
+         → FastAPI 422（detail 是对象数组）→ 界面只弹 `[object Object]`。 */
+      var pid = (p.proposal_id != null) ? p.proposal_id : p.id;
+      var st = p.status || '待确认';
+      var pending = st === '待确认';
+      var ch = (p.changes || []).filter(function(c){ return c && c.label; })
+        .map(function(c){
+          return '<div class="proprow-c">' + esc(c.label) + '：' +
+            esc(c.before || '（空）') + ' <b>→</b> ' + esc(c.after || '（空）') + '</div>';
+        }).join('');
+      return '<div class="proprow" data-pid="' + esc(pid) + '"' +
+        (p.current_turn ? ' data-current="1"' : '') + '>' +
         '<div class="proprow-t">' + esc(p.title || p.summary || p.description || '') +
           (p.risk ? '<span class="prisk r' + esc(p.risk) + '">' + esc(p.risk) + '风险</span>' : '') +
-        '</div>' +
-        '<div class="proprow-a">' +
-          '<button class="btn primary sm" data-prop="' + p.id + '" data-d="approve">同意执行</button>' +
-          '<button class="btn sm" data-prop="' + p.id + '" data-d="reject">拒绝</button>' +
-        '</div></div>';
+        '</div>' + ch +
+        (pending
+          ? '<div class="proprow-a">' +
+              '<button class="btn primary sm" data-prop="' + esc(pid) + '" data-d="approve">同意执行</button>' +
+              '<button class="btn sm" data-prop="' + esc(pid) + '" data-d="reject">拒绝</button>' +
+            '</div>'
+          : '<div class="proprow-a"><span class="proprow-st">' + esc(st) + '</span></div>') +
+        '</div>';
     }).join('') +
+    (batchCount > 1
+      ? '<div class="dcard-a propbatch">' +
+          '<button class="btn primary sm" data-prop-all="approve">' +
+            '全部同意（' + batchCount + '）</button>' +
+          '<button class="btn sm" data-prop-all="reject">全部拒绝</button>' +
+        '</div>'
+      : '') +
     '<div class="dcard-a"><span class="hint">同意后立即执行并写审计；拒绝也留痕。' +
       '写操作不会自动生效。</span></div>';
   holder.appendChild(el);
   Array.prototype.forEach.call(el.querySelectorAll('[data-prop]'), function(b){
     b.addEventListener('click', function(){
-      b.disabled = true;
-      decideProp(Number(b.dataset.prop), b.dataset.d, b);
+      var pid = Number(b.dataset.prop);
+      if(!pid || isNaN(pid)){ toast('这条提案缺少编号，请刷新后重试'); return; }
+      /* 禁用放在用户确认之后（decideProp 内部）：在这里先禁用，
+         用户点「取消」就永远点不动了。 */
+      decideProp(pid, b.dataset.d, b);
     });
   });
+  Array.prototype.forEach.call(el.querySelectorAll('[data-prop-all]'), function(b){
+    b.addEventListener('click', function(){ decideAllProps(el, b.dataset.propAll); });
+  });
+}
+/* 一句话批量任务：动作已由助手拆好，HR 只需要在这里点一次“全部同意”。 */
+async function decideAllProps(el, decision){
+  var pids = [];
+  Array.prototype.forEach.call(el.querySelectorAll('.proprow[data-pid]'), function(row){
+    if(!row.querySelector('[data-prop]')) return;   /* 已处理的行不参与批量 */
+    if(row.getAttribute('data-current') !== '1') return;  /* 旧提案不批量误执行 */
+    var pid = Number(row.getAttribute('data-pid'));
+    if(pid && !isNaN(pid)) pids.push(pid);
+  });
+  if(!pids.length) return;
+  var approve = decision === 'approve';
+  var ok = await askConfirm({
+    title: approve ? '全部同意并执行' : '全部拒绝',
+    danger: !approve,
+    okText: approve ? ('同意并执行 ' + pids.length + ' 条') : '全部拒绝',
+    body: (approve ? '将执行这 ' : '将拒绝这 ') + pids.length +
+      ' 条提案，全部写入审计。' + (approve ? '执行后不能自动撤销。' : '')
+  });
+  if(!ok) return;
+  var success = 0, failed = 0;
+  for(var i = 0; i < pids.length; i++){
+    var r = await api('/api/proposals/' + pids[i] + '/decide', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({decision: approve ? 'approve' : 'reject'})
+    });
+    if(r && !r.__err) success++; else failed++;
+  }
+  toast((approve ? '已执行 ' : '已拒绝 ') + success + ' 条' +
+        (failed ? ('，' + failed + ' 条失败') : ''), failed ? 'warn' : 'ok');
+  if(CHAT_CONV_ID) openConversation(CHAT_CONV_ID);
 }
 
 /* ---------- 面试单位：多选（照搬原版 multiRender/multiAdd）----------
@@ -7650,7 +10770,7 @@ function multiDelIvUnit(i){
    智能助手/自动扫描会生成"建议"，都要 HR 亲自点头才落库。
    同意 → 执行并写审计；拒绝 → 也写审计（谁在什么时候拒的）。
    放在人才库第二行，点开是一张可折叠的清单。 */
-var PROPS = [];
+var PROPS = [], PROPS_LOADED = false;
 /* 提案摘要里的姓名 → 可点开档案的链接。
    后端 `/api/proposals` 已把每条提案的 candidate_id / candidate_name 解析好
    （set_stage 提案存的是 application_id，由后端换成候选人），这里只替换
@@ -7694,6 +10814,9 @@ function propRowHtml(p){
 }
 /* 只更新计数，不重建整个提案列表（v4.0.15：原来每处理一条都整块重绘） */
 function updatePropCount(){
+  /* 没打开过提案面板时 PROPS 是空数组，不能据此把按钮改成「（0）」——
+     那会让 HR 以为没有待办。只有真正加载过才用本地计数。 */
+  if(!PROPS_LOADED) return;
   var btn = document.getElementById('btnProp');
   if(btn) btn.textContent = '待确认提案（' + PROPS.length + '）';
   var n = document.getElementById('propCount');
@@ -7710,6 +10833,7 @@ async function loadProps(){
   box.innerHTML = '<div class="hint" style="padding:8px">读取提案…</div>';
   var r = await api('/api/proposals');
   PROPS = (r.items || []).filter(function(x){ return x.status === '待确认'; });
+  PROPS_LOADED = true;
   if(!PROPS.length){
     updatePropCount();
     box.innerHTML = '<div class="hint" style="padding:10px">没有待确认的提案</div>';
@@ -7743,6 +10867,16 @@ async function decideAllProps(decision){
   loadProps();
   load({push:false});
 }
+function settlePropCard(pid, label){
+  /* 同一张卡有两个按钮；成功/失败后都要一起停用，不能只停被点的那个。 */
+  Array.prototype.forEach.call(document.querySelectorAll('[data-pid="' + pid + '"]'),
+    function(row){
+      var acts = row.querySelector('.proprow-a');
+      if(acts) acts.innerHTML = '<span class="proprow-st">' + esc(label) + '</span>';
+    });
+  Array.prototype.forEach.call(document.querySelectorAll('[data-prop="' + pid + '"]'),
+    function(b){ b.disabled = true; });
+}
 async function decideProp(pid, decision, btn){
   var q = decision === 'approve'
     ? '确认执行这条提案吗？\n\n它会真的改档案（写审计）。'
@@ -7757,6 +10891,7 @@ async function decideProp(pid, decision, btn){
   if(r.__err){ toast(r.__err); if(btn) btn.disabled = false; return; }
   /* 局部更新：保留这一行并标成"已处理"，只把计数减一；不重建整块提案列表。
      这样 40+ 条时不会每次点同意都闪一下，也能看见这条已经处理过了。 */
+  settlePropCard(pid, decision === 'approve' ? '已执行' : '已拒绝');
   var row = document.getElementById('prop-' + pid);
   if(row){
     row.classList.add('done');
@@ -7766,59 +10901,69 @@ async function decideProp(pid, decision, btn){
   }
   PROPS = PROPS.filter(function(x){ return Number(x.id) !== Number(pid); });
   updatePropCount();
-  toast(decision === 'approve' ? '已执行' : '已拒绝');
+  toast(r.message || (decision === 'approve' ? '已执行' : '已拒绝'));
   load({push:false});
 }
-/* ---------- 批量：按模型重跑 / 分析待分析的人 ---------- */
+/* ---------- 批量重新分析 / 分析未分析的人 ---------- */
 async function batchReanalyze(){
-  var ok = await askConfirm({title: '批量按模型重跑',
-    body: '对「抽取方式还是规则通道」的档案逐人完整重跑？\n\n每人约 10 秒，会调用模型。',
-    okText: '开始重跑'});
+  var ids = Object.keys(SEL).filter(function(k){ return SEL[k]; }).map(Number);
+  var scope = ids.length ? ('勾选的 ' + ids.length + ' 人') : '全部候选人';
+  if(!ids.length){
+    /* 未勾选 = 全部。先把 id 取出来分块提交：后端一次只跑 10 人，
+       且“全部重跑”不能用 remaining 循环（同一批人会反复被选中）。 */
+    var all = await api('/api/candidates?page_size=100000');
+    if(all.__err){ toast(all.__err, 'danger'); return; }
+    ids = (all.items || []).map(function(x){ return Number(x.id); }).filter(Boolean);
+  }
+  if(!ids.length){ toast('没有可分析的候选人', 'warn'); return; }
+  var ok = await askConfirm({title: '批量重新分析',
+    body: '对' + scope + '做完整重新分析？\n\n' +
+          '会重新解析原件、用模型重抽字段、重算建议档位与分析结论；\n' +
+          '**不会覆盖** HR 已确认的档位、阶段、岗位，以及人工更正过的字段。\n' +
+          '每人约 6–15 秒，人数多时需要较长时间。',
+    okText: '开始分析'});
   if(!ok) return;
-  toast('开始重跑…');
-  var total = 0;
-  /* 后端返回的是 `analyzed`（`server.py:1717/1731`），原来这里读 `r.reanalyzed`
-     → 恒为 0，进度与结果永远显示 0 人。
-     每批也从 1 人改成 10 人（后端上限 12，`server.py:1719`），并把「循环 20 次」
-     这个**硬编码业务上限**去掉 —— 超过 20 人时原来会中途静默结束、看起来像"跑完了"。
-     留一个 300 的 guard 只防后端 remaining 不收敛的死循环。 */
-  for(var guard = 0; guard < 300; guard++){
+  var total = 0, failed = 0, done = 0;
+  toast('开始重新分析…');
+  for(var i = 0; i < ids.length; i += 10){
+    var chunk = ids.slice(i, i + 10);
     var r = await api('/api/candidates/reanalyze-batch', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({limit: 10, only_heuristic: true})});
-    if(r.__err){ toast(r.__err); return; }
-    total += (r.analyzed || 0);
-    if(!r.remaining) break;
-    /* 本批一个都没成功 = **没有进展**（多半是这批人反复失败，例如模型不可用）。
-       不停下来的话 remaining 永远不为 0，会空转到 guard 上限——几千次请求把界面卡死，
-       而用户看到的只是进度条不动。宁可停下并说清楚原因。 */
-    if(!(r.analyzed || 0)){
-      toast('连续一批没有成功（失败 ' + (r.failed || 0) + ' 人），已停下；'
-            + '请先确认模型可用，再点一次继续', 'warn');
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({limit: 10, only_heuristic: false, ids: chunk})});
+    if(r.__err){ toast('分析中断：' + r.__err, 'danger'); break; }
+    total += Number(r.analyzed) || 0;
+    failed += Number(r.failed) || 0;
+    done += chunk.length;
+    toast('已处理 ' + done + ' / ' + ids.length + ' 人…');
+    /* 整块都没成功 = 模型/解析有问题，继续只会空转 */
+    if(!(Number(r.analyzed) > 0) && Number(r.failed) > 0){
+      toast('这一批没有成功（失败 ' + r.failed + ' 人），已停下；请检查模型后重试', 'warn');
       break;
     }
-    toast('已重跑 ' + total + ' 人，还剩 ' + r.remaining + ' 人…');
   }
-  toast('批量重跑完成，共 ' + total + ' 人');
+  toast('批量重新分析完成：成功 ' + total + ' 人'
+        + (failed ? '，失败 ' + failed + ' 人' : ''), failed ? 'warn' : 'ok');
   load();
 }
 async function analyzePending(){
-  /* 作用：给「入库即分析」开关关着时漏掉的人**补做分析**（AI 抽技能、算档位那一整套）。
-     ⚠️ 原来只调一次、limit 写死 5 —— 有 50 人没分析就得连点 10 次，
-     按钮名是"分析待分析的人"，做一半就停等于名不副实。
-     现在循环到没有剩余为止（每轮 10 人，最多 50 轮封顶防跑飞）。 */
-  var total = 0, rounds = 0;
-  toast('正在分析…');
-  while(rounds < 50){
-    var r = await api('/api/insights/analyze-pending', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({limit: 10})});
+  /* 只处理“从未用大模型分析过”的人：extract_mode != llm+rule。
+     每轮 10 人；重跑成功后 extract_mode 会变成 llm+rule，自动从下一轮排除。 */
+  var total = 0, failed = 0, rounds = 0;
+  toast('正在分析未分析的人…');
+  while(rounds < 300){
+    var r = await api('/api/candidates/reanalyze-batch', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({limit: 10, only_heuristic: true})});
     if(r.__err){ toast(r.__err, 'danger'); break; }
     total += Number(r.analyzed) || 0;
+    failed += Number(r.failed) || 0;
     rounds++;
-    /* 这一轮一个人都没分析出来 → 说明要么没有待分析的，要么已经处理完了 */
     if(!(Number(r.analyzed) > 0)) break;
+    toast('已分析 ' + total + ' 人，还剩 ' + (r.remaining || 0) + ' 人…');
+    if(!r.remaining) break;
   }
-  if(total) toast('已分析 ' + total + ' 人', 'ok');
-  else toast('没有待分析的人', 'warn');
+  if(total) toast('已分析 ' + total + ' 人' + (failed ? '，失败 ' + failed + ' 人' : ''), 'ok');
+  else toast('没有未分析的人', 'warn');
   load();
 }
 
@@ -7827,41 +10972,56 @@ async function analyzePending(){
    之前 v2 固定给「未判/拟录用/不录用」，在「已发放offer」阶段提交必然被服务端 422 ——
    业务方看到的就是"下拉能选、点了没反应"。 */
 function outcomeField(d){
-  var outs = (STAGE_CFG.outcomes || {})[(d.stage || '').trim()] || [];
-  var cur = d.outcome || '';
+  /* v4.0.17：面试结论只保留 未判/拟录用/不录用。
+     已签约/拒签/毁约已经挪到「签约情况」，不再和面试结论抢同一个字段。 */
+  var cur = (d.outcome === '拟录用' || d.outcome === '不录用') ? d.outcome : '';
   var badge = outcomeChip(cur, d.stage);
-  if(!outs.length){
-    /* 空状态要给出**下一步**，而不只是宣布"这里不能用"：
-       阶段没到能下结论的时候，告诉 HR 到哪个阶段可以标。 */
-    var can = [];
-    Object.keys(STAGE_CFG.outcomes || {}).forEach(function(k){
-      if((STAGE_CFG.outcomes[k] || []).length) can.push(k);
-    });
-    var tip = can.length ? ('可在「' + can.join('」「') + '」阶段标结论') : '当前流程没有可标结论的阶段';
-    return '<span class="hint">' + (cur ? esc(cur) + '　' : '') + tip + '</span>';
-  }
-  /* 现值不属于本阶段允许的结论（历史数据）时，**照样列出来** ——
-     否则下拉显示"未判"、列表显示"已签约"，同一件事两处说法。 */
-  var opts = [''].concat(outs);
-  if(cur && opts.indexOf(cur) < 0) opts.push(cur);
+  var opts = ['', '拟录用', '不录用'];
   var order = STAGE_CFG.order || [];
   var stageIdx = order.indexOf((d.stage || '').trim());
   var interviewIdx = order.indexOf('已面试');
+  var waitIdx = order.indexOf('待面试');
+  if(stageIdx < 0 || (waitIdx >= 0 && stageIdx < waitIdx)){
+    return '<span class="hint">进入「待面试」后可填面试结论</span>';
+  }
   var autoAdvance = stageIdx >= 0 && interviewIdx >= 0 && stageIdx < interviewIdx;
   var title = autoAdvance
     ? '面试结论（选择后会从当前阶段自动推进到「已面试」）'
     : '面试结论（只改标签，不改变当前阶段）';
-  /* 徽标 / 下拉 / 「清空结论」三点必须**同一行**：`结论` 这一格在 .ivrow 里是
-     纵向 flex，直接平铺的话按钮会掉到下拉下面单独占一行（2026-10-28 修）。 */
   return '<span class="ivout">' + badge +
     '<select id="ivOutcome" class="vsel" title="' + esc(title) + '">' +
     opts.map(function(v){
       return '<option value="' + esc(v) + '"' + (cur === v ? ' selected' : '') + '>' +
         (v || '未判') + '</option>';
     }).join('') + '</select>' +
-    /* 「清空结论」是**撤销一个已经做过的判断**，用危险动作的红（白底灰边红字，
-       hover 才变红底）—— 与「覆盖一切条件」同族，不该和普通次要按钮长一样。 */
     '<button class="btn sm btn-danger" onclick="clearOutcome()">清空结论</button></span>';
+}
+
+/* 签约情况下拉：未签约 / 已签约 / 拒签 / 毁约。
+   已签约时如果没有签约日期，自动补今天 —— 招聘进度按“已签约 + 签约日期”同步。 */
+function signStatusField(d){
+  var cur = d.sign_status || '';
+  if(!cur){
+    if(d.outcome === '已签约') cur = '已签约';
+    else if(d.outcome === '拒签') cur = '拒签';
+    else if(d.signed_at) cur = '已签约';
+    else cur = '未签约';
+  }
+  var opts = ['未签约', '已签约', '拒签', '毁约'];
+  return '<select id="obSignStatus" title="签约情况" onchange="signStatusChanged(this)">' +
+    opts.map(function(v){
+      return '<option value="' + esc(v) + '"' + (cur === v ? ' selected' : '') + '>' +
+        esc(v) + '</option>';
+    }).join('') + '</select>';
+}
+function signStatusChanged(sel){
+  if(sel.value !== '已签约') return;
+  var dt = document.getElementById('obSigned');
+  if(!dt || dt.value) return;
+  var d = new Date();
+  var s = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+          String(d.getDate()).padStart(2, '0');
+  dt.value = s;
 }
 /* ---------- 改结论标签：前序阶段会补推，后续阶段只改标签 ----------
    业务方 2026-10-20 16:0x：「我阶段没打错，我可能也会点错，标签应该可以修改」。
@@ -7875,12 +11035,14 @@ function outcomeField(d){
 
    ⚠️ 这里不会把「不录用」推进到「已结束」或触发归档；结束流程仍由 HR 显式操作。 */
 async function setOutcome(aid, stage, v){
-  var body = {stage: stage || '', outcome: v || ''};
-  var r = await api('/api/applications/' + aid + '/stage', {method:'POST',
-    headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  /* v4.0.17：面试结论走 interview-info（值域固定为拟录用/不录用），
+     不再走阶段接口 —— 阶段接口的 outcome 还承担“已签约/拒签”的旧动作，
+     两者混用会把面试结论覆盖掉。 */
+  var r = await api('/api/applications/' + aid + '/interview-info', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({outcome: v || ''})});
   if(r.__err){ toast(r.__err); return; }
-  var msg = v ? ('已把结论改为「' + v + '」') : '已清除结论（未判）';
-  if(r.advanced_to) msg += '，并自动推进到「' + r.advanced_to + '」';
+  var msg = v ? ('已把面试结论改为「' + v + '」') : '已清除面试结论（未判）';
+  if(r.advanced) msg += '，并自动推进到「已面试」';
   toast(msg);
   load(); if(CUR) pick(CUR);
 }
@@ -7987,6 +11149,46 @@ async function mailFor(cid){
     }
   }
   MAIL_JUMP_CID = null;
+}
+/* 助手草稿 → 写邮件页：选人、选模板、填主题/正文，避免跳过去是一片空白。 */
+async function openDraftInMailer(d){
+  if(!d) return;
+  var cid = d.candidate_id;
+  setView('mail');
+  var ready = await waitFor(function(){ return !!document.getElementById('mCandInput'); }, 6000);
+  if(!ready){ toast('写邮件页没打开，请从左侧「写邮件」重试', 'warn'); return; }
+  if(cid) await pickCand(cid);
+  await waitFor(function(){
+    return !!document.getElementById('mSubject') && !!document.getElementById('mBody');
+  }, 3000);
+
+  var sel = document.getElementById('mTpl');
+  if(sel && d.template){
+    var opt = Array.prototype.filter.call(sel.options, function(o){
+      return String(o.text || '').indexOf(d.template) >= 0;
+    })[0];
+    /* 只把模板选中，不 dispatch change：
+       change 会异步向服务端再生成一版草稿，可能把下面填好的助手草稿覆盖掉。
+       HR 之后自己点「生成草稿」时仍会按这个模板渲染。 */
+    if(opt) sel.value = opt.value;
+  }
+
+  var name = d.name || '';
+  var subj = String(d.subject || '');
+  var html = d.body_html || d.body || d.html || '';
+  if(name){
+    subj = subj.replace(/\{name\}|\{姓名\}/gi, name);
+    html = String(html).replace(/\{name\}|\{姓名\}/gi, name);
+  }
+  var s = document.getElementById('mSubject');
+  var b = document.getElementById('mBody');
+  if(s) s.value = subj;
+  if(b) b.innerHTML = html;
+  if(d.to) M_TO = d.to;
+  var sent = document.getElementById('mailSentBox');
+  if(sent) sent.innerHTML = '';
+  M_RESULT = null;
+  toast('已填入草稿');
 }
 /* 复制到剪贴板 */
 function copyText(t){
@@ -9118,13 +12320,16 @@ document.getElementById('loginForm').addEventListener('submit', function(ev){
   if(u && p) doLogin(u, p);
 });
 (function boot(){
+  syncThemeBtn();
   /* 先按"当前还不知道是谁"收紧界面：账号管理入口藏起来、应用区压暗。
      登录成功后再由 renderWhoami() 放开。**不能等 loadMe() 回来才做** ——
      那一瞬间里侧栏是全亮的，看起来像没生效。 */
   applyPermissions();
-  if(!AUTH_ENABLED){            /* 本机模式：原来的启动路径，一字不改 */
+  if(!AUTH_ENABLED){            /* 本机模式：默认进入智能助手 */
     applyUrlState();
     URL_READY = true;
+    enterDefaultView();
+    applyPermissions();
     load({push:false});
     /* 右侧默认展示「概览 · 待办」（业务方 2026-10-21）：没人选中时不该只留一句
        "左侧选一个人" —— 那块地方占着半屏，正好放今天该干什么。 */
@@ -9139,6 +12344,8 @@ document.getElementById('loginForm').addEventListener('submit', function(ev){
     renderWhoami();
     applyUrlState();
     URL_READY = true;
+    enterDefaultView();
+    applyPermissions();
     load({push:false});
     showOverview();
   });

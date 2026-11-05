@@ -248,7 +248,7 @@ def _message(text: str, *, error: bool = False) -> None:
     try:
         import ctypes
         ctypes.windll.user32.MessageBoxW(
-            None, text, "HRAgent 工作台", 0x10 if error else 0x40
+            None, text, "人才库智能体", 0x10 if error else 0x40
         )
     except Exception:
         print(text)
@@ -511,7 +511,7 @@ class TrayApp:
             return
         _save_bootstrap({"user_home": chosen})
         _message("数据目录已记录：\n" + chosen +
-                 "\n\n退出并重新打开工作台后生效。原有数据不会被删除或覆盖。")
+                 "\n\n退出并重新打开应用后生效。原有数据不会被删除或覆盖。")
 
     def _install_update(self, icon=None, item=None):
         package = _choose_update_file()
@@ -533,7 +533,7 @@ class TrayApp:
                  "--install-dir", install_dir, "--pid", str(os.getpid())],
                 cwd=install_dir,
             )
-            print("[update] 已启动更新器，工作台将退出并等待替换程序文件")
+            print("[update] 已启动更新器，应用将退出并等待替换程序文件")
             self._quit()
         except Exception as exc:
             _message(f"启动更新器失败：{type(exc).__name__}: {exc}", error=True)
@@ -557,7 +557,7 @@ class TrayApp:
         import pystray
 
         menu = pystray.Menu(
-            pystray.MenuItem("打开工作台", self._open_ui, default=True),
+            pystray.MenuItem("打开主界面", self._open_ui, default=True),
             pystray.MenuItem("打开数据目录", self._open_data),
             pystray.MenuItem("打开配置目录", self._open_config),
             pystray.MenuItem("设置数据目录…", self._change_data_dir),
@@ -568,18 +568,18 @@ class TrayApp:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出（停止服务）", self._quit),
         )
-        self.icon = pystray.Icon("HRAgent工作台", _load_tray_image(self.base),
-                                 "HRAgent 工作台", menu)
+        self.icon = pystray.Icon("人才库智能体", _load_tray_image(self.base),
+                                 "人才库智能体", menu)
         # ⚠️ **这里绝对不要再打开浏览器**（v3.1.14 修）。
         # main() 里已经在起托盘之前打开过一次了；这里再调一次、
         # 或者再挂个 Timer 调一次，用户就会看到**两三个浏览器窗口**——
         # 现场实测：一次启动弹了三个。打开浏览器只允许有**一个**入口，
         # 就是 main() 里那一处。
         threading.Timer(1.5, lambda: self.icon.notify(
-            f"HRAgent 工作台已启动\n{self.url}", "HRAgent")).start()
-        print(f"[√] HRAgent 工作台已启动：{self.url}")
+            f"人才库智能体已启动\n{self.url}", "人才库智能体")).start()
+        print(f"[√] 人才库智能体已启动：{self.url}")
         print(f"    数据目录：{self.data_dir}")
-        print("    托盘图标已就绪：右键可打开工作台 / 数据目录 / 退出。")
+        print("    托盘图标已就绪：右键可打开主界面 / 数据目录 / 退出。")
         self.icon.run()
         print("[√] 服务已停止，进程退出。")
 
@@ -1104,7 +1104,7 @@ def _open_existing_instance() -> bool:
           "直接打开浏览器，不再启动第二份")
     if not os.environ.get("TP_NO_BROWSER"):
         if not _open_url(_url):
-            _message("工作台已经在运行，但没能自动打开浏览器。\n\n"
+            _message("人才库智能体已经在运行，但没能自动打开浏览器。\n\n"
                      f"请手动访问：\n{_url}")
     return True
 
@@ -1253,7 +1253,7 @@ def _is_our_instance(port: int) -> str | None:
         data = _read("/api/ping", 1.2)
     except Exception:                                    # noqa: BLE001
         return None          # 连不上/超时 → 这里不是我们的服务，别再等 /api/meta
-    if isinstance(data, dict) and data.get("product") == "HRAgent":
+    if isinstance(data, dict) and data.get("product") in ("HRAgent", "人才库智能体"):
         return str(data.get("ui_build") or "")
 
     # ② 有响应但格式不对 → 可能是**旧版本**实例（还没有 /api/ping），确认一次
@@ -1286,7 +1286,7 @@ def _fail_port(port: int, pid: int | None, detail: str = "") -> int:
         return 1
     try:                # 有界面才弹窗，失败也不该挡住退出
         import ctypes
-        ctypes.windll.user32.MessageBoxW(None, msg, "HRAgent 工作台", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, msg, "人才库智能体", 0x10)
     except Exception as exc:
         print(f"    （弹窗失败：{exc}，详见本日志）")
     return 1
@@ -1561,7 +1561,7 @@ def main(argv: list[str] | None = None) -> int:
             # v3.1.8：**自动打开失败时必须让人看得见地址**。
             # 只写日志等于没说 —— 用户看不到日志，只会认为"双击没反应"。
             _message(
-                "HRAgent 工作台已启动。\n\n"
+                "人才库智能体已启动。\n\n"
                 "系统没能自动打开浏览器（可能被安全软件拦截）。\n"
                 f"请手动打开浏览器，访问：\n\n{url}\n\n"
                 "（复制上面的地址粘贴到浏览器地址栏即可。）"
@@ -1588,7 +1588,7 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc()
         print(f"    服务仍在运行，请直接访问 {url}；关闭本窗口即退出。")
         _message(
-            "HRAgent 工作台已启动，但**系统托盘图标没能创建**。\n\n"
+            "人才库智能体已启动，但**系统托盘图标没能创建**。\n\n"
             f"请用浏览器打开这个地址使用：\n{url}\n\n"
             "（这台机器的安全策略不允许创建托盘窗口。\n"
             "  功能不受影响，只是没有右下角那个图标。\n"

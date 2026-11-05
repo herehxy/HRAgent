@@ -10,10 +10,15 @@
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
+import re
 import sys
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from .. import net
@@ -38,10 +43,10 @@ def mask_key(key) -> str:
 
 
 def save_cfg(base_url: str | None = None, model: str | None = None,
-             api_key: str | None = None) -> dict:
+             api_key: str | None = None, enabled: bool | None = None) -> dict:
     """界面保存模型配置（v1.7.6）。
 
-    base_url / model 写 `config/model.json`（保留 preset / _presets / 超时等其他字段）；
+    base_url / model / enabled 写 `config/model.json`（保留 preset / _presets / 超时等其他字段）；
     api_key 写 `config/secrets.json`（0600，已 gitignore）——**不进 SQLite**：
     settings 表随库备份流动，密钥混进去等于把秘密带进每次备份。
     api_key 传 None 或空串 = 不修改（界面"留空不改"语义）。
@@ -49,7 +54,7 @@ def save_cfg(base_url: str | None = None, model: str | None = None,
     返回 {"changed": [字段名], "env_override": [会盖过文件值的环境变量名]}。
     """
     changed: list[str] = []
-    if base_url is not None or model is not None:
+    if base_url is not None or model is not None or enabled is not None:
         cfg: dict = {}
         if os.path.exists(CONFIG_PATH):
             try:
@@ -64,6 +69,10 @@ def save_cfg(base_url: str | None = None, model: str | None = None,
         if model and model.strip() and model.strip() != cfg.get("model"):
             cfg["model"] = model.strip()
             changed.append("model")
+        # `enabled` 是唯一开关：缺省按开（与 load_cfg 的语义一致）
+        if enabled is not None and bool(cfg.get("enabled", True)) != bool(enabled):
+            cfg["enabled"] = bool(enabled)
+            changed.append("enabled")
         if changed:
             tmp = CONFIG_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
@@ -139,18 +148,17 @@ def _post(path: str, payload: dict, cfg: dict) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _apply_provider_quirks(payload: dict, cfg: dict) -> dict:
+def _apply_provider_quirks(payload: dict, cfg: dict, stream: bool = False) -> dict:
     """按服务商/模型补上必要的请求参数（不影响其他模型）。
 
-    目前只有一条：**Qwen3 系列（百炼兼容端点）默认开启思考模式**，
-    非流式调用会直接 400：
+    Qwen3 系列（百炼兼容端点）默认开启思考模式，**非流式**调用会直接 400：
     `parameter.enable_thinking must be set to false for non-streaming calls`。
-    本项目全部走非流式 + JSON 输出，思考模式只会拖慢并污染 JSON，
-    所以对 `qwen3*` 模型自动补 `enable_thinking=false`；
+    所以只在非流式时对 `qwen3*` 自动补 `enable_thinking=false`；
+    流式调用保留思考模式，才能把思维链推给前端。
     `cfg["extra_body"]` 里的键**优先级最高**（换模型或想显式开启时可覆盖）。
     """
     model = str(cfg.get("model") or "")
-    if model.startswith("qwen3") and "enable_thinking" not in payload:
+    if not stream and model.startswith("qwen3") and "enable_thinking" not in payload:
         payload["enable_thinking"] = False
     for k, v in (cfg.get("extra_body") or {}).items():
         payload[k] = v
@@ -187,7 +195,92 @@ def chat(messages: list[dict], tools: list[dict] | None = None, cfg: dict | None
     msg = body["choices"][0]["message"]
     msg["_usage"] = body.get("usage") or {}
     msg["_model"] = body.get("model") or cfg.get("model")
+    # 思维链：MiMo / DeepSeek / vLLM 放在 `reasoning_content`，
+    # OpenRouter 一类放 `reasoning`。统一挂到 `_reasoning`，
+    # 上层（助手循环 / 界面）不用为每个服务商各写一份兼容。
+    _think = msg.get("reasoning_content")
+    if _think is None:
+        _think = msg.get("reasoning")
+    msg["_reasoning"] = (_think if isinstance(_think, str) else "") or ""
     return msg
+
+
+def chat_stream(messages: list[dict], tools: list[dict] | None = None,
+                cfg: dict | None = None, tool_choice: str | None = None):
+    """流式调用 `/chat/completions`，逐块 yield：`{delta, finish_reason, usage, model}`。
+
+    只依赖 OpenAI 兼容的 SSE 协议，不绑定具体厂商：
+      · `delta.content`        —— 答复增量
+      · `delta.reasoning_content` / `delta.reasoning` —— 思维链增量（有就推，没有就跳过）
+      · `delta.tool_calls`     —— 工具调用增量（由上层按 index/id 拼装）
+
+    兼容两种"假流式"：
+      1) 端点忽略 `stream:true`，直接回一个普通 JSON —— 读出来当单块处理；
+      2) 端点用 `message` 而不是 `delta` —— 同样当单块处理。
+    这样换任何通用 LLM 都不会因为流式支持差异把对话打断。
+    """
+    cfg = cfg or load_cfg()
+    payload: dict = {
+        "model": cfg.get("model", "qwen2.5:14b"),
+        "messages": messages,
+        "temperature": cfg.get("temperature", 0),
+        "stream": True,
+    }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = tool_choice or "auto"
+    req = urllib.request.Request(
+        f"{cfg['base_url'].rstrip('/')}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Authorization": f"Bearer {cfg.get('api_key', '')}",
+        },
+        method="POST",
+    )
+    with net.urlopen(req, timeout=cfg.get("timeout", 180)) as resp:
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if "application/json" in ctype:
+            body = json.loads(resp.read().decode("utf-8"))
+            msg = (body.get("choices") or [{}])[0].get("message") or {}
+            yield {"delta": {
+                "content": msg.get("content") or "",
+                "reasoning_content": msg.get("reasoning_content") or msg.get("reasoning") or "",
+                "tool_calls": msg.get("tool_calls") or [],
+            }, "finish_reason": "stop", "usage": body.get("usage") or {},
+                "model": body.get("model") or cfg.get("model")}
+            return
+        for raw in resp:
+            line = raw.decode("utf-8", "ignore").strip()
+            if not line or line.startswith(":"):
+                continue
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except ValueError:
+                continue
+            choices = chunk.get("choices") or []
+            if not choices:
+                # 有些服务商单独发一个 usage 块
+                yield {"delta": {}, "finish_reason": None,
+                       "usage": chunk.get("usage") or {},
+                       "model": chunk.get("model") or cfg.get("model")}
+                continue
+            ch = choices[0]
+            delta = ch.get("delta") or ch.get("message") or {}
+            yield {"delta": delta, "finish_reason": ch.get("finish_reason"),
+                   "usage": chunk.get("usage") or {},
+                   "model": chunk.get("model") or cfg.get("model")}
+            # 有的兼容端点发完 finish_reason 后不立刻发 [DONE]、也不关连接，
+            # 继续等会让界面"答案已出完但一直发送中"。标准 SSE 的最后一个
+            # 内容块就带 finish_reason，收到即收尾；usage 以已收到的为准。
+            if ch.get("finish_reason") in ("stop", "length", "tool_calls"):
+                break
 
 
 def chat_json(system: str, user: str, cfg: dict | None = None) -> dict | None:
@@ -216,6 +309,186 @@ def list_models(cfg: dict | None = None) -> list[str]:
     with net.urlopen(req, timeout=8) as resp:
         body = json.loads(resp.read().decode("utf-8"))
     return [m.get("id", "") for m in body.get("data", [])]
+
+
+#: 上下文窗口字段。不同兼容端点叫法不一样，按优先级找第一个能解析的。
+_CTX_KEYS = (
+    "context_length", "context_window", "max_context_length", "max_model_len",
+    "max_input_tokens", "input_token_limit", "max_sequence_length",
+    "context_size", "n_ctx",
+)
+_MODEL_META_CACHE: dict[tuple[str, str], tuple[dict | None, float]] = {}
+_PARAM_KEYS = (
+    "parameter_count", "parameters", "num_parameters", "param_count",
+    "total_params", "model_size", "parameter_size", "params", "size",
+)
+
+
+def _parse_ctx(value) -> int | None:
+    """把 128000 / "128k" / "1M" / "1,000,000" 统一成整数。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and value > 0:
+        return int(value)
+    s = str(value or "").strip().lower().replace(",", "").replace("_", "")
+    m = re.match(r"^([0-9]+(?:\.[0-9]+)?)\s*([km])?$", s)
+    if not m:
+        return None
+    n = float(m.group(1))
+    mult = {"k": 1000, "m": 1000000}.get(m.group(2) or "", 1)
+    out = int(n * mult)
+    return out if out > 0 else None
+
+
+def _extract_ctx(obj) -> int | None:
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if str(k).lower() in _CTX_KEYS:
+                n = _parse_ctx(v)
+                if n:
+                    return n
+        for v in obj.values():
+            if isinstance(v, (dict, list)):
+                n = _extract_ctx(v)
+                if n:
+                    return n
+    elif isinstance(obj, list):
+        for v in obj:
+            n = _extract_ctx(v)
+            if n:
+                return n
+    return None
+
+
+def _parse_params(value) -> str | None:
+    """把 7B / "7b" / 7000000000 / "70亿" 统一成 "7B" 这类展示值。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and value > 0:
+        n = float(value)
+        if n >= 1e9:
+            s = f"{n / 1e9:.1f}B"
+            return s.replace(".0B", "B")
+        if n >= 1e6:
+            return f"{n / 1e6:.0f}M"
+        return None
+    s = str(value or "").strip().lower().replace(",", "")
+    m = re.match(r"^([0-9]+(?:\.[0-9]+)?)\s*([bm])$", s)
+    if m:
+        return f"{m.group(1)}{m.group(2).upper()}"
+    m = re.match(r"^([0-9]+(?:\.[0-9]+)?)\s*(?:billion|亿)$", s)
+    if m:
+        n = float(m.group(1))
+        if "亿" in s:
+            n /= 10.0
+        out = f"{n:.1f}B"
+        return out.replace(".0B", "B")
+    return None
+
+
+def _extract_params(obj) -> str | None:
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if str(k).lower() in _PARAM_KEYS:
+                p = _parse_params(v)
+                if p:
+                    return p
+        for v in obj.values():
+            if isinstance(v, (dict, list)):
+                p = _extract_params(v)
+                if p:
+                    return p
+    elif isinstance(obj, list):
+        for v in obj:
+            p = _extract_params(v)
+            if p:
+                return p
+    return None
+
+
+def _probe_model_meta(cfg: dict) -> dict | None:
+    """探测 `/models` / `/models/{model}` 的模型元数据（缓存 1 小时）。
+
+    失败/不支持不报错，也不把 traceback 打到服务日志——这是可选信息，
+    不该污染正常对话日志。
+    """
+    base = str(cfg.get("base_url") or "").rstrip("/")
+    model = str(cfg.get("model") or "")
+    if not base or not model:
+        return None
+    key = (base, model)
+    now = time.time()
+    cached = _MODEL_META_CACHE.get(key)
+    if cached and now - cached[1] < 3600:
+        return cached[0]
+
+    headers = {"Authorization": f"Bearer {cfg.get('api_key', '')}"}
+    hit: dict | None = None
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            req = urllib.request.Request(f"{base}/models", headers=headers)
+            with net.urlopen(req, timeout=4) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            items = body.get("data") if isinstance(body, dict) else body
+            if isinstance(items, list):
+                for it in items:
+                    if isinstance(it, dict) and str(it.get("id") or "") == model:
+                        hit = it
+                        break
+                if hit is None:
+                    for it in items:
+                        if isinstance(it, dict) and model in str(it.get("id") or ""):
+                            hit = it
+                            break
+        except Exception:                                    # noqa: BLE001
+            hit = None
+        if hit is None:
+            try:
+                path = "/models/" + urllib.parse.quote(model, safe="")
+                req = urllib.request.Request(f"{base}{path}", headers=headers)
+                with net.urlopen(req, timeout=4) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                if isinstance(body, dict):
+                    hit = body
+            except Exception:                                # noqa: BLE001
+                hit = None
+    _MODEL_META_CACHE[key] = (hit, now)
+    return hit
+
+
+def model_parameter_count(cfg: dict | None = None) -> str:
+    """模型参数量展示值（如 "7B"）；拿不到返回空串，绝不猜。"""
+    cfg = cfg or load_cfg()
+    explicit = _parse_params(cfg.get("parameter_count"))
+    if explicit:
+        return explicit
+    hit = _probe_model_meta(cfg)
+    if hit:
+        p = _extract_params(hit)
+        if p:
+            return p
+    # 最后从模型名里认 7b / 14B / 72b 这类明确写出的规格
+    m = re.search(r"(?:^|[-_:])(\d+(?:\.\d+)?)\s*[bB](?:\b|$)",
+                  str(cfg.get("model") or ""))
+    if m:
+        return f"{m.group(1)}B"
+    return ""
+
+
+def model_context_window(cfg: dict | None = None) -> tuple[int | None, str]:
+    """获取模型实际上下文窗口。
+
+    顺序：`config/model.json` 的 `context_window`（人工确认值）→ 端点
+    `/models` 元数据里的 context_length 等字段 → `/models/{model}` → 未知。
+    返回 `(tokens, source)`，source 为 config/provider/unknown。
+    """
+    cfg = cfg or load_cfg()
+    explicit = _parse_ctx(cfg.get("context_window"))
+    if explicit:
+        return explicit, "config"
+    hit = _probe_model_meta(cfg)
+    ctx = _extract_ctx(hit) if hit else None
+    return ctx, ("provider" if ctx else "unknown")
 
 
 def status() -> dict:

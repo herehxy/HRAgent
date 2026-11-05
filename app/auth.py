@@ -34,6 +34,7 @@ PERM_LABELS = {
     "propose": "让助手生成待确认提案",
     "confirm": "确认提案、发送邮件",
     "set_stage": "改档位 / 推进阶段 / 归档",
+    "edit_plan": "维护招聘计划（届别 / 单位名额 / 录用单位）",
     "add_note": "写备注",
     "merge": "合并 / 拆分档案",
     "ingest": "导入简历、跑分析任务",
@@ -50,7 +51,7 @@ _PERMS = {
     # 管理员 = HR 的全部权限 + 账号管理
     "admin": set(PERM_LABELS),
     "hr": {"read", "view_full_contact", "chat", "propose", "confirm",
-           "set_stage", "add_note", "merge", "ingest", "export", "archive",
+           "set_stage", "edit_plan", "add_note", "merge", "ingest", "export", "archive",
            "settings"},
     # 只读：不含 propose/confirm/set_stage/... —— 连"生成提案"都不给，
     # 因为提案被确认后就是真实改动，只读用户不该在系统里留下待办。

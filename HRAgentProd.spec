@@ -37,6 +37,9 @@ hiddenimports = [
     "app", "app.server", "app.profile_migrate", "app.version",
     "app.agent", "app.agent.loop", "app.agent.tools", "app.agent.llm",
     "app.pipeline",
+    # v4.0.16：招聘进度（导入/导出走 openpyxl 的多表/合并能力）
+    "app.recruit", "app.recruit_export",
+    "openpyxl", "openpyxl.styles", "openpyxl.worksheet.properties",
     "pystray", "pystray._win32", "pystray._util",
     "PIL", "PIL.Image", "PIL.ImageDraw", "PIL.ImageTk",
     "rapidocr_onnxruntime", "onnxruntime", "cv2",

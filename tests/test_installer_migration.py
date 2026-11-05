@@ -30,7 +30,15 @@ class InstallerMigrationTest(ProfileMigrationTest):
         with self.assertRaises(ValueError):
             setup_wizard.validate_legacy_removal(self.legacy, Path(self.target), self.old_root)
 
-    def test_rejects_directory_without_old_executable(self):
+    def test_data_only_legacy_directory_is_allowed(self):
+        """没有 exe、但确实是 data/config 目录时允许整体删除（新版行为）。"""
         (self.old_root / setup_wizard.EXE_NAME).unlink()
+        self.assertEqual(self.old_root,
+                         setup_wizard.legacy_program_root(self.legacy))
+
+    def test_rejects_unrelated_directory(self):
+        """既没有主程序、也不像数据目录时仍然拒绝。"""
+        empty = Path(self.root) / "not-hragent"
+        empty.mkdir()
         with self.assertRaises(ValueError):
-            setup_wizard.legacy_program_root(self.legacy)
+            setup_wizard.legacy_program_root(str(empty))

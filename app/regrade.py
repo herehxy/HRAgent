@@ -29,7 +29,7 @@ import json
 import sqlite3
 import sys
 
-from . import db
+from . import db, stages as stages_mod
 from .pipeline.extract import extract
 from .pipeline import tier as tier_mod
 from .pipeline.tier import grade
@@ -382,6 +382,130 @@ def suggest_job_for_application(conn: sqlite3.Connection, candidate_id: int,
                      else "模型未能判断出对应岗位；可在卡片上手动「指定岗位」")}
 
 
+def bulk_initial_pass(conn: sqlite3.Connection, candidate_ids: list[int],
+                      tiers: dict, operator: str = "hr", role: str = "hr") -> dict:
+    """批量：采纳建议岗位（如果有）+ 推进到「初筛通过」。
+
+    规则（业务方 2026-11-04）：
+      · 先看候选人**最新一条投递**；
+      · 未归岗且有建议岗位 → 采纳建议并重算（assign_job，写审计）；
+      · 未归岗且无建议岗位 → **仍然推进**到初筛通过，但在结果里单列
+        `no_suggestion`，提醒 HR 后续指定岗位（不替 HR 猜岗位）；
+      · 已在「初筛通过」或更后 → 不动阶段；如果未归岗且有建议，仍会补归岗；
+      · 已是该建议岗位/已归岗 → 不重复写。
+    逐条用现有 `assign_job` / `set_application_stage`，所以权限、审计、必填校验
+    与单条操作完全同一条路径，不另写一套写库逻辑。
+    """
+    order = stages_mod.all_stages()
+    try:
+        first_idx = order.index("初筛通过")
+    except ValueError:
+        first_idx = 1
+    out = {"advanced": 0, "assigned": 0, "no_suggestion": 0,
+           "already_passed": 0, "failed": 0, "items": []}
+    terminal = set(stages_mod.terminal_stages())
+    seen: set[int] = set()
+    for _cid in candidate_ids or []:
+        try:
+            cid = int(_cid)
+        except (TypeError, ValueError):
+            out["failed"] += 1
+            continue
+        if cid in seen:
+            continue
+        seen.add(cid)
+        try:
+            rows = conn.execute(
+                """SELECT a.*, c.name AS candidate_name, c.archived_at AS archived_at
+                   FROM applications a
+                   JOIN candidates c ON c.id = a.candidate_id
+                   WHERE a.candidate_id = ?
+                   ORDER BY COALESCE(a.applied_at,'') DESC, a.id DESC""",
+                (cid,)).fetchall()
+            if not rows:
+                out["failed"] += 1
+                out["items"].append({"candidate_id": cid, "status": "failed",
+                                     "reason": "没有投递记录"})
+                continue
+            # 优先取**最新一条未结束**的投递：最新投递已结束时，不要漏掉仍在流程中的
+            # 上一条（多投递候选人是本项目的常态）。
+            _rows = [dict(r) for r in rows]
+            _inflight = [r for r in _rows
+                         if stages_mod.normalize_stage(r.get("stage")) not in terminal]
+            a = _inflight[0] if _inflight else _rows[0]
+            cur_stage = stages_mod.normalize_stage(a.get("stage"))
+            item = {"candidate_id": cid, "application_id": a["id"],
+                    "name": a.get("candidate_name") or "",
+                    "before_stage": a.get("stage") or "", "assigned_job": None,
+                    "advanced": False, "status": ""}
+            if a.get("archived_at"):
+                out["already_passed"] += 1
+                item["status"] = "already_passed"
+                item["reason"] = "已归档，未改动"
+                out["items"].append(item)
+                continue
+            # 已结束的投递不再回退/归岗：批量按钮只服务“还没走完初筛”的人
+            if cur_stage in terminal:
+                out["already_passed"] += 1
+                item["status"] = "already_passed"
+                item["reason"] = "已结束，未改动"
+                out["items"].append(item)
+                continue
+            # 1) 未归岗：优先采纳建议岗位（不猜、不硬塞）
+            if not a.get("job_id"):
+                sjid = a.get("suggested_job_id")
+                if sjid:
+                    job = db.get_job(conn, int(sjid))
+                    if job:
+                        r = assign_job(conn, int(a["id"]), int(sjid),
+                                       job.get("jd_json") or {}, tiers, operator, role)
+                        if r.get("error"):
+                            # 建议岗位已停用/已删除等：**不阻断推进**，
+                            # 当作“没有可用建议”处理，让 HR 之后手工指定。
+                            out["no_suggestion"] += 1
+                            item["reason"] = f"建议岗位不可用（{r['error']}），已推进未归岗"
+                        else:
+                            out["assigned"] += 1
+                            item["assigned_job"] = job.get("title") or f"#{sjid}"
+                    else:
+                        out["no_suggestion"] += 1
+                        item["reason"] = "建议岗位已不存在，已推进未归岗"
+                else:
+                    out["no_suggestion"] += 1
+                    item["reason"] = "没有建议岗位，已推进但未归岗"
+            # 2) 推进阶段：只在「初筛通过」之前推进；已通过/更后不动
+            if cur_stage in order and order.index(cur_stage) < first_idx:
+                try:
+                    db.set_application_stage(
+                        conn, int(a["id"]), "初筛通过", None,
+                        operator=operator, role=role)
+                    out["advanced"] += 1
+                    item["advanced"] = True
+                    if not item["status"]:
+                        item["status"] = "advanced"
+                except ValueError as exc:
+                    out["failed"] += 1
+                    item["status"] = "failed"
+                    item["reason"] = str(exc)
+            else:
+                out["already_passed"] += 1
+                if not item["status"]:
+                    item["status"] = "already_passed"
+            out["items"].append(item)
+        except Exception as exc:                                 # noqa: BLE001
+            # 单个人失败不拖垮整批；前面已提交的保持提交（逐条审计）。
+            out["failed"] += 1
+            out["items"].append({"candidate_id": cid, "status": "failed",
+                                 "reason": f"{type(exc).__name__}: {exc}"})
+    if seen:
+        db.add_audit(conn, "application", "bulk", "bulk_initial_pass", "",
+                     (f"{len(seen)} 人：推进 {out['advanced']}，采纳建议岗位 "
+                      f"{out['assigned']}，无可用建议 {out['no_suggestion']}，"
+                      f"跳过/已过 {out['already_passed']}，失败 {out['failed']}"),
+                     operator, role)
+    return out
+
+
 def assign_job(conn: sqlite3.Connection, application_id: int, job_id: int,
                jd: dict, tiers: dict, operator: str = "hr", role: str = "hr") -> dict:
     """把投递归到 HR 指定的岗位（**归岗 / 改岗位通用**），并按该岗位 JD 重算系统建议。
@@ -511,3 +635,88 @@ def refresh_skills(conn: sqlite3.Connection, operator: str = "hr", role: str = "
                      f"（技能 {skills_written} 项；档位与分数未改动）", operator, role)
     return {"ok": True, "applied": bool(apply), "refreshed": refreshed,
             "skills_written": skills_written, "skipped": skipped}
+
+
+def bulk_assign_job(conn, candidate_ids: list[int], job_id: int, tiers: dict,
+                    operator: str = "hr", role: str = "hr") -> dict:
+    """批量归岗：把勾选的候选人统一归到指定岗位。
+
+    口径与单条「指定岗位」完全一致（都走 `assign_job`），只是逐人调用：
+      · 取每人**最新一条未结束**的投递（多投递候选人是常态）；
+      · 已归档 / 已结束的跳过，不硬改；
+      · 已在该岗位的计为 `unchanged`，不重复写审计；
+      · 单人失败不拖垮整批，最后写一条批次审计。
+    """
+    job = db.get_job(conn, int(job_id))
+    if not job:
+        return {"ok": False, "error": f"未找到岗位 #{job_id}"}
+    if not job.get("active"):
+        return {"ok": False, "error": "该岗位已停用，不能归岗"}
+    jd = job.get("jd_json") or {}
+    out = {"assigned": 0, "unchanged": 0, "skipped": 0, "failed": 0, "items": []}
+    terminal = set(stages_mod.terminal_stages())
+    seen: set[int] = set()
+    for _cid in candidate_ids or []:
+        try:
+            cid = int(_cid)
+        except (TypeError, ValueError):
+            out["failed"] += 1
+            continue
+        if cid in seen:
+            continue
+        seen.add(cid)
+        try:
+            rows = conn.execute(
+                """SELECT a.*, c.name AS candidate_name, c.archived_at AS archived_at
+                   FROM applications a JOIN candidates c ON c.id = a.candidate_id
+                   WHERE a.candidate_id = ?
+                   ORDER BY COALESCE(a.applied_at,'') DESC, a.id DESC""",
+                (cid,)).fetchall()
+            if not rows:
+                out["failed"] += 1
+                out["items"].append({"candidate_id": cid, "status": "failed",
+                                     "reason": "没有投递记录"})
+                continue
+            _rows = [dict(r) for r in rows]
+            _inflight = [r for r in _rows
+                         if stages_mod.normalize_stage(r.get("stage")) not in terminal]
+            a = _inflight[0] if _inflight else _rows[0]
+            item = {"candidate_id": cid, "application_id": a["id"],
+                    "name": a.get("candidate_name") or "", "status": ""}
+            if a.get("archived_at"):
+                out["skipped"] += 1
+                item["status"] = "skipped"
+                item["reason"] = "已归档，未改动"
+                out["items"].append(item)
+                continue
+            if stages_mod.normalize_stage(a.get("stage")) in terminal:
+                out["skipped"] += 1
+                item["status"] = "skipped"
+                item["reason"] = "投递已结束，未改动"
+                out["items"].append(item)
+                continue
+            r = assign_job(conn, int(a["id"]), int(job_id), jd, tiers,
+                           operator, role)
+            if r.get("error"):
+                out["failed"] += 1
+                item["status"] = "failed"
+                item["reason"] = r["error"]
+            elif r.get("unchanged"):
+                out["unchanged"] += 1
+                item["status"] = "unchanged"
+            else:
+                out["assigned"] += 1
+                item["status"] = "assigned"
+                item["job_title"] = r.get("job_title") or job.get("title")
+            out["items"].append(item)
+        except Exception as exc:                                 # noqa: BLE001
+            out["failed"] += 1
+            out["items"].append({"candidate_id": cid, "status": "failed",
+                                 "reason": f"{type(exc).__name__}: {exc}"})
+    if seen:
+        db.add_audit(conn, "application", "bulk_assign_job", "bulk_assign_job", "",
+                     f"{len(seen)} 人 → 「{job.get('title') or job_id}」："
+                     f"归岗 {out['assigned']}，已在该岗位 {out['unchanged']}，"
+                     f"跳过 {out['skipped']}，失败 {out['failed']}",
+                     operator, role)
+    return out

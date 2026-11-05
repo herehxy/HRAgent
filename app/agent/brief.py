@@ -17,10 +17,10 @@ from .. import db
 
 #: 摘要结构版本。凡是"字段含义/措辞"变动（例如标题里要带姓名）都要 +1，
 #: 服务端据此判断"库里那份是不是旧结构"，旧的就重算，避免页面一直显示旧措辞。
-BRIEF_VERSION = 3
+BRIEF_VERSION = 4
 
 _BRIEF_SYSTEM = (
-    "你是企业人才库工作台的 HR 助手。下面是今天的待办统计与明细，"
+    "你是企业人才库智能体的 HR 助手。下面是今天的待办统计与明细，"
     "请判断**今天最该先关注什么**，帮 HR 排优先级。"
     "要求：\n"
     "1) 只依据给出的数据，不要编造候选人或数字；\n"
@@ -28,7 +28,8 @@ _BRIEF_SYSTEM = (
     "不要写『1 位候选人』『某候选人』这类没有信息量的说法；\n"
     "3) 优先考虑：影响面大（涉及多人/整批）、有明确截止压力、"
     "拖久了会造成损失（如高分候选人流失、投递久了失联）的事项；\n"
-    "4) priorities 最多 3 条，按该做的先后排序；\n"
+    "4) priorities 最多 5 条，按该做的先后排序；"
+    "能覆盖几类待办就列几条，不硬凑；\n"
     "5) 每条说清『做什么』和『为什么现在做』，不要复述统计数字；\n"
     "6) 你只给建议，不代替 HR 做任何决定。\n"
     "严格输出 JSON："
@@ -114,7 +115,7 @@ def _rule_priorities(workload: dict) -> list[dict]:
                     "action": "打开人才库逐条确认档位",
                     "names": [i.get("name") for i in _pc if i.get("name")],
                     "count": c["pending_confirm"]})
-    return out[:3]
+    return out[:6]
 
 
 def _llm_priorities(workload: dict) -> dict | None:
@@ -154,7 +155,7 @@ def build(conn, stuck_days: int = 7, use_llm: bool = True) -> dict:
 
     llm_out = _llm_priorities(workload) if use_llm else None
     if llm_out:
-        priorities = [p for p in (llm_out.get("priorities") or []) if p.get("title")][:3]
+        priorities = [p for p in (llm_out.get("priorities") or []) if p.get("title")][:6]
         headline = (llm_out.get("headline") or "").strip()
         source = "llm"
     else:

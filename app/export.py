@@ -92,7 +92,8 @@ def build_roster(conn, *, operator: str = "HR", role: str = "hr",
     rows: list[list] = []
     for n, i in enumerate(items, 1):
         # 「是否录用」由 (阶段, 结论) 推导 —— 还没判的阶段给 `—`
-        vd = stages_mod.verdict(i.get("stage"), i.get("outcome"))
+        vd = stages_mod.verdict(i.get("stage"), i.get("outcome"),
+                                db_mod.effective_sign_status(i))
         rows.append([
             n,
             _v(i.get("interview_date")),     # 发面试邀请时回写
@@ -114,9 +115,89 @@ def build_roster(conn, *, operator: str = "HR", role: str = "hr",
 
 
 
+#: 面试日程表列。比 13 列名单更聚焦"哪天、在哪、面谁"。
+INTERVIEW_COLS = ["序号", "面试日期", "时段", "面试单位", "姓名", "岗位",
+                  "学历", "学校", "面试方式", "当前阶段", "电话"]
+
+
+def build_interview_schedule(conn, *, stage: str = "待面试",
+                             date_from: str | None = None,
+                             date_to: str | None = None,
+                             operator: str = "HR", role: str = "hr",
+                             ) -> tuple[list[str], list[list], set[int], int]:
+    """面试日程（xlsx 行集）。只取有 `interview_date` 的人，按日期/时段/姓名排序。"""
+    from . import db as db_mod
+
+    items = db_mod.list_candidates(conn, stage=stage or "待面试", archived=False)
+    df = str(date_from or "").strip()[:10]
+    dt = str(date_to or "").strip()[:10]
+    picked = []
+    for it in items:
+        day = str(it.get("interview_date") or "").strip()[:10]
+        if not day:
+            continue
+        if df and day < df:
+            continue
+        if dt and day > dt:
+            continue
+        picked.append(it)
+    picked.sort(key=lambda i: (str(i.get("interview_date") or ""),
+                               str(i.get("interview_slot") or ""),
+                               str(i.get("name") or "")))
+    rows = []
+    for n, i in enumerate(picked, 1):
+        rows.append([
+            n,
+            _v(i.get("interview_date")),
+            _v(i.get("interview_slot")),
+            _v(i.get("interview_unit")),
+            _v(i.get("name")),
+            _v(i.get("job_title")),
+            _v(i.get("edu_level")),
+            _v(i.get("school")),
+            _v(i.get("interview_mode")),
+            _v(i.get("stage")),
+            _phone(i),
+        ])
+    return list(INTERVIEW_COLS), rows, {0, 10}, len(picked)
+
+
+def build_resume_bundle(conn, **filters) -> list[tuple[str, str]]:
+    """按筛选条件收集**最新一份简历原件**，返回 [(磁盘路径, 包内文件名)]。
+
+    与 `bundle_name` 的区别：那个只给「初筛通过」且带投递日期语义；
+    这里给任意岗位/阶段/投递时间段，用于“导出这批人的名单和简历附件”。
+    """
+    from . import db as db_mod
+    from . import naming as naming_mod
+
+    items = db_mod.list_candidates(conn, archived=False, light=False, **filters)
+    pairs: list[tuple[str, str]] = []
+    used: set[str] = set()
+    for it in items:
+        doc = _latest_resume_doc(conn, int(it["id"]))
+        if not doc:
+            continue
+        path, fname = doc
+        base = naming_mod.resume_filename(it, os.path.splitext(fname)[1])
+        stem, ext = os.path.splitext(base)
+        final, k = base, 2
+        while final in used:
+            final = f"{stem}({k}){ext}"
+            k += 1
+        used.add(final)
+        pairs.append((path, final))
+    return pairs
+
+
 def bundle_name(conn, filters: dict, *, operator: str, role: str,
                 scope: str, n: int) -> tuple[str, list[tuple[str, str]]]:
     """初筛通过人员的简历打包：`[(磁盘路径, 包内文件名)]`。
+
+    口径（业务方 2026-11-04 明确）：`filters` 里的 `date_from/date_to`
+    是**投递时间**——所选时间段投递、且当前处于「初筛通过」的人；
+    不是"在这段时间里变成初筛通过"的人。`list_candidates` 的日期过滤
+    本来就按 `applied_at`，这里不另算一套。
 
     命名模板（人事处指定）：`匹配岗位-学历-学校-最高学历专业-姓名-性别`
     —— 见 `app/naming.py`（**唯一真源**，不在这里另写一份拼串）。
@@ -144,10 +225,18 @@ def bundle_name(conn, filters: dict, *, operator: str, role: str,
         used.add(final)
         pairs.append((path, final))
     stamp = datetime.now().strftime("%Y%m%d")
+    _from = str((filters or {}).get("date_from") or "").strip()
+    _to = str((filters or {}).get("date_to") or "").strip()
+    if _from or _to:
+        # 文件名带上"投递时间段"，HR 解压前就知道这一包覆盖哪一批
+        span = f"{_from or '最早'}-{_to or '最新'}"
+        return f"初筛通过-{span}.zip", pairs
     return f"初筛通过-{stamp}.zip", pairs
 
 
-def bundle_roster(conn, *, operator: str = "HR", role: str = "hr") -> dict:
+def bundle_roster(conn, *, operator: str = "HR", role: str = "hr",
+                  date_from: str | None = None,
+                  date_to: str | None = None) -> dict:
     """「初筛通过」名单表（xlsx 字节），随「下载初筛简历」的压缩包一起下发（v2.0.1）。
 
     业务方要求：下载初筛简历时附一份初筛通过的人员名单，Excel，放进压缩包里。
@@ -165,13 +254,17 @@ def bundle_roster(conn, *, operator: str = "HR", role: str = "hr") -> dict:
     """
     headers, rows, tcols, n = build_roster(
         conn, operator=operator, role=role,
-        include_archived=False, stage="初筛通过")
-    stamp = datetime.now().strftime("%Y%m%d")
+        include_archived=False, stage="初筛通过",
+        date_from=date_from, date_to=date_to)
+    _from = str(date_from or "").strip()
+    _to = str(date_to or "").strip()
+    _span = f"{_from or '最早'}至{_to or '最新'}"
     return {
-        "filename": f"初筛通过名单-{stamp}.xlsx",
+        "filename": f"初筛通过名单-{_span}.xlsx",
         "data": xlsx_mod.write_sheet(
             rows, headers, text_cols=tcols,
-            meta=xlsx_mod.meta_line("初筛通过名单（随简历包）", "初筛通过", n),
+            meta=xlsx_mod.meta_line("初筛通过名单（随简历包）",
+                                    f"初筛通过 · {_span}", n),
             sheet_title="初筛通过名单"),
         "n": n,
     }

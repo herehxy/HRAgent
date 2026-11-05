@@ -65,7 +65,7 @@ def _asgi(method: str, url: str, headers=None, body: bytes = b"") -> tuple[int, 
     if body:
         raw.append((b"content-length", str(len(body)).encode()))
     scope = {
-        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
         "http_version": "1.1", "method": method.upper(), "scheme": "http",
         "path": parts.path, "raw_path": parts.path.encode(),
         "query_string": parts.query.encode(), "root_path": "",

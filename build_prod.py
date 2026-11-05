@@ -136,11 +136,11 @@ def prepare_config_template() -> None:
 #: 发行包里这几份配置**不能**沿用本机的值 —— 它们是"这个人/这家单位"的设置，
 #: 不是产品默认。v4.0.0 起一律写成空壳，由使用者自己填。
 #:
-#: · model.json / embedding.json：本机指向单位内网模型端点，
+#: · model.json / embedding.json：本机指向单位内网 MaaS 端点（`ws-*.maas...`），
 #:   打进安装包等于把内网地址连同模型名一起发出去；
-#: · jd.json：这是**新岗位会继承的默认判定尺子**（本机岗位的默认判定项），
+#: · jd.json：这是**新岗位会继承的默认判定尺子**（钛合金/真空熔铸/材料成型…），
 #:   发给别家单位，等于替人家决定"什么算合格"；
-#: · interview.json：面试单位/会议室/联系人属于本单位组织架构。
+#: · interview.json：面试单位/会议室/联系人（含真实电话）是本单位组织架构。
 BLANK_CONFIGS = {
     "model.json": {
         "enabled": False,
@@ -288,6 +288,13 @@ def make_portable(version: str) -> str:
 
 def make_update(version: str) -> tuple[str, dict]:
     files: dict[str, str] = {}
+    # ⚠️ 必须包含主程序 exe：PyInstaller onedir 的 PYZ（app 代码）嵌在 exe 里，
+    # 只替换 _internal 等于“更新了依赖、没更新程序”——版本号和页面仍是旧的。
+    for name in ("HRAgent工作台.exe", "version.json"):
+        source = os.path.join(APP_DIR, name)
+        if not os.path.isfile(source):
+            raise RuntimeError(f"更新包缺少程序文件：{source}")
+        files[name] = _sha256(source)
     for current, _dirs, names in os.walk(os.path.join(APP_DIR, "_internal")):
         for name in names:
             source = os.path.join(current, name)

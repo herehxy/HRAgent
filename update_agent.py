@@ -187,8 +187,10 @@ def _safe_members(zf: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
             raise ValueError(f"更新包包含非法路径：{info.filename}")
         if name == "update-manifest.json":
             continue
-        if not name.startswith("_internal/"):
-            raise ValueError(f"更新包只能替换 _internal：{info.filename}")
+        # v4.3.1：PyInstaller onedir 的 app 代码（PYZ）在主 exe 里，
+        # 更新包必须能替换主 exe 与 version.json；其余根目录文件仍拒绝。
+        if not (name.startswith("_internal/") or name in (MAIN_EXE, "version.json")):
+            raise ValueError(f"更新包只能替换 _internal / 主程序：{info.filename}")
         if any(name.startswith(prefix) for prefix in FORBIDDEN_PREFIXES):
             raise ValueError(f"更新包包含用户数据/配置，已拒绝：{info.filename}")
         if not info.is_dir():
@@ -312,20 +314,35 @@ def apply_update(package: str, install_dir: str, *, pid: int | None = None,
         exclude_state=True,
     )
     _copy_backup(main_exe, os.path.join(backup_root, MAIN_EXE))
+    version_path = os.path.join(install_dir, "version.json")
+    if os.path.isfile(version_path):
+        shutil.copy2(version_path, os.path.join(backup_root, "version.json"))
 
     old_renamed = False
     new_installed = False
+    exe_replaced = False
     try:
         if os.path.exists(internal):
             os.replace(internal, old_internal)
             old_renamed = True
         os.replace(staging_internal, internal)
         new_installed = True
+        # PyInstaller onedir 的 app 代码（PYZ）在主 exe 里，必须一起替换；
+        # 只换 _internal 会出现“更新成功但版本/页面仍是旧的”。
+        staging_exe = os.path.join(staging_parent, MAIN_EXE)
+        if os.path.isfile(staging_exe):
+            os.replace(staging_exe, main_exe)
+            exe_replaced = True
+        staging_version = os.path.join(staging_parent, "version.json")
+        if os.path.isfile(staging_version):
+            shutil.copy2(staging_version, version_path)
     except Exception:
         if new_installed and os.path.exists(internal):
             shutil.rmtree(internal, ignore_errors=True)
         if old_renamed and os.path.exists(old_internal):
             os.replace(old_internal, internal)
+        if exe_replaced and os.path.isfile(os.path.join(backup_root, MAIN_EXE)):
+            shutil.copy2(os.path.join(backup_root, MAIN_EXE), main_exe)
         raise
 
     after_profile = _profile_fingerprint(user_home)
@@ -334,6 +351,10 @@ def apply_update(package: str, install_dir: str, *, pid: int | None = None,
             shutil.rmtree(internal, ignore_errors=True)
         if old_renamed and os.path.exists(old_internal):
             os.replace(old_internal, internal)
+        if exe_replaced and os.path.isfile(os.path.join(backup_root, MAIN_EXE)):
+            shutil.copy2(os.path.join(backup_root, MAIN_EXE), main_exe)
+        if os.path.isfile(os.path.join(backup_root, "version.json")):
+            shutil.copy2(os.path.join(backup_root, "version.json"), version_path)
         raise RuntimeError("更新前后用户数据/配置指纹不一致，已回滚程序文件")
 
     # 旧版若还把 data/config 放在程序目录里，整个保留在备份中，绝不删除。
