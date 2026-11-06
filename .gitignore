@@ -64,14 +64,3 @@ _pack_data/
 
 # 真实用户档案的整份镜像（真实简历 + 证件照 + 密钥）——绝不入库
 _prod_verify/
-
-# 部署/个人配置一律不入库（v4.0.15 推送前加固）
-config/jd.json
-config/interview.json
-config/search.json
-*.TMP
-*.tmp
-*.bak-*
-*~RF*
-_ui_check.js
-tests/_launch_tmp/

@@ -467,6 +467,22 @@ button{cursor:pointer}
 .proprow-c{font-size:12.5px;color:var(--ink-2);margin-top:4px;line-height:1.55}
 .proprow-c b{color:var(--ink-3);font-weight:500;margin:0 2px}
 .proprow-st{font-size:12.5px;color:var(--ink-3)}
+.proprow-st.approve{color:var(--ok);font-weight:600}
+.proprow-st.reject{color:var(--bad);font-weight:600}
+.proprow.done{opacity:.62}
+/* 点下决定后、接口返回前：两个按钮一起禁用，旁边明确写出“选了哪一个”。 */
+.propchoice{font-size:12.5px;font-weight:600;white-space:nowrap}
+.propchoice.approve{color:var(--ok)}
+.propchoice.reject{color:var(--bad)}
+.btn.chosen{box-shadow:0 0 0 2px var(--accent-soft),0 0 0 3px var(--accent-line)}
+/* 同类型提案超过 3 条时折叠成一组，避免一屏几十条。 */
+.propgroup{margin:6px 0;border-top:1px dashed var(--warn-line);padding-top:6px}
+.propgroup > summary{cursor:pointer;list-style:none;font-size:13px;font-weight:600;
+  color:var(--ink);display:flex;align-items:center;gap:6px}
+.propgroup > summary::-webkit-details-marker{display:none}
+.propgroup > summary::before{content:'▸';color:var(--ink-3);font-size:12px}
+.propgroup[open] > summary::before{content:'▾'}
+.propgroup-hint{font-size:12px;color:var(--ink-3);font-weight:400;margin-left:auto}
 .stg{font-size:12px;line-height:1;padding:2px 7px;border-radius:4px;margin-left:7px;
   font-weight:600;white-space:nowrap;display:inline-block;vertical-align:1px}
 .ochip{font-size:13px;line-height:1;padding:3px 9px;border-radius:5px;margin-left:6px;
@@ -710,8 +726,9 @@ body.v-archive .top,body.v-archive .top2,body.v-archive .tabbar,body.v-archive .
 body.v-sys  .top,body.v-sys  .top2,body.v-sys  .tabbar,body.v-sys  .pipe,body.v-sys  .wrap,
 body.v-users .top,body.v-users .top2,body.v-users .tabbar,body.v-users .pipe,body.v-users .wrap,
 body.v-chat .top,body.v-chat .top2,body.v-chat .tabbar,body.v-chat .pipe,body.v-chat .wrap,
-body.v-recruit .top,body.v-recruit .top2,body.v-recruit .tabbar,body.v-recruit .pipe,body.v-recruit .wrap{display:none!important}
-#mailView,#orgView,#archView,#sysView,#usersView,#chatView,#recruitView{display:none;flex:1;min-height:0;overflow:hidden}
+body.v-recruit .top,body.v-recruit .top2,body.v-recruit .tabbar,body.v-recruit .pipe,body.v-recruit .wrap,
+body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedule .pipe,body.v-schedule .wrap{display:none!important}
+#mailView,#orgView,#archView,#sysView,#usersView,#chatView,#recruitView,#scheduleView{display:none;flex:1;min-height:0;overflow:hidden}
 #usersView.on{display:block;overflow-y:auto}
 /* 写邮件：左侧准备材料，右侧专心编辑正文。去掉收件人预览后，编辑区获得主要宽度。 */
 #mailView.on{display:grid;grid-template-columns:minmax(360px,.82fr) minmax(560px,1.18fr)}
@@ -729,6 +746,7 @@ body.v-recruit .top,body.v-recruit .top2,body.v-recruit .tabbar,body.v-recruit .
 /* 招聘进度：整页滚动，表格自己横向滚动 + 表头 sticky。
    和系统配置页不同，这里内容很宽（单位×学历×签约人），不能限制 820px。 */
 #recruitView.on{display:block;overflow-y:auto;padding:18px 24px 40px}
+#scheduleView.on{display:flex;flex-direction:column;overflow:hidden;padding:20px 24px 18px}
 #chatView.on{display:grid;grid-template-columns:250px minmax(0,1fr) 320px}
 /* v4.0.17：Claude 式会话栏 */
 .chatconv{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line);
@@ -1197,7 +1215,12 @@ body.v-recruit .top,body.v-recruit .top2,body.v-recruit .tabbar,body.v-recruit .
 .ivrow input[type="date"]{width:152px}
 .ivrow input[type="datetime-local"]{width:196px}
 .ivrow #ivSlot{width:130px}
+/* 面试时间：固定时段下拉 + 手动输入并排；下拉按学历生成 30/50 分钟档。 */
+.ivslot{display:flex;align-items:center;gap:5px;min-width:0}
+.ivslot select{width:142px;height:34px;padding:0 5px;font-size:12.5px}
+.ivslot #ivSlot{width:112px}
 .ivrow #ivMode{width:118px}
+.ivrow #ivPlace{width:170px}
 .ivrow #obStatus{width:118px}
 /* 面试单位：一个框里能并排放下三个单位名（每个约 5-7 字）+ 一个"继续添加"输入 */
 .ivrow .multi{width:100%;min-height:34px;padding:4px 6px;gap:6px;
@@ -1854,6 +1877,80 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .rp-date-range .dash{color:var(--ink-3);user-select:none}
 @media(max-width:900px){.rp-cards,.rp-degrees{grid-template-columns:repeat(2,1fr)}}
 
+/* ---------------- 日程安排（v4.4.3） ----------------
+   日历只读「待面试」阶段；拖拽只改面试日期/时刻，不改阶段。 */
+.sched-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;flex:none}
+.sched-title{font-size:20px;font-weight:700;letter-spacing:-.01em;line-height:1.3}
+.sched-sub{font-size:13px;color:var(--ink-3)}
+.sched-tools{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sched-body{flex:1;min-height:0;overflow:auto;padding-bottom:8px}
+.sched-month{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));border:1px solid var(--line);
+  border-radius:10px;overflow:hidden;background:var(--surface);min-width:700px}
+.sched-dow{padding:8px 9px;font-size:12.5px;font-weight:600;color:var(--ink-3);
+  background:var(--surface-2);border-left:1px solid var(--line)}
+.sched-dow:first-child{border-left:0}
+.sched-cell{min-height:118px;padding:5px 6px 6px;border-top:1px solid var(--line);
+  border-left:1px solid var(--line);min-width:0;position:relative;transition:background .12s}
+.sched-cell:nth-child(7n+1){border-left:0}
+.sched-cell.out{background:var(--surface-2)}
+.sched-daynum{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;
+  padding:0 5px;border-radius:999px;font-size:12.5px;font-weight:600;color:var(--ink-2)}
+.sched-cell.out .sched-daynum{color:var(--ink-3);opacity:.65}
+.sched-cell.today .sched-daynum{background:var(--accent);color:#fff}
+.sched-ev{display:block;width:100%;text-align:left;font:inherit;font-size:12.5px;line-height:1.3;
+  margin-top:3px;padding:3px 6px;border:0;border-left:3px solid var(--accent);border-radius:3px;
+  background:var(--accent-soft);color:var(--ink);cursor:pointer;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;transition:filter .12s,box-shadow .12s}
+.sched-ev:hover{filter:brightness(.97);box-shadow:0 0 0 1px var(--accent-line)}
+.sched-ev.dragging{opacity:.42}
+.sched-ev .t{font-weight:700;margin-right:0;color:var(--accent-ink)}
+.sched-ev .meta{display:inline;font-size:11px;font-weight:400;color:var(--ink-2);
+  white-space:normal}
+/* 月视图格子窄：让“08:00-08:30”先占一行，姓名不够宽时自然换到第二行，
+   时间范围始终完整可见（周/日视图仍是单行块）。 */
+.sched-cell .sched-ev{white-space:normal;text-overflow:clip;line-height:1.25;
+  font-size:11.5px;padding:2px 4px}
+.sched-cell .sched-ev .t{margin-right:0}
+.sched-more{display:block;margin-top:2px;padding:0 2px;border:0;background:none;color:var(--ink-3);
+  font:inherit;font-size:11.5px;cursor:pointer;text-align:left}
+.sched-more:hover{color:var(--accent-ink)}
+.sched-cell.drag-over{background:var(--accent-soft);outline:2px dashed var(--accent);outline-offset:-3px}
+.sched-empty{padding:28px;text-align:center;color:var(--ink-3);font-size:14px}
+.sched-week{min-width:760px;border:1px solid var(--line);border-radius:10px;overflow:hidden;
+  background:var(--surface)}
+.sched-weekhead{display:flex;background:var(--surface-2);border-bottom:1px solid var(--line)}
+.sched-weekhead .sched-timecol{border-right:1px solid var(--line)}
+.sched-weekhead .sched-dayhead{flex:1;min-width:92px;padding:7px 8px;font-size:12.5px;
+  font-weight:600;color:var(--ink-2);border-left:1px solid var(--line)}
+.sched-weekhead .sched-dayhead:first-of-type{border-left:0}
+.sched-weekhead .sched-dayhead.today{color:var(--accent-ink);background:var(--accent-soft)}
+.sched-weekbody{display:flex}
+.sched-timecol{width:58px;flex:none;color:var(--ink-3);font-size:11.5px;text-align:right;
+  padding-right:6px;background:var(--surface);position:relative}
+.sched-allday-label{height:34px;line-height:34px;border-bottom:1px solid var(--line)}
+.sched-hourlabel{height:46px;position:relative;top:-7px}
+.sched-endtime{position:absolute;left:0;right:6px;bottom:0;line-height:1;
+  transform:translateY(-2px);text-align:right;color:var(--ink-3)}
+.sched-daycol{flex:1;min-width:92px;position:relative;border-left:1px solid var(--line)}
+.sched-daycol:first-child{border-left:0}
+.sched-allday{min-height:34px;border-bottom:1px solid var(--line);padding:2px 3px}
+.sched-allday .sched-ev{margin-top:2px;padding:1px 4px;font-size:11.5px;line-height:1.25}
+.sched-hours{position:relative}
+.sched-hline{height:46px;border-top:1px solid var(--line)}
+.sched-hline:nth-child(2n){background:rgba(127,127,127,.025)}
+.sched-ev.timed{position:absolute;left:3px;right:3px;margin:0;z-index:1;
+  font-size:13px;line-height:1.15;padding:1px 6px;
+  white-space:normal;overflow:hidden;min-height:19px}
+.sched-daycol.drag-over{background:var(--accent-soft)}
+.sched-week.single{min-width:0}
+.sched-week.single .sched-daycol{min-width:0}
+/* 日视图是单列，空间足够：时间/姓名/单位/地点统一放大两号（15px），
+   行高压紧以容纳 30 分钟的卡片高度。 */
+.sched-week.single .sched-ev.timed{font-size:15px;line-height:1.05;padding:0 6px}
+.sched-week.single .sched-ev .meta{font-size:15px}
+.sched-readonly .sched-ev{cursor:pointer}
+
+
 /* ============================================================================
    v4.1 — Warm Minimal design system (Anthropic / Claude-inspired)
    ----------------------------------------------------------------------------
@@ -2108,8 +2205,14 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .chatinput{background:var(--surface);border-top-color:var(--line)}
 .chatside{background:var(--surface);border-left-color:var(--line)}
 .msg{border-radius:9px;font-size:15.5px;line-height:1.75}
-.msg.user{background:var(--surface-2);border-color:var(--line)}
-.msg.assistant{background:var(--surface);border-color:var(--line)}
+/* 用户自己发的消息靠右、浅蓝底，和助手的白色回答分开（2026-11-05）。
+   width:fit-content 让短句只占一句话的宽度，长句到 680px 再换行；
+   margin-left:auto 是右对齐的关键，只改颜色不改布局的话仍然会贴在左边。 */
+.msg.user{display:block;width:fit-content;max-width:min(100%,680px);
+  margin:0 0 12px auto;background:#e8f1ff;border-color:#cfe0f7;
+  border-bottom-right-radius:3px}
+.msg.assistant{background:var(--surface);border-color:var(--line);
+  border-bottom-left-radius:3px}
 /* 回答里的结构：小标题加粗、段间距拉开，长答案不再是一整块文字 */
 #chatView .msg h3{font-size:16.5px;font-weight:700;margin:14px 0 7px;
   letter-spacing:-.01em;line-height:1.5}
@@ -2151,6 +2254,12 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
     --accent:#D98A65; --accent-ink:#E7A985; --accent-soft:#382F29;
     --accent-line:#5A4438; --accent-hi:#42352E;
   }
+}
+/* 用户气泡固定浅蓝，不跟随助手页的 Claude 暖色：暖色画布 + 浅蓝气泡，
+   一眼能分清“我说的”和“助手答的”。 */
+:root[data-theme="dark"] .msg.user{background:#1c2f47;border-color:#2f4d70}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) .msg.user{background:#1c2f47;border-color:#2f4d70}
 }
 /* 会话列表选中态：与左侧主导航同一套蓝色，不再跟着聊天内容变暖色 */
 .chatconv-item.on{background:var(--sel);color:var(--sel-ink)}
@@ -2209,10 +2318,6 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
   :root:not([data-theme="light"]) .loginwrap{
     background:linear-gradient(135deg,rgba(23,24,27,.95),rgba(31,32,36,.9)),
       url("/login-bg.jpg") center 42% / cover no-repeat,var(--ground)}
-}
-:root[data-theme="dark"] .msg.user{background:var(--surface-2)}
-@media (prefers-color-scheme: dark){
-  :root:not([data-theme="light"]) .msg.user{background:var(--surface-2)}
 }
 :root[data-theme="dark"] .toast{background:var(--surface-2);color:var(--ink)}
 @media (prefers-color-scheme: dark){
@@ -2276,12 +2381,15 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
   <button data-view="pool">
     <svg class="ico" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.6 19.2c.5-3.3 2.7-5.2 5.4-5.2s4.9 1.9 5.4 5.2"/><path d="M16.2 5.6a3 3 0 0 1 0 5.9"/><path d="M17.6 19.2c-.2-2.3-1-4-2.4-4.9 2.7-.3 5.1 1.5 5.4 4.9"/></svg>
     <span>人才库</span></button>
-  <button data-view="recruit">
-    <svg class="ico" viewBox="0 0 24 24"><rect x="3.2" y="4.5" width="17.6" height="15" rx="2"/><path d="M3.2 9.2h17.6M8.4 9.2v10.3M15.6 9.2v10.3"/><path d="M7 6.8h.01M10.2 6.8h.01"/></svg>
-    <span>招聘进度</span></button>
+  <button data-view="schedule">
+    <svg class="ico" viewBox="0 0 24 24"><rect x="3.2" y="5" width="17.6" height="15" rx="2"/><path d="M7.5 3.5v3M16.5 3.5v3M3.2 9.5h17.6"/><path d="M7.5 13h.01M12 13h.01M16.5 13h.01M7.5 16.5h.01M12 16.5h.01"/></svg>
+    <span>日程安排</span></button>
   <button data-view="mail">
     <svg class="ico" viewBox="0 0 24 24"><rect x="3" y="5.5" width="18" height="13" rx="2.2"/><path d="m3.8 7.2 7.1 5.2a2 2 0 0 0 2.2 0l7.1-5.2"/></svg>
     <span>写邮件</span></button>
+  <button data-view="recruit">
+    <svg class="ico" viewBox="0 0 24 24"><rect x="3.2" y="4.5" width="17.6" height="15" rx="2"/><path d="M3.2 9.2h17.6M8.4 9.2v10.3M15.6 9.2v10.3"/><path d="M7 6.8h.01M10.2 6.8h.01"/></svg>
+    <span>招聘进度</span></button>
   <div class="sgroup">管理</div>
   <button data-view="org">
     <svg class="ico" viewBox="0 0 24 24"><rect x="3" y="7.5" width="18" height="12" rx="2.2"/><path d="M9 7.5V6a1.8 1.8 0 0 1 1.8-1.8h2.4A1.8 1.8 0 0 1 15 6v1.5"/><path d="M3 12.2h18"/></svg>
@@ -2413,6 +2521,7 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 <div id="usersView"></div>
 <div id="chatView"></div>
 <div id="recruitView"></div>
+<div id="scheduleView"></div>
 <div id="archView"></div>
 
 <div class="pipe" id="pipe"></div>
@@ -3512,7 +3621,9 @@ function compareCard(d){
   var interview = [
     d.interview_unit ? '单位：' + d.interview_unit : '',
     d.interview_date ? '日期：' + String(d.interview_date).slice(0, 16) : '',
-    d.interview_slot ? '时段：' + d.interview_slot : '',
+    d.interview_slot ? '时段：' + (schedRangeText(d.interview_date, d.interview_slot,
+                                                 d.edu_level) || d.interview_slot) : '',
+    d.interview_place ? '地点：' + d.interview_place : '',
     d.interview_mode ? '方式：' + d.interview_mode : '',
     d.outcome ? '结论：' + d.outcome : ''
   ].filter(Boolean).map(esc).join('<br>') || '<span class="hint">未登记面试安排</span>';
@@ -3809,6 +3920,7 @@ function openDetail(d){
      那次不该把人已经滚到的位置再拉回顶部。 */
   var switched = box.dataset.cid !== String(d.id);
   box.innerHTML = fullDetail(d);
+  ensureHireUnits();
   box.dataset.cid = String(d.id);
   if(switched) box.scrollTop = 0;
   multiRenderIvUnit();
@@ -4177,6 +4289,17 @@ function fullDetail(d){
       'title="跳到写邮件页，自动带出这个人的收件人、姓名与档案里填过的面试信息">✉ 写邮件</button>' +
   '</div>';
 
+  /* 面试时间的固定候选：按候选人学历生成 30/50 分钟时段，再合并系统字典。
+     当前值不在候选里就落到「手动输入」，不会丢掉档案里已有的原文。 */
+  var _slotVal = String(d.interview_slot || '').trim();
+  /* 拖拽后档案里可能只留下开始时刻；详情里补成完整时段，保存时也一并规范化。 */
+  if(/^\d{1,2}:\d{2}$/.test(_slotVal)){
+    var _slotRange = schedRangeText(d.interview_date, _slotVal, d.edu_level);
+    if(_slotRange) _slotVal = _slotRange;
+  }
+  var _slotOpts = interviewSlotOptions(d.edu_level);
+  var _slotPreset = _slotOpts.indexOf(_slotVal) >= 0;
+
   /* 操作条与个人信息完全分离：先铺右上操作条，再从下一行开始个人档案。 */
   return actionBar +
     '<div class="dhead profile-head">' +
@@ -4309,15 +4432,29 @@ function fullDetail(d){
         '<span class="fld"><span class="fl">面试日期</span>' +
           '<input id="ivDate" type="date" value="' +
             esc(String(d.interview_date || '').slice(0, 10)) + '"></span>' +
-        '<span class="fld"><span class="fl">时段</span>' +
-          '<input id="ivSlot" list="dlIvSlot" placeholder="09:30-10:30" ' +
-            'value="' + esc(d.interview_slot || '') + '"></span>' +
-        '<datalist id="dlIvSlot">' + (IDICT.slots || []).map(function(x){
-          return '<option value="' + esc(x) + '"></option>'; }).join('') + '</datalist>' +
+        '<span class="fld"><span class="fl">面试时间</span>' +
+          '<div class="ivslot">' +
+            '<select id="ivSlotSel" class="vsel" onchange="ivSlotPicked(this.value)">' +
+              '<option value="">固定时段…</option>' +
+              _slotOpts.map(function(x){
+                return '<option value="' + esc(x) + '"' +
+                  (x === _slotVal ? ' selected' : '') + '>' + esc(x) + '</option>';
+              }).join('') +
+              '<option value="__custom"' +
+                ((_slotVal && !_slotPreset) ? ' selected' : '') + '>手动输入…</option>' +
+            '</select>' +
+            '<input id="ivSlot" placeholder="09:30-10:00" ' +
+              'title="支持 09:30-10:00、9点-9点30、上午9:00-9:30；只填开始时间时按学历时长自动补结束" ' +
+              'value="' + esc(_slotVal) + '"></div></span>' +
         '<span class="fld"><span class="fl">方式</span>' +
           '<input id="ivMode" list="dlIvMode" placeholder="现场面试" ' +
             'value="' + esc(d.interview_mode || '') + '"></span>' +
         '<datalist id="dlIvMode">' + (IDICT.modes || []).map(function(x){
+          return '<option value="' + esc(x) + '"></option>'; }).join('') + '</datalist>' +
+        '<span class="fld"><span class="fl">面试地点</span>' +
+          '<input id="ivPlace" list="dlIvPlace" placeholder="1519 会议室" ' +
+            'value="' + esc(d.interview_place || '') + '"></span>' +
+        '<datalist id="dlIvPlace">' + (IDICT.rooms || []).map(function(x){
           return '<option value="' + esc(x) + '"></option>'; }).join('') + '</datalist>' +
         '<span class="fld"><span class="fl">结论</span>' + outcomeField(d) + '</span>' +
       '</div>' +
@@ -4327,8 +4464,12 @@ function fullDetail(d){
            没有 edit_plan 的角色只读；本机模式/HR 可编辑。
            这里先给免费输入 + datalist，届别单位还没导入时也不挡手输。 */
         '<span class="fld"><span class="fl">录用单位</span>' +
-          '<input id="obHireUnit" list="dlHireUnit" placeholder="如：钛所" value="' +
-            esc(d.hire_unit || '') + '"' + (can('edit_plan') ? '' : ' disabled') + '></span>' +
+          '<div class="ivslot">' +
+            '<select id="obHireUnitSel" class="vsel" onchange="hireUnitPicked(this.value)"' +
+              (can('edit_plan') ? '' : ' disabled') + '>' +
+              hireUnitOptionsHtml(d.hire_unit || '') + '</select>' +
+            '<input id="obHireUnit" list="dlHireUnit" placeholder="如：钛所" value="' +
+              esc(d.hire_unit || '') + '"' + (can('edit_plan') ? '' : ' disabled') + '></div></span>' +
         '<datalist id="dlHireUnit">' + (RECRUIT_UNITS || []).map(function(u){
           return '<option value="' + esc(u) + '"></option>'; }).join('') + '</datalist>' +
         '<span class="fld"><span class="fl">签约情况</span>' +
@@ -5431,6 +5572,7 @@ var FORM_FIELDS = [
   ['基本信息','edCetLv','cet'],
   ['面试与录用','ivUnit','interview_unit'], ['面试与录用','ivDate','interview_date'],
   ['面试与录用','ivSlot','interview_slot'], ['面试与录用','ivMode','interview_mode'],
+  ['面试与录用','ivPlace','interview_place'],
   ['面试与录用','obOffer','offer_sent_at'], ['面试与录用','obSigned','signed_at'],
   ['面试与录用','obDeadline','onboard_deadline'],
   ['面试与录用','obHireUnit','hire_unit'],
@@ -6084,8 +6226,10 @@ function doSearch(){
 var VIEW = 'pool';
 var PIPE_PAGE = {};
 var IDICT = {}, IDICT_LOADED = false;
+var HIRE_UNITS_LOADED = false;
 var MAIL_TPL = [], MAIL_VARS = {builtin: [], runtime: []}, IDICT = {};
 var MAIL_CANDS = [], MAIL_FULL = [];
+var MAIL_BOOTED = false, MAIL_CANDS_LOADED = false, MAIL_CANDS_LOADING = false;
 var M_CID = null, M_AID = null, M_TO = '', M_SMTP = {}, M_CAND = null;
 var M_OUTBOX = [];          /* 临时上传的附件 {outbox_id, filename, size} */
 var M_RESULT = null;        /* 发送结果（成功凭据或失败原因） */
@@ -6099,7 +6243,13 @@ var M_MAIL_TASK_ACK = '';
 
 /* 当前模块记在 **URL hash** 里：整页刷新（F5）后还停在原模块，
    不会莫名其妙跳回人才库。浏览器前进/后退也跟着走。 */
-var VIEWS = ['pool', 'recruit', 'chat', 'mail', 'org', 'archive', 'sys', 'users'];
+var VIEWS = ['pool', 'recruit', 'schedule', 'chat', 'mail', 'org', 'archive', 'sys', 'users'];
+
+/* 日程页状态必须在这里初始化：restoreView 在脚本前部就会按 hash 进入
+   initSchedule，而函数定义在脚本后部；var 提升只会把变量变成 undefined。 */
+var SCHED = {view:'month', anchor:new Date(), events:[], req:0, booted:false, range:null, hour:46};
+var SCHED_DRAG = null;
+var SCHED_DRAG_JUST = false;
 function setView(v, fromHash){
   VIEW = v;
   if(!fromHash){
@@ -6113,7 +6263,8 @@ function setView(v, fromHash){
      而视图名是 'archive'，对不上 → 归档页永远不显示。
      用显式映射，别耍小聪明。 */
   var MAP = {mailView:'mail', orgView:'org', archView:'archive',
-             sysView:'sys', chatView:'chat', usersView:'users', recruitView:'recruit'};
+             sysView:'sys', chatView:'chat', usersView:'users', recruitView:'recruit',
+             scheduleView:'schedule'};
   Object.keys(MAP).forEach(function(id){
     var el = document.getElementById(id);
     if(el) el.classList.toggle('on', MAP[id] === v);
@@ -6126,6 +6277,7 @@ function setView(v, fromHash){
   if(v === 'org') initOrg();
   if(v === 'archive') initArch();
   if(v === 'recruit') initRecruit();
+  if(v === 'schedule') initSchedule();
   if(v === 'sys') initSys();
   if(v === 'users') initUsers();
   if(v === 'chat') initChat();
@@ -6304,21 +6456,43 @@ async function resumeMailTask(){
 /* ⚠️ 这里原本是 `async function initMail(){`，一次批量替换把 async 吃掉了，
    变成"async 挂在插入块前面、真正的 initMail 变成普通函数" → 里面的 await 报语法错、整页死。 */
 async function initMail(){
+  /* 重复进入写邮件页不再拉一遍四个接口：DOM 还在，直接复用。
+     首次进入先给一个占位，避免用户看着空白等 /api/candidates（827 人时很慢）。 */
+  if(MAIL_BOOTED && document.getElementById('mCandInput')){
+    loadMailCandidates(true);     /* 页面已在：立即显示，后台刷新候选人 */
+    return;
+  }
+  var mv = document.getElementById('mailView');
+  if(mv && !MAIL_BOOTED) mv.innerHTML = '<div class="hint" style="padding:24px">正在打开写邮件…</div>';
   var r = await Promise.all([
-    api('/api/mail/templates'), api('/api/interview-dict'),
-    api('/api/mail/smtp'), api('/api/candidates')
+    api('/api/mail/templates'), api('/api/interview-dict'), api('/api/mail/smtp')
   ]);
   MAIL_TPL = (r[0].items || []);
   MAIL_VARS = {builtin: r[0].builtin_vars || [], runtime: r[0].runtime_vars || []};
   IDICT = r[1] || {};
   M_SMTP = r[2] || {};
-  MAIL_FULL = (r[3].items || []);
-  MAIL_CANDS = MAIL_FULL.map(function(c){
-    return {id: c.id, name: c.name || '', email: c.email || ''};
-  });
+  MAIL_CANDS = [];
+  MAIL_FULL = [];
   renderMail();
+  MAIL_BOOTED = true;
   setMailSending(M_SENDING);
+  loadMailCandidates();      /* 候选人名单后台加载，不挡页面 */
   resumeMailTask();
+}
+function loadMailCandidates(force){
+  if(MAIL_CANDS_LOADING || (MAIL_CANDS_LOADED && !force)) return;
+  MAIL_CANDS_LOADING = true;
+  api('/api/mail/candidates').then(function(r){
+    MAIL_CANDS_LOADING = false;
+    if(!r || r.__err) return;
+    MAIL_CANDS = (r.items || []).map(function(c){
+      return {id: c.id, name: c.name || '', email: c.email || ''};
+    });
+    MAIL_FULL = MAIL_CANDS.slice();
+    MAIL_CANDS_LOADED = true;
+    var inp = document.getElementById('mCandInput');
+    if(inp && document.activeElement === inp) filterCand();
+  }).catch(function(){ MAIL_CANDS_LOADING = false; });
 }
 
 /* ---------- 模板变量控件：按 key 分派成真控件（不是一排灰提示文本框） ---------- */
@@ -6388,6 +6562,12 @@ var AC_IDX = -1;
 function filterCand(clearSel){
   var box = document.getElementById('mCandDrop');
   if(!box) return;
+  if(!MAIL_CANDS_LOADED && !MAIL_CANDS.length){
+    box.innerHTML = '<div class="acItem">正在读取候选人…</div>';
+    box.classList.add('on');
+    loadMailCandidates();
+    return;
+  }
   var kw = ((document.getElementById('mCandInput') || {}).value || '').trim().toLowerCase();
   if(clearSel){
     /* 输入内容一旦变化，就必须解除“已选候选人”绑定。
@@ -9357,6 +9537,517 @@ function mermaidChartSvg(raw){
   return null;
 }
 
+/* ---------- 日程安排（v4.4.3） ----------
+   数据源唯一：applications.stage == '待面试' 且 interview_date 非空。
+   月/周/日三种视图都从同一个 /api/interviews/calendar 拉当前范围；
+   拖拽只改 interview_date / interview_slot，不改阶段，也不自动归档。 */
+function schedPad(n){ return (n < 10 ? '0' : '') + n; }
+function schedYmd(d){
+  return d.getFullYear() + '-' + schedPad(d.getMonth() + 1) + '-' + schedPad(d.getDate());
+}
+function schedAtMidnight(d){ return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+function schedAddDays(d, n){
+  var x = schedAtMidnight(d); x.setDate(x.getDate() + n); return x;
+}
+function schedMonday(d){
+  var x = schedAtMidnight(d);
+  x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
+  return x;
+}
+function schedDateOf(s){
+  var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || ''));
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+}
+function schedTimeOf(s){
+  var m = /^\d{4}-\d{2}-\d{2}[ T](\d{2}):(\d{2})/.exec(String(s || ''));
+  return m ? (m[1] + ':' + m[2]) : '';
+}
+/* 历史档案的 interview_date 常常只存了日期，真正的时段在 interview_slot
+   （如「9:00-9:50」「上午 9:00-9:30」）。只认 interview_date 会把所有面试
+   都堆到「全天」一行，所以开始/结束时间必须回退到时段原文。 */
+function schedSlotRange(slot){
+  var s = String(slot || '').replace(/：/g, ':').replace(/[～~—－]/g, '-');
+  var ap = /下午|晚上|傍晚/.test(s) ? 'pm' : (/上午|早上|早晨/.test(s) ? 'am' : '');
+  var re = /(\d{1,2})\s*[:点时]\s*(\d{1,2})?/g;
+  var out = [], m;
+  while((m = re.exec(s)) && out.length < 2){
+    var h = Number(m[1]), mi = Number(m[2] || 0);
+    if(h > 24 || mi > 59) continue;
+    if(ap === 'pm' && h < 12) h += 12;
+    if(ap === 'am' && h === 12) h = 0;
+    out.push(schedPad(h) + ':' + schedPad(mi));
+  }
+  return {start: out[0] || '', end: out[1] || ''};
+}
+function schedEventStart(ev){
+  var t = schedTimeOf(ev && ev.interview_date);
+  /* 00:00 是旧数据常见的“只有日期”占位，不应把它当成凌晨面试。 */
+  if(t && t !== '00:00') return t;
+  return schedSlotRange(ev && ev.interview_slot).start;
+}
+function schedEventEnd(ev){
+  var start = schedEventStart(ev);
+  if(!start) return '';
+  var r = schedSlotRange(ev && ev.interview_slot);
+  /* 原文写了完整时段就按原文结束时间，拖拽只改过开始时刻时按学历时长推。 */
+  if(r.end && (!r.start || r.start === start) && r.end !== start) return r.end;
+  return schedEndOf(start, schedDurationMinutes(ev && ev.edu_level));
+}
+function schedMinutesOf(t){
+  var m = /^(\d{1,2}):(\d{2})$/.exec(String(t || ''));
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+function schedEventSpan(ev){
+  var a = schedMinutesOf(schedEventStart(ev));
+  var b = schedMinutesOf(schedEventEnd(ev));
+  if(a != null && b != null && b > a) return b - a;
+  return schedDurationMinutes(ev && ev.edu_level);
+}
+function schedRangeText(dateStr, slot, edu){
+  var ev = {interview_date:dateStr, interview_slot:slot, edu_level:edu};
+  var st = schedEventStart(ev), en = schedEventEnd(ev);
+  return st ? (st + (en ? '-' + en : '')) : '';
+}
+/* 8:00–18:00 的十个小时要撑满日程区剩余高度。返回每个小时的高度，
+   窗口太矮时保底 46px（滚动），太高时封顶 160px，避免把行拉得离谱。 */
+function schedHourHeight(){
+  var box = document.getElementById('scheduleView');
+  if(!box || !box.clientHeight) return 46;
+  var cs = getComputedStyle(box);
+  var padT = parseFloat(cs.paddingTop) || 0;
+  var padB = parseFloat(cs.paddingBottom) || 0;
+  var head = box.querySelector('.sched-head');
+  var headH = head ? (head.offsetHeight + 12) : 0;
+  var bodyH = box.clientHeight - padT - padB - headH;
+  /* 固定占位：星期表头 35 + 全天行 34 + 表格边框 2 + body 底部留白 8。 */
+  var h = (bodyH - 79) / 10;
+  return Math.max(46, Math.min(160, Math.floor(h)));
+}
+/* 面试时长按学历：博士 50 分钟，硕士 30 分钟；其他学历按 30 分钟。
+   日历用它决定事件块高度，面试信息里的固定时段也按同一口径生成。 */
+function schedDurationMinutes(edu){
+  var s = String(edu || '');
+  if(s.indexOf('博士') >= 0) return 50;
+  if(s.indexOf('硕士') >= 0) return 30;
+  return 30;
+}
+function schedEndOf(start, minutes){
+  var m = /^(\d{1,2}):(\d{2})$/.exec(String(start || ''));
+  if(!m) return '';
+  var total = Number(m[1]) * 60 + Number(m[2]) + Number(minutes || 0);
+  total = Math.max(0, Math.min(24 * 60 - 1, total));
+  return schedPad(Math.floor(total / 60)) + ':' + schedPad(total % 60);
+}
+/* 面试时段的固定候选：按学历时长生成 8:00–18:00 内的整/半点开始时间，
+   再把系统配置里的 slots 合并进来（配置可能有单位自己的作息）。 */
+function interviewSlotOptions(edu){
+  var dur = schedDurationMinutes(edu);
+  var out = [];
+  for(var m = 8 * 60; m + dur <= 18 * 60; m += 30){
+    out.push(schedPad(Math.floor(m / 60)) + ':' + schedPad(m % 60) + '-' +
+             schedPad(Math.floor((m + dur) / 60)) + ':' + schedPad((m + dur) % 60));
+  }
+  ((typeof IDICT !== 'undefined' && IDICT.slots) || []).forEach(function(x){
+    if(x && out.indexOf(x) < 0) out.push(String(x));
+  });
+  return out;
+}
+function ivSlotPicked(v){
+  var inp = document.getElementById('ivSlot');
+  if(!inp) return;
+  if(v === '__custom'){
+    inp.focus();
+    try{ inp.select(); }catch(_e){}
+    return;
+  }
+  if(v) inp.value = v;
+}
+/* 录用单位的候选来自招聘进度（RECRUIT_UNITS），但用户很可能没先打开过
+   招聘进度页；打开档案时按需拉一次，否则 datalist 一直是空的。 */
+function hireUnitOptionsHtml(current){
+  var units = ((typeof RECRUIT_UNITS !== 'undefined' && RECRUIT_UNITS) || []);
+  var cur = String(current || '');
+  var out = '<option value="">固定单位…</option>' + units.map(function(u){
+    return '<option value="' + esc(u) + '"' + (u === cur ? ' selected' : '') + '>' + esc(u) + '</option>';
+  }).join('');
+  out += '<option value="__custom"' +
+    ((cur && units.indexOf(cur) < 0) ? ' selected' : '') + '>手动输入…</option>';
+  return out;
+}
+function refreshHireUnitOptions(){
+  var dl = document.getElementById('dlHireUnit');
+  if(dl){
+    dl.innerHTML = ((typeof RECRUIT_UNITS !== 'undefined' && RECRUIT_UNITS) || [])
+      .map(function(u){ return '<option value="' + esc(u) + '"></option>'; }).join('');
+  }
+  var sel = document.getElementById('obHireUnitSel');
+  var inp = document.getElementById('obHireUnit');
+  if(sel){
+    var cur = inp ? inp.value : '';
+    sel.innerHTML = hireUnitOptionsHtml(cur);
+  }
+}
+function hireUnitPicked(v){
+  var inp = document.getElementById('obHireUnit');
+  if(!inp) return;
+  if(v === '__custom'){
+    inp.focus();
+    try{ inp.select(); }catch(_e){}
+    return;
+  }
+  if(v) inp.value = v;
+}
+function ensureHireUnits(){
+  if(((typeof RECRUIT_UNITS !== 'undefined' && RECRUIT_UNITS) || []).length){
+    refreshHireUnitOptions();
+    return;
+  }
+  if(HIRE_UNITS_LOADED) return;
+  HIRE_UNITS_LOADED = true;
+  api('/api/recruit/meta').then(function(j){
+    if(j && !j.__err){
+      RECRUIT_UNITS = j.units || [];
+      refreshHireUnitOptions();
+      if(!RECRUIT_UNITS.length) HIRE_UNITS_LOADED = false;  /* 还没有计划：下次打开再试 */
+    }else{
+      HIRE_UNITS_LOADED = false;   /* 失败允许下次打开再试 */
+    }
+  }).catch(function(){ HIRE_UNITS_LOADED = false; });
+}
+function schedSameDay(a, b){
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate();
+}
+function schedRange(){
+  var a = SCHED.anchor;
+  if(SCHED.view === 'month'){
+    var first = new Date(a.getFullYear(), a.getMonth(), 1);
+    var last = new Date(a.getFullYear(), a.getMonth() + 1, 0);
+    return {from: schedYmd(schedMonday(first)), to: schedYmd(schedAddDays(schedMonday(last), 6))};
+  }
+  if(SCHED.view === 'week'){
+    var mon = schedMonday(a);
+    return {from: schedYmd(mon), to: schedYmd(schedAddDays(mon, 6))};
+  }
+  return {from: schedYmd(a), to: schedYmd(a)};
+}
+function schedTitle(){
+  var a = SCHED.anchor;
+  if(SCHED.view === 'month') return a.getFullYear() + '年' + (a.getMonth() + 1) + '月';
+  if(SCHED.view === 'week'){
+    var mon = schedMonday(a), sun = schedAddDays(mon, 6);
+    return (mon.getMonth() + 1) + '月' + mon.getDate() + '日 – ' +
+      (sun.getMonth() + 1) + '月' + sun.getDate() + '日';
+  }
+  var wd = ['日', '一', '二', '三', '四', '五', '六'][a.getDay()];
+  return a.getFullYear() + '年' + (a.getMonth() + 1) + '月' + a.getDate() + '日 周' + wd;
+}
+function schedEventsOn(day){
+  var key = schedYmd(day);
+  return SCHED.events.filter(function(e){ return String(e.interview_date || '').slice(0, 10) === key; })
+    .sort(function(a, b){
+      var ta = schedEventStart(a) || '99:99';
+      var tb = schedEventStart(b) || '99:99';
+      return ta === tb ? String(a.candidate_name || '').localeCompare(String(b.candidate_name || ''), 'zh')
+        : ta.localeCompare(tb);
+    });
+}
+function schedChip(ev, timed){
+  var t = schedEventStart(ev);
+  var end = schedEventEnd(ev);
+  var dur = schedEventSpan(ev);
+  var bits = [ev.candidate_name || '未识别'];
+  if(ev.job_title) bits.push(ev.job_title);
+  if(ev.interview_unit) bits.push(ev.interview_unit);
+  if(ev.interview_place) bits.push(ev.interview_place);
+  if(ev.interview_mode) bits.push(ev.interview_mode);
+  var range = t ? (t + (end ? '-' + end : '')) : '';
+  var when = range ? (timed ? (range + '（' + dur + '分钟）') : range) : '';
+  var title = (when ? when + ' ' : '') + bits.join(' · ');
+  var label = (range ? '<span class="t">' + esc(range) + '</span> ' : '') +
+    esc(ev.candidate_name || '未识别');
+  /* 周/日视图：单位和地点紧跟在姓名后面（同一行，用空白隔开），
+     不另起一行；月视图格子太窄，只保留时间 + 姓名。 */
+  if(timed){
+    var meta = [];
+    if(ev.interview_unit) meta.push(ev.interview_unit);
+    if(ev.interview_place) meta.push(ev.interview_place);
+    if(meta.length){
+      label += '<span class="meta">' + meta.map(function(x){
+        return '&nbsp;&nbsp;' + esc(x);
+      }).join('') + '</span>';
+    }
+  }
+  return '<button type="button" class="sched-ev' + (timed ? ' timed' : '') + '"' +
+    ' draggable="' + (can('set_stage') ? 'true' : 'false') + '"' +
+    ' data-aid="' + esc(String(ev.application_id)) + '"' +
+    ' title="' + esc(title) + '">' + label + '</button>';
+}
+function schedHeadHtml(){
+  var editable = can('set_stage');
+  return '<div class="sched-head"><div>' +
+    '<div class="sched-title">' + esc(schedTitle()) + '</div>' +
+    '<div class="sched-sub">共 ' + SCHED.events.length + ' 场待面试' +
+      (editable ? ' · 拖拽卡片可调整日期/时间' : ' · 只读账号不能拖拽') + '</div></div>' +
+    '<div class="sched-tools">' +
+      '<button class="btn" onclick="schedPrev()" title="上一页">‹</button>' +
+      '<button class="btn" onclick="schedToday()">今天</button>' +
+      '<button class="btn" onclick="schedNext()" title="下一页">›</button>' +
+      '<button class="btn" onclick="schedExportXlsx()">导出 Excel</button>' +
+      '<span class="seg">' +
+        '<button class="' + (SCHED.view === 'day' ? 'on' : '') + '" onclick="schedSetView(\'day\')">日</button>' +
+        '<button class="' + (SCHED.view === 'week' ? 'on' : '') + '" onclick="schedSetView(\'week\')">周</button>' +
+        '<button class="' + (SCHED.view === 'month' ? 'on' : '') + '" onclick="schedSetView(\'month\')">月</button>' +
+      '</span>' +
+      '<button class="btn" onclick="schedLoad()">刷新</button>' +
+    '</div></div>';
+}
+function schedMonthHtml(){
+  var start = schedDateOf(SCHED.range.from), end = schedDateOf(SCHED.range.to);
+  var today = new Date();
+  var html = '<div class="sched-month">' +
+    ['一', '二', '三', '四', '五', '六', '日'].map(function(w){
+      return '<div class="sched-dow">周' + w + '</div>';
+    }).join('');
+  var d = schedAtMidnight(start);
+  while(d <= end){
+    var outside = d.getMonth() !== SCHED.anchor.getMonth();
+    var list = schedEventsOn(d);
+    var shown = list.slice(0, 3).map(function(e){ return schedChip(e, false); }).join('');
+    var more = list.length > 3
+      ? '<button class="sched-more" data-more="' + schedYmd(d) + '">+' + (list.length - 3) + ' 场</button>'
+      : '';
+    html += '<div class="sched-cell' + (outside ? ' out' : '') +
+      (schedSameDay(d, today) ? ' today' : '') + '" data-date="' + schedYmd(d) + '">' +
+      '<div class="sched-daynum">' + d.getDate() + '</div>' + shown + more + '</div>';
+    d = schedAddDays(d, 1);
+  }
+  return html + '</div>';
+}
+function schedWeekHtml(){
+  var H0 = 8, H1 = 18, HOUR = SCHED.hour || 46;
+  var start = schedDateOf(SCHED.range.from);
+  var days = [];
+  for(var i = 0; i < (SCHED.view === 'day' ? 1 : 7); i++) days.push(schedAddDays(start, i));
+  var today = new Date();
+  var head = '<div class="sched-weekhead"><div class="sched-timecol"></div>' +
+    days.map(function(d){
+      var wd = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()];
+      return '<div class="sched-dayhead' + (schedSameDay(d, today) ? ' today' : '') +
+        '">周' + wd + ' · ' + (d.getMonth() + 1) + '/' + d.getDate() + '</div>';
+    }).join('') + '</div>';
+  var labels = '<div class="sched-timecol"><div class="sched-allday-label">全天</div>' +
+    (function(){
+      var out = '';
+      for(var h = H0; h < H1; h++){
+        out += '<div class="sched-hourlabel" style="height:' + HOUR + 'px">' +
+          schedPad(h) + ':00</div>';
+      }
+      return out;
+    })() + '<div class="sched-endtime">' + H1 + ':00</div></div>';
+  var cols = days.map(function(d){
+    var list = schedEventsOn(d);
+    var allDay = list.filter(function(e){ return !schedEventStart(e); });
+    var timed = list.filter(function(e){ return !!schedEventStart(e); });
+    var lines = '';
+    for(var h = H0; h < H1; h++) lines += '<div class="sched-hline" style="height:' + HOUR + 'px"></div>';
+    var timedHtml = timed.map(function(e){
+      var t = schedEventStart(e).split(':');
+      var mins = Number(t[0]) * 60 + Number(t[1]) - H0 * 60;
+      var top = Math.max(0, Math.min((H1 - H0) * HOUR - 24, mins / 60 * HOUR));
+      var span = schedEventSpan(e);
+      var hpx = Math.max(20, Math.min((H1 - H0) * HOUR - top, span / 60 * HOUR));
+      return schedChip(e, true).replace('<button ',
+        '<button style="top:' + top.toFixed(0) + 'px;height:' + hpx.toFixed(0) + 'px" ');
+    }).join('');
+    return '<div class="sched-daycol" data-date="' + schedYmd(d) + '">' +
+      '<div class="sched-allday">' + allDay.map(function(e){ return schedChip(e, false); }).join('') + '</div>' +
+      '<div class="sched-hours">' + lines + timedHtml + '</div></div>';
+  }).join('');
+  return '<div class="sched-week' + (SCHED.view === 'day' ? ' single' : '') + '">' +
+    head + '<div class="sched-weekbody">' + labels + cols + '</div></div>';
+}
+function renderSchedule(){
+  var box = document.getElementById('scheduleView');
+  if(!box) return;
+  if(SCHED.view === 'month'){
+    box.innerHTML = schedHeadHtml() + '<div class="sched-body">' + schedMonthHtml() + '</div>';
+  }else{
+    /* 先把标题栏和空的 body 铺好，量出真正可用的高度，再按高度生成小时行。
+       否则标题栏换行时（窄窗口）会多算/少算几十像素。 */
+    box.innerHTML = schedHeadHtml() + '<div class="sched-body"></div>';
+    SCHED.hour = schedHourHeight();
+    box.querySelector('.sched-body').innerHTML = schedWeekHtml();
+  }
+  bindSchedule(box);
+}
+async function schedLoad(){
+  var box = document.getElementById('scheduleView');
+  if(!box) return;
+  var range = schedRange();
+  SCHED.range = range;
+  var req = ++SCHED.req;
+  box.innerHTML = schedHeadHtml() + '<div class="sched-body"><div class="sched-empty">读取日程…</div></div>';
+  var r = await api('/api/interviews/calendar?from=' + encodeURIComponent(range.from) +
+                    '&to=' + encodeURIComponent(range.to));
+  if(req !== SCHED.req) return;
+  if(r && r.__err){
+    box.innerHTML = schedHeadHtml() + '<div class="sched-body"><div class="sched-empty">' +
+      esc(r.__err) + '</div></div>';
+    return;
+  }
+  SCHED.events = (r && r.items) || [];
+  renderSchedule();
+}
+async function initSchedule(){
+  if(!SCHED.booted){ SCHED.booted = true; SCHED.anchor = new Date(); }
+  if(!window.__schedResizeBound){
+    window.__schedResizeBound = true;
+    var _rt = null;
+    window.addEventListener('resize', function(){
+      clearTimeout(_rt);
+      _rt = setTimeout(function(){
+        var el = document.getElementById('scheduleView');
+        if(el && el.classList.contains('on')) renderSchedule();
+      }, 120);
+    });
+  }
+  await schedLoad();
+}
+function schedExportRange(){
+  /* 月视图的 SCHED.range 是 6 周网格（包含前后月份的交叉日），导出只要本月。
+     周/日视图没有交叉日，直接用当前范围。 */
+  if(SCHED.view === 'month'){
+    var y = SCHED.anchor.getFullYear(), m = SCHED.anchor.getMonth();
+    return {from: schedYmd(new Date(y, m, 1)), to: schedYmd(new Date(y, m + 1, 0))};
+  }
+  return SCHED.range || schedRange();
+}
+function schedExportXlsx(){
+  var range = schedExportRange();
+  var url = '/api/interviews/calendar/export?from=' + encodeURIComponent(range.from) +
+    '&to=' + encodeURIComponent(range.to);
+  fetch(url, {headers: hdr({})}).then(function(r){
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    return r.blob();
+  }).then(function(b){
+    saveBlob(b, '面试日程-' + range.from + '至' + range.to + '.xlsx');
+    toast('已导出 Excel');
+  }).catch(function(e){ toast('导出失败：' + e, 'danger'); });
+}
+function schedSetView(v){
+  SCHED.view = v;
+  schedLoad();
+}
+function schedPrev(){
+  if(SCHED.view === 'month'){
+    SCHED.anchor = new Date(SCHED.anchor.getFullYear(), SCHED.anchor.getMonth() - 1, 1);
+  }else SCHED.anchor = schedAddDays(SCHED.anchor, SCHED.view === 'week' ? -7 : -1);
+  schedLoad();
+}
+function schedNext(){
+  if(SCHED.view === 'month'){
+    SCHED.anchor = new Date(SCHED.anchor.getFullYear(), SCHED.anchor.getMonth() + 1, 1);
+  }else SCHED.anchor = schedAddDays(SCHED.anchor, SCHED.view === 'week' ? 7 : 1);
+  schedLoad();
+}
+function schedToday(){ SCHED.anchor = new Date(); schedLoad(); }
+function schedOpenDay(day){
+  var d = schedDateOf(day);
+  if(!d) return;
+  SCHED.anchor = d;
+  SCHED.view = 'day';
+  schedLoad();
+}
+function schedOpenCandidate(cid){
+  if(!cid) return;
+  setView('pool');
+  pick(Number(cid));
+}
+function schedFindEvent(aid){
+  return (SCHED.events || []).filter(function(e){
+    return String(e.application_id) === String(aid);
+  })[0] || null;
+}
+async function schedMoveEvent(ev, date, time){
+  var body = {date: date};
+  if(time !== undefined) body.time = time;
+  var r = await api('/api/interviews/' + ev.application_id + '/reschedule', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+  });
+  if(r.__err){ toast('调整失败：' + r.__err, 'danger'); return; }
+  toast(r.message || '已调整面试时间');
+  await schedLoad();       /* 以服务端结果为准，避免本地时间和库里的值分叉 */
+}
+function schedBindDrag(el, ev){
+  el.addEventListener('dragstart', function(e){
+    SCHED_DRAG = ev;
+    SCHED_DRAG_JUST = true;
+    el.classList.add('dragging');
+    try{ e.dataTransfer.setData('text/plain', String(ev.application_id)); }catch(_e){}
+    if(e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  });
+  el.addEventListener('dragend', function(){
+    el.classList.remove('dragging');
+    SCHED_DRAG = null;
+    setTimeout(function(){ SCHED_DRAG_JUST = false; }, 120);
+  });
+  el.addEventListener('click', function(e){
+    if(SCHED_DRAG_JUST){ e.preventDefault(); e.stopPropagation(); return; }
+    schedOpenCandidate(ev.candidate_id);
+  });
+}
+function schedDropTarget(el, getTime){
+  el.addEventListener('dragover', function(e){
+    if(!SCHED_DRAG) return;
+    e.preventDefault();
+    if(e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    el.classList.add('drag-over');
+  });
+  el.addEventListener('dragleave', function(e){
+    if(!el.contains(e.relatedTarget)) el.classList.remove('drag-over');
+  });
+  el.addEventListener('drop', async function(e){
+    if(!SCHED_DRAG) return;
+    e.preventDefault();
+    el.classList.remove('drag-over');
+    var ev = SCHED_DRAG, date = el.getAttribute('data-date');
+    var time = getTime ? getTime(e, el) : undefined;
+    SCHED_DRAG = null;
+    if(!date) return;
+    await schedMoveEvent(ev, date, time);
+  });
+}
+function bindSchedule(box){
+  Array.prototype.forEach.call(box.querySelectorAll('.sched-ev[data-aid]'), function(el){
+    var ev = schedFindEvent(el.getAttribute('data-aid'));
+    if(ev) schedBindDrag(el, ev);
+  });
+  Array.prototype.forEach.call(box.querySelectorAll('.sched-more[data-more]'), function(el){
+    el.addEventListener('click', function(){ schedOpenDay(el.getAttribute('data-more')); });
+  });
+  Array.prototype.forEach.call(box.querySelectorAll('.sched-cell[data-date]'), function(el){
+    el.addEventListener('click', function(e){
+      if(SCHED_DRAG_JUST) return;
+      if(e.target.closest('.sched-ev, .sched-more')) return;
+      schedOpenDay(el.getAttribute('data-date'));
+    });
+    schedDropTarget(el, null);
+  });
+  Array.prototype.forEach.call(box.querySelectorAll('.sched-daycol[data-date]'), function(el){
+    schedDropTarget(el, function(e, col){
+      var hours = col.querySelector('.sched-hours');
+      if(!hours) return;
+      var r = hours.getBoundingClientRect();
+      if(e.clientY < r.top) return '';          /* 拖到“全天”区：清掉具体时刻 */
+      var H0 = 8, H1 = 18, HOUR = SCHED.hour || 46;
+      var mins = H0 * 60 + Math.round((e.clientY - r.top) / HOUR * 60 / 15) * 15;
+      mins = Math.max(H0 * 60, Math.min(H1 * 60 - 15, mins));
+      return schedPad(Math.floor(mins / 60)) + ':' + schedPad(mins % 60);
+    });
+  });
+}
+
 function mdLite(src){
   /* Markdown 渲染（2026-10-20 补齐）。原来这个函数只做标题/粗体/斜体/行内代码/单一列表，
      **模型做"全员对比"时输出的管道表格整块以原始 `|` 文本怼在页面上**
@@ -9689,6 +10380,24 @@ function newConvId(){
   return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+/* 切换/新建对话时，正在生成的那一轮要停下来，但**不能把旧回答写进新对话**。
+   CHAT_GEN 是这一轮回答的世代号：切换时 +1，旧请求的 onEvent / 收尾回调
+   发现世代号对不上就直接退出，连 CHAT_CTRL 都不碰（否则会把新请求的
+   AbortController 清空，新回答就停不掉了）。 */
+var CHAT_GEN = 0;
+function leaveRunningChat(){
+  var was = !!(CHAT_CTRL || CHAT_STREAMING);
+  CHAT_GEN += 1;
+  if(CHAT_CTRL){
+    try{ CHAT_CTRL.abort(); }catch(_e){ /* 已经结束的请求 abort 也会抛，忽略 */ }
+  }
+  CHAT_CTRL = null;
+  CHAT_STREAMING = false;
+  chatBusy(false);
+  stopTracePoll();
+  return was;
+}
+
 async function loadConversations(){
   var r = await api('/api/agent/conversations');
   if(r && !r.__err){
@@ -9700,11 +10409,14 @@ async function loadConversations(){
 function renderConvList(){
   var box = document.getElementById('chatConvList');
   if(!box) return;
-  if(!CHAT_CONVS.length){
+  /* restoreView 在脚本前部就会进入 initChat → newChat，而 CHAT_CONVS 的 var
+     赋值在脚本后部；此处必须容错，否则首屏直接抛 undefined.length，左侧会话列表不再加载。 */
+  var convs = CHAT_CONVS || [];
+  if(!convs.length){
     box.innerHTML = '<div class="chatconv-empty">还没有对话<br>点「新对话」开始</div>';
     return;
   }
-  box.innerHTML = CHAT_CONVS.map(function(c){
+  box.innerHTML = convs.map(function(c){
     var active = (c.id === CHAT_CONV_ID) ? ' on' : '';
     var title = c.title || '新对话';
     var meta = (c.message_count || 0) + ' 轮 · ' + esc(String(c.updated_at || '').slice(5, 16));
@@ -10036,10 +10748,8 @@ function collectOutputs(r){
     out.push({kind:'draft', icon:'✉', tag:'草稿',
               label:(d.subject || d.name || '邮件草稿')});
   });
-  (r.pending_proposals || r.proposals || []).forEach(function(p){
-    out.push({kind:'proposal', icon:'✓', tag:'待确认',
-              label:(p.summary || ('提案 #' + (p.proposal_id || '')))});
-  });
+  /* 待确认提案不进右侧「本次产出」：它是待办，不是这一轮生成的产物。
+     提案本身在对话卡片和「待确认提案」面板里处理，避免同一件事出现两遍。 */
   return out;
 }
 function outputKey(x){
@@ -10058,11 +10768,12 @@ function renderOutputs(r, reset){
   if(!box) return;
   if(reset) CHAT_OUTPUTS = [];
   if(r) mergeOutputs(collectOutputs(r));
-  var items = CHAT_OUTPUTS;
+  /* 过滤掉旧版本已经收进来的 proposal 项，避免升级后旧会话仍显示提案。 */
+  var items = CHAT_OUTPUTS.filter(function(x){ return x.kind !== 'proposal'; });
   var st = document.getElementById('outState');
   if(st) st.textContent = items.length ? (items.length + ' 项') : '—';
   if(!items.length){
-    box.innerHTML = '<div class="hint">当前对话还没有下载 / 草稿 / 提案</div>';
+    box.innerHTML = '<div class="hint">当前对话还没有下载 / 草稿</div>';
     return;
   }
   box.innerHTML = items.map(function(x){
@@ -10148,7 +10859,7 @@ function renderTraceFromMessages(hmsgs){
 }
 
 function newChat(){
-  if(CHAT_CTRL){ toast('请先停止当前回答'); return; }
+  var wasBusy = leaveRunningChat();
   CHAT_CONV_ID = newConvId();
   CHAT = [];
   var log = document.getElementById('chatLog');
@@ -10162,6 +10873,7 @@ function newChat(){
   renderConvList();
   var inp = document.getElementById('chatIn');
   if(inp){ inp.value = ''; inp.focus(); chatGrow(inp); }
+  if(wasBusy) toast('已停止当前回答，已新建对话');
 }
 
 function renderChatMessages(hmsgs){
@@ -10206,8 +10918,12 @@ function renderChatMessages(hmsgs){
 }
 
 async function openConversation(cid){
-  if(CHAT_CTRL){ toast('请先停止当前回答'); return; }
+  /* 允许在回答过程中直接切走：先停掉当前这一轮，再读另一条会话。
+     旧回答的收尾回调靠 CHAT_GEN 识别“已经被切走”，不会污染新对话。 */
+  var wasBusy = leaveRunningChat();
+  var gen = CHAT_GEN;
   var h = await api('/api/agent/history?conversation_id=' + encodeURIComponent(cid));
+  if(gen !== CHAT_GEN) return;             /* 期间又点了别的会话 */
   if(h.__err){ toast('读取会话失败：' + h.__err, 'danger'); return; }
   CHAT_CONV_ID = cid;
   var _last = renderChatMessages(h.messages || []);
@@ -10215,6 +10931,7 @@ async function openConversation(cid){
   renderConvList();
   var inp = document.getElementById('chatIn');
   if(inp) inp.focus();
+  if(wasBusy) toast('已停止当前回答，已切换对话');
 }
 
 async function renameConversation(cid){
@@ -10413,7 +11130,9 @@ function retryAgent(btn){
   var inp = document.getElementById('chatIn');
   if(inp){ inp.value = q; askAgent(); }
 }
-async function askAgentNonStream(q, holder){
+async function askAgentNonStream(q, holder, gen){
+  if(gen == null) gen = ++CHAT_GEN;
+  if(gen !== CHAT_GEN) return;
   holder.innerHTML = '<span class="hint">思考中…</span>';
   CHAT_CTRL = new AbortController();
   chatBusy(true);
@@ -10423,6 +11142,7 @@ async function askAgentNonStream(q, holder){
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({message: q, history: CHAT, session_id: CHAT_CONV_ID}),
     signal: CHAT_CTRL.signal});
+  if(gen !== CHAT_GEN) return;     /* 已经切走：不碰新对话，也不清空新请求 */
   CHAT_CTRL = null;
   chatBusy(false);
   stopTracePoll();
@@ -10443,6 +11163,7 @@ async function askAgent(){
   var q = (inp.value || '').trim();
   if(!q || CHAT_CTRL) return;
   if(!CHAT_CONV_ID) CHAT_CONV_ID = newConvId();
+  var gen = ++CHAT_GEN;      /* 这一轮回答的世代号，切走即失效 */
   inp.value = '';
   chatGrow(inp);
   pushMsg('user', q);
@@ -10472,6 +11193,7 @@ async function askAgent(){
     return thinkBody;
   }
   function flushAnswer(){
+    if(gen !== CHAT_GEN) return;
     if(answerTimer){ clearTimeout(answerTimer); answerTimer = null; }
     if(answerEl) answerEl.innerHTML = liveAns ? mdLite(liveAns) : '';
     chatAutoScroll();
@@ -10481,6 +11203,7 @@ async function askAgent(){
     answerTimer = setTimeout(function(){ answerTimer = null; flushAnswer(); }, 90);
   }
   function onEvent(ev){
+    if(gen !== CHAT_GEN) return;
     if(!ev || !ev.type) return;
     sawAny = true;
     lastEvent = Date.now();
@@ -10515,6 +11238,10 @@ async function askAgent(){
   startTracePoll(q, holder);
   var done = null;
   tick = setInterval(function(){
+    if(gen !== CHAT_GEN){
+      if(tick){ clearInterval(tick); tick = null; }
+      return;
+    }
     var sec = Math.round((Date.now() - t0) / 1000);
     if(!sawAny && sec >= 15){
       statusBase = '模型响应较慢，仍在等待…（可点停止）';
@@ -10544,6 +11271,7 @@ async function askAgent(){
       else onEvent(ev);
     });
     if(!done) throw new Error('流式连接结束但没有收到最终答复');
+    if(gen !== CHAT_GEN) return;
     CHAT_CTRL = null;
     CHAT_STREAMING = false;
     chatBusy(false);
@@ -10552,6 +11280,9 @@ async function askAgent(){
     if(answerTimer){ clearTimeout(answerTimer); answerTimer = null; }
     renderAgentResult(holder, done, q);
   }catch(e){
+    /* 已经切到别的会话/新建对话：这一轮的所有收尾都不许碰新界面，
+       尤其不能把 CHAT_CTRL 置空（那会让新请求停不下来）。 */
+    if(gen !== CHAT_GEN) return;
     var aborted = String((e && e.name) || '') === 'AbortError' || /abort/i.test(String(e));
     CHAT_CTRL = null;
     CHAT_STREAMING = false;
@@ -10591,7 +11322,7 @@ async function askAgent(){
       renderTrace(null);
       return;
     }
-    await askAgentNonStream(q, holder);
+    await askAgentNonStream(q, holder, gen);
   }
 }
 function renderDraftCards(holder, drafts){
@@ -10622,6 +11353,27 @@ function renderDraftCards(holder, drafts){
     });
   });
 }
+/* 提案一多，同一类操作会刷满一屏（例如批量归岗 20 条）。
+   按工具类型分组：1–3 条直接展开；超过 3 条默认折叠，标题写明类型与条数，
+   需要逐条核对时再展开。批量按钮仍在底部，不展开也能一次处理。 */
+function groupProposalRows(props, rowFn){
+  var groups = [], byKey = {};
+  (props || []).forEach(function(p){
+    var key = String(p.tool || p.tool_label || 'other');
+    if(!byKey[key]){
+      byKey[key] = {label: p.tool_label || p.tool || '其他提案', items: []};
+      groups.push(byKey[key]);
+    }
+    byKey[key].items.push(p);
+  });
+  return groups.map(function(g){
+    var rows = g.items.map(rowFn).join('');
+    if(g.items.length <= 3) return rows;
+    return '<details class="propgroup"><summary>' + esc(g.label) +
+      ' · ' + g.items.length + ' 条<span class="propgroup-hint">展开核对</span></summary>' +
+      rows + '</details>';
+  }).join('');
+}
 function renderProposalCards(holder, props){
   var el = document.createElement('div');
   el.className = 'dcard prop';
@@ -10635,7 +11387,7 @@ function renderProposalCards(holder, props){
     return (p.status || '待确认') === '待确认' && p.current_turn;
   }).length;
   el.innerHTML = '<div class="dcard-t">待确认提案（' + props.length + '）</div>' +
-    props.map(function(p){
+    groupProposalRows(props, function(p){
       /* ⚠️ 助手返回的字段是 `proposal_id`，不是 `id`。
          原来写 `p.id` → data-prop="undefined" → 请求 /api/proposals/NaN/decide
          → FastAPI 422（detail 是对象数组）→ 界面只弹 `[object Object]`。 */
@@ -10659,7 +11411,7 @@ function renderProposalCards(holder, props){
             '</div>'
           : '<div class="proprow-a"><span class="proprow-st">' + esc(st) + '</span></div>') +
         '</div>';
-    }).join('') +
+    }) +
     (batchCount > 1
       ? '<div class="dcard-a propbatch">' +
           '<button class="btn primary sm" data-prop-all="approve">' +
@@ -10674,17 +11426,17 @@ function renderProposalCards(holder, props){
     b.addEventListener('click', function(){
       var pid = Number(b.dataset.prop);
       if(!pid || isNaN(pid)){ toast('这条提案缺少编号，请刷新后重试'); return; }
-      /* 禁用放在用户确认之后（decideProp 内部）：在这里先禁用，
-         用户点「取消」就永远点不动了。 */
+      /* decideProp 会先把同一提案的按钮一起标灰并显示“已选择”，
+         用户在确认框点取消时再恢复。 */
       decideProp(pid, b.dataset.d, b);
     });
   });
   Array.prototype.forEach.call(el.querySelectorAll('[data-prop-all]'), function(b){
-    b.addEventListener('click', function(){ decideAllProps(el, b.dataset.propAll); });
+    b.addEventListener('click', function(){ decideAllCardProps(el, b.dataset.propAll); });
   });
 }
 /* 一句话批量任务：动作已由助手拆好，HR 只需要在这里点一次“全部同意”。 */
-async function decideAllProps(el, decision){
+async function decideAllCardProps(el, decision){
   var pids = [];
   Array.prototype.forEach.call(el.querySelectorAll('.proprow[data-pid]'), function(row){
     if(!row.querySelector('[data-prop]')) return;   /* 已处理的行不参与批量 */
@@ -10708,7 +11460,10 @@ async function decideAllProps(el, decision){
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({decision: approve ? 'approve' : 'reject'})
     });
-    if(r && !r.__err) success++; else failed++;
+    if(r && !r.__err){
+      success++;
+      settlePropCard(pids[i], approve ? 'approve' : 'reject');
+    } else failed++;
   }
   toast((approve ? '已执行 ' : '已拒绝 ') + success + ' 条' +
         (failed ? ('，' + failed + ' 条失败') : ''), failed ? 'warn' : 'ok');
@@ -10808,8 +11563,8 @@ function propRowHtml(p){
     '<div class="ptext">' + propSummaryHtml(p) + '</div>' +
     '<span class="prisk r' + esc(p.risk || '低') + '">' + esc(p.risk || '低') + '风险</span>' +
     '<span class="pacts">' +
-      '<button class="btn primary sm" onclick="decideProp(' + p.id + ',\'approve\',this)">同意</button>' +
-      '<button class="btn sm" onclick="decideProp(' + p.id + ',\'reject\',this)">拒绝</button>' +
+      '<button class="btn primary sm" data-d="approve" onclick="decideProp(' + p.id + ',\'approve\',this)">同意</button>' +
+      '<button class="btn sm" data-d="reject" onclick="decideProp(' + p.id + ',\'reject\',this)">拒绝</button>' +
     '</span></div>';
 }
 /* 只更新计数，不重建整个提案列表（v4.0.15：原来每处理一条都整块重绘） */
@@ -10844,12 +11599,16 @@ async function loadProps(){
     '<span class="pacts">' +
       '<button class="btn sm" onclick="decideAllProps(\'approve\')">全部确认执行</button>' +
       '<button class="btn sm" onclick="decideAllProps(\'reject\')">全部拒绝</button>' +
-    '</span></div>' + PROPS.map(propRowHtml).join('');
+    '</span></div>' + groupProposalRows(PROPS, propRowHtml);
   updatePropCount();
 }
 /* 批量决定：逐条走同一个 decide 接口（每条都写审计），失败不中断，最后汇总 */
 async function decideAllProps(decision){
-  var ids = PROPS.map(function(p){ return p.id; });
+  /* 面板可能是几分钟前打开的；批量执行前重新取一次，避免只处理旧快照里的第一条/前几条。 */
+  var fresh = await api('/api/proposals');
+  if(fresh.__err){ toast('读取提案失败：' + fresh.__err, 'danger'); return; }
+  var ids = (fresh.items || []).filter(function(x){ return x.status === '待确认'; })
+    .map(function(p){ return p.id; });
   if(!ids.length){ toast('没有待确认的提案'); return; }
   var ok = await askConfirm({title: decision === 'approve' ? '全部确认执行' : '全部拒绝',
     danger: decision === 'reject',
@@ -10858,47 +11617,87 @@ async function decideAllProps(decision){
   if(!ok) return;
   var done = 0, fail = 0;
   for(var i = 0; i < ids.length; i++){
+    toast('正在处理 ' + (i + 1) + ' / ' + ids.length + ' 条…');
     var r = await api('/api/proposals/' + ids[i] + '/decide', {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({decision: decision})});
-    if(r.__err) fail++; else done++;
+    if(r.__err) fail++;
+    else { done++; settlePropCard(ids[i], decision); }
   }
   toast('已处理 ' + done + ' 条' + (fail ? ('，失败 ' + fail + ' 条') : ''));
   /* 批量是一次性操作，重建一次列表可以接受；单条决定见 decideProp 的局部更新 */
   loadProps();
   load({push:false});
 }
-function settlePropCard(pid, label){
-  /* 同一张卡有两个按钮；成功/失败后都要一起停用，不能只停被点的那个。 */
-  Array.prototype.forEach.call(document.querySelectorAll('[data-pid="' + pid + '"]'),
-    function(row){
-      var acts = row.querySelector('.proprow-a');
-      if(acts) acts.innerHTML = '<span class="proprow-st">' + esc(label) + '</span>';
+/* 同一提案可能同时出现在「对话卡片」和右侧「待确认提案」面板里，
+   两处必须一起变灰、一起显示用户点了哪个；只停被点的那个按钮等于没停。 */
+function propActionAreas(pid){
+  return document.querySelectorAll(
+    '[data-pid="' + pid + '"] .proprow-a, #prop-' + pid + ' .pacts');
+}
+function markPropPending(pid, decision){
+  var choice = decision === 'approve' ? '同意执行' : '拒绝';
+  Array.prototype.forEach.call(propActionAreas(pid), function(area){
+    /* 只改按钮状态，不替换 innerHTML：对话卡片上的按钮是 renderProposalCards
+       一次性绑的监听器，innerHTML 一换，取消确认后就再也点不动了。 */
+    Array.prototype.forEach.call(area.querySelectorAll('button'), function(b){
+      b.disabled = true;
+      b.classList.toggle('chosen', b.getAttribute('data-d') === decision);
     });
+    var old = area.querySelector('.propchoice');
+    if(old) old.remove();
+    var tag = document.createElement('span');
+    tag.className = 'propchoice ' + decision;
+    tag.textContent = '已选择：' + choice;
+    area.appendChild(tag);
+  });
+}
+function restorePropPending(pid){
+  Array.prototype.forEach.call(propActionAreas(pid), function(area){
+    var old = area.querySelector('.propchoice');
+    if(old) old.remove();
+    Array.prototype.forEach.call(area.querySelectorAll('button'), function(b){
+      b.disabled = false;
+      b.classList.remove('chosen');
+    });
+  });
+}
+function settlePropCard(pid, decision){
+  var label = decision === 'approve' ? '已同意执行' : '已拒绝';
+  var cls = decision === 'approve' ? 'approve' : 'reject';
+  Array.prototype.forEach.call(propActionAreas(pid), function(area){
+    area.innerHTML = '<span class="proprow-st ' + cls + '">' + label + '</span>';
+  });
   Array.prototype.forEach.call(document.querySelectorAll('[data-prop="' + pid + '"]'),
     function(b){ b.disabled = true; });
+  Array.prototype.forEach.call(document.querySelectorAll('.proprow[data-pid="' + pid + '"]'),
+    function(row){ row.classList.add('done'); });
+  var row = document.getElementById('prop-' + pid);
+  if(row) row.classList.add('done');
 }
 async function decideProp(pid, decision, btn){
   var q = decision === 'approve'
     ? '确认执行这条提案吗？\n\n它会真的改档案（写审计）。'
     : '拒绝这条提案？\n\n拒绝也会写入审计。';
+  /* 用户一点就先标出“选了哪一个”，并把同一提案的另一处按钮一起锁住；
+     取消确认时再恢复，避免点错后卡死。 */
+  markPropPending(pid, decision);
   var ok = await askConfirm({title: decision === 'approve' ? '同意提案' : '拒绝提案',
     body: q, danger: decision === 'reject',
     okText: decision === 'approve' ? '同意并执行' : '拒绝'});
-  if(!ok) return;
-  if(btn) btn.disabled = true;
-  var r = await api('/api/proposals/' + pid + '/decide', {method:'POST',
-    headers:{'Content-Type':'application/json'}, body: JSON.stringify({decision: decision})});
-  if(r.__err){ toast(r.__err); if(btn) btn.disabled = false; return; }
+  if(!ok){ restorePropPending(pid); return; }
+  var r;
+  try{
+    r = await api('/api/proposals/' + pid + '/decide', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({decision: decision})});
+  }catch(e){
+    restorePropPending(pid);
+    toast('执行失败：' + String((e && e.message) || e), 'danger');
+    return;
+  }
+  if(r.__err){ toast(r.__err); restorePropPending(pid); return; }
   /* 局部更新：保留这一行并标成"已处理"，只把计数减一；不重建整块提案列表。
      这样 40+ 条时不会每次点同意都闪一下，也能看见这条已经处理过了。 */
-  settlePropCard(pid, decision === 'approve' ? '已执行' : '已拒绝');
-  var row = document.getElementById('prop-' + pid);
-  if(row){
-    row.classList.add('done');
-    var acts = row.querySelector('.pacts');
-    if(acts) acts.innerHTML = '<span class="hint">' +
-      (decision === 'approve' ? '已同意' : '已拒绝') + '</span>';
-  }
+  settlePropCard(pid, decision);
   PROPS = PROPS.filter(function(x){ return Number(x.id) !== Number(pid); });
   updatePropCount();
   toast(r.message || (decision === 'approve' ? '已执行' : '已拒绝'));

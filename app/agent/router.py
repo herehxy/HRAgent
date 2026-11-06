@@ -50,13 +50,14 @@ GROUPS: dict[str, list[str]] = {
         "preview_mail", "draft_email", "get_mail_config", "save_mail_config",
     ],
     "govern": [
-        "list_proposals", "list_audit", "list_agent_runs",
+        "list_proposals", "list_audit", "list_import_history", "list_agent_runs",
         "run_proactive_scan", "rebuild_brief", "clear_chat_history",
         "list_removed_files", "restore_source_files", "remove_source_files",
     ],
     "admin": [
         "create_job", "update_job_jd", "regrade_job", "ingest_resumes",
-        "export_resumes", "list_source_files", "get_settings", "save_settings",
+        "list_import_history", "export_resumes", "list_source_files",
+        "get_settings", "save_settings",
         "get_model_config", "save_model_config", "update_interview_dict",
         "route_pending",
     ],
@@ -102,6 +103,8 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
     "govern": (
         "提案", "待确认", "审计", "操作记录", "巡检", "扫描", "待办",
         "摘要", "周报", "恢复", "清理", "删除会话", "运行记录",
+        "导入记录", "导入历史", "重复检测", "重复简历", "被判重复", "被标记为重复",
+        "哪些重复", "为什么没入库", "没入库",
     ),
     "admin": (
         "新建岗位", "jd", "导入", "导出简历", "设置", "配置", "模型",

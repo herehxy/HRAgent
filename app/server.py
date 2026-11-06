@@ -425,6 +425,18 @@ def _load(path: str) -> dict:
         return json.load(fh)
 
 
+def _load_optional(path: str) -> dict:
+    """配置文件缺失/损坏时返回空字典，不让整个 /api/meta 变成 500。
+
+    `TP_HOME` 指向一个尚未初始化 config/ 的目录时（源码调试、新机器首次启动），
+    JD/档位文件可能还不存在；页面应该能打开，然后由用户去「系统配置」补。
+    """
+    try:
+        return _load(path)
+    except (OSError, ValueError):
+        return {}
+
+
 def _jd_tiers() -> tuple[dict, dict]:
     return _load(JD_PATH), _load(TIERS_PATH)
 
@@ -973,20 +985,24 @@ def api_meta(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
     s = _session(x_tp_token, x_tp_role)
     conn = db.connect(DB_PATH)
     try:
-        jd = _load(JD_PATH)
+        jd = _load_optional(JD_PATH)
         cfg = mb.load_config()
+        try:
+            _ontology = nz.describe()
+        except (OSError, ValueError):
+            _ontology = {}
         return {
             "session": s,
             "product_version": PRODUCT_VERSION,
             "jd": jd,
-            "tiers": _load(TIERS_PATH),
+            "tiers": _load_optional(TIERS_PATH),
             # 前端版本戳：验收脚本据此证明"页面跑的是当前这版前端"
             # （服务未重启时它反映旧代码，从而暴露"验的是上一版"）。
             "ui_build": ui_build(),
             "jobs": db.list_jobs(conn, include_inactive=True),
             "departments": db.list_departments(conn, include_inactive=True),
             "tools": tool_catalog(),
-            "ontology": nz.describe(),
+            "ontology": _ontology,
             "parse": parse_mod.engine_capabilities(),
             "mailbox": {"mode": cfg.get("mode"), "eml_dir": cfg.get("eml_dir"),
                         "imap_host": (cfg.get("imap") or {}).get("host") or "",
@@ -3619,6 +3635,191 @@ def api_bundle_initial_pass(date_from: str | None = Query(default=None),
         conn.close()
 
 
+@app.get("/api/interviews/calendar")
+def api_interview_calendar(date_from: str = Query(alias="from"),
+                           date_to: str = Query(alias="to"),
+                           x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                           x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """日程页：按日期范围取「待面试」的面试安排。
+
+    事件按投递（application）而不是候选人：同一人投两个岗位会有两条日程，
+    点击后各自打开对应档案。只读接口，不改变任何阶段/日期。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    _re_date = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    if not _re_date.fullmatch(str(date_from or "")) or not _re_date.fullmatch(str(date_to or "")):
+        raise HTTPException(status_code=422, detail="日期格式应为 YYYY-MM-DD")
+    try:
+        _d1 = datetime.strptime(date_from, "%Y-%m-%d").date()
+        _d2 = datetime.strptime(date_to, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="日期不合法") from exc
+    if _d2 < _d1:
+        raise HTTPException(status_code=422, detail="结束日期不能早于开始日期")
+    if (_d2 - _d1).days > 370:
+        raise HTTPException(status_code=422, detail="日程范围最多一年")
+    conn = db.connect(DB_PATH)
+    try:
+        items = db.list_interview_events(conn, date_from, date_to)
+        return {"from": date_from, "to": date_to, "count": len(items), "items": items}
+    finally:
+        conn.close()
+
+
+#: 日程表里的时段原文解析（与前端 `schedSlotRange` 同一口径）。
+#: 历史数据常把时刻存在 interview_slot（"9:00-9:50" / "上午 9:00-9:30"），
+#: 而 interview_date 只有日期；导出时必须从这里补开始/结束时间。
+_SCHED_TIME_RE = re.compile(r"(\d{1,2})\s*[:点时]\s*(\d{1,2})?")
+
+
+def _sched_slot_range(slot: str) -> tuple[str, str]:
+    s = str(slot or "").replace("：", ":").replace("～", "-").replace("~", "-")
+    s = s.replace("—", "-").replace("－", "-")
+    ap = "pm" if any(x in s for x in ("下午", "晚上", "傍晚")) else (
+        "am" if any(x in s for x in ("上午", "早上", "早晨")) else "")
+    out: list[str] = []
+    for m in _SCHED_TIME_RE.finditer(s):
+        h, mi = int(m.group(1)), int(m.group(2) or 0)
+        if h > 24 or mi > 59:
+            continue
+        if ap == "pm" and h < 12:
+            h += 12
+        if ap == "am" and h == 12:
+            h = 0
+        out.append(f"{h:02d}:{mi:02d}")
+        if len(out) >= 2:
+            break
+    return (out[0] if out else ""), (out[1] if len(out) > 1 else "")
+
+
+def _sched_event_range(it: dict) -> tuple[str, str]:
+    """事件的实际起止时间：优先档案里的时刻，其次时段原文，最后按学历时长推。"""
+    m = re.match(r"^\d{4}-\d{2}-\d{2}[ T](\d{2}):(\d{2})",
+                 str(it.get("interview_date") or ""))
+    start = ""
+    if m and not (m.group(1) == "00" and m.group(2) == "00"):
+        start = f"{m.group(1)}:{m.group(2)}"
+    slot_start, slot_end = _sched_slot_range(str(it.get("interview_slot") or ""))
+    if not start:
+        start = slot_start
+    if not start:
+        return "", ""
+    if slot_end and (not slot_start or slot_start == start) and slot_end != start:
+        return start, slot_end
+    dur = 50 if "博士" in str(it.get("edu_level") or "") else 30
+    h, mi = int(start[:2]), int(start[3:5])
+    total = h * 60 + mi + dur
+    end = f"{total // 60:02d}:{total % 60:02d}" if total < 24 * 60 else start
+    return start, end
+
+
+def _sched_sort_key(it: dict):
+    day = str(it.get("interview_date") or "")[:10]
+    start, _ = _sched_event_range(it)
+    return day, start or "99:99", str(it.get("candidate_name") or "")
+
+
+@app.get("/api/interviews/calendar/export")
+def api_interview_calendar_export(
+        date_from: str = Query(alias="from"),
+        date_to: str = Query(alias="to"),
+        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
+    """日程页导出 Excel（xlsx）：日期列强制文本并留足列宽，避免 Excel 显示 ####。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    _re_date = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    if not _re_date.fullmatch(str(date_from or "")) or not _re_date.fullmatch(str(date_to or "")):
+        raise HTTPException(status_code=422, detail="日期格式应为 YYYY-MM-DD")
+    try:
+        _d1 = datetime.strptime(date_from, "%Y-%m-%d").date()
+        _d2 = datetime.strptime(date_to, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="日期不合法") from exc
+    if _d2 < _d1:
+        raise HTTPException(status_code=422, detail="结束日期不能早于开始日期")
+    if (_d2 - _d1).days > 370:
+        raise HTTPException(status_code=422, detail="日程范围最多一年")
+    conn = db.connect(DB_PATH)
+    try:
+        items = db.list_interview_events(conn, date_from, date_to, with_contact=True)
+    finally:
+        conn.close()
+    headers = ["日期", "时间", "姓名", "电话", "岗位", "学历", "学校", "专业",
+               "面试单位", "面试方式", "状态", "面试地点"]
+    rows = []
+    for it in sorted(items, key=_sched_sort_key):
+        start, end = _sched_event_range(it)
+        phone = str(auth.present_candidate(it).get("phone") or "").strip()
+        if phone == "—":
+            phone = ""
+        rows.append([
+            str(it.get("interview_date") or "")[:10],
+            f"{start}-{end}" if start and end else (start or it.get("interview_slot") or ""),
+            it.get("candidate_name") or "", phone, it.get("job_title") or "",
+            it.get("edu_level") or "", it.get("school") or "", it.get("major") or "",
+            it.get("interview_unit") or "", it.get("interview_mode") or "",
+            it.get("stage") or "", it.get("interview_place") or "",
+        ])
+    _export_operator[0], _export_operator[1] = s["username"], s["role"]
+    meta = xlsx_mod.meta_line("面试日程", f"（{date_from} 至 {date_to}）", len(rows))
+    return _export_response(headers, rows, {0, 1, 3}, meta, "面试日程", len(rows),
+                            "xlsx", f"{date_from}至{date_to}")
+
+
+@app.post("/api/interviews/{aid}/reschedule")
+def api_interview_reschedule(aid: int, req: dict = Body(...),
+                             x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                             x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """拖拽调整面试时间：只改「待面试」投递的 interview_date / interview_slot。
+
+    `time` 省略 = 保留原来的时刻（月视图拖到另一天）；
+    传 `time` = 同时把时段原文改成这个时刻（周/日视图拖到具体时间）。
+    其余字段（面试单位/方式/阶段）不动，也不触发自动归档。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "set_stage")
+    date_s = str(req.get("date") or "").strip()[:10]
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_s):
+        raise HTTPException(status_code=422, detail="date 格式应为 YYYY-MM-DD")
+    try:
+        datetime.strptime(date_s, "%Y-%m-%d")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="date 不合法") from exc
+    time_s: str | None = None
+    if "time" in req and req.get("time") not in (None, ""):
+        time_s = str(req.get("time")).strip()
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", time_s):
+            raise HTTPException(status_code=422, detail="time 格式应为 HH:MM")
+    conn = db.connect(DB_PATH)
+    try:
+        app = db.get_application(conn, aid)
+        if not app:
+            raise HTTPException(status_code=404, detail="未找到该投递")
+        if str(app.get("stage") or "") != "待面试":
+            raise HTTPException(status_code=400,
+                                detail=f"只有「待面试」的投递可以调整日程，当前是「{app.get('stage') or '未设置'}」")
+        old_dt = str(app.get("interview_date") or "").strip()
+        old_time = old_dt[11:16] if re.match(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}", old_dt) else ""
+        keep_time = ("time" not in req)
+        new_time = old_time if keep_time else (time_s or "")
+        new_dt = date_s + ((" " + new_time) if new_time else "")
+        patch: dict = {"interview_date": new_dt}
+        # 时段原文只在用户明确拖到某个时刻时改；月视图只改日期，保留“上午/09:30-10:30”原文。
+        if not keep_time:
+            patch["interview_slot"] = time_s or None
+        updated = db.update_application_fields(
+            conn, aid, operator=s["username"], role=s["role"], **patch) or {}
+        return {"ok": True, "application_id": aid,
+                "interview_date": updated.get("interview_date"),
+                "interview_slot": updated.get("interview_slot"),
+                "message": (f"已改到 {new_dt}，并已同步到个人档案"
+                            if new_dt else "已调整面试时间，并已同步到个人档案")}
+    finally:
+        conn.close()
+
+
 @app.post("/api/applications/{aid}/interview-info")
 def api_interview_info(aid: int, req: dict,
                        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
@@ -3659,6 +3860,7 @@ def api_interview_info(aid: int, req: dict,
         _text("hire_unit", 40)             # v4.0.16：录用单位（招聘进度归属）
         _text("interview_slot", 24)        # 面试时段原文
         _text("interview_mode", 16)        # 面试方式（现场 / 线上）
+        _text("interview_place", 60)       # 面试地点（会议室 / 线上会议链接）
         _text("signed_at", 32)             # 签约时间
         _date("interview_date")            # 面试日期 YYYY-MM-DD
         _date("onboard_deadline")           # 入职最后期限（**人工维护**）
@@ -4740,6 +4942,35 @@ def _sse_pack(ev: dict) -> str:
     return "data: " + json.dumps(ev, ensure_ascii=False, default=str) + "\n\n"
 
 
+@app.get("/api/mail/candidates")
+def api_mail_candidates(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """写邮件页的收件人候选：只回 id/name/email，不跑人才库列表的全量组装。
+
+    原来页面为了一个收件人下拉框拉 `/api/candidates`（800+ 人时带打分、证据、
+    岗位补齐等一大堆字段），首屏要等好几秒。邮件页只需要三列。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT id, name, phone_enc, email_enc FROM candidates "
+            "WHERE COALESCE(archived_at, '') = '' ORDER BY name COLLATE NOCASE, id"
+        ).fetchall()
+        items = []
+        for r in rows:
+            p = auth.present_candidate(dict(r))
+            _email = p.get("email") or ""
+            if _email == "—":
+                _email = ""
+            items.append({"id": r["id"], "name": r["name"] or "",
+                          "email": _email})
+        return {"count": len(items), "items": items}
+    finally:
+        conn.close()
+
+
 @app.post("/api/agent/chat/stream")
 def api_agent_chat_stream(req: ChatReq,
                           x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
@@ -5165,6 +5396,9 @@ def api_proposals(status: str | None = None, x_tp_token: str | None = Header(def
         # 其他工具给的是 candidate_id。这里统一解析出候选人，
         # 前端就不必猜 summary 里的名字，也不用手动拼 URL。
         for it in items:
+            # 右侧提案面板按类型折叠时需要一个中文类型名；标签只在 db.TOOL_LABEL
+            # 维护一份，前端不再抄一遍（两处定义迟早分叉）。
+            it["tool_label"] = db.TOOL_LABEL.get(it.get("tool"), it.get("tool") or "其他提案")
             _a = it.get("args") or {}
             if isinstance(_a, str):
                 try:
@@ -5218,6 +5452,25 @@ def api_audit(entity: str | None = None, entity_id: str | None = None, limit: in
     try:
         items = db.list_audit(conn, entity=entity, entity_id=entity_id, limit=limit)
         return {"count": len(items), "items": items}
+    finally:
+        conn.close()
+
+
+@app.get("/api/import/history")
+def api_import_history(days: int = 30, action: str | None = None, limit: int = 200,
+                       x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """简历导入 / 重复检测记录。与 /api/audit 同一道权限，但包含 duplicate_skipped。"""
+    s = _session(x_tp_token, x_tp_role)
+    if s.get("mode") != "local":
+        require(s, "manage_users")
+    else:
+        require(s, "read")
+    conn = db.connect(DB_PATH)
+    try:
+        items = db.list_import_history(conn, days=days, action=action, limit=limit)
+        return {"count": len(items), "actions": list(db.IMPORT_AUDIT_ACTIONS),
+                "items": items}
     finally:
         conn.close()
 
@@ -7398,6 +7651,8 @@ def _mail_send_sync(req: MailSendReq, s: dict) -> dict:
                         _patch["interview_slot"] = _v["面试时段"]
                     if _v.get("面试方式"):
                         _patch["interview_mode"] = _v["面试方式"]
+                    if _v.get("面试地点"):
+                        _patch["interview_place"] = _v["面试地点"]
                     if _v.get("面试单位"):
                         # 邮件里改过单位就以**邮件为准**（候选人被告知的是邮件里那个），
                         # `update_application_fields` 会写审计，前后不一致看得见。

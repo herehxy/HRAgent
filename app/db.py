@@ -831,6 +831,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "interview_date": "TEXT",
             "interview_slot": "TEXT",
             "interview_mode": "TEXT",
+            # v4.5.1：面试地点（会议室 / 线上会议链接）。发面试邀请时从模板变量回写，
+            # 也可在档案里手工填写；日程卡片与导出的「面试地点」列直接读这里。
+            "interview_place": "TEXT",
             # 进入「已面试」阶段的时刻。**只用于圈定"曾到过已面试"的导出行集**，
             # 不参与展示。为什么不能用 interview_date 代替：面试日期在**邀约时**就有了
             # （待面试阶段），而"到底面了没有"要等面试完成 —— 用日期当标记会把
@@ -1625,6 +1628,7 @@ SELECT c.*,
        a.interview_date  AS interview_date,
        a.interview_slot  AS interview_slot,
        a.interview_mode  AS interview_mode,
+       a.interview_place AS interview_place,
        a.interviewed_at  AS interviewed_at,
        a.offer_sent_at   AS offer_sent_at,
        a.signed_at       AS signed_at,
@@ -2167,6 +2171,7 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         "interview_date": latest.get("interview_date"),
         "interview_slot": latest.get("interview_slot"),
         "interview_mode": latest.get("interview_mode"),
+        "interview_place": latest.get("interview_place"),
         "outcome": latest.get("outcome"),
         "offer_sent_at": latest.get("offer_sent_at"),
         "signed_at": latest.get("signed_at"),
@@ -2403,6 +2408,35 @@ def list_applications(conn: sqlite3.Connection, cid: int | None = None,
     return [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
 
 
+def list_interview_events(conn: sqlite3.Connection, date_from: str, date_to: str,
+                          with_contact: bool = False) -> list[dict]:
+    """日程页的面试事件：只取「待面试」且已登记面试日期的投递。
+
+    按 `interview_date` 的日期前缀过滤（列里可能存 `YYYY-MM-DD HH:MM`）。
+    同一候选人投多个岗位会有多条投递，各自是独立事件，用 application_id 区分。
+    `with_contact=True` 只给导出用：多取 `phone_enc`，由调用方解密成明文；
+    普通日历接口必须保持默认 False，避免把密文下发到前端。
+    """
+    contact_col = ", c.phone_enc AS phone_enc" if with_contact else ""
+    rows = conn.execute(
+        f"""SELECT a.id AS application_id, a.candidate_id,
+                  c.name AS candidate_name, c.edu_level, c.school, c.major,
+                  a.job_id, j.title AS job_title, a.stage,
+                  a.interview_date, a.interview_slot, a.interview_unit,
+                  a.interview_mode, a.interview_place, a.tier_final{contact_col}
+           FROM applications a
+           JOIN candidates c ON c.id = a.candidate_id
+           LEFT JOIN jobs j ON j.id = a.job_id
+           WHERE a.stage = ?
+             AND COALESCE(c.archived_at, '') = ''
+             AND a.interview_date IS NOT NULL
+             AND TRIM(a.interview_date) <> ''
+             AND substr(a.interview_date, 1, 10) BETWEEN ? AND ?
+           ORDER BY a.interview_date, c.name""",
+        ("待面试", date_from, date_to)).fetchall()
+    return [_decode(dict(r)) for r in rows]
+
+
 def set_application_tier(conn: sqlite3.Connection, aid: int, tier: str,
                          note: str | None = None, operator: str = "HR",
                          role: str = "recruiter") -> dict | None:
@@ -2469,6 +2503,7 @@ def unreview_mark(conn: sqlite3.Connection, aid: int, operator: str = "HR",
 #: `_ADD['applications']` 的每一列，必须落在 insert 列清单或本白名单里 —— 二者皆无即报错。
 APPLICATION_WRITABLE = (
     "outcome", "interview_unit", "interview_date", "interview_slot", "interview_mode",
+    "interview_place",
     "interviewed_at", "offer_sent_at", "signed_at", "onboard_deadline", "onboard_status",
     "hire_unit", "sign_status",
 )
@@ -2477,6 +2512,7 @@ APPLICATION_WRITABLE = (
 APPLICATION_FIELD_LABEL = {
     "outcome": "结论", "interview_unit": "面试单位", "interview_date": "面试日期",
     "interview_slot": "面试时段", "interview_mode": "面试方式",
+    "interview_place": "面试地点",
     "interviewed_at": "进入面试时间", "offer_sent_at": "录用函发送时间",
     "signed_at": "签约时间", "onboard_deadline": "入职最后期限",
     "onboard_status": "入职情况", "hire_unit": "录用单位",
@@ -3489,6 +3525,49 @@ def list_audit(conn: sqlite3.Connection, entity: str | None = None,
     sql += " ORDER BY id DESC LIMIT ?"
     args.append(int(limit))
     return [_decorate_audit(_decode(dict(r))) for r in conn.execute(sql, args).fetchall()]
+
+
+#: 简历导入相关审计动作。`duplicate_skipped` 在普通审计视图里被当作只读噪音过滤，
+#: 但它正是"这份简历为什么没入库"的答案，导入历史要单独把它们查出来。
+IMPORT_AUDIT_ACTIONS = (
+    "ingest", "duplicate_skipped", "new_version", "new_version_archived",
+    "oversize_skipped", "identity_weak_match",
+)
+
+
+def list_import_history(conn: sqlite3.Connection, *, days: int = 30,
+                        action: str | None = None, limit: int = 200) -> list[dict]:
+    """最近的简历导入 / 重复检测记录（含普通审计视图刻意隐藏的 duplicate_skipped）。
+
+    `audit_log` 里本来就有这些记录，但 `list_audit` 默认把 `duplicate_skipped`
+    当只读动作过滤掉了，所以 HR 在界面上一直看不到"这批谁被判定重复"。
+    这里按时间窗直接查，并为每条记录补上候选人姓名：
+      · application 实体：投递 → 候选人
+      · document 实体：附件哈希前缀 → 候选人
+    """
+    days = max(1, min(int(days or 30), 3650))
+    limit = max(1, min(int(limit or 200), 1000))
+    acts = [action] if action in IMPORT_AUDIT_ACTIONS else list(IMPORT_AUDIT_ACTIONS)
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    sql = ("SELECT * FROM audit_log WHERE action IN (%s) AND ts >= ? "
+           "ORDER BY id DESC LIMIT ?" % ",".join("?" * len(acts)))
+    rows = [_decorate_audit(_decode(dict(r)))
+            for r in conn.execute(sql, (*acts, cutoff, limit)).fetchall()]
+    for r in rows:
+        name = ""
+        if r.get("entity") == "application":
+            hit = conn.execute(
+                "SELECT c.name FROM applications a JOIN candidates c ON c.id = a.candidate_id "
+                "WHERE a.id = ?", (r.get("entity_id"),)).fetchone()
+            name = str(hit[0] or "") if hit else ""
+        elif r.get("entity") == "document":
+            hit = conn.execute(
+                "SELECT c.name FROM documents d JOIN candidates c ON c.id = d.candidate_id "
+                "WHERE substr(COALESCE(d.file_hash,''),1,16) = ?",
+                (r.get("entity_id"),)).fetchone()
+            name = str(hit[0] or "") if hit else ""
+        r["candidate_name"] = name
+    return rows
 
 
 def candidate_audit(conn: sqlite3.Connection, cid: int, limit: int = 50) -> list[dict]:

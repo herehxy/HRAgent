@@ -55,7 +55,8 @@ DISABLED_TOOLS = {"send_email", "send_message", "export_external", "delete_candi
 
 READ_TOOLS = {"search_candidates", "get_candidate", "get_candidates", "pool_stats", "search_by_skills",
               "semantic_search", "similar_candidates", "pipeline_overview",
-              "mailbox_status", "list_audit", "list_proposals", "explain_grade",
+              "mailbox_status", "list_audit", "list_import_history", "list_proposals",
+              "explain_grade",
               "list_jobs",
               # v1.25：邮件模板与配置（读只回掩码，绝不回明文密钥）
               "list_mail_templates", "get_mail_template", "get_mail_config",
@@ -189,6 +190,15 @@ TOOL_SPECS = [
           "查询操作审计日志（谁在何时改了什么）。可指定 entity（candidate/application/proposal）与 id。",
           {"entity": {"type": "string"}, "entity_id": {"type": "string"},
            "limit": {"type": "integer", "description": "默认 20"}}),
+    _spec("list_import_history",
+          "查询简历导入历史与重复检测记录：哪些简历入了库、哪些因 SHA256 重复被跳过、"
+          "哪些作为同一岗位的新版本归档。回答『刚才那批谁被判重复/为什么没入库』用这个，"
+          "不要凭导入提示回忆。",
+          {"days": {"type": "integer", "description": "回看天数，默认 30"},
+           "action": {"type": "string",
+                      "description": "可选：duplicate_skipped / ingest / new_version / "
+                                     "new_version_archived / oversize_skipped"},
+           "limit": {"type": "integer", "description": "默认 100"}}),
     _spec("list_proposals",
           "列出待 HR 确认的写入提案（改档/改阶段/加标签/合并）。"),
     _spec("explain_grade",
@@ -1516,6 +1526,26 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 {"entity": r["entity"], "entity_id": r["entity_id"], "action": r["action"],
                  "before": r["before"], "after": r["after"], "operator": r["operator"],
                  "ts": r["ts"]} for r in rows]})
+
+        if name == "list_import_history":
+            # 与 list_audit 同一道权限：导入记录含文件名/候选人，只给管理员或本机模式。
+            if str(ctx.role or "") != "admin" and not (ctx.cfg or {}).get("local"):
+                return _err("导入记录仅系统管理员可查看。",
+                            "如需核对重复检测，请让管理员在「账号管理」权限下查看。")
+            rows = db.list_import_history(
+                conn, days=int(args.get("days") or 30),
+                action=args.get("action"), limit=int(args.get("limit") or 100))
+            return _ok({
+                "count": len(rows),
+                "actions": list(db.IMPORT_AUDIT_ACTIONS),
+                "records": [{
+                    "ts": r.get("ts"), "action": r.get("action"),
+                    "action_label": r.get("action_label"),
+                    "entity": r.get("entity"), "entity_id": r.get("entity_id"),
+                    "candidate_name": r.get("candidate_name") or "",
+                    "readable": r.get("readable") or r.get("after") or "",
+                } for r in rows],
+            })
 
         if name == "list_proposals":
             rows = db.list_proposals(conn, status=args.get("status") or "待确认")
