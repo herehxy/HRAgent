@@ -1791,6 +1791,7 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
                 pass
     proposals = []
     briefs: list[dict] = []
+    _run_id = None
     conn = db.connect(ctx.db_path)
     try:
         _all = db.list_proposals(conn, status="待确认", limit=100)
@@ -1829,7 +1830,7 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
                     or int(_b.get("proposal_id")) in _mentioned
             except (TypeError, ValueError):
                 _b["current_turn"] = False
-        db.log_agent_run(conn, {
+        _run_id = db.log_agent_run(conn, {
             "session_id": ctx.session_id, "question": question, "answer": answer[:4000],
             "thinking": thinking,
             "context": getattr(ctx, "context", {}) or {},
@@ -1900,6 +1901,7 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
         "latency_ms": latency,
         "tokens": usage,
         "session_id": ctx.session_id,
+        "run_id": _run_id,
         "pending_proposals": briefs,
         "disclaimer": "系统只给建议，最终档位与招聘决定由 HR 确认。"
                       "写操作一律以『待确认提案』形式提交，不会自动生效。",

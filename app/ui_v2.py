@@ -50,82 +50,104 @@ _PAGE = r"""<!DOCTYPE html>
 <link rel="icon" type="image/png" href="__BRAND_ICON__">
 <style>
 :root{
-  /* 原始配色（v4.0 及更早）：冷灰画布 + 纯白内容区 + 蓝色功能色。
-     布局与组件形状保持 v4.1，仅颜色回到原版。 */
+  /* v5 — Apple-inspired design tokens.
+     Canvas = Apple 官网的浅灰 #f5f5f7，内容 = 纯白，文字 = #1d1d1f，
+     功能色 = Apple Blue #0071e3；分隔线只保留一层极淡的 hairline。 */
   color-scheme:light;
-  --ground:#f5f6f7;
+  --font-ui:"SF Pro Display","SF Pro Text",-apple-system,BlinkMacSystemFont,
+    "Segoe UI Variable Display","Segoe UI","PingFang SC","Hiragino Sans GB",
+    "HarmonyOS Sans SC","Source Han Sans SC","Noto Sans CJK SC",
+    "Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  --ease:cubic-bezier(.28,.11,.32,1);
+  --ease-out:cubic-bezier(.16,1,.3,1);
+  --ring:0 0 0 4px rgba(0,113,227,.16);
+  --ground:#f5f5f7;
   --surface:#ffffff;
-  --surface-2:#f2f3f5;
-  --nav:#e9ebee;
-  --ink:#1f2329;
-  --ink-2:#51565d;
-  --ink-3:#646a73;
-  --line:#dee0e3;
-  --line-2:#c9cdd4;
-  --accent:#3370ff;
-  --accent-ink:#1d5fd6;
-  --accent-soft:#f0f5ff;
-  --accent-line:#ccdcff;
-  --accent-hi:#e1ecff;
+  --surface-2:#f2f2f5;
+  --nav:#fbfbfd;
+  --ink:#1d1d1f;
+  --ink-2:#424245;
+  --ink-3:#86868b;
+  --line:#e8e8ed;
+  --line-2:#d2d2d7;
+  --accent:#0071e3;
+  --accent-ink:#0066cc;
+  --accent-soft:#eaf4ff;
+  --accent-line:#cfe4fb;
+  --accent-hi:#dcecfd;
   /* 导航 / 列表“选中”统一用这一套（聊天页也不跟着内容变色） */
-  --sel:#f0f5ff; --sel-ink:#1d5fd6; --sel-line:#ccdcff;
-  --row-alt:#F7F9FB; --row-unit:#EEF2F6;
-  /* 非聊天页的“暖色”强调位沿用主蓝；智能助手页会单独覆盖成 Claude 暖色。 */
-  --warm:#3370ff; --warm-soft:#f0f5ff; --warm-line:#ccdcff;
-  --plum:#7b61ff; --plum-soft:#f3efff;
-  --ok:#1f7a3d;   --ok-soft:#e8f5eb;   --ok-line:#b8dfc4;   --ok-hi:#ddeee2;
-  --warn:#a85b00; --warn-soft:#fff3e0; --warn-line:#f5d5a8;
-  --bad:#c93a2e;  --bad-soft:#ffefee;  --bad-line:#f5cfcb;
-  --tier-b:#146b9e; --tier-b-soft:#e8f1f8;
-  --r:10px; --r-s:7px;
-  --shadow:0 8px 24px rgba(31,35,41,.07);
+  --sel:#eaf4ff; --sel-ink:#0066cc; --sel-line:#cfe4fb;
+  --row-alt:#fafafc; --row-unit:#f0f0f3;
+  /* 智能助手页统一回主蓝，不再单独使用暖色。 */
+  --warm:#0071e3; --warm-soft:#eaf4ff; --warm-line:#cfe4fb;
+  --plum:#5e5ce6; --plum-soft:#eeedff;
+  --ok:#1d7f43;   --ok-soft:#e9f7ee;   --ok-line:#c9e9d5;   --ok-hi:#dcf2e5;
+  --warn:#a05a00; --warn-soft:#fff6e8; --warn-line:#f0ddbb;
+  --bad:#d70015;  --bad-soft:#fff0f2;  --bad-line:#f6ccd2;
+  --tier-b:#0b6bb3; --tier-b-soft:#e8f3fb;
+  --r:14px; --r-s:10px;
+  --shadow:0 2px 6px rgba(0,0,0,.05),0 16px 40px rgba(0,0,0,.09);
+  --fill-hover:rgba(0,0,0,.045);
+  --fill-active:rgba(0,0,0,.07);
+  --glass:rgba(255,255,255,.82);
+  --scroll-thumb:rgba(0,0,0,.18);
 }
 /* Manual dark theme (set on <html> by the account menu) */
 :root[data-theme="dark"]{
   color-scheme:dark;
-  --ground:#17181b; --surface:#1f2024; --surface-2:#282a2f; --nav:#1a1b1f;
-  --ink:#f2f3f5; --ink-2:#b5b9c2; --ink-3:#8a8f99;
-  --line:#35373d; --line-2:#4a4d55;
-  --accent:#7aa2ff; --accent-ink:#a8c4ff; --accent-soft:#232c3f;
-  --accent-line:#3a4a6b; --accent-hi:#2c3a55;
-  --sel:#232c3f; --sel-ink:#a8c4ff; --sel-line:#3a4a6b;
-  --row-alt:#26282C; --row-unit:#2D3035;
-  --warm:#7aa2ff; --warm-soft:#232c3f; --warm-line:#3a4a6b;
-  --plum:#b8a4ff; --plum-soft:#332c4a;
-  --ok:#7fd39a; --ok-soft:#24362b; --ok-line:#3b5a45; --ok-hi:#2d4435;
-  --warn:#e0b174; --warn-soft:#3a3225; --warn-line:#5a4a33;
-  --bad:#e58f86; --bad-soft:#3b2c29; --bad-line:#5a3e39;
-  --tier-b:#8fb8d8; --tier-b-soft:#28343c;
-  --shadow:0 8px 24px rgba(0,0,0,.22);
+  --ground:#000000; --surface:#1c1c1e; --surface-2:#2c2c2e; --nav:#161618;
+  --ink:#f5f5f7; --ink-2:#d2d2d7; --ink-3:#98989d;
+  --line:#38383a; --line-2:#48484a;
+  --accent:#2997ff; --accent-ink:#7cbfff; --accent-soft:#0f2a44;
+  --accent-line:#1f4668; --accent-hi:#163a5c;
+  --sel:#0f2a44; --sel-ink:#7cbfff; --sel-line:#1f4668;
+  --row-alt:#232325; --row-unit:#2a2a2d;
+  --warm:#2997ff; --warm-soft:#0f2a44; --warm-line:#1f4668;
+  --plum:#a99cff; --plum-soft:#2a2747;
+  --ok:#5fd47f; --ok-soft:#122b1a; --ok-line:#265433; --ok-hi:#193b24;
+  --warn:#f0b45c; --warn-soft:#2f2617; --warn-line:#594523;
+  --bad:#ff7a70; --bad-soft:#3a1e21; --bad-line:#653036;
+  --tier-b:#8ec5ea; --tier-b-soft:#1b2c38;
+  --shadow:0 2px 8px rgba(0,0,0,.4),0 20px 50px rgba(0,0,0,.5);
+  --ring:0 0 0 4px rgba(41,151,255,.22);
+  --fill-hover:rgba(255,255,255,.07);
+  --fill-active:rgba(255,255,255,.1);
+  --glass:rgba(28,28,30,.82);
+  --scroll-thumb:rgba(255,255,255,.24);
 }
 /* OS dark mode, unless the user explicitly chose light in the account menu. */
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
     color-scheme:dark;
-    --ground:#17181b; --surface:#1f2024; --surface-2:#282a2f; --nav:#1a1b1f;
-    --ink:#f2f3f5; --ink-2:#b5b9c2; --ink-3:#8a8f99;
-    --line:#35373d; --line-2:#4a4d55;
-    --accent:#7aa2ff; --accent-ink:#a8c4ff; --accent-soft:#232c3f;
-    --accent-line:#3a4a6b; --accent-hi:#2c3a55;
-    --sel:#232c3f; --sel-ink:#a8c4ff; --sel-line:#3a4a6b;
-    --row-alt:#26282C; --row-unit:#2D3035;
-    --warm:#7aa2ff; --warm-soft:#232c3f; --warm-line:#3a4a6b;
-    --plum:#b8a4ff; --plum-soft:#332c4a;
-    --ok:#7fd39a; --ok-soft:#24362b; --ok-line:#3b5a45; --ok-hi:#2d4435;
-    --warn:#e0b174; --warn-soft:#3a3225; --warn-line:#5a4a33;
-    --bad:#e58f86; --bad-soft:#3b2c29; --bad-line:#5a3e39;
-    --tier-b:#8fb8d8; --tier-b-soft:#28343c;
-    --shadow:0 8px 24px rgba(0,0,0,.22);
+    --ground:#000000; --surface:#1c1c1e; --surface-2:#2c2c2e; --nav:#161618;
+    --ink:#f5f5f7; --ink-2:#d2d2d7; --ink-3:#98989d;
+    --line:#38383a; --line-2:#48484a;
+    --accent:#2997ff; --accent-ink:#7cbfff; --accent-soft:#0f2a44;
+    --accent-line:#1f4668; --accent-hi:#163a5c;
+    --sel:#0f2a44; --sel-ink:#7cbfff; --sel-line:#1f4668;
+    --row-alt:#232325; --row-unit:#2a2a2d;
+    --warm:#2997ff; --warm-soft:#0f2a44; --warm-line:#1f4668;
+    --plum:#a99cff; --plum-soft:#2a2747;
+    --ok:#5fd47f; --ok-soft:#122b1a; --ok-line:#265433; --ok-hi:#193b24;
+    --warn:#f0b45c; --warn-soft:#2f2617; --warn-line:#594523;
+    --bad:#ff7a70; --bad-soft:#3a1e21; --bad-line:#653036;
+    --tier-b:#8ec5ea; --tier-b-soft:#1b2c38;
+    --shadow:0 2px 8px rgba(0,0,0,.4),0 20px 50px rgba(0,0,0,.5);
+    --ring:0 0 0 4px rgba(41,151,255,.22);
+    --fill-hover:rgba(255,255,255,.07);
+    --fill-active:rgba(255,255,255,.1);
+    --glass:rgba(28,28,30,.82);
+    --scroll-thumb:rgba(255,255,255,.24);
   }
 }
 *{box-sizing:border-box}
 html,body{height:100%}
 body{
   margin:0; background:var(--ground); color:var(--ink);
-  font:14px/1.62 Inter,"HarmonyOS Sans SC","Source Han Sans SC","Noto Sans CJK SC",
-       "PingFang SC","Microsoft YaHei",system-ui,sans-serif;
-  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
-  display:grid;grid-template-columns:232px 1fr;height:100vh;overflow:hidden;
+  font:14px/1.65 var(--font-ui);
+  -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
+  text-rendering:optimizeLegibility;
+  display:grid;grid-template-columns:248px 1fr;height:100vh;overflow:hidden;
 }
 button,input,select,textarea{font:inherit;color:inherit}
 button{cursor:pointer}
@@ -1808,16 +1830,17 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   border-top:1px solid var(--line);padding-top:12px}
 .rh-degree{min-width:0;padding:0 14px;border-left:1px solid var(--line)}
 .rh-degree:first-child{border-left:0;padding-left:0}
-.rh-dhead{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2);
-  margin-bottom:4px}
-.rh-dot{width:8px;height:8px;border-radius:50%;flex:none}
+.rh-dhead{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink-2);
+  margin-bottom:6px}
+.rh-dot{width:9px;height:9px;border-radius:50%;flex:none}
 .rh-dot.doctor{background:#7b61ff}
 .rh-dot.master{background:var(--accent)}
 .rh-dot.bachelor{background:var(--ok)}
 .rh-dot.college{background:#d97706}
-.rh-dname{font-weight:600;color:var(--ink)}
-.rh-dstat{display:block;font-size:12px;color:var(--ink-3);margin-top:1px;white-space:nowrap}
-.rh-dstat b{font-size:15px;font-variant-numeric:tabular-nums;color:var(--ink)}
+.rh-dname{font-weight:600;color:var(--ink);font-size:14px}
+.rh-dstat{display:block;font-size:13px;color:var(--ink-3);margin-top:3px;
+  white-space:nowrap;line-height:1.55}
+.rh-dstat b{font-size:18px;font-variant-numeric:tabular-nums;color:var(--ink)}
 .rh-dstat.gap.pos b{color:var(--warn)}
 .rh-dstat.gap.zero b{color:var(--ok)}
 .rh-dstat.gap.neg b{color:var(--bad)}
@@ -2351,6 +2374,896 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
   .mask.on .dlg{animation:none!important}
   .btn,.row,.side button,.cw-card,.lgitem,.seg button{transition:none!important}
 }
+
+/* ============================================================================
+   v5 — Apple-inspired visual system
+   ----------------------------------------------------------------------------
+   A final, purely visual layer on top of the existing business UI. It changes
+   colour, type, spacing, hairlines, radii and motion only — every DOM contract,
+   route, permission and data path stays exactly as it was.
+
+   Design language
+     · canvas #f5f5f7 / content white / ink #1d1d1f
+     · one accent — Apple Blue #0071e3
+     · hairlines and soft fills instead of heavy borders
+     · 14–22px radii, pill controls, generous rhythm
+     · SF-style type scale with tight display tracking
+     · motion that answers an action: 200–420ms, Apple ease curves
+   ============================================================================ */
+
+/* ---------- 0. Elevation tokens ---------- */
+:root{
+  --elev:0 1px 2px rgba(0,0,0,.06),0 0 0 .5px rgba(0,0,0,.05);
+  --elev-2:0 10px 28px rgba(0,0,0,.10);
+  --elev-card:0 1px 2px rgba(0,0,0,.03),0 14px 40px rgba(0,0,0,.06);
+}
+:root[data-theme="dark"]{
+  --elev:0 1px 3px rgba(0,0,0,.5),0 0 0 1px #313134;
+  --elev-2:0 14px 36px rgba(0,0,0,.55);
+  --elev-card:0 1px 2px rgba(0,0,0,.35),0 18px 46px rgba(0,0,0,.42);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --elev:0 1px 3px rgba(0,0,0,.5),0 0 0 1px #313134;
+    --elev-2:0 14px 36px rgba(0,0,0,.55);
+    --elev-card:0 1px 2px rgba(0,0,0,.35),0 18px 46px rgba(0,0,0,.42);
+  }
+}
+
+/* ---------- 1. Global text, scrollbars, focus ---------- */
+::selection{background:rgba(0,113,227,.18);color:var(--ink)}
+*{scrollbar-color:var(--scroll-thumb) transparent;scrollbar-width:thin}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border:3px solid transparent;
+  background-clip:content-box;border-radius:999px}
+::-webkit-scrollbar-thumb:hover{background:var(--ink-3);border:3px solid transparent;
+  background-clip:content-box}
+a{color:var(--accent-ink);text-decoration:none}
+a:hover{text-decoration:underline}
+h1,h2,h3,h4{letter-spacing:-.015em}
+.num,.stat-n,.rh-v,.rp-card .v,.rh-ring-center b,.count b{letter-spacing:-.02em}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,
+[tabindex]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---------- 2. Sidebar ---------- */
+body{grid-template-columns:248px 1fr}
+.side{padding:18px 14px 12px;background:var(--nav);border-right:1px solid var(--line)}
+.sbrand{padding:4px 10px 20px;gap:11px;font-size:15.5px;letter-spacing:-.01em}
+.sbrand img{width:30px;height:30px;border-radius:9px;
+  box-shadow:0 1px 2px rgba(0,0,0,.14),0 0 0 .5px rgba(0,0,0,.06)}
+.sbrand b{font-weight:600}
+.sgroup{padding:16px 12px 8px;font-size:10.5px;font-weight:600;
+  letter-spacing:.12em;color:var(--ink-3)}
+.side button{height:38px;padding:0 11px;gap:11px;border-radius:10px;
+  font-size:13.5px;color:var(--ink-2);
+  transition:background-color .2s var(--ease),color .2s var(--ease),
+    box-shadow .2s var(--ease),transform .12s var(--ease)}
+.side button:hover{background:var(--fill-hover);color:var(--ink)}
+.side button:active{transform:scale(.985)}
+.side button.on{background:var(--surface);color:var(--ink);font-weight:600;
+  box-shadow:var(--elev)}
+.side button.on .ico{color:var(--accent);opacity:1;stroke-width:1.8}
+.sfoot{padding:12px 2px 2px;border-top:1px solid var(--line)}
+.acct{height:42px;padding:0 9px;border-radius:10px;
+  transition:background-color .2s var(--ease)}
+.acct:hover{background:var(--fill-hover)}
+.acct .av{width:26px;height:26px;font-size:11px;font-weight:600;color:#fff;
+  background:var(--accent);box-shadow:none}
+.acct .txt b{font-size:13px}
+.acct .txt i{font-size:11px}
+.acctMenu{border:1px solid var(--line);border-radius:14px;background:var(--surface);
+  box-shadow:var(--elev-2);padding:6px}
+.acctMenu button{height:34px;line-height:34px;border-radius:8px;font-size:13px}
+.acctMenu button:hover{background:var(--fill-hover)}
+.acctMenu .ver{font-size:10.5px}
+
+/* ---------- 3. Top bars / filters ---------- */
+.top{height:60px;padding:0 24px;gap:10px;background:var(--surface);
+  border-bottom:1px solid var(--line)}
+.brand{font-size:14px;font-weight:600}
+.search{width:300px;height:36px;padding:0 15px;border:1px solid transparent;
+  border-radius:999px;background:var(--surface-2);color:var(--ink);font-size:13px;
+  transition:background-color .2s var(--ease),border-color .2s var(--ease),
+    box-shadow .2s var(--ease)}
+.search::placeholder{color:var(--ink-3)}
+.search:hover{border-color:var(--line)}
+.search:focus{background:var(--surface);border-color:var(--accent);box-shadow:var(--ring)}
+.sel,.msel > .msbtn,.vsel,.stagesel{height:36px;padding:0 13px;border:1px solid transparent;
+  border-radius:999px;background:var(--surface-2);color:var(--ink-2);font-size:13px;
+  transition:background-color .2s var(--ease),border-color .2s var(--ease),
+    color .2s var(--ease),box-shadow .2s var(--ease)}
+.sel:hover,.msel > .msbtn:hover,.vsel:hover,.stagesel:hover{
+  border-color:var(--line);color:var(--ink)}
+.sel:focus,.msel > .msbtn:focus,.vsel:focus,.stagesel:focus{
+  border-color:var(--accent);box-shadow:var(--ring)}
+.msel > .msbtn.active{background:var(--accent-soft);border-color:transparent;
+  color:var(--accent-ink)}
+.count{font-size:12px;color:var(--ink-3);letter-spacing:.01em}
+.count b{font-size:15px;font-weight:600;color:var(--ink)}
+.vdiv{height:16px;background:var(--line)}
+.top2{padding:9px 20px;gap:6px;background:var(--surface);border-bottom:1px solid var(--line)}
+.jobbar,.archbar{padding:9px 24px;background:var(--surface);border-color:var(--line)}
+.tabbar{padding:8px 24px;background:var(--surface);border-bottom:1px solid var(--line)}
+.tabs{display:flex;flex-wrap:wrap;gap:2px;padding:3px;border-radius:999px;
+  background:var(--surface-2)}
+.tabs button{padding:5px 14px;border:1px solid transparent;border-radius:999px;
+  background:transparent;color:var(--ink-2);font-size:12.5px;
+  transition:background-color .2s var(--ease),color .2s var(--ease),
+    box-shadow .2s var(--ease)}
+.tabs button:hover{background:var(--fill-hover);color:var(--ink)}
+.tabs button.on{background:var(--surface);border-color:transparent;color:var(--ink);
+  font-weight:600;box-shadow:var(--elev)}
+
+/* ---------- 4. Buttons ---------- */
+.btn{height:34px;padding:0 15px;border:1px solid transparent;border-radius:999px;
+  background:var(--surface-2);color:var(--ink);font-size:13px;font-weight:500;
+  line-height:1.2;transition:background-color .2s var(--ease),color .2s var(--ease),
+    border-color .2s var(--ease),transform .12s var(--ease),box-shadow .2s var(--ease)}
+.btn:hover{background:var(--line);border-color:transparent;color:var(--ink)}
+.btn:active{transform:scale(.97)}
+.btn.primary,.btn-primary{background:var(--accent-soft);border-color:transparent;
+  color:var(--accent-ink);font-weight:600}
+.btn.primary:hover,.btn-primary:hover{background:var(--accent-hi);color:var(--accent-ink)}
+.btn-green{background:var(--ok-soft);border-color:transparent;color:var(--ok)}
+.btn-green:hover{background:var(--ok-hi);border-color:transparent;color:var(--ok)}
+.btn-ok{background:var(--ok);border-color:var(--ok);color:#fff;font-weight:600}
+.btn-ok:hover{background:var(--ok);border-color:var(--ok);color:#fff;filter:brightness(1.06)}
+.btn-danger,.btn.danger{background:var(--bad-soft);border-color:transparent;
+  color:var(--bad);font-weight:500}
+.btn-danger:hover,.btn.danger:hover{background:var(--bad-line);border-color:transparent;
+  color:var(--bad)}
+.btn.sm{height:28px;padding:0 11px;font-size:12px}
+.btn-lg{height:36px;padding:0 16px;font-size:13.5px}
+.top2 .btn-lg{height:32px;padding:0 11px;font-size:12px}
+.btn:disabled{opacity:.38;cursor:not-allowed;transform:none}
+.btn.busy{border-color:var(--accent-line);color:var(--accent-ink);
+  background:var(--accent-soft)}
+.btn.reviewed{background:var(--ok-soft);border-color:transparent;color:var(--ok)}
+.btn.reviewed:hover{background:var(--ok-hi);border-color:transparent;color:var(--ok)}
+#btnProp.on{background:var(--accent-soft);border-color:transparent;color:var(--accent-ink)}
+
+/* iOS-style segmented control */
+.seg{display:inline-flex;gap:2px;padding:3px;border:0;border-radius:999px;
+  background:var(--surface-2);overflow:visible}
+.seg button{border:0;border-right:0;border-radius:999px;background:transparent;
+  color:var(--ink-2);padding:5px 14px;font-size:12.5px;
+  transition:background-color .2s var(--ease),color .2s var(--ease),
+    box-shadow .2s var(--ease)}
+.seg button:hover{background:var(--fill-hover);color:var(--ink)}
+.seg button.on{background:var(--surface);color:var(--ink);font-weight:600;
+  box-shadow:var(--elev)}
+.tier-sec .seg button{font-size:13.5px;padding:6px 18px}
+
+/* ---------- 5. Inputs ---------- */
+input:not([type=checkbox]):not([type=radio]),select,textarea{
+  border:1px solid transparent;border-radius:10px;background:var(--surface-2);
+  color:var(--ink);transition:background-color .2s var(--ease),
+    border-color .2s var(--ease),box-shadow .2s var(--ease)}
+input:not([type=checkbox]):not([type=radio]):hover,select:hover,textarea:hover{
+  border-color:var(--line-2)}
+input:not([type=checkbox]):not([type=radio]):focus,select:focus,textarea:focus{
+  outline:none;background:var(--surface);border-color:var(--accent);
+  box-shadow:var(--ring)}
+input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
+
+/* ---------- 6. Candidate / job list ---------- */
+.wrap{grid-template-columns:380px 1fr}
+.listwrap{background:var(--surface);border-right:1px solid var(--line)}
+.list{padding:8px}
+.row{grid-template-columns:3px 18px 30px 1fr auto;gap:10px;
+  padding:10px 12px 10px 0;margin:2px 0;border-bottom:0;border-radius:12px;
+  transition:background-color .18s var(--ease)}
+.row.jrow{grid-template-columns:3px 1fr auto}
+.row:hover{background:var(--surface-2)}
+.row.on{background:var(--accent-soft)}
+.rowbar{width:3px;min-height:38px;border-radius:999px}
+.row.on .rowbar{background:var(--accent)}
+.row .nm{font-size:14.5px;font-weight:600;letter-spacing:-.01em}
+.row .sub{font-size:12.5px;color:var(--ink-3)}
+.av{width:30px;height:30px;background:var(--surface-2);font-size:11.5px}
+.pager{padding:10px 14px;background:var(--surface);border-top:1px solid var(--line);
+  font-size:12px;color:var(--ink-3);gap:6px 10px}
+.pager .btn{height:28px;padding:0 11px;font-size:12px}
+.pgjumpwrap{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.pgbreak{flex-basis:100%;width:0;height:0;margin:0;padding:0}
+.pgwrap .pg,.ppager .pg,.pgjump{border-radius:8px;border-color:var(--line);
+  background:var(--surface)}
+.tier{border-radius:999px;font-size:11.5px;font-weight:600}
+.empty{padding:36px 18px;color:var(--ink-3);font-size:13px}
+.listmask{background:rgba(0,0,0,.22)}
+
+/* ---------- 7. Detail ---------- */
+.detail{padding:0 36px 56px;background:var(--surface)}
+.detail > *{max-width:1180px}
+.detail-toolbar{padding:16px 0 12px;background:var(--surface);
+  border-bottom:1px solid var(--line);box-shadow:none}
+.detail.swap > *:not(.detail-toolbar){animation:appleViewIn .32s var(--ease-out) both}
+.profile-head{margin-top:24px}
+.dname{font-size:28px;font-weight:650;letter-spacing:-.03em;line-height:1.22}
+.av-lg{width:104px;height:104px;border:0;border-radius:18px;background:var(--surface-2);
+  box-shadow:0 1px 3px rgba(0,0,0,.08);font-size:32px}
+.dmeta{font-size:14px;gap:8px 12px;color:var(--ink-2)}
+#detail .dmeta .chipl{font-size:14px}
+.dmeta .edv{background:var(--surface-2);border:1px solid transparent;border-radius:999px;
+  padding:4px 12px;font-size:13.5px}
+.dmeta .edv:hover{background:var(--accent-soft);border-color:transparent;
+  color:var(--accent-ink)}
+.dmeta .edv.empty{color:var(--ink-3)}
+.dmeta.dmeta2{margin-top:12px}
+#detail .dmeta.dmeta2 .chipl{font-size:13px;font-weight:600;padding:4px 12px;
+  border:1px solid transparent;border-radius:999px;background:var(--surface-2);
+  color:var(--ink-2)}
+.dmeta.dmeta2 .stagechip{background:var(--accent-soft);border-color:transparent;
+  color:var(--accent-ink)}
+.dmeta.dmeta2 .offerchip{background:var(--ok-soft);border-color:transparent;color:var(--ok)}
+.dmeta.dmeta2 .ochip{font-size:13px;padding:4px 12px}
+.fdsep{background:var(--line-2)}
+.vsep{background:var(--line)}
+
+/* sections */
+.sec{margin-top:30px}
+.sec > h3,#detail .sec > h3{font-size:17px;font-weight:600;letter-spacing:-.015em;
+  color:var(--ink);border-bottom:1px solid var(--line);padding-bottom:10px;
+  margin-bottom:14px}
+.sec.tier-sec{margin-top:24px}
+.sec.tier-sec > h3{font-size:17px;border-bottom:0;padding-bottom:0;margin-bottom:10px}
+.profile-layout{gap:0 32px;font-size:14px}
+.profile-layout .sec > h3{font-size:15px}
+#detail .ev{font-size:14px;line-height:1.75;background:var(--surface-2);
+  border-left:0;border-radius:12px;padding:12px 14px;color:var(--ink-2)}
+#detail .sec .ev b{color:var(--ink);font-weight:600}
+#detail .sum{font-size:15.5px;font-weight:500;line-height:1.7;color:var(--ink)}
+#detail .sec.quiet > h3{font-size:14px;letter-spacing:0;color:var(--ink-2)}
+#detail .sec.quiet .ev{font-size:13px;background:var(--surface-2)}
+.honosec .ev{background:var(--surface-2);border-radius:12px;padding:10px 13px}
+.proj-item{border-left:0;border-radius:14px;background:var(--surface-2);
+  padding:12px 14px}
+.proj-dir{border:0;border-radius:12px;background:var(--accent-soft)}
+.proj-dir span{color:var(--accent-ink)}
+.fgroup{background:var(--surface-2);border-radius:14px;padding:14px 16px}
+.fgroup > h4{font-size:12.5px;font-weight:600;color:var(--ink-3);letter-spacing:.02em}
+.ivqwrap{background:var(--surface-2);border-radius:14px;padding:14px 16px}
+.ivrow + .ivrow{border-top:1px solid var(--line)}
+.ivrow .multi{border-color:transparent;background:var(--surface-2);border-radius:10px}
+.edu-band{border-color:var(--line)}
+.edu-edit{border-top-color:var(--line)}
+.fld > .fl,.lbl2{color:var(--ink-3)}
+
+/* chips */
+.chipl,.jchip,.rk,.stg,.ochip,.achip,.jst,.prisk,.flagbad,.flagwarn,.flagneutral,
+.mchip,.tochip,.ivrow .mchip{border-radius:999px;border-color:transparent}
+.chipl{padding:3px 10px;font-size:12px;font-weight:500;background:var(--accent-soft);
+  color:var(--accent-ink)}
+.chipl.gray{background:var(--surface-2);color:var(--ink-2)}
+.jchip{padding:2px 10px;font-size:12px;background:var(--surface-2);color:var(--ink-2)}
+.jchip:hover{background:var(--accent-soft);color:var(--accent-ink);border-color:transparent}
+.rk{padding:2px 9px;font-size:12px;background:var(--accent-soft);color:var(--accent-ink)}
+.rk.none{background:transparent;color:var(--ink-3)}
+.stg,.jst{padding:3px 9px;font-size:11.5px}
+.ochip{padding:3px 11px;font-size:12.5px}
+.achip{padding:2px 9px}
+.prisk{padding:2px 9px}
+.skill span{border:1px solid transparent;border-radius:999px;background:var(--surface-2);
+  padding:4px 11px;font-size:12.5px;color:var(--ink-2)}
+.skill .hit{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.skill .miss{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+.skill .plain.unverified{background:transparent;border-style:dashed;border-color:var(--line-2)}
+
+/* banners / callouts */
+.srcbar{margin-top:16px;padding:12px 16px;background:var(--ok-soft);border:0;
+  border-radius:14px}
+.srcbar .btn{border-radius:999px;background:var(--surface);border-color:transparent}
+.srcbar .btn:hover{background:var(--ok);border-color:var(--ok);color:#fff}
+.dupwarn{border:0;border-radius:14px;background:var(--warn-soft);padding:12px 14px}
+.dupwarn .btn{border-radius:999px;border-color:transparent;background:var(--surface)}
+.quality{border-left:3px solid var(--warn);border-radius:12px;padding:12px 14px}
+.sensline{border:0;border-radius:12px;padding:10px 13px}
+.sensline.none{background:var(--surface-2)}
+.dcard{border:0;border-radius:12px;background:var(--accent-soft);padding:12px 14px}
+.dcard.prop{background:var(--warn-soft)}
+.msgline{border:0;border-radius:999px;background:var(--ok-soft);color:var(--ok)}
+.msgline.bad{background:var(--bad-soft);color:var(--bad)}
+.msgline.busy{background:var(--surface-2);color:var(--ink-3)}
+.taskbar{background:var(--warn-soft);border-bottom:1px solid var(--line)}
+.progfill{background:var(--accent);border-radius:999px}
+/* 思考块：DeepSeek 式“已思考（用时 N 秒）”折叠头 + 左侧竖线正文。 */
+.thinkbox{background:transparent;border:0;border-radius:0;margin:0 0 18px;
+  overflow:visible}
+.thinkbox > summary{display:flex;align-items:center;gap:6px;padding:3px 0;
+  font-size:13px;color:var(--ink-3);cursor:pointer;list-style:none}
+.thinkbox > summary::-webkit-details-marker{display:none}
+.thinkbox > summary::before{content:'›';font-size:17px;line-height:1;
+  color:var(--ink-3);transition:transform .15s var(--ease)}
+.thinkbox[open] > summary::before{transform:rotate(90deg)}
+.thinkbox .think-body{margin:8px 0 0;padding:2px 0 2px 16px;
+  border-left:2px solid var(--line-2);border-radius:0;
+  background:transparent;color:var(--ink-3);font-size:13px;
+  line-height:1.75;max-height:210px;overflow:auto;white-space:normal}
+.thinkbox .think-body p{margin:0 0 6px}
+.thinkbox .think-body p:last-child{margin-bottom:0}
+.think-live{display:block;margin:0 0 14px;padding:0;border:0;
+  border-radius:0;background:transparent}
+.think-live-h{display:flex;align-items:center;gap:6px;font-size:12.5px;
+  color:var(--ink-3);margin-bottom:6px}
+.think-live-h::before{content:'›';font-size:17px;line-height:1;
+  color:var(--accent);transform:rotate(90deg)}
+.think-live .think-body{margin:0;padding:2px 0 2px 16px;
+  border-left:2px solid var(--line-2);border-radius:0;
+  background:transparent;color:var(--ink-3);font-size:13px;
+  line-height:1.75;max-height:180px;overflow:auto;white-space:pre-wrap}
+.mchart{border:0;border-radius:14px;background:var(--surface-2)}
+.pvbox{border:0;border-radius:12px;background:var(--surface-2)}
+.outitem{border:0;border-radius:10px;background:var(--surface-2)}
+.outitem:hover{background:var(--fill-hover)}
+.metric-row{border-radius:10px;background:var(--surface-2)}
+.rawbox{border:0;border-radius:14px;overflow:hidden;box-shadow:0 0 0 1px var(--line)}
+.rawbox > summary{background:var(--surface-2);color:var(--ink-2)}
+.auditbox{border:0;border-radius:14px;overflow:hidden;box-shadow:0 0 0 1px var(--line)}
+.auditbox > summary{background:var(--surface-2);color:var(--ink-2);font-size:12.5px}
+.auditbox > summary:hover{background:var(--line)}
+.auditbox th{background:transparent;color:var(--ink-3);border-bottom:1px solid var(--line)}
+.auditbox td{border-bottom:1px solid var(--line)}
+
+/* fields that open on click */
+.edv{border-radius:8px;background:var(--surface-2)}
+.edv:hover{background:var(--accent-soft);border-color:transparent;color:var(--accent-ink)}
+.edu-field input,.edu-field select{border-radius:9px;background:var(--surface-2)}
+
+/* duplicate / pinned comparison tabs */
+.pinned-tabs{margin:0 -36px;padding:8px 36px;background:var(--surface);
+  border-bottom:1px solid var(--line);gap:6px}
+.pinned-tab{border:0;border-radius:999px;background:var(--surface-2);
+  padding:7px 12px;margin-bottom:0;color:var(--ink-2)}
+.pinned-tab:hover{background:var(--fill-hover)}
+.pinned-tab.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600;
+  border:0;box-shadow:none}
+.pinned-tab.on .pt-name{color:var(--accent-ink)}
+.pinned-profile{padding-top:22px}
+
+/* ---------- 8. Overview / analysis ---------- */
+.ovcol,.ov-analysis,.stat{background:var(--surface-2);border:0;border-radius:18px;
+  padding:20px 22px;box-shadow:none}
+.ovcol > h3{font-size:16px;font-weight:600;border-bottom:1px solid var(--line);
+  padding-bottom:12px;margin-bottom:14px}
+.ov-analysis{padding:20px 22px}
+.ana-workbench{background:transparent;border:0;border-radius:0;padding:0}
+.ana-controls{background:var(--surface);border:0;border-radius:14px;padding:14px 16px;
+  box-shadow:0 0 0 1px var(--line)}
+.ov-todos .todo{border-bottom:1px solid var(--line);padding:12px 10px;margin:0 -10px;
+  border-radius:12px;cursor:pointer;
+  transition:background-color .15s var(--ease),transform .12s var(--ease)}
+.ov-todos .todo:hover{background:var(--surface)}
+.ov-todos .todo:active{background:var(--fill-hover)}
+.ov-todos .todo:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.ov-todos .todo::after{content:'›';margin-left:auto;align-self:center;flex:none;
+  color:var(--ink-3);font-size:17px;line-height:1;
+  transition:color .15s var(--ease),transform .15s var(--ease)}
+.ov-todos .todo:hover::after{color:var(--accent);transform:translateX(2px)}
+.todo-t{font-size:14px}
+.todo-w{font-size:12.5px;color:var(--ink-2)}
+.todo-a{font-size:12.5px}
+.stat{padding:16px 18px}
+.stat-n{font-size:30px;font-weight:600}
+.stat-l{font-size:12.5px;color:var(--ink-2)}
+.stat-h{font-size:11.5px;color:var(--ink-3)}
+.ovjob-track{height:8px;background:var(--surface);border-radius:999px}
+.ovjob-track i{background:var(--accent);border-radius:999px}
+.ovjob-head{font-size:12px;color:var(--ink-2)}
+.lgitem{border-radius:8px;font-size:12.5px}
+.lgitem:hover{background:var(--fill-hover)}
+.anack{border-radius:999px;border-color:transparent;background:var(--surface)}
+.anack:hover{border-color:transparent;background:var(--fill-hover)}
+.anack.on{background:var(--accent-soft);border-color:transparent;color:var(--accent-ink)}
+.dimbtn{border-radius:999px;border-color:transparent;background:var(--surface)}
+.dimbtn.on{background:var(--accent-soft);border-color:transparent;color:var(--accent-ink)}
+.barchart .btrack{height:10px;border-radius:999px;background:var(--surface)}
+.barchart .btrack i{border-radius:999px}
+
+/* ---------- 9. Recruit progress ---------- */
+#recruitView.on{padding:28px 32px 56px;background:var(--ground)}
+.rp-head h2{font-size:28px;font-weight:650;letter-spacing:-.03em}
+.rp-card,.rp-degree,.rp-health-card,.rp-wrap,.recruit-hero{background:var(--surface);
+  border:0;border-radius:20px;box-shadow:0 0 0 1px var(--line)}
+.rp-card{padding:22px 24px}
+.rp-card::before{display:none}
+.rp-card .k{font-size:12.5px;color:var(--ink-3);font-weight:500;letter-spacing:.01em}
+.rp-card .v{font-size:36px;font-weight:650;letter-spacing:-.035em;margin-top:4px}
+.rp-degree{padding:18px 20px}
+.rp-degree .dt{font-size:15px;font-weight:600}
+.recruit-hero{padding:28px 32px;border-radius:24px}
+.recruit-hero::after{display:none}
+.rh-ring-center b{font-size:40px;font-weight:650;letter-spacing:-.04em}
+.rh-ring-center span{font-size:12px;color:var(--ink-3)}
+.rh-kpis{border-bottom-color:var(--line);padding-bottom:18px;margin-bottom:18px}
+.rh-v{font-size:30px;font-weight:650;letter-spacing:-.03em}
+.rh-k{font-size:11.5px;color:var(--ink-3);letter-spacing:.01em}
+.rh-degrees{border-top-color:var(--line);padding-top:16px}
+.rh-degree{border-left-color:var(--line)}
+.rh-dname{font-weight:600}
+.rp-tabs{display:inline-flex;gap:2px;border:0;background:var(--surface-2);
+  border-radius:999px;padding:3px;margin-bottom:18px}
+.rp-tab{border:0;border-radius:999px;padding:7px 17px;font-size:13px;color:var(--ink-2);
+  transition:background-color .2s var(--ease),color .2s var(--ease),
+    box-shadow .2s var(--ease)}
+.rp-tab:hover{background:var(--fill-hover);color:var(--ink)}
+.rp-tab.on{background:var(--surface);color:var(--ink);border:0;font-weight:600;
+  box-shadow:var(--elev)}
+.rp-bar .btn,.rp-toolbar .btn{border-radius:999px}
+.rp-wrap{border-radius:18px}
+.rp-table th{background:var(--surface-2);color:var(--ink-3);font-size:11.5px;
+  font-weight:600;letter-spacing:.03em;padding:12px 10px;border-bottom:1px solid var(--line)}
+.rp-table th.plan{background:var(--surface-2);color:var(--warn)}
+.rp-table th.calc{background:var(--surface-2);color:var(--accent-ink)}
+.rp-table th.sign{background:var(--surface-2);color:var(--plum)}
+.rp-table td{padding:12px 10px;border-bottom:1px solid var(--line)}
+.rp-table tbody tr.unit-even td{background:var(--row-alt)}
+.rp-table tbody tr.unit-even td.unit{background:var(--row-unit)}
+.rp-table tbody tr.unit-even.has-sign td{background:var(--ok-soft)}
+.rp-table tbody tr.unit-even.has-sign td.unit{background:var(--ok-hi)}
+.rp-table input.rp-num{border-radius:8px;border-color:transparent;background:var(--surface-2)}
+.rp-signee{background:var(--accent-soft);color:var(--accent-ink);border-radius:999px;
+  font-size:11.5px;padding:3px 9px}
+.rp-signee:hover{background:var(--accent-hi)}
+.rp-empty{border:1px dashed var(--line-2);background:var(--surface);border-radius:18px}
+.rp-health-card{padding:16px 18px}
+.rp-form > input,.rp-date-range input{border-radius:10px;background:var(--surface-2);
+  border-color:transparent;height:38px}
+
+/* ---------- 10. Schedule ---------- */
+#scheduleView.on{padding:28px 32px 22px;background:var(--ground)}
+.sched-head{margin-bottom:16px}
+.sched-title{font-size:28px;font-weight:650;letter-spacing:-.03em}
+.sched-sub{font-size:12.5px;color:var(--ink-3)}
+.sched-tools .btn{border-radius:999px}
+.sched-month,.sched-week{border:0;border-radius:18px;background:var(--surface);
+  box-shadow:0 0 0 1px var(--line);overflow:hidden}
+.sched-dow{background:var(--surface-2);color:var(--ink-3);font-size:11px;
+  font-weight:600;letter-spacing:.06em;border-color:var(--line);padding:10px 11px}
+.sched-cell{min-height:124px;border-color:var(--line);padding:7px 8px}
+.sched-cell.out{background:var(--surface-2)}
+.sched-cell.out .sched-daynum{color:var(--ink-3);opacity:.5}
+.sched-daynum{min-width:24px;height:24px;font-size:12.5px;font-weight:600}
+.sched-cell.today .sched-daynum{background:var(--accent);color:#fff;
+  box-shadow:0 2px 8px rgba(0,113,227,.35)}
+.sched-ev{border:0;border-left:0;border-radius:7px;background:var(--accent-soft);
+  color:var(--accent-ink);padding:3px 7px;font-weight:500;
+  transition:background-color .15s var(--ease),box-shadow .15s var(--ease)}
+.sched-ev:hover{background:var(--accent-hi);filter:none;box-shadow:none}
+.sched-ev .t{color:var(--accent-ink)}
+.sched-ev.dragging{opacity:.4}
+.sched-cell.drag-over{background:var(--accent-soft);outline:2px dashed var(--accent);
+  outline-offset:-3px}
+.sched-weekhead{background:var(--surface-2);border-bottom:1px solid var(--line)}
+.sched-weekhead .sched-dayhead{border-left-color:var(--line);color:var(--ink-2)}
+.sched-weekhead .sched-dayhead.today{background:var(--accent-soft);color:var(--accent-ink)}
+.sched-daycol,.sched-timecol{border-color:var(--line)}
+.sched-hline{border-top-color:var(--line)}
+.sched-hline:nth-child(2n){background:var(--fill-hover)}
+
+/* ---------- 11. Mail / editor ---------- */
+#mailView.on{background:var(--ground)}
+.mform{padding:24px 28px 40px;background:var(--surface-2);
+  border-right:1px solid var(--line)}
+.medit{padding:24px 30px 0;background:var(--surface)}
+.mform .sec > h3{font-size:15px}
+.mrow > label{font-size:12.5px;color:var(--ink-3)}
+.mrow input,.mrow select,.mrow > div > input,.mrow > div > select{
+  height:38px;border-radius:10px;border-color:transparent;background:var(--surface);
+  font-size:13.5px}
+.mrow input:focus,.mrow select:focus,.mrow > div > input:focus,
+.mrow > div > select:focus{background:var(--surface);border-color:var(--accent);
+  box-shadow:var(--ring)}
+.mtool button{border:0;border-radius:8px;background:var(--surface-2);color:var(--ink-2);
+  height:28px;min-width:30px}
+.mtool button:hover{background:var(--line);border-color:transparent;color:var(--ink)}
+.mtool .btn-primary{background:var(--accent-soft);color:var(--accent-ink)}
+.richeditor,#mBody{border:1px solid var(--line);border-radius:14px;background:var(--surface);
+  padding:16px 18px;line-height:1.75}
+.richeditor:focus,#mBody:focus{border-color:var(--accent);box-shadow:var(--ring)}
+.medit-actions{border-top:1px solid var(--line);background:var(--surface);padding:14px 0 18px}
+.tochip{font-size:14px;padding:5px 13px;border-radius:999px}
+.pv{border:0;border-radius:16px;box-shadow:0 0 0 1px var(--line)}
+.miss{border-radius:10px;background:var(--bad-soft);color:var(--bad)}
+.acList{border:0;border-radius:14px;box-shadow:var(--elev-2)}
+.acItem{border-radius:8px;padding:8px 11px}
+.acItem:hover{background:var(--fill-hover);color:var(--ink)}
+.acItem.sel{background:var(--accent-soft);color:var(--accent-ink)}
+
+/* ---------- 12. Job management / archive ---------- */
+#orgView.on{grid-template-columns:340px 1fr;background:var(--surface)}
+.orgleft{background:var(--surface);border-right:1px solid var(--line)}
+.orgleft .jobbar{border-top:1px solid var(--line);background:var(--surface)}
+#archView.on{grid-template-columns:400px 1fr;background:var(--surface)}
+#archBar{background:var(--surface);border-bottom:1px solid var(--line)}
+.jrowacts .btn{height:30px;padding:0 12px;font-size:12px}
+/* 岗位 JD：用满详情区宽度，短字段三列、长字段整行，标签在上方。 */
+.jdgroup{background:var(--surface-2);border-radius:16px;padding:16px 18px;margin-top:10px}
+.jdgrid{display:grid;grid-template-columns:1fr;gap:16px}
+.jdgrid-3{grid-template-columns:minmax(0,1.8fr) minmax(0,1fr) minmax(0,1fr)}
+.jdfield{display:flex;flex-direction:column;gap:7px;min-width:0;
+  font-size:12px;font-weight:500;color:var(--ink-3);letter-spacing:.01em}
+.jdgroup .jdfield input,.jdgroup .jdfield select,.jdgroup .jdfield textarea{
+  width:100%;min-width:0;height:40px;padding:0 12px;
+  border:1px solid transparent;border-radius:10px;
+  background:var(--surface);color:var(--ink);font:inherit;font-size:14px;
+  outline:none;transition:background-color .2s var(--ease),border-color .2s var(--ease),
+    box-shadow .2s var(--ease)}
+.jdgroup .jdfield textarea{height:auto;min-height:96px;padding:10px 12px;
+  line-height:1.7;resize:vertical}
+.jdgroup .jdfield .jdlist{min-height:64px}
+.jdgroup .jdfield input:focus,.jdgroup .jdfield select:focus,
+.jdgroup .jdfield textarea:focus{background:var(--surface);
+  border-color:var(--accent);box-shadow:var(--ring)}
+.jdgroup .jdfield .jdinline{display:flex;align-items:center;gap:8px;width:100%;
+  height:40px;padding:0 12px;border:1px solid transparent;border-radius:10px;
+  background:var(--surface)}
+.jdgroup .jdfield .jdinline input{flex:1;width:auto;min-width:0;height:100%;
+  padding:0;border:0;background:transparent;box-shadow:none}
+.jdgroup .jdfield .jdinline input:focus{border:0;background:transparent;
+  box-shadow:none}
+.jdgroup .jdfield .jdinline:focus-within{border-color:var(--accent);
+  box-shadow:var(--ring)}
+.jdinline i{font-style:normal;font-size:13px;color:var(--ink-3);white-space:nowrap;flex:none}
+.jdseg{display:flex;flex-wrap:wrap;gap:4px;padding:4px;border-radius:12px;
+  background:var(--surface)}
+.jdseg-btn{border:0;border-radius:8px;background:transparent;padding:6px 10px;
+  font:inherit;font-size:12.5px;color:var(--ink-2);cursor:pointer;
+  transition:background-color .15s var(--ease),color .15s var(--ease)}
+.jdseg-btn:hover{background:var(--fill-hover);color:var(--ink)}
+.jdseg-btn.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+@media (max-width:900px){.jdgrid-3{grid-template-columns:1fr}}
+/* 插入表格弹窗：两列数字 + 右对齐动作，不再用会被 pre-wrap 拉散的行内布局。 */
+.tblform{display:grid;grid-template-columns:1fr 1fr;gap:14px;white-space:normal}
+.tblfield{display:flex;flex-direction:column;gap:7px;font-size:12.5px;
+  color:var(--ink-3)}
+.tblfield input{height:40px;padding:0 12px;border:1px solid transparent;
+  border-radius:10px;background:var(--surface-2);font:inherit;font-size:14px;
+  color:var(--ink);outline:none}
+.tblfield input:focus{background:var(--surface);border-color:var(--accent);
+  box-shadow:var(--ring)}
+.tblbar{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.tblhint{margin-top:16px;font-size:12.5px;line-height:1.75;color:var(--ink-3);
+  white-space:normal}
+@media (max-width:720px){.tblform{grid-template-columns:1fr}}
+
+/* ---------- 13. System settings / users ---------- */
+#sysView.on{padding:28px 32px 56px;background:var(--ground)}
+#sysView > *{max-width:1080px}
+.cfgsec{background:var(--surface);border-radius:18px;padding:20px 22px;
+  box-shadow:0 0 0 1px var(--line)}
+.cfgsec > h3{border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:14px}
+.cfgsec .btn.sm{border-radius:999px}
+.crow > label{font-size:12.5px}
+.crow input,.crow select,.crow textarea,.cinput input,.cinput select,.cinput textarea,
+.cval .ced{border-radius:10px;border-color:transparent;background:var(--surface-2);
+  height:38px}
+.cval textarea.ced,.crow textarea,.cinput textarea{height:auto}
+.crow input:focus,.crow select:focus,.crow textarea:focus,.cinput input:focus,
+.cinput select:focus,.cinput textarea:focus,.cval .ced:focus{
+  border-color:var(--accent);box-shadow:var(--ring)}
+.cedit{background:var(--surface-2);border-radius:14px;padding:12px 14px}
+.dict-add input,.dict-bulk textarea{border-radius:10px;background:var(--surface-2);
+  border-color:transparent}
+#usersView{background:var(--ground)}
+.uwrap{max-width:980px;margin:28px 32px 48px;padding:24px 26px 32px;background:var(--surface);
+  border-radius:20px;box-shadow:0 0 0 1px var(--line)}
+.uhead h3{font-size:20px;font-weight:600;letter-spacing:-.02em}
+.utable th{border-bottom:1px solid var(--line);color:var(--ink-3);font-size:11.5px;
+  letter-spacing:.04em}
+.utable td{border-bottom:1px solid var(--line);padding:12px 10px}
+.utable tbody tr:hover td{background:var(--fill-hover)}
+
+/* ---------- 14. Pipeline / proposals ---------- */
+.pipe{padding:10px 24px;background:var(--surface);border-bottom:1px solid var(--line)}
+.pipehead{border-bottom:1px solid var(--line)}
+.pcol{border-right:1px solid var(--line)}
+.pchip{border-radius:8px;padding:4px 8px}
+.pchip:hover{background:var(--accent-soft);color:var(--accent-ink)}
+.propbox{background:var(--surface);border-bottom:1px solid var(--line);padding:12px 24px}
+/* 待确认提案属于人才库视图：切到其它页面时必须一起让位，
+   否则展开过一次之后会一直挂在每个页面底部（已修）。 */
+body.v-mail .propbox,body.v-org .propbox,body.v-archive .propbox,
+body.v-sys .propbox,body.v-users .propbox,body.v-chat .propbox,
+body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
+.prow{border-bottom:1px solid var(--line)}
+.prisk{border-radius:999px;background:var(--surface-2)}
+
+/* ---------- 15. Tables ---------- */
+.mdtable{border-collapse:separate;border-spacing:0;font-size:13px;
+  border-radius:12px;overflow:hidden;box-shadow:0 0 0 1px var(--line)}
+.mdtable th,.mdtable td{border:0;border-bottom:1px solid var(--line);padding:9px 12px}
+.mdtable th{background:var(--surface-2);color:var(--ink-3);font-size:11.5px;
+  font-weight:600;letter-spacing:.03em}
+.mdtable tr:last-child td{border-bottom:0}
+.mdtable tbody tr:nth-child(even){background:transparent}
+.mdtable tbody tr:hover{background:var(--fill-hover)}
+.mdt-btn{border-radius:999px;border-color:transparent;background:var(--surface-2)}
+
+/* ---------- 16. Chat ---------- */
+#chatView.on{grid-template-columns:260px minmax(0,1fr) 320px;background:var(--surface)}
+.chatconv{background:var(--nav);border-right:1px solid var(--line)}
+.chatconv-head{padding:20px 16px 12px}
+.chatconv-head h3{font-size:13px;font-weight:600;color:var(--ink-3);letter-spacing:.02em}
+.chatconv-list{padding:0 10px 16px}
+.chatconv-item{border-radius:10px;padding:11px 32px 11px 11px;margin-bottom:2px;
+  transition:background-color .18s var(--ease)}
+.chatconv-item:hover{background:var(--fill-hover)}
+.chatconv-item.on{background:var(--surface);box-shadow:var(--elev);color:var(--ink)}
+.chatconv-item.on .cc-title{color:var(--ink);font-weight:600}
+.cc-title{font-size:13px}
+.cc-meta{font-size:11px;color:var(--ink-3)}
+.chatlog{padding:28px 32px}
+/* LLM 回复不套气泡、不限制宽度：像 Claude Code 一样直接铺满正文栏。 */
+.chatlog > *{max-width:none}
+.msg{border-radius:18px;padding:12px 17px;font-size:15px;line-height:1.72;
+  border:1px solid transparent}
+.msg.assistant{background:transparent;border-color:transparent;
+  border-radius:0;box-shadow:none;padding:0 0 2px;margin-bottom:20px;
+  width:100%;max-width:none}
+.msg.user{background:var(--accent-soft);border-color:transparent;color:var(--ink);
+  border-bottom-right-radius:6px;max-width:min(100%,760px)}
+.msg-actions{display:flex;align-items:center;gap:6px;margin-top:8px;
+  opacity:.55;transition:opacity .18s var(--ease)}
+.msg:hover .msg-actions,.msg:focus-within .msg-actions{opacity:1}
+.msg.user .msg-actions{justify-content:flex-end}
+.msg.assistant .msg-actions{justify-content:flex-start}
+.msg-actions .mdt-btn{font-size:11.5px;padding:2px 9px}
+.msg.user .msg-edit{width:min(560px,70vw);min-height:64px;padding:10px 12px;
+  border:1px solid var(--accent);border-radius:14px;background:var(--surface);
+  color:var(--ink);font:inherit;font-size:14.5px;line-height:1.65;resize:vertical;
+  outline:none;box-shadow:var(--ring)}
+.msg.user .msg-edit-actions{justify-content:flex-end}
+#chatView .msg h3{font-size:17px;font-weight:600;letter-spacing:-.015em}
+#chatView .msg h4{font-size:15.5px;font-weight:600}
+#chatView .msg code{background:var(--surface);border-radius:6px}
+#chatView .msg pre{background:var(--surface);border-radius:12px;padding:12px 14px}
+#chatView .msg blockquote{border-left:3px solid var(--line-2)}
+.chatwelcome{max-width:780px}
+#chatView .chatwelcome h2{font-size:32px;font-weight:700;letter-spacing:-.035em;
+  line-height:1.18;margin-bottom:10px}
+#chatView .chatwelcome p{font-size:14px;line-height:1.7;color:var(--ink-3)}
+#chatView .cw-mark{display:none}
+#chatView .cw-asks{gap:10px}
+/* AI 产出标记保持克制：灰底小标签，不用强调色。 */
+.projectsec .ai-tag{background:var(--surface-2);border-color:transparent;
+  color:var(--ink-3);font-weight:500;font-size:11px;padding:1px 8px}
+#chatView .cw-card{background:var(--surface-2);border:0;border-radius:16px;
+  padding:15px 17px;transition:background-color .22s var(--ease),
+    box-shadow .22s var(--ease),transform .22s var(--ease)}
+#chatView .cw-card:hover{background:var(--surface);border-color:transparent;
+  transform:translateY(-2px);box-shadow:var(--elev-card)}
+#chatView .cw-card .cw-q{font-size:13.5px;line-height:1.55}
+.cw-w{font-size:11.5px;color:var(--ink-3)}
+.cw-config .btn{background:transparent;color:var(--ink-3)}
+.cw-config .btn:hover{background:var(--fill-hover);color:var(--ink)}
+.chatinput{background:var(--surface);border-top:1px solid var(--line);
+  padding:14px 32px 22px}
+.chatinput textarea{border:1px solid transparent;border-radius:20px;
+  background:var(--surface-2);padding:14px 64px 16px 16px;font-size:14.5px;
+  line-height:1.7;transition:background-color .2s var(--ease),
+    border-color .2s var(--ease),box-shadow .2s var(--ease)}
+.chatinput textarea:focus{background:var(--surface);border-color:var(--accent);
+  box-shadow:var(--ring)}
+/* 发送 / 停止是**同一个圆钮**：空闲时是回车图标，生成中变成停止方块。
+   一个按钮只表达一件事，不并排摆两个动作。 */
+#chatSend,#chatSend.busy{position:absolute;right:10px;bottom:10px;
+  width:40px;height:40px;min-width:40px;min-height:40px;padding:0;
+  border-radius:50%;display:grid;place-items:center;opacity:1;pointer-events:auto;
+  background:var(--ink);border:1px solid var(--ink);color:var(--surface);
+  transition:background-color .2s var(--ease),transform .12s var(--ease),
+    opacity .2s var(--ease)}
+#chatSend .ci-ico{width:19px;height:19px;flex:none;fill:none;stroke:currentColor;
+  stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+#chatSend .ci-stop{display:none}
+#chatSend.busy .ci-enter{display:none}
+#chatSend.busy .ci-stop{display:block}
+#chatView #chatSend{background:var(--ink);border-color:var(--ink);color:var(--surface)}
+#chatView #chatSend:hover{background:var(--ink);border-color:var(--ink);
+  color:var(--surface);filter:brightness(1.12)}
+#chatSend:active{transform:scale(.94)}
+#chatSend:disabled{opacity:.4}
+.cc-live{color:var(--accent-ink);font-weight:500}
+.cc-live::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;
+  background:var(--accent);margin-right:5px;vertical-align:1px}
+.chatside{background:var(--nav);border-left:1px solid var(--line);padding:20px}
+.chatside .sec{margin-top:24px}
+.chatside .sec > h3{font-size:14px;font-weight:600;letter-spacing:0;color:var(--ink-3);
+  border-bottom:0;padding-bottom:0;margin:0 0 9px}
+.chatside .sec > h3 .hint{font-size:11px;font-weight:400}
+.ctxbar{height:9px;border-radius:999px;background:var(--surface-2)}
+.ctxrow{font-size:12px}
+.ask{border:0;border-radius:999px;background:var(--surface-2);color:var(--ink-2);
+  font-size:12.5px;padding:6px 14px}
+.ask:hover{background:var(--fill-hover);border-color:transparent;color:var(--ink)}
+/* The assistant page now uses the same Apple Blue accent as the rest of the app. */
+#chatView .chatwrap{--accent:#0071e3;--accent-ink:#0066cc;--accent-soft:#eaf4ff;
+  --accent-line:#cfe4fb;--accent-hi:#dcecfd}
+:root[data-theme="dark"] #chatView .chatwrap{--accent:#2997ff;--accent-ink:#7cbfff;
+  --accent-soft:#0f2a44;--accent-line:#1f4668;--accent-hi:#163a5c}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) #chatView .chatwrap{--accent:#2997ff;
+    --accent-ink:#7cbfff;--accent-soft:#0f2a44;--accent-line:#1f4668;--accent-hi:#163a5c}
+}
+:root[data-theme="dark"] .msg.user{background:var(--accent-soft);border-color:transparent}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) .msg.user{background:var(--accent-soft);
+    border-color:transparent}
+}
+
+/* ---------- 17. Dialogs / popovers / toast ---------- */
+.mask{background:rgba(0,0,0,.32)}
+.dlg{background:var(--surface);border:0;border-radius:22px;padding:26px 28px;
+  box-shadow:0 30px 90px rgba(0,0,0,.28)}
+.dlg h3{font-size:20px;font-weight:600;letter-spacing:-.02em;margin-bottom:14px}
+.dlg .db{font-size:14px;line-height:1.72;color:var(--ink-2)}
+.dlg .dbar{margin-top:24px;gap:10px}
+.dlg .dbar .btn{height:36px;padding:0 18px}
+/* 弹窗内的自绘选项列表：和胶囊输入框同一套圆角、底色与强调色。 */
+.picklist{display:flex;flex-direction:column;gap:2px;max-height:340px;overflow-y:auto;
+  padding:6px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}
+.pickrow{display:flex;align-items:center;gap:12px;width:100%;padding:12px 14px;
+  border:0;border-radius:10px;background:transparent;text-align:left;font:inherit;
+  font-size:14px;color:var(--ink);cursor:pointer;
+  transition:background-color .15s var(--ease),color .15s var(--ease)}
+.pickrow:hover{background:var(--fill-hover)}
+.pickrow.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+.pickrow.placeholder{color:var(--ink-3)}
+.pickrow .pickcheck{margin-left:auto;opacity:0;color:var(--accent-ink);font-weight:700}
+.pickrow.on .pickcheck{opacity:1}
+/* 全站单选下拉的自绘弹层：与输入框同一套圆角、底色、强调色。
+   原生 <select> 仍然保留（表单值与 change 事件不变），只替换弹层外观。 */
+.selMenu{position:fixed;z-index:300;display:flex;flex-direction:column;gap:2px;
+  padding:6px;background:var(--surface);border:1px solid var(--line);
+  border-radius:14px;box-shadow:var(--elev-2);overflow-y:auto;min-width:160px;
+  max-width:360px;outline:none}
+.selOpt{display:flex;align-items:center;gap:10px;width:100%;padding:9px 11px;
+  border:0;border-radius:9px;background:transparent;text-align:left;font:inherit;
+  font-size:13px;color:var(--ink);cursor:pointer;white-space:nowrap;
+  transition:background-color .14s var(--ease),color .14s var(--ease)}
+.selOpt > span:first-child{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.selOpt:hover{background:var(--fill-hover)}
+.selOpt.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+.selOpt .selChk{opacity:0;color:var(--accent-ink);font-weight:700}
+.selOpt.on .selChk{opacity:1}
+.selOpt.placeholder{color:var(--ink-3)}
+.selOpt.placeholder.on{color:var(--accent-ink)}
+.dlg-x{border-radius:999px}
+.mask.on .dlg{animation:appleDlgIn .3s var(--ease-out) both}
+.msel .msPanel,.morePanel,.acctMenu,.acList,.batchPanel{background:var(--surface);
+  border:0;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.18),
+    0 0 0 1px rgba(0,0,0,.04);padding:8px}
+.msItem{border-radius:9px;padding:7px 10px;font-size:12.5px}
+.msItem:hover{background:var(--fill-hover)}
+.msItem input{accent-color:var(--accent)}
+.morePanel .clearRow{border-top:1px solid var(--line);padding-top:10px}
+#batchPanel .btn,#batchOpsPanel .btn{border-radius:8px;background:transparent}
+#batchPanel .btn:hover,#batchOpsPanel .btn:hover{background:var(--accent-soft);
+  color:var(--accent-ink)}
+.toast{left:50%;bottom:30px;padding:11px 20px;border-radius:999px;font-size:13px;
+  background:rgba(29,29,31,.94);color:#fff;box-shadow:0 12px 32px rgba(0,0,0,.28);
+  opacity:0;transform:translate(-50%,8px) scale(.98);
+  transition:opacity .24s var(--ease),transform .24s var(--ease)}
+.toast.on{opacity:1;transform:translate(-50%,0) scale(1)}
+.toast.ok{background:rgba(29,127,67,.96);color:#fff}
+.toast.warn{background:rgba(160,90,0,.96);color:#fff;border:0}
+.toast.danger{background:rgba(215,0,21,.96);color:#fff}
+.toast.info{background:rgba(29,29,31,.94);color:#fff}
+:root[data-theme="dark"] .toast{background:rgba(44,44,46,.96);color:var(--ink)}
+:root[data-theme="dark"] .toast.ok{background:rgba(29,127,67,.96);color:#fff}
+:root[data-theme="dark"] .toast.danger{background:rgba(215,0,21,.96);color:#fff}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) .toast{background:rgba(44,44,46,.96);color:var(--ink)}
+  :root:not([data-theme="light"]) .toast.ok{background:rgba(29,127,67,.96);color:#fff}
+  :root:not([data-theme="light"]) .toast.danger{background:rgba(215,0,21,.96);color:#fff}
+}
+.loadbar{height:3px}
+.loadbar::before{background:var(--accent);border-radius:999px}
+
+/* ---------- 18. Login ---------- */
+.loginbox{width:min(380px,calc(100vw - 48px));padding:40px 36px 32px;
+  background:rgba(255,255,255,.9);border:1px solid rgba(255,255,255,.75);
+  border-radius:26px;box-shadow:0 40px 100px rgba(0,0,0,.22),
+    inset 0 1px 0 rgba(255,255,255,.85)}
+.loginbrand{font-size:20px;font-weight:600;letter-spacing:-.02em}
+.logindot{width:10px;height:10px;border-radius:3px;background:var(--accent);
+  box-shadow:none}
+.loginlabel{font-size:12px;font-weight:500;color:var(--ink-3);margin-bottom:6px;
+  letter-spacing:.01em}
+.logininput{height:44px;padding:0 14px;margin-bottom:16px;border-radius:12px;
+  background:rgba(0,0,0,.045);border:1px solid transparent;font-size:14px}
+.logininput:focus{background:var(--surface);border-color:var(--accent);
+  box-shadow:var(--ring)}
+.loginbtn{height:46px;border-radius:999px;font-size:15px;font-weight:600;
+  background:var(--accent-soft);border-color:transparent;color:var(--accent-ink);
+  transition:background-color .2s var(--ease),transform .12s var(--ease)}
+.loginbtn:hover{background:var(--accent-hi)}
+.loginbtn:active{transform:scale(.985)}
+.loginhint{font-size:11.5px;color:var(--ink-3);margin-top:16px}
+#loginFirstHint{margin-top:16px}
+:root[data-theme="dark"] .loginbox{background:rgba(28,28,30,.76);
+  border-color:rgba(255,255,255,.12);box-shadow:0 40px 100px rgba(0,0,0,.6),
+    inset 0 1px 0 rgba(255,255,255,.08)}
+:root[data-theme="dark"] .logininput{background:rgba(255,255,255,.06)}
+:root[data-theme="dark"] .logininput:focus{background:var(--surface)}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) .loginbox{background:rgba(28,28,30,.76);
+    border-color:rgba(255,255,255,.12);box-shadow:0 40px 100px rgba(0,0,0,.6),
+      inset 0 1px 0 rgba(255,255,255,.08)}
+  :root:not([data-theme="light"]) .logininput{background:rgba(255,255,255,.06)}
+  :root:not([data-theme="light"]) .logininput:focus{background:var(--surface)}
+}
+
+/* ---------- 19. Motion ---------- */
+@keyframes appleViewIn{
+  from{opacity:0;transform:translateY(10px)}
+  to{opacity:1;transform:none}
+}
+@keyframes appleDlgIn{
+  from{opacity:0;transform:translateY(10px) scale(.975)}
+  to{opacity:1;transform:none}
+}
+#mailView.on,#orgView.on,#archView.on,#sysView.on,#usersView.on,
+#chatView.on,#recruitView.on,#scheduleView.on{
+  animation:appleViewIn .38s var(--ease-out) both
+}
+.detail.swap > *:not(.detail-toolbar){animation:appleViewIn .32s var(--ease-out) both}
+.mask.on .dlg{animation:appleDlgIn .3s var(--ease-out) both}
+@media (prefers-reduced-motion: reduce){
+  #mailView.on,#orgView.on,#archView.on,#sysView.on,#usersView.on,
+  #chatView.on,#recruitView.on,#scheduleView.on,
+  .detail.swap > *,.mask.on .dlg{animation:none!important}
+  .btn,.side button,.row,.tabs button,.seg button,.cw-card,.toast,.sched-ev,
+  .chatconv-item,.loginbtn{transition:none!important}
+  .btn:active,.side button:active,.loginbtn:active{transform:none!important}
+  #chatView .cw-card:hover{transform:none}
+}
+
+/* ---------- 20. Responsive (re-declared after the final layer) ---------- */
+@media (max-width:1280px){
+  body{grid-template-columns:216px 1fr}
+  .wrap{grid-template-columns:348px 1fr}
+  .search{width:236px}
+  .detail{padding:0 24px 44px}
+  #chatView.on{grid-template-columns:220px minmax(0,1fr)}
+  #recruitView.on,#sysView.on{padding:24px 24px 48px}
+  #scheduleView.on{padding:24px 24px 18px}
+  .pinned-tabs{margin:0 -24px;padding:8px 24px}
+}
+@media (max-width:1100px){
+  body{grid-template-columns:64px 1fr}
+  .side{padding:12px 6px}
+  .sbrand{justify-content:center;padding:4px 0 14px}
+  .sbrand span,.side button span,.side .sgroup,.side .sfoot .txt,
+  .side .sfoot .chev{display:none}
+  .side .sfoot .av{display:inline-flex}
+  .side button{justify-content:center;padding:0}
+  .wrap{grid-template-columns:1fr}
+  .detail{padding:0 18px 40px}
+  .top{height:auto;min-height:56px;flex-wrap:wrap;gap:8px;padding:8px 14px}
+  .top .search{flex:1 1 220px;width:auto;min-width:160px}
+  .top2{padding:8px 14px}
+  .tabbar{padding:8px 14px}
+  #chatView.on{grid-template-columns:1fr}
+  .chatinput{padding:12px 18px 18px}
+  .chatlog{padding:20px 18px}
+  #recruitView.on,#sysView.on{padding:20px 16px 40px}
+  #scheduleView.on{padding:20px 14px 14px}
+  .uwrap{margin:20px 16px 40px}
+  .pinned-tabs{margin:0 -18px;padding:8px 18px}
+}
+@media (max-width:900px){
+  #chatView.on{grid-template-columns:1fr}
+  .cw-asks{grid-template-columns:1fr}
+  .rp-cards,.rp-degrees{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .rh-kpis{grid-template-columns:1fr 1fr;gap:16px 0}
+}
+@media (max-width:720px){
+  .dlg{padding:22px;border-radius:20px}
+  .dname{font-size:24px}
+  .rp-head h2,.sched-title,#chatView .chatwelcome h2{font-size:26px}
+  .loginbox{padding:32px 24px 26px}
+}
 </style>
 <script>
 (function(){
@@ -2797,6 +3710,7 @@ function msToggle(id){
 /* 点空白关掉所有勾选面板（与"更多筛选"的交互一致） */
 document.addEventListener('click', function(ev){
   var t = ev.target;
+  if(SEL_MENU && SEL_MENU.contains(t)) return;
   if(t && t.closest && t.closest('.msel')) return;
   Array.prototype.forEach.call(document.querySelectorAll('.msel.open'), function(x){
     x.classList.remove('open');
@@ -2965,6 +3879,7 @@ document.addEventListener('click', function(ev){
   var panel = document.getElementById('morePanel');
   if(!panel || !panel.classList.contains('on')) return;
   var more = document.getElementById('btnMore');
+  if(SEL_MENU && SEL_MENU.contains(ev.target)) return;
   if(panel.contains(ev.target) || (more && more.contains(ev.target))) return;
   panel.classList.remove('on');
 }, true);
@@ -2973,6 +3888,7 @@ document.addEventListener('click', function(ev){
   var panel = document.getElementById('batchPanel');
   if(!panel || !panel.classList.contains('on')) return;
   var btn = document.getElementById('btnBatch');
+  if(SEL_MENU && SEL_MENU.contains(ev.target)) return;
   if(panel.contains(ev.target) || (btn && btn.contains(ev.target))) return;
   panel.classList.remove('on');
 }, true);
@@ -2980,6 +3896,7 @@ document.addEventListener('click', function(ev){
   var panel = document.getElementById('batchOpsPanel');
   if(!panel || !panel.classList.contains('on')) return;
   var btn = document.getElementById('btnBatchOps');
+  if(SEL_MENU && SEL_MENU.contains(ev.target)) return;
   if(panel.contains(ev.target) || (btn && btn.contains(ev.target))) return;
   panel.classList.remove('on');
 }, true);
@@ -3260,11 +4177,12 @@ function renderPager(){
     '<button class="btn sm" onclick="gotoPage(' + (cur - 1) + ')"' + (cur <= 1 ? ' disabled' : '') + '>上一页</button>' +
     '<span class="num">第 ' + cur + ' / ' + pages + ' 页　共 ' + total + ' 人</span>' +
     '<button class="btn sm" onclick="gotoPage(' + (cur + 1) + ')"' + (cur >= pages ? ' disabled' : '') + '>下一页</button>' +
-    '<span class="hint">跳至</span>' +
+    '<span class="pgbreak"></span>' +
+    '<span class="pgjumpwrap"><span class="hint">跳至</span>' +
     '<input class="pgjump" id="pgJump" value="' + cur + '" ' +
       'onkeydown="if(event.key===\'Enter\'){gotoPage(parseInt(document.getElementById(\'pgJump\').value)||1);}" ' +
       'style="width:52px;height:26px;text-align:center">' +
-    '<span class="hint">页</span>' +
+    '<span class="hint">页</span></span>' +
     '<span class="pgwrap">每页' +
       '<select class="sel" style="height:26px" onchange="setPageSize(this.value)">' +
         [25, 50, 100, 200].map(function(n){
@@ -3529,8 +4447,10 @@ async function showOverview(){
   var _prios = (br.priorities || []).filter(function(x){
     return !_dismissed[String(x.title || '')];
   });
+  window.OV_TODOS = _prios;
   var todo = _prios.map(function(x, i){
-    return '<div class="todo"><div class="todo-i num">' + (i + 1) + '</div>' +
+    return '<div class="todo" role="button" tabindex="0" data-todo-i="' + i + '">' +
+      '<div class="todo-i num">' + (i + 1) + '</div>' +
       '<div style="min-width:0"><div class="todo-t">' + esc(x.title || '') + '</div>' +
       (x.why ? '<div class="todo-w">' + esc(x.why) + '</div>' : '') +
       (x.action ? '<div class="todo-a">' + esc(x.action) + '</div>' : '') + '</div></div>';
@@ -3568,8 +4488,48 @@ async function showOverview(){
               : '<div class="hint ov-todos">今天没有需要优先处理的事</div>') +
       '</div>' +
     '</div>';
+  Array.prototype.forEach.call(box.querySelectorAll('.todo'), function(el){
+    function go(){ openTodo(Number(el.dataset.todoI)); }
+    el.addEventListener('click', go);
+    el.addEventListener('keydown', function(ev){
+      if(ev.key === 'Enter' || ev.key === ' '){ ev.preventDefault(); go(); }
+    });
+  });
   document.getElementById('count').innerHTML =
     '共 <b class="num">' + st.people + '</b> 人';
+}
+/* 今日待办整行可点：按 action 文案跳到对应的处理入口，
+   而不是让 HR 对着一行蓝字自己找。 */
+function openTodo(i){
+  var p = (window.OV_TODOS || [])[i];
+  if(!p) return;
+  var text = String(p.action || '') + ' ' + String(p.title || '') + ' ' + String(p.why || '');
+  setView('pool');
+  if(/投递管道|停滞投递|停滞/.test(text)){
+    if(!PIPE_OPEN) togglePipe();
+    return;
+  }
+  if(/缺失字段|信息缺失/.test(text)){
+    TAB = 'REVIEW';
+    Array.prototype.forEach.call(document.querySelectorAll('#tabs button'), function(b){
+      b.classList.toggle('on', b.dataset.tab === 'REVIEW');
+    });
+    PAGE.page = 1;
+    load();
+    var list = document.getElementById('list');
+    if(list) list.scrollTop = 0;
+    return;
+  }
+  var names = (p.names || []).filter(Boolean);
+  if(names.length){
+    var hit = (ITEMS || []).filter(function(x){ return names.indexOf(x.name) >= 0; })[0];
+    if(hit){ pick(hit.id); return; }
+    var kw = document.getElementById('kw');
+    if(kw){ kw.value = names[0]; doSearch(); }
+    return;
+  }
+  var kw2 = document.getElementById('kw');
+  if(kw2) kw2.focus();
 }
 async function rebuildBrief(){
   toast('重算今日待办…');
@@ -3886,7 +4846,7 @@ async function loadProjects(d, box){
   }
   var timer = setTimeout(function(){
     if(wrap.isConnected){
-      wrap.innerHTML = '<h3>项目经历<span class="ai-tag">AI 总结</span></h3>' +
+      wrap.innerHTML = '<h3>项目经历<span class="ai-tag">摘要</span></h3>' +
         '<div class="hint proj-loading">正在从简历中提炼项目经历…</div>';
     }
   }, 350);
@@ -3949,7 +4909,7 @@ function projectSectionHtml(p){
   if(!items.length) return '';
   var dir = String((p && p.direction_summary) || '').trim();
   return '<div class="sec projectsec profile-wide"><h3>项目经历' +
-      '<span class="ai-tag">AI 总结</span></h3>' +
+      '<span class="ai-tag">摘要</span></h3>' +
     (dir ? '<div class="proj-dir"><span>项目方向</span><b>' + esc(dir) + '</b></div>' : '') +
     '<div class="proj-list">' + items.map(function(x){
       return '<div class="proj-item">' +
@@ -4925,7 +5885,7 @@ function closeProgDlg(){
   var wide = document.querySelector('#mask .dlg.wide');
   if(wide) wide.classList.remove('wide');
   var b = document.getElementById('edDlgBody');
-  if(b){ b.style.display = 'none'; b.innerHTML = ''; }
+  if(b){ b.style.display = 'none'; b.innerHTML = ''; b.style.whiteSpace = ''; }
   document.getElementById('dlgBody').style.display = '';
   document.getElementById('dlgNo').style.display = '';
   document.getElementById('dlgYes').style.display = '';
@@ -6867,26 +7827,57 @@ function askSelect(title, options, ph){
     var editorBody = document.getElementById('edDlgBody');
     if(editorBody){ editorBody.style.display = 'none'; editorBody.innerHTML = ''; }
     document.getElementById('dlgBody').style.display = '';
+    /* 不用原生 <select>：它的下拉列表是浏览器/系统画的（蓝色高亮、方角），
+       和页面里其它胶囊输入框完全不是一套皮肤。这里改成应用内自绘的选项列表，
+       交互仍是「选中一行 → 确定」，键盘 Tab/Enter 也照常可用。 */
+    var picked = '';
     document.getElementById('dlgBody').innerHTML =
-      '<select id="dlgSelect" style="width:100%;height:36px;padding:0 9px;font-size:14.5px;' +
-      'border:1px solid var(--line-2);border-radius:var(--r-s);background:var(--surface)">' +
-      (ph ? '<option value="">' + esc(ph) + '</option>' : '') +
+      '<div class="picklist" id="dlgPickList" role="listbox">' +
+      (ph ? '<button type="button" class="pickrow placeholder" data-v="" role="option">' +
+        '<span>' + esc(ph) + '</span><span class="pickcheck">✓</span></button>' : '') +
       (options || []).map(function(o){
-        return '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>';
-      }).join('') + '</select>';
+        return '<button type="button" class="pickrow" data-v="' + esc(o.value) + '" role="option">' +
+          '<span>' + esc(o.label) + '</span><span class="pickcheck">✓</span></button>';
+      }).join('') + '</div>';
     document.getElementById('dlgNo').textContent = '取消';
     var yes = document.getElementById('dlgYes');
     yes.textContent = '确定'; yes.className = 'btn primary';
     function done(v){ closeDlg(v || null); }
-    yes.onclick = function(){ done(document.getElementById('dlgSelect').value || null); };
+    var list = document.getElementById('dlgPickList');
+    var rows = function(){ return list ? list.querySelectorAll('.pickrow') : []; };
+    if(list){
+      list.addEventListener('click', function(ev){
+        var row = ev.target.closest && ev.target.closest('.pickrow');
+        if(!row || !list.contains(row)) return;
+        picked = row.dataset.v || '';
+        Array.prototype.forEach.call(rows(), function(r){
+          r.classList.toggle('on', r === row);
+          r.setAttribute('aria-selected', r === row ? 'true' : 'false');
+        });
+      });
+      list.addEventListener('keydown', function(ev){
+        var all = Array.prototype.slice.call(rows());
+        var i = all.indexOf(document.activeElement);
+        if(ev.key === 'ArrowDown' || ev.key === 'ArrowUp'){
+          ev.preventDefault();
+          var next = ev.key === 'ArrowDown'
+            ? all[Math.min(all.length - 1, i + 1)] : all[Math.max(0, i - 1)];
+          if(next) next.focus();
+        } else if(ev.key === 'Enter' && document.activeElement.classList.contains('pickrow')){
+          ev.preventDefault();
+          document.activeElement.click();
+        }
+      });
+    }
+    yes.onclick = function(){ done(picked || null); };
     document.getElementById('dlgNo').onclick = function(){ done(null); };
     document.getElementById('mask').onclick = function(ev){
       if(ev.target === ev.currentTarget) done(null);
     };
     window.__dlgResolve = resolve;
     document.getElementById('mask').classList.add('on');
-    var sel = document.getElementById('dlgSelect');
-    setTimeout(function(){ sel.focus(); }, 30);
+    var first = rows()[0];
+    setTimeout(function(){ if(first) first.focus(); }, 30);
   });
 }
 document.addEventListener('keydown', function(ev){
@@ -7244,11 +8235,12 @@ async function initOrg(){
   document.getElementById('jobList').innerHTML = JOBS.length
     ? JOBS.map(function(x){
         return '<div class="row jrow" data-id="' + x.id + '">' +
-          '<div class="rowbar"></div><div class="av" style="border-radius:6px">' +
-            esc((x.title || '?').slice(0, 1)) + '</div>' +
+          '<div class="rowbar"></div>' +
           '<div style="min-width:0"><div class="nm">' + esc(x.title || '未命名') + '</div>' +
-            '<div class="sub">' + esc(x.department_name || x.dept || '未指定部门') +
-            '　· 在池 ' + (x.applications_count || 0) + ' 人</div></div>' +
+            '<div class="sub">' +
+            ((x.department_name || x.dept)
+              ? esc(x.department_name || x.dept) + '　· ' : '') +
+            '在池 ' + (x.applications_count || 0) + ' 人</div></div>' +
           '<div class="jrowacts">' +
             '<span class="jst ' + (x.active ? 'on' : 'off') + '">' +
             esc(x.active ? '在招' : '停用') + '</span>' +
@@ -7323,12 +8315,8 @@ async function saveNewJob(){
 }
 async function openJob(jid){
   JOB_CUR = jid;
-  loadOntologyHints();          /* 专业/技能规范名候选（异步，不阻塞渲染） */
-  setTimeout(function(){
-    attachHint('jdMajors', ONTOLOGY_MAJORS);
-    attachHint('jdSkills', ONTOLOGY_SKILLS);
-    attachHint('jdPref', ONTOLOGY_SKILLS);
-  }, 700);
+  /* 技能/专业改成自由文本 + 多行输入，不再弹规范名候选框；
+     保留 loadOntologyHints 供其它页面需要时使用，但这里不挂 datalist。 */
   Array.prototype.forEach.call(document.querySelectorAll('#jobList .row'), function(r){
     r.classList.toggle('on', Number(r.dataset.id) === jid);
   });
@@ -7340,14 +8328,17 @@ async function openJob(jid){
   var jd = d.jd || J.jd_json || {};
   var must = jd.must || {};
   var box = document.getElementById('jobDetail');
-  var eduOpts = ['', '大专', '本科', '硕士', '博士'].map(function(v){
-    return '<option value="' + v + '"' + ((must.education_min || '') === v ? ' selected' : '') +
-      '>' + (v || '不限') + '</option>';
+  var _edu = String(must.education_min || '');
+  var eduSeg = ['', '大专', '本科', '硕士', '博士'].map(function(v){
+    return '<button type="button" class="jdseg-btn' + (_edu === v ? ' on' : '') +
+      '" data-v="' + esc(v) + '">' + (v || '不限') + '</button>';
   }).join('');
   box.innerHTML =
     '<div class="dhead"><div style="min-width:0">' +
       '<div class="dname">' + esc(J.title || '未命名') + '</div>' +
-      '<div class="dmeta"><span>' + esc(J.department_name || J.dept || '未指定部门') + '</span>' +
+      '<div class="dmeta">' +
+        ((J.department_name || J.dept)
+          ? '<span>' + esc(J.department_name || J.dept) + '</span>' : '') +
         '<span class="chipl gray">' + esc(J.owner || '未指定负责人') + '</span>' +
         '<span class="chipl gray">编制 ' + (J.headcount == null ? '—' : J.headcount) + '</span>' +
         '<span class="chipl gray">在池 ' + (J.applications_count || 0) + ' 人</span></div>' +
@@ -7358,36 +8349,38 @@ async function openJob(jid){
         ? '<button class="btn" data-act="deactivate">停用</button>'
         : '<button class="btn" data-act="activate">启用</button>') +
     '</div></div>' +
-    '<div class="sec"><h3>岗位要求（决定档位尺子）</h3>' +
-      '<div class="bar2"><span class="lbl2">最低学历</span>' +
-        '<select id="jdEdu" style="width:130px">' + eduOpts + '</select>' +
-        '<span class="lbl2">最低年限</span>' +
-        '<input id="jdYears" type="number" min="0" step="1" style="width:90px" value="' +
-          esc(String(must.years_min == null ? 0 : must.years_min)) + '">' +
+    '<div class="sec"><h3>岗位要求</h3>' +
+      '<div class="jdgroup"><div class="jdgrid jdgrid-3">' +
+        '<div class="jdfield"><span>最低学历</span>' +
+          '<div class="jdseg" id="jdEduSeg">' + eduSeg + '</div>' +
+          '<input type="hidden" id="jdEdu" value="' + esc(_edu) + '"></div>' +
+        '<label class="jdfield"><span>最低年限</span>' +
+          '<input id="jdYears" type="number" min="0" step="1" value="' +
+            esc(String(must.years_min == null ? 0 : must.years_min)) + '"></label>' +
+        '<label class="jdfield"><span>招聘数量</span>' +
+          '<span class="jdinline"><input id="jdHead" type="number" min="0" step="1" value="' +
+            esc(String(J.headcount == null ? '' : J.headcount)) + '"><i>人</i></span></label>' +
+      '</div></div>' +
+      '<div class="jdgroup"><div class="jdgrid">' +
+        '<label class="jdfield"><span>必需技能</span>' +
+          '<textarea id="jdSkills" rows="2" class="jdlist" ' +
+            'placeholder="顿号分隔，如 数据分析、项目管理">' +
+            esc((must.skills_required || []).join('、')) + '</textarea></label>' +
+        '<label class="jdfield"><span>专业要求</span>' +
+          '<textarea id="jdMajors" rows="2" class="jdlist" ' +
+            'placeholder="顿号分隔，如 计算机、电子信息">' +
+            esc((must.major_required || []).join('、')) + '</textarea></label>' +
+        /* 「加分技能」读的是 `preferred.skills`（后端 `_jd_from_req` 的落点）。 */
+        '<label class="jdfield"><span>加分技能</span>' +
+          '<textarea id="jdPref" rows="2" class="jdlist" ' +
+            'placeholder="加分项，有更好，没有不算减分">' +
+            esc(((J.jd_json && J.jd_json.preferred && J.jd_json.preferred.skills) || []).join('、')) +
+            '</textarea></label>' +
+      '</div></div>' +
+      '<div class="jdgroup"><label class="jdfield"><span>岗位说明</span>' +
+        '<textarea id="jdNote" rows="8" class="jdnote" placeholder="岗位职责、必须说明的事项（自由文本）">' +
+          esc(J.jd_json && J.jd_json.note ? J.jd_json.note : '') + '</textarea></label>' +
       '</div>' +
-      '<div class="bar2"><span class="lbl2">必需技能</span>' +
-        '<input id="jdSkills" style="flex:1;min-width:0" value="' +
-          esc((must.skills_required || []).join('、')) + '" ' +
-          'placeholder="顿号分隔，如 金相分析、X射线衍射"></div>' +
-      '<div class="bar2"><span class="lbl2">专业要求</span>' +
-        '<input id="jdMajors" style="flex:1;min-width:0" value="' +
-          esc((must.major_required || []).join('、')) + '" placeholder="顿号分隔"></div>' +
-      /* 「加分技能」原本读的是 `must.skills_preferred`，而后端 `_jd_from_req`
-         把它组装到 `preferred.skills`（见 server.py:4095，config/jd.json 也是这个结构）
-         —— 位置对不上，这一栏永远显示空白。已改为真实位置。
-         「必备项 must_have」已移除：整个后端（JobJdReq / regrade）都没有这个字段，
-         填什么都不影响判定，是个会误导人的假控件（原版也没有）。 */
-      '<div class="bar2"><span class="lbl2">加分技能</span>' +
-        '<input id="jdPref" style="flex:1;min-width:0" value="' +
-          esc(((J.jd_json && J.jd_json.preferred && J.jd_json.preferred.skills) || []).join('、')) +
-          '" placeholder="加分项，有更好，没有不算减分"></div>' +
-      '<div class="bar2"><span class="lbl2">招聘数量</span>' +
-        '<input id="jdHead" type="number" min="0" step="1" style="width:90px" value="' +
-          esc(String(J.headcount == null ? '' : J.headcount)) + '"> 人</div>' +
-      '<div class="bar2"><span class="lbl2">岗位说明</span>' +
-        '<textarea id="jdNote" rows="3" style="flex:1;min-width:0" ' +
-          'placeholder="岗位职责、必须说明的事项（自由文本）">' +
-          esc(J.jd_json && J.jd_json.note ? J.jd_json.note : '') + '</textarea></div>' +
     '</div>' +
     (J.opened_at ? '<div class="sec"><h3>时间</h3><dl class="kv">' +
       '<dt>开放</dt><dd>' + esc(String(J.opened_at).slice(0, 16)) + '</dd>' +
@@ -7395,6 +8388,16 @@ async function openJob(jid){
       '</dl></div>' : '');
   Array.prototype.forEach.call(box.querySelectorAll('.dact [data-act]'), function(b){
     b.addEventListener('click', function(){ orgAct(b.dataset.act); });
+  });
+  Array.prototype.forEach.call(box.querySelectorAll('#jdEduSeg .jdseg-btn'), function(b){
+    b.addEventListener('click', function(){
+      Array.prototype.forEach.call(box.querySelectorAll('#jdEduSeg .jdseg-btn'), function(x){
+        x.classList.remove('on');
+      });
+      b.classList.add('on');
+      var hid = document.getElementById('jdEdu');
+      if(hid) hid.value = b.dataset.v || '';
+    });
   });
 }
 /* ---------- 重判档位：两段式（先预演，看完差异再落库） ----------
@@ -10191,6 +11194,8 @@ document.addEventListener('click', function(e){
   if(!t || !t.closest) return;
   var retry = t.closest('[data-retry]');
   if(retry){ retryAgent(retry); return; }
+  var edit = t.closest('[data-edit-msg]');
+  if(edit){ editUserMessage(edit); return; }
   var dl = t.closest('[data-out-dl]');
   if(dl){
     var _url = dl.getAttribute('data-out-dl');
@@ -10326,8 +11331,13 @@ async function initChat(){
         '<div class="chatlog" id="chatLog"></div>' +
         '<div class="chatinput"><div class="ciwrap">' +
           '<textarea id="chatIn" rows="3" placeholder="输入指令或问题，Enter 发送"></textarea>' +
-          '<button class="btn primary" id="chatSend">发送</button>' +
-          '<button class="btn stop" id="chatStop" style="display:none">停止</button>' +
+          '<button class="btn primary" id="chatSend" aria-label="发送" title="发送">' +
+            '<svg class="ci-ico ci-enter" viewBox="0 0 24 24" aria-hidden="true">' +
+              '<path d="M20 5v7a3 3 0 0 1-3 3H6"></path>' +
+              '<path d="m10 11-4 4 4 4"></path></svg>' +
+            '<svg class="ci-ico ci-stop" viewBox="0 0 24 24" aria-hidden="true">' +
+              '<rect x="7.5" y="7.5" width="9" height="9" rx="2"></rect></svg>' +
+          '</button>' +
         '</div></div>' +
       '</div>' +
       '<div class="chatside">' +
@@ -10357,9 +11367,9 @@ async function initChat(){
     });
     inp.addEventListener('input', function(){ chatGrow(inp); });
     setTimeout(function(){ chatGrow(inp); }, 0);
-    document.getElementById('chatSend').addEventListener('click', askAgent);
-    document.getElementById('chatStop').addEventListener('click', function(){
-      if(CHAT_CTRL){ CHAT_CTRL.abort(); toast('已停止'); }
+    document.getElementById('chatSend').addEventListener('click', function(){
+      if(CHAT_CTRL) stopRunningChat();
+      else askAgent();
     });
     document.getElementById('chatNew').addEventListener('click', newChat);
     renderTrace(null);
@@ -10380,21 +11390,17 @@ function newConvId(){
   return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-/* 切换/新建对话时，正在生成的那一轮要停下来，但**不能把旧回答写进新对话**。
-   CHAT_GEN 是这一轮回答的世代号：切换时 +1，旧请求的 onEvent / 收尾回调
-   发现世代号对不上就直接退出，连 CHAT_CTRL 都不碰（否则会把新请求的
-   AbortController 清空，新回答就停不掉了）。 */
+/* 切换/新建对话时，**不结束**正在生成的那一轮：请求继续在后台跑，
+   完成后由服务端按原 session_id 入库；切回来时历史里就能看到。
+   CHAT_GEN 是「界面世代号」：切换时 +1，旧请求的 onEvent / 收尾回调
+   发现世代号对不上就不再碰新对话的 DOM，但也不再 abort。 */
 var CHAT_GEN = 0;
 function leaveRunningChat(){
-  var was = !!(CHAT_CTRL || CHAT_STREAMING);
+  var was = !!CHAT_CTRL;
   CHAT_GEN += 1;
-  if(CHAT_CTRL){
-    try{ CHAT_CTRL.abort(); }catch(_e){ /* 已经结束的请求 abort 也会抛，忽略 */ }
-  }
-  CHAT_CTRL = null;
-  CHAT_STREAMING = false;
-  chatBusy(false);
   stopTracePoll();
+  /* 不 abort、不清 CHAT_CTRL/CHAT_STREAMING：后台继续生成。
+     发送按钮保持“停止”态，用户随时可以真正中止这一轮。 */
   return was;
 }
 
@@ -10406,6 +11412,22 @@ async function loadConversations(){
   }
 }
 
+/* 发送即入列：服务端要等一轮跑完才写会话行，左侧列表不能因此空着。
+   先放一条本地临时会话（标题=这句提问），回答落库后 loadConversations 会替换。 */
+function ensureConvInList(cid, q){
+  if(!cid) return;
+  var list = CHAT_CONVS || [];
+  if(list.some(function(c){ return c.id === cid; })) return;
+  var d = new Date();
+  var p = function(n){ return (n < 10 ? '0' : '') + n; };
+  var stamp = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+    ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  var title = String(q || '新对话').replace(/\s+/g, ' ').trim().slice(0, 48) || '新对话';
+  list.unshift({id: cid, title: title, message_count: 0,
+                updated_at: stamp, pending: true});
+  CHAT_CONVS = list;
+  renderConvList();
+}
 function renderConvList(){
   var box = document.getElementById('chatConvList');
   if(!box) return;
@@ -10419,7 +11441,10 @@ function renderConvList(){
   box.innerHTML = convs.map(function(c){
     var active = (c.id === CHAT_CONV_ID) ? ' on' : '';
     var title = c.title || '新对话';
-    var meta = (c.message_count || 0) + ' 轮 · ' + esc(String(c.updated_at || '').slice(5, 16));
+    var live = !!(CHAT_CTRL && RUN_CONV_ID === c.id);
+    var meta = live
+      ? '<span class="cc-live">生成中…</span>'
+      : ((c.message_count || 0) + ' 轮 · ' + esc(String(c.updated_at || '').slice(5, 16)));
     return '<div class="chatconv-item' + active + '" onclick="openConversation(\'' +
         esc(c.id) + '\')">' +
       '<div class="cc-title">' + esc(title) + '</div>' +
@@ -10466,7 +11491,6 @@ function renderWelcome(){
   if(!log) return;
   var asks = chatAsksLoad();
   log.innerHTML = '<div class="chatwelcome" id="chatWelcome">' +
-    '<div class="cw-mark">AI</div>' +
     '<h2>今天想先处理哪件事？</h2>' +
     '<p>查人、推进流程、汇总招聘进度都可以直接说。写操作会先停在「待确认提案」，你确认后才生效。</p>' +
     '<div class="cw-asks">' + asks.map(function(q){
@@ -10528,11 +11552,13 @@ function renderWelcome(){
 
 var CHAT_TRACE_TIMER = null;
 
-function thinkingHtml(text, open){
+function thinkingHtml(text, open, seconds){
   text = String(text || '').trim();
   if(!text) return '';
+  var sec = Number(seconds || 0);
+  var when = sec > 0 ? '（用时 ' + Math.max(1, Math.round(sec)) + ' 秒）' : '';
   return '<details class="thinkbox"' + (open ? ' open' : '') + '>' +
-    '<summary>思考过程<span class="think-meta">' + text.length + ' 字</span></summary>' +
+    '<summary><span class="think-label">已思考' + when + '</span></summary>' +
     '<div class="think-body">' + mdLite(text) + '</div></details>';
 }
 /* 等待模型时把已经拿到的思维链实时显示出来；答复落地后整体换成折叠块。 */
@@ -10541,7 +11567,7 @@ function renderThinkingLive(holder, text){
   if(!holder || !text) return;
   var body = holder.querySelector('.think-live .think-body');
   if(!body){
-    holder.innerHTML = '<div class="think-live"><div class="think-live-h">思考过程</div>' +
+    holder.innerHTML = '<div class="think-live"><div class="think-live-h">正在思考</div>' +
       '<div class="think-body"></div></div><div class="hint">正在生成回答…</div>';
     body = holder.querySelector('.think-live .think-body');
   }
@@ -10871,9 +11897,10 @@ function newChat(){
   loadChatContext();
   syncChatSidebar();
   renderConvList();
+  chatBusy(!!CHAT_CTRL);
   var inp = document.getElementById('chatIn');
   if(inp){ inp.value = ''; inp.focus(); chatGrow(inp); }
-  if(wasBusy) toast('已停止当前回答，已新建对话');
+  if(wasBusy) toast('上一轮回答仍在后台生成', 'info');
 }
 
 function renderChatMessages(hmsgs){
@@ -10885,7 +11912,8 @@ function renderChatMessages(hmsgs){
   (hmsgs || []).forEach(function(m){
     var node = pushMsg(m.role, m.content || '');
     if(m.role === 'assistant' && m.thinking){
-      node.insertAdjacentHTML('afterbegin', thinkingHtml(m.thinking));
+      node.insertAdjacentHTML('afterbegin',
+        thinkingHtml(m.thinking, false, m.latency_ms ? m.latency_ms / 1000 : 0));
     }
     if(m.role === 'assistant'){
       lastAsst = m;
@@ -10904,6 +11932,8 @@ function renderChatMessages(hmsgs){
     }
     if((m.drafts || []).length) renderDraftCards(node, m.drafts);
     if((m.proposals || []).length) renderProposalCards(node, m.proposals);
+    if(m.run_id) node.setAttribute('data-run-id', m.run_id);
+    addMsgActions(node, m.role);
   });
   CHAT = (hmsgs || []).map(function(x){ return {role: x.role, content: x.content}; });
   if(!hmsgs || !hmsgs.length) renderWelcome();
@@ -10918,8 +11948,8 @@ function renderChatMessages(hmsgs){
 }
 
 async function openConversation(cid){
-  /* 允许在回答过程中直接切走：先停掉当前这一轮，再读另一条会话。
-     旧回答的收尾回调靠 CHAT_GEN 识别“已经被切走”，不会污染新对话。 */
+  /* 允许在回答过程中直接切走：这一轮不 abort，继续在后台生成。
+     旧回答的收尾回调靠 CHAT_GEN / RUN_CONV_ID 判断是否还该碰界面。 */
   var wasBusy = leaveRunningChat();
   var gen = CHAT_GEN;
   var h = await api('/api/agent/history?conversation_id=' + encodeURIComponent(cid));
@@ -10927,11 +11957,33 @@ async function openConversation(cid){
   if(h.__err){ toast('读取会话失败：' + h.__err, 'danger'); return; }
   CHAT_CONV_ID = cid;
   var _last = renderChatMessages(h.messages || []);
+  /* 如果切回来的正是仍在生成的那一条：把当前累积的思考/答案重新挂到页面上，
+     之后的事件会继续往这个新气泡里写。 */
+  if(CHAT_CTRL && RUN_CONV_ID === cid && RUN_STATE){
+    pushMsg('user', RUN_Q);
+    var ph = pushMsg('assistant', '');
+    ph.innerHTML = '<div class="stream-status hint"></div>' +
+      (RUN_STATE.liveThink
+        ? '<div class="think-live"><div class="think-live-h">正在思考</div>' +
+          '<div class="think-body"></div></div>' : '') +
+      '<div class="stream-answer"></div>';
+    var tb = ph.querySelector('.think-body');
+    if(tb) tb.textContent = RUN_STATE.liveThink;
+    var ae = ph.querySelector('.stream-answer');
+    if(ae) ae.innerHTML = RUN_STATE.liveAns ? mdLite(RUN_STATE.liveAns) : '';
+    RUN_HOLDER = ph;
+    renderTraceRunning(RUN_Q);
+    startTracePoll(RUN_Q, ph);
+    chatAutoScroll();
+  }
   if(!_last || !_last.context) loadChatContext();
   renderConvList();
+  chatBusy(!!CHAT_CTRL);
   var inp = document.getElementById('chatIn');
   if(inp) inp.focus();
-  if(wasBusy) toast('已停止当前回答，已切换对话');
+  if(wasBusy && RUN_CONV_ID && RUN_CONV_ID !== cid){
+    toast('上一轮回答仍在后台生成', 'info');
+  }
 }
 
 async function renameConversation(cid){
@@ -10992,6 +12044,8 @@ function pushMsg(role, content){
   var el = document.createElement('div');
   el.className = 'msg ' + role;
   el.innerHTML = role === 'assistant' ? mdLite(content) : esc(content);
+  /* 用户原话单独存一份：编辑重发时不受气泡里追加的按钮文字影响。 */
+  if(role === 'user') el.setAttribute('data-q', content);
   log.appendChild(el);
   log.scrollTop = log.scrollHeight;
   syncChatSidebar();
@@ -11000,24 +12054,30 @@ function pushMsg(role, content){
 /* 模型一次调用可能要几十秒 —— 必须能**中断**，否则 HR 只能干等或刷新页面。
    用 AbortController 挂在 fetch 上：点「停止」直接 abort，界面立刻回到可输入状态。 */
 var CHAT_CTRL = null;
+/* 正在生成的那一轮属于哪条会话。切走时回答留在后台跑，
+   回到原会话时用它给出「生成中」占位。 */
+var RUN_CONV_ID = null;
+var RUN_Q = '';
+var RUN_HOLDER = null;   /* 当前这一轮答案挂在哪个 DOM 节点（切回来会换绑） */
+var RUN_STATE = null;    /* {liveThink, liveAns, statusBase}，供重新挂载时还原 */
 /* SSE 正在逐字推送时，右侧轨迹轮询不要再改写同一条消息里的思考块 */
 var CHAT_STREAMING = false;
 function chatBusy(on){
   var send = document.getElementById('chatSend');
-  var stop = document.getElementById('chatStop');
   var ta = document.getElementById('chatIn');
-  if(send){ send.classList.toggle('busy', !!on); send.textContent = on ? '发送中…' : '发送'; }
-  if(stop) stop.style.display = on ? '' : 'none';
-  /* 忙碌态凭空多一个「停止」按钮，按钮组整体变宽 —— 输入框右侧的留白必须跟着加，
-     否则长句子的末尾会被「发送中…」压住（v2 把按钮改成了框内绝对定位，
-     原版按钮在框外正常流，没有这个问题）。
-     宽度按实际按钮量出来，文案再变也不会对不上。 */
-  if(ta){
-    ta.style.paddingRight = '';
-    var base = parseFloat(getComputedStyle(ta).paddingRight) || 92;
-    var need = on ? Math.ceil(send.offsetWidth + 12 + stop.offsetWidth + 8 + 8) : base;
-    ta.style.paddingRight = need + 'px';
+  if(send){
+    send.classList.toggle('busy', !!on);
+    var other = !!(on && RUN_CONV_ID && RUN_CONV_ID !== CHAT_CONV_ID);
+    send.setAttribute('aria-label', on ? (other ? '停止另一条会话的回答' : '停止生成') : '发送');
+    send.setAttribute('title', on ? (other ? '停止另一条会话的回答' : '停止生成') : '发送');
   }
+  /* 按钮是固定 40px 圆钮，忙碌态宽度不变，输入框留白也保持不变。 */
+  if(ta) ta.style.paddingRight = '';
+}
+function stopRunningChat(){
+  if(!CHAT_CTRL) return;
+  try{ CHAT_CTRL.abort(); }catch(_e){ /* 已经结束的请求 abort 也会抛，忽略 */ }
+  toast('已停止');
 }
 /* 流式读取 SSE：每个 `data:` 块回调一次；`: ping` 注释直接忽略。 */
 async function readAgentSSE(resp, onEvent){
@@ -11061,7 +12121,8 @@ function renderAgentResult(holder, r, q){
   if(r.answer || (r.trace || []).length) renderTrace(r, q);
   else renderTrace(null);
   var answer = r.answer || (r.detail || '（无回复）');
-  holder.innerHTML = thinkingHtml(r.thinking) + mdLite(answer);
+  holder.innerHTML = thinkingHtml(r.thinking, false,
+    r.latency_ms ? r.latency_ms / 1000 : 0) + mdLite(answer);
   if((r.citations || []).length){
     var srcs = r.citations.map(function(c){
       return esc(c.label || c.tool) + (c.count > 1 ? ' ×' + c.count : '');
@@ -11100,52 +12161,142 @@ function renderAgentResult(holder, r, q){
       (route.length ? ' · 工具组：' + esc(route.join('/')) : '') +
       (r.skill_name ? ' · SOP：' + esc(r.skill_name) : '') + '</div>');
   }
-  if(q){
-    holder.setAttribute('data-q', q);
-    holder.insertAdjacentHTML('beforeend',
-      '<div class="msg-actions"><button class="mdt-btn" data-retry>重新生成</button></div>');
-  }
+  if(q) holder.setAttribute('data-q', q);
+  if(r.run_id) holder.setAttribute('data-run-id', r.run_id);
   CHAT.push({role:'user', content:q}, {role:'assistant', content: r.answer || ''});
   if((r.drafts || []).length) renderDraftCards(holder, r.drafts);
   if((r.pending_proposals || []).length) renderProposalCards(holder, r.pending_proposals);
   if(r.session_id) CHAT_CONV_ID = r.session_id;
+  finishLiveMessage(holder, q, r.run_id);
   loadConversations();          /* 首轮回答后，左侧出现这条会话的标题 */
   loadChatMetrics();            /* 运行指标随每次回答刷新 */
   if(r.context && r.context.window) renderContext(r.context);  /* 上下文用量 */
   renderOutputs(r);             /* 本次下载/草稿/提案 */
   killAutofill();
 }
-function retryAgent(btn){
-  if(CHAT_CTRL) return;
-  var holder = btn.closest('.msg');
-  var q = holder ? (holder.getAttribute('data-q') || '') : '';
-  if(!holder || !q) return;
+/* 给一条消息补上「编辑重发 / 重新生成」入口。 */
+function addMsgActions(node, role){
+  if(!node || node.querySelector('.msg-actions')) return;
+  var user = role === 'user';
+  node.insertAdjacentHTML('beforeend',
+    '<div class="msg-actions"><button type="button" class="mdt-btn" ' +
+    (user ? 'data-edit-msg' : 'data-retry') + '>' +
+    (user ? '编辑重发' : '重新生成') + '</button></div>');
+}
+/* 一轮回答结束后：回答和它前面那条提问都挂上对应入口与 run_id。 */
+function finishLiveMessage(holder, q, runId){
+  if(!holder) return;
+  if(runId) holder.setAttribute('data-run-id', runId);
   var prev = holder.previousElementSibling;
-  holder.remove();
-  if(prev && prev.classList && prev.classList.contains('user')) prev.remove();
-  // 同步回退内存里的历史，避免重试后上下文里出现两份同样的问答
-  if(CHAT.length >= 2 && CHAT[CHAT.length - 2].role === 'user'){
-    CHAT.splice(-2, 2);
+  while(prev && !(prev.classList && prev.classList.contains('msg'))){
+    prev = prev.previousElementSibling;
   }
+  if(prev && prev.classList.contains('user')){
+    if(runId) prev.setAttribute('data-run-id', runId);
+    addMsgActions(prev, 'user');
+  }
+  addMsgActions(holder, 'assistant');
+}
+/* 编辑/重发前，先在服务端把这条提问之后的旧分支软隐藏（审计记录保留）。 */
+async function truncateConversationAt(runId){
+  if(!CHAT_CONV_ID || !runId) return {ok:true};
+  return await api('/api/agent/conversations/' + encodeURIComponent(CHAT_CONV_ID) + '/truncate', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({before_run_id: Number(runId)})
+  });
+}
+/* 从某条用户消息开始重新发送：去掉它之后的旧回答与后续轮次。 */
+async function resendFrom(userNode, text){
+  if(!userNode || !text) return;
+  if(CHAT_CTRL){ toast('回答还在生成中，稍后再试', 'info'); return; }
+  var log = document.getElementById('chatLog');
+  var all = Array.prototype.slice.call(log.querySelectorAll('.msg'));
+  var idx = all.indexOf(userNode);
+  if(idx < 0) return;
+  var runId = Number(userNode.getAttribute('data-run-id') || 0);
+  if(runId > 0){
+    var tr = await truncateConversationAt(runId);
+    if(tr && tr.__err){ toast('重发失败：' + tr.__err, 'danger'); return; }
+  }
+  all.slice(idx).forEach(function(n){ n.remove(); });
+  CHAT = CHAT.slice(0, Math.min(idx, CHAT.length));
+  CHAT_OUTPUTS = [];
+  renderTrace(null);
+  renderOutputs(null, true);
+  renderContext(null);
+  syncChatSidebar();
   var inp = document.getElementById('chatIn');
-  if(inp){ inp.value = q; askAgent(); }
+  if(inp){ inp.value = text; chatGrow(inp); inp.focus(); }
+  askAgent();
+}
+function retryAgent(btn){
+  if(CHAT_CTRL){ toast('回答还在生成中，稍后再试', 'info'); return; }
+  var holder = btn.closest('.msg.assistant');
+  if(!holder) return;
+  var prev = holder.previousElementSibling;
+  while(prev && !(prev.classList && prev.classList.contains('msg'))){
+    prev = prev.previousElementSibling;
+  }
+  if(!prev || !prev.classList.contains('user')) return;
+  var q = (prev.getAttribute('data-q') || prev.innerText || '').trim();
+  if(q) resendFrom(prev, q);
+}
+function editUserMessage(btn){
+  var node = btn.closest('.msg.user');
+  if(!node || node.querySelector('.msg-edit')) return;
+  if(CHAT_CTRL){ toast('回答还在生成中，稍后再编辑', 'info'); return; }
+  var text = node.getAttribute('data-q') || node.innerText || '';
+  var original = node.innerHTML;
+  node.innerHTML =
+    '<textarea class="msg-edit" rows="2" aria-label="编辑这条提问"></textarea>' +
+    '<div class="msg-actions msg-edit-actions">' +
+      '<button type="button" class="mdt-btn" data-edit-cancel>取消</button>' +
+      '<button type="button" class="btn primary sm" data-edit-save>重发</button>' +
+    '</div>';
+  var ta = node.querySelector('.msg-edit');
+  ta.value = text;
+  ta.focus();
+  try{ ta.setSelectionRange(text.length, text.length); }catch(e){}
+  function cancel(){ node.innerHTML = original; }
+  function save(){
+    var v = (ta.value || '').trim();
+    if(!v){ ta.focus(); return; }
+    if(CHAT_CTRL){ toast('回答还在生成中，稍后再试', 'info'); return; }
+    resendFrom(node, v);
+  }
+  ta.addEventListener('keydown', function(ev){
+    if(ev.key === 'Enter' && !ev.shiftKey){ ev.preventDefault(); save(); }
+    if(ev.key === 'Escape'){ ev.preventDefault(); cancel(); }
+  });
+  node.querySelector('[data-edit-cancel]').addEventListener('click', cancel);
+  node.querySelector('[data-edit-save]').addEventListener('click', save);
 }
 async function askAgentNonStream(q, holder, gen){
   if(gen == null) gen = ++CHAT_GEN;
   if(gen !== CHAT_GEN) return;
+  var convId = CHAT_CONV_ID;
   holder.innerHTML = '<span class="hint">思考中…</span>';
-  CHAT_CTRL = new AbortController();
+  var ctrl = new AbortController();
+  CHAT_CTRL = ctrl;
   chatBusy(true);
   renderTraceRunning(q);
   startTracePoll(q, holder);
   var r = await api('/api/agent/chat', {method:'POST',
     headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({message: q, history: CHAT, session_id: CHAT_CONV_ID}),
-    signal: CHAT_CTRL.signal});
-  if(gen !== CHAT_GEN) return;     /* 已经切走：不碰新对话，也不清空新请求 */
-  CHAT_CTRL = null;
-  chatBusy(false);
-  stopTracePoll();
+    body: JSON.stringify({message: q, history: CHAT, session_id: convId}),
+    signal: ctrl.signal});
+  if(CHAT_CTRL === ctrl){
+    CHAT_CTRL = null;
+    chatBusy(false);
+    stopTracePoll();
+  }
+  var viewing = (convId === CHAT_CONV_ID);
+  if(gen !== CHAT_GEN){
+    /* 期间切走了又切回来：服务端已经入库，重新读一次历史即可。 */
+    if(viewing) openConversation(convId);
+    else loadConversations();
+    return;
+  }
   if(r.__err && /abort/i.test(r.__err)){
     holder.innerHTML = '<span class="hint">已停止。</span>';
     renderTrace(null);
@@ -11161,41 +12312,56 @@ async function askAgentNonStream(q, holder, gen){
 async function askAgent(){
   var inp = document.getElementById('chatIn');
   var q = (inp.value || '').trim();
-  if(!q || CHAT_CTRL) return;
+  if(!q) return;
+  if(CHAT_CTRL){
+    toast(RUN_CONV_ID && RUN_CONV_ID !== CHAT_CONV_ID
+      ? '另一条会话的回答仍在生成，切回去可停止或等待完成'
+      : '回答还在生成，可点右侧停止或稍候', 'info');
+    return;
+  }
   if(!CHAT_CONV_ID) CHAT_CONV_ID = newConvId();
-  var gen = ++CHAT_GEN;      /* 这一轮回答的世代号，切走即失效 */
+  var gen = ++CHAT_GEN;
+  var convId = CHAT_CONV_ID;
+  ensureConvInList(convId, q);
   inp.value = '';
   chatGrow(inp);
   pushMsg('user', q);
   var holder = pushMsg('assistant', '');
   holder.innerHTML = '<div class="stream-status hint">正在思考…</div>' +
     '<div class="stream-answer"></div>';
-  var answerEl = holder.querySelector('.stream-answer');
-  var liveThink = '', liveAns = '', thinkBody = null, answerTimer = null;
+  /* 这一轮的状态放在全局：切到别的会话时 DOM 换掉，但内容继续累积；
+     切回来时 openConversation 会把 RUN_HOLDER 重新绑到新的气泡上。 */
+  var run = {liveThink:'', liveAns:'', statusBase:'正在思考…'};
+  RUN_CONV_ID = convId; RUN_Q = q; RUN_HOLDER = holder; RUN_STATE = run;
+  var answerTimer = null;
   var sawAny = false;
   var t0 = Date.now(), lastEvent = Date.now(), tick = null, timedOut = false;
-  var statusBase = '正在思考…';
+  function viewing(){ return RUN_CONV_ID === CHAT_CONV_ID && !!RUN_HOLDER; }
   function setStatus(t){
-    if(t) statusBase = t;
-    var s = holder.querySelector('.stream-status');
+    if(t) run.statusBase = t;
+    if(!viewing()) return;
+    var s = RUN_HOLDER.querySelector('.stream-status');
     if(!s) return;
     var sec = Math.round((Date.now() - t0) / 1000);
-    var extra = liveAns ? (' · 已 ' + liveAns.length + ' 字') : '';
-    s.textContent = statusBase + ' · ' + sec + 's' + extra;
+    var extra = run.liveAns ? (' · 已 ' + run.liveAns.length + ' 字') : '';
+    s.textContent = run.statusBase + ' · ' + sec + 's' + extra;
   }
   function ensureThink(){
-    if(thinkBody) return thinkBody;
+    if(!viewing()) return null;
+    var h = RUN_HOLDER;
+    var body = h.querySelector('.think-body');
+    if(body) return body;
     var d = document.createElement('div');
     d.className = 'think-live';
-    d.innerHTML = '<div class="think-live-h">思考过程</div><div class="think-body"></div>';
-    holder.insertBefore(d, answerEl);
-    thinkBody = d.querySelector('.think-body');
-    return thinkBody;
+    d.innerHTML = '<div class="think-live-h">正在思考</div><div class="think-body"></div>';
+    h.insertBefore(d, h.querySelector('.stream-answer'));
+    return d.querySelector('.think-body');
   }
   function flushAnswer(){
-    if(gen !== CHAT_GEN) return;
     if(answerTimer){ clearTimeout(answerTimer); answerTimer = null; }
-    if(answerEl) answerEl.innerHTML = liveAns ? mdLite(liveAns) : '';
+    if(!viewing()) return;
+    var a = RUN_HOLDER.querySelector('.stream-answer');
+    if(a) a.innerHTML = run.liveAns ? mdLite(run.liveAns) : '';
     chatAutoScroll();
   }
   function scheduleAnswer(){
@@ -11203,22 +12369,26 @@ async function askAgent(){
     answerTimer = setTimeout(function(){ answerTimer = null; flushAnswer(); }, 90);
   }
   function onEvent(ev){
-    if(gen !== CHAT_GEN) return;
     if(!ev || !ev.type) return;
+    /* 内容始终累积，即使用户已经切到别的会话 */
     sawAny = true;
     lastEvent = Date.now();
     if(ev.type === 'thinking_delta'){
-      liveThink += ev.text || '';
-      var b = ensureThink();
-      if(b){ b.textContent = liveThink; b.scrollTop = b.scrollHeight; }
-      setStatus('正在思考…');
-      chatAutoScroll();
+      run.liveThink += ev.text || '';
+      if(viewing()){
+        var b = ensureThink();
+        if(b){ b.textContent = run.liveThink; b.scrollTop = b.scrollHeight; }
+        setStatus('正在思考…');
+        chatAutoScroll();
+      } else {
+        run.statusBase = '正在思考…';
+      }
     } else if(ev.type === 'answer_delta'){
-      liveAns += ev.text || '';
-      setStatus('正在生成回答…');
-      scheduleAnswer();
+      run.liveAns += ev.text || '';
+      if(viewing()){ setStatus('正在生成回答…'); scheduleAnswer(); }
+      else run.statusBase = '正在生成回答…';
     } else if(ev.type === 'answer_reset'){
-      liveAns = '';
+      run.liveAns = '';
       flushAnswer();
     } else if(ev.type === 'tool_start'){
       setStatus('正在调用：' + (ev.tool_label || ev.tool || '工具') + '…');
@@ -11236,30 +12406,44 @@ async function askAgent(){
   chatBusy(true);
   renderTraceRunning(q);
   startTracePoll(q, holder);
+  renderConvList();
   var done = null;
   tick = setInterval(function(){
-    if(gen !== CHAT_GEN){
+    if(RUN_STATE !== run){
       if(tick){ clearInterval(tick); tick = null; }
       return;
     }
     var sec = Math.round((Date.now() - t0) / 1000);
     if(!sawAny && sec >= 15){
-      statusBase = '模型响应较慢，仍在等待…（可点停止）';
+      run.statusBase = '模型响应较慢，仍在等待…（可点停止）';
     }
     /* 2 分钟没有任何增量就认为链路卡住，主动停止，避免界面永远停在“正在生成” */
     if(Date.now() - lastEvent > 120000){
       timedOut = true;
-      statusBase = '模型长时间无响应，已停止';
+      run.statusBase = '模型长时间无响应，已停止';
       setStatus();
       if(CHAT_CTRL) CHAT_CTRL.abort();
       return;
     }
     setStatus();
   }, 1000);
+  function finish(){
+    var viewingNow = (RUN_CONV_ID === CHAT_CONV_ID && !!RUN_HOLDER);
+    var liveHolder = RUN_HOLDER;
+    CHAT_CTRL = null;
+    CHAT_STREAMING = false;
+    RUN_CONV_ID = null; RUN_Q = ''; RUN_HOLDER = null; RUN_STATE = null;
+    chatBusy(false);
+    stopTracePoll();
+    if(tick){ clearInterval(tick); tick = null; }
+    if(answerTimer){ clearTimeout(answerTimer); answerTimer = null; }
+    renderConvList();
+    return viewingNow ? liveHolder : null;
+  }
   try{
     var resp = await fetch('/api/agent/chat/stream', {method:'POST',
       headers: hdr(),
-      body: JSON.stringify({message: q, history: CHAT, session_id: CHAT_CONV_ID}),
+      body: JSON.stringify({message: q, history: CHAT, session_id: convId}),
       signal: CHAT_CTRL.signal});
     if(resp.status === 401 && AUTH_ENABLED){
       setToken(''); ME = null;
@@ -11271,58 +12455,60 @@ async function askAgent(){
       else onEvent(ev);
     });
     if(!done) throw new Error('流式连接结束但没有收到最终答复');
-    if(gen !== CHAT_GEN) return;
-    CHAT_CTRL = null;
-    CHAT_STREAMING = false;
-    chatBusy(false);
-    stopTracePoll();
-    if(tick){ clearInterval(tick); tick = null; }
-    if(answerTimer){ clearTimeout(answerTimer); answerTimer = null; }
-    renderAgentResult(holder, done, q);
+    var live = finish();
+    if(live){
+      renderAgentResult(live, done, q);
+    } else {
+      /* 用户已经切走：答案由服务端入库，刷新会话列表即可，
+         不要碰当前会话的 DOM / CHAT。 */
+      loadConversations();
+    }
   }catch(e){
-    /* 已经切到别的会话/新建对话：这一轮的所有收尾都不许碰新界面，
-       尤其不能把 CHAT_CTRL 置空（那会让新请求停不下来）。 */
-    if(gen !== CHAT_GEN) return;
     var aborted = String((e && e.name) || '') === 'AbortError' || /abort/i.test(String(e));
-    CHAT_CTRL = null;
-    CHAT_STREAMING = false;
-    chatBusy(false);
-    stopTracePoll();
-    if(tick){ clearInterval(tick); tick = null; }
+    var live = finish();
+    loadConversations();       /* 中止/失败时把本地临时会话与服务端对齐 */
+    if(!live){
+      /* 切走后才结束/被停止：不污染当前会话，也不把半成品塞进当前 CHAT。 */
+      loadConversations();
+      return;
+    }
     if(aborted){
-      if(liveAns || liveThink){
+      if(run.liveAns || run.liveThink){
         /* 已经生成的内容不能因为点停止就丢掉——尤其答案看起来已经出完、
            只是服务端还在收尾时，保留它比显示一句"已停止"有用得多。 */
-        if(answerTimer){ clearTimeout(answerTimer); answerTimer = null; }
-        holder.innerHTML = thinkingHtml(liveThink) + mdLite(liveAns) +
+        live.innerHTML = thinkingHtml(run.liveThink, false,
+          Math.round((Date.now() - t0) / 1000)) + mdLite(run.liveAns) +
           '<div class="trace">' +
           (timedOut ? '模型长时间无响应，已保留已生成内容。' : '已停止，已保留已生成内容。') +
           '</div>';
-        CHAT.push({role:'user', content:q}, {role:'assistant', content:liveAns});
+        CHAT.push({role:'user', content:q}, {role:'assistant', content:run.liveAns});
       } else {
-        holder.innerHTML = '<span class="hint">' +
+        live.innerHTML = '<span class="hint">' +
           (timedOut ? '模型长时间无响应，已停止。' : '已停止。') + '</span>';
       }
+      finishLiveMessage(live, q, null);
       renderTrace(null);
       return;
     }
     /* 流式不可用（老代理/老端点）→ 自动退回非流式；已经显示了一半则保留半成品。 */
-    if(liveAns || liveThink){
-      if(answerTimer){ clearTimeout(answerTimer); answerTimer = null; }
-      holder.innerHTML = thinkingHtml(liveThink) + mdLite(liveAns) +
+    if(run.liveAns || run.liveThink){
+      live.innerHTML = thinkingHtml(run.liveThink, false,
+        Math.round((Date.now() - t0) / 1000)) + mdLite(run.liveAns) +
         '<div class="trace">流式连接中断：' + esc(String((e && e.message) || e)) + '</div>';
-      CHAT.push({role:'user', content:q}, {role:'assistant', content:liveAns});
+      CHAT.push({role:'user', content:q}, {role:'assistant', content:run.liveAns});
+      finishLiveMessage(live, q, null);
       return;
     }
     if(sawAny){
       /* 已经执行过工具（可能已生成提案），绝不能重跑一遍造成重复。
          如实告诉 HR 连接断了，让他刷新后看提案列表。 */
-      holder.innerHTML = '<div class="trace">流式连接中断：' +
+      live.innerHTML = '<div class="trace">流式连接中断：' +
         esc(String((e && e.message) || e)) + '</div>';
+      finishLiveMessage(live, q, null);
       renderTrace(null);
       return;
     }
-    await askAgentNonStream(q, holder, gen);
+    await askAgentNonStream(q, live, gen);
   }
 }
 function renderDraftCards(holder, drafts){
@@ -12612,19 +13798,24 @@ function onEditorInput(id){
 function insertTableDialog(id){
   EDITOR_TARGET = id || 'mBody';
   setModalTitle('插入表格');
-  document.getElementById('edDlgBody').innerHTML = `
-    <div class="bar">
-      <span class="small">行（含表头）</span>
-      <input id="tblRows" type="number" value="4" min="1" max="30" style="width:80px">
-      <span class="small">列</span>
-      <input id="tblCols" type="number" value="2" min="1" max="10" style="width:80px">
-      <button class="btn-primary" onclick="doInsertTable()">插入</button>
-      <button onclick="closeModal()">取消</button>
+  var b = document.getElementById('edDlgBody');
+  /* 弹窗正文默认 pre-wrap；这里是一张表单，必须恢复 normal，
+     否则模板字符串里的换行/缩进会被当成真正的换行，控件全被拉散。 */
+  if(b) b.style.whiteSpace = 'normal';
+  if(b) b.innerHTML = `
+    <div class="tblform">
+      <label class="tblfield"><span>行（含表头）</span>
+        <input id="tblRows" type="number" value="4" min="1" max="30"></label>
+      <label class="tblfield"><span>列</span>
+        <input id="tblCols" type="number" value="2" min="1" max="10"></label>
     </div>
-    <div class="small" style="margin-top:10px">插入后直接在格子里打字（第一行是表头）。
-      要调版式：用工具栏的<b>＋行/－行/＋列/－列</b>改形状
-      （光标不在表格里也没关系，会作用到最近那张表的末尾），
-      用<b>合并→</b>做跨列（如整行标题、标签+内容），满意后点<b>表格美化</b>一键统一样式。</div>`;
+    <div class="tblbar">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="doInsertTable()">插入</button>
+    </div>
+    <div class="tblhint">插入后直接在格子里打字（第一行是表头）。要调版式：用工具栏的
+      <b>＋行/－行/＋列/－列</b> 改形状（光标不在表格里也没关系，会作用到最近那张表的末尾），
+      用 <b>合并→</b> 做跨列（如整行标题、标签+内容），满意后点 <b>表格美化</b> 一键统一样式。</div>`;
   openEditorDlg();
 }
 
@@ -13149,6 +14340,116 @@ document.getElementById('loginForm').addEventListener('submit', function(ev){
     showOverview();
   });
 })();
+
+/* ============================================================
+   全站单选下拉：应用内自绘弹层
+   ------------------------------------------------------------
+   原生 <select> 仍然保留（表单值和 change 事件都不变），只把它点开时
+   系统画的蓝色列表换成与页面输入框同一套圆角/底色。事件用委托绑定，
+   动态生成的 select 也自动生效；多选 / size>1 / disabled 不接管。
+   ============================================================ */
+var SEL_MENU = null;
+function closeSelMenu(){
+  if(SEL_MENU){ SEL_MENU.remove(); SEL_MENU = null; }
+  document.removeEventListener('mousedown', selOutside, true);
+  window.removeEventListener('scroll', selScroll, true);
+  window.removeEventListener('resize', closeSelMenu);
+}
+function selOutside(ev){
+  if(!SEL_MENU) return;
+  if(SEL_MENU.contains(ev.target)) return;
+  if(ev.target.closest && ev.target.closest('select')) return;
+  closeSelMenu();
+}
+function selScroll(ev){
+  if(SEL_MENU && ev.target && (ev.target === SEL_MENU || SEL_MENU.contains(ev.target))) return;
+  closeSelMenu();
+}
+function openSelMenu(sel){
+  if(!sel || sel.disabled || sel.multiple || sel.size > 1) return false;
+  closeSelMenu();
+  var opts = Array.prototype.slice.call(sel.options || []);
+  if(!opts.length) return false;
+  var menu = document.createElement('div');
+  menu.className = 'selMenu';
+  menu.setAttribute('role', 'listbox');
+  menu.innerHTML = opts.map(function(o, i){
+    var cls = 'selOpt' + (i === sel.selectedIndex ? ' on' : '') +
+      ((o.value === '' && !o.text) || /^(请选择|选择一|不限|全部)/.test(o.text || '')
+        ? ' placeholder' : '');
+    return '<button type="button" class="' + cls + '" role="option" data-i="' + i + '"' +
+      ' title="' + esc(o.text || '') + '"' +
+      ' aria-selected="' + (i === sel.selectedIndex ? 'true' : 'false') + '">' +
+      '<span>' + esc(o.text || '') + '</span><span class="selChk">✓</span></button>';
+  }).join('');
+  document.body.appendChild(menu);
+  var rect = sel.getBoundingClientRect();
+  var w = Math.min(Math.max(rect.width, 180), 360);
+  menu.style.width = w + 'px';
+  var mh = Math.min(menu.scrollHeight, 320);
+  menu.style.maxHeight = mh + 'px';
+  var left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - w - 8));
+  var above = rect.top - mh - 6;
+  var below = rect.bottom + 6;
+  var top = (below + mh + 8 > window.innerHeight && above >= 8) ? above : below;
+  menu.style.left = left + 'px';
+  menu.style.top = Math.max(8, top) + 'px';
+  SEL_MENU = menu;
+  var cur = menu.querySelector('.selOpt.on') || menu.querySelector('.selOpt');
+  if(cur){
+    try{ cur.focus({preventScroll:true}); cur.scrollIntoView({block:'nearest'}); }
+    catch(e){ cur.focus(); }
+  }
+  menu.addEventListener('mousedown', function(ev){ ev.preventDefault(); });
+  menu.addEventListener('click', function(ev){
+    var b = ev.target.closest ? ev.target.closest('.selOpt') : null;
+    if(!b) return;
+    var i = Number(b.dataset.i);
+    if(sel.options[i]){
+      sel.selectedIndex = i;
+      sel.dispatchEvent(new Event('input', {bubbles:true}));
+      sel.dispatchEvent(new Event('change', {bubbles:true}));
+    }
+    closeSelMenu();
+    try{ sel.focus({preventScroll:true}); }catch(e){}
+  });
+  menu.addEventListener('keydown', function(ev){
+    var all = Array.prototype.slice.call(menu.querySelectorAll('.selOpt'));
+    var at = all.indexOf(document.activeElement);
+    if(ev.key === 'ArrowDown' || ev.key === 'ArrowUp'){
+      ev.preventDefault();
+      var next = ev.key === 'ArrowDown'
+        ? all[Math.min(all.length - 1, at + 1)] : all[Math.max(0, at - 1)];
+      if(next) next.focus();
+    } else if(ev.key === 'Enter' || ev.key === ' '){
+      ev.preventDefault();
+      if(document.activeElement.classList.contains('selOpt')) document.activeElement.click();
+    }
+  });
+  setTimeout(function(){
+    document.addEventListener('mousedown', selOutside, true);
+    window.addEventListener('scroll', selScroll, true);
+    window.addEventListener('resize', closeSelMenu);
+  }, 0);
+  return true;
+}
+document.addEventListener('mousedown', function(ev){
+  if(ev.button !== undefined && ev.button !== 0) return;
+  var sel = ev.target && ev.target.closest ? ev.target.closest('select') : null;
+  if(!sel || sel.disabled || sel.multiple || sel.size > 1) return;
+  var ok = false;
+  try{ ok = openSelMenu(sel); }catch(e){ closeSelMenu(); }
+  if(ok) ev.preventDefault();
+}, true);
+document.addEventListener('keydown', function(ev){
+  if(ev.key === 'Escape'){ closeSelMenu(); return; }
+  var sel = ev.target;
+  if(!sel || sel.tagName !== 'SELECT' || sel.multiple || sel.disabled || sel.size > 1) return;
+  if(ev.key === 'Enter' || ev.key === ' ' || ev.key === 'ArrowDown'){
+    ev.preventDefault();
+    try{ openSelMenu(sel); }catch(e){ closeSelMenu(); }
+  }
+});
 </script>
 </body>
 </html>

@@ -291,7 +291,9 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     -- 服务商是否上报过缓存字段；0=没报（不能显示 0%），1=报了（0 也是真实 0%）
     cache_reported INTEGER DEFAULT 0,
     latency_ms INTEGER, status TEXT, mode TEXT,
-    operator TEXT, ts TEXT
+    operator TEXT, ts TEXT,
+    -- v5：编辑/重发时旧分支只软隐藏（不删除），审计与成本记录仍保留。
+    hidden_at TEXT
 );
 -- ---------- 智能体对话（v4.0.17） ----------
 -- 一条会话 = 页面左侧的一个“对话”。`agent_runs.session_id` 继续存会话 id，
@@ -4658,13 +4660,15 @@ def chat_history(conn: sqlite3.Connection, limit: int = 300,
     """
     st = chat_clear_state(conn)
     if conversation_id:
-        where = " WHERE session_id = ?"
+        # 编辑/重发会把旧分支软隐藏（hidden_at），历史只显示当前分支。
+        where = " WHERE session_id = ? AND COALESCE(hidden_at, '') = ''"
         base_args: list = [str(conversation_id)[:64]]
         if operator:
             where += " AND operator = ?"
             base_args.append(operator)
     else:
         where, base_args = _chat_since(conn)
+        where = (where + " AND " if where else " WHERE ") + "COALESCE(hidden_at, '') = ''"
         if operator:
             where = (where + " AND " if where else " WHERE ") + "operator = ?"
             base_args.append(operator)
@@ -4746,9 +4750,11 @@ def list_conversations(conn: sqlite3.Connection, operator: str,
     rows = conn.execute(
         """SELECT c.*,
                   (SELECT COUNT(*) FROM agent_runs r
-                     WHERE r.session_id = c.id AND r.operator = c.operator) AS message_count,
+                     WHERE r.session_id = c.id AND r.operator = c.operator
+                       AND COALESCE(r.hidden_at, '') = '') AS message_count,
                   (SELECT r.question FROM agent_runs r
                      WHERE r.session_id = c.id AND r.operator = c.operator
+                       AND COALESCE(r.hidden_at, '') = ''
                      ORDER BY r.id ASC LIMIT 1) AS first_question
            FROM agent_conversations c
            WHERE c.operator = ? AND COALESCE(c.archived_at, '') = ''
@@ -4785,6 +4791,62 @@ def rename_conversation(conn: sqlite3.Connection, cid: str, operator: str,
         (title, now(), str(cid)[:64], str(operator or "HR")))
     add_audit(conn, "chat_conversation", str(cid)[:64], "rename",
               cur.get("title") or "", title, actor, role)
+    return get_conversation(conn, cid, operator)
+
+
+def truncate_conversation(conn: sqlite3.Connection, cid: str, operator: str,
+                          before_run_id: int,
+                          actor: str = "HR", role: str = "hr") -> dict | None:
+    """编辑/重发：从 `before_run_id` 起的旧分支软隐藏，运行记录不删除。
+
+    · 只隐藏不删除：成本/审计记录仍保留，但会话历史与会话列表只显示新分支；
+    · 清空会话记忆，避免下一次回答又带进旧分支的内容；
+    · 如果被截断的是自动生成标题的首条问题，标题一并清空，由新一轮重新生成；
+      用户手动改过的标题保持不变。
+    """
+    cur = get_conversation(conn, cid, operator)
+    if not cur:
+        return None
+    cid = str(cid)[:64]
+    operator = str(operator or "HR").strip()[:64] or "HR"
+    try:
+        before = int(before_run_id)
+    except (TypeError, ValueError):
+        return None
+    if before <= 0:
+        return None
+    hit = conn.execute(
+        "SELECT id, question FROM agent_runs "
+        "WHERE id = ? AND session_id = ? AND operator = ? "
+        "AND COALESCE(hidden_at, '') = ''",
+        (before, cid, operator)).fetchone()
+    if not hit:
+        return None
+    first = conn.execute(
+        "SELECT id, question FROM agent_runs "
+        "WHERE session_id = ? AND operator = ? AND COALESCE(hidden_at, '') = '' "
+        "ORDER BY id ASC LIMIT 1",
+        (cid, operator)).fetchone()
+    title = (cur.get("title") or "").strip()
+    clear_title = False
+    if first:
+        first_q = re.sub(r"\s+", " ", str(first["question"] or "")).strip()[:48]
+        if before <= int(first["id"]) and (not title or title == first_q):
+            clear_title = True
+    stamp = now()
+    conn.execute(
+        "UPDATE agent_runs SET hidden_at = ? "
+        "WHERE session_id = ? AND operator = ? AND id >= ? "
+        "AND COALESCE(hidden_at, '') = ''",
+        (stamp, cid, operator, before))
+    conn.execute(
+        """UPDATE agent_conversations
+           SET memory_json = NULL, updated_at = ?,
+               title = CASE WHEN ? THEN '' ELSE title END
+           WHERE id = ? AND operator = ?""",
+        (stamp, 1 if clear_title else 0, cid, operator))
+    add_audit(conn, "chat_conversation", cid, "truncate",
+              f"隐藏 run >= {before} 的旧分支", "编辑/重发", actor, role)
     return get_conversation(conn, cid, operator)
 
 

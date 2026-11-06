@@ -5107,6 +5107,25 @@ def api_agent_conversation_rename(cid: str, req: dict = Body(...),
         conn.close()
 
 
+@app.post("/api/agent/conversations/{cid}/truncate")
+def api_agent_conversation_truncate(cid: str, req: dict = Body(...),
+                                    x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                                    x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """编辑/重发：从指定 run 起隐藏旧分支（运行记录保留给成本与审计）。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    conn = db.connect(DB_PATH)
+    try:
+        out = db.truncate_conversation(
+            conn, cid, s.get("username", "HR"), req.get("before_run_id"),
+            actor=s.get("username", "HR"), role=s["role"])
+        if not out:
+            raise HTTPException(status_code=404, detail="未找到该会话或该轮记录")
+        return {"ok": True, "conversation": out}
+    finally:
+        conn.close()
+
+
 @app.delete("/api/agent/conversations/{cid}")
 def api_agent_conversation_delete(cid: str,
                                   x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
