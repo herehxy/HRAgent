@@ -47,7 +47,10 @@ WRITE_TOOLS = {"set_stage", "set_tier", "add_tag", "merge_candidates", "add_note
                # v5.1：系统管理类写操作（此前只有界面能操作）
                "set_interview_info", "manage_mail_template", "set_job_active",
                "manage_department", "manage_user", "manage_recruit_plan",
-               "import_domain_pack"}
+               "import_domain_pack",
+               # v5.1.1：头像 / 岗位信息 / 对话历史 / 招聘计划 Excel
+               "manage_avatar", "update_job_info", "restore_chat_history",
+               "truncate_chat", "import_recruit_plan_excel"}
 # ingest_resumes / export_resumes **不在** WRITE_TOOLS：它们是直接执行的
 # （取数据、给下载指引），标成"写·需确认"会让界面与实际行为不一致。
 # run_proactive_scan 也**不在** WRITE_TOOLS：它只建提案、不改业务数据，
@@ -78,10 +81,13 @@ READ_TOOLS = {"search_candidates", "get_candidate", "get_candidates", "pool_stat
               # v4.4.0：面试日程 Excel / .ics
               "export_interview_schedule", "export_interview_ics",
               "export_resume_bundle",
+              # v5.1.1：来源邮件 / 附件原文（此前只给摘要）
+              "get_source_mail", "get_document_text",
+              "get_feedback_report", "export_feedback", "list_conversations",
               # v5.1：系统管理类只读
               "list_users", "list_departments", "list_recruit_plans", "list_domain_packs"}
-COMPUTE_TOOLS = {"analyze_fit", "compare_candidates", "draft_interview_questions",
-                 "draft_email", "preview_mail"}
+COMPUTE_TOOLS = {"analyze_fit", "compare_candidates", "compare_channel",
+                 "draft_interview_questions", "draft_email", "preview_mail"}
 
 #: v1.29：从配置取，不再手抄（原来这里和 agent/proactive.py 各一份，容易只改一边）
 STAGES = stages_mod.all_stages()
@@ -140,7 +146,17 @@ TOOL_SPECS = [
                    "description": "岗位名称（如『科学研究』）或『未归岗』。按**归岗关系**筛选："
                                   "只返回归到该岗位下的人；『未归岗』返回尚未归岗的人。"
                                   "岗位名以 list_jobs 的返回为准。"},
-           "keyword": {"type": "string", "description": "姓名、院校、专业关键词（院校用全称）"},
+           "mail_subject": {"type": "string",
+                            "description": "来源邮件标题包含的关键词（如『已录用』『面试邀请』）。"
+                                           "用于查『邮件标题里有某字样的人』。"},
+           "mail_from": {"type": "string",
+                         "description": "来源邮件发件人包含的地址/关键词"},
+           "mail_body": {"type": "string",
+                         "description": "来源邮件正文包含的关键词（新收邮件已入库；老邮件可能没有正文）"},
+           "certificate": {"type": "string",
+                           "description": "证书关键词（如 中级职称 / PMP / 注册安全工程师）"},
+           "keyword": {"type": "string",
+                       "description": "姓名、院校、专业、备注、岗位或来源邮件标题/发件人关键词"},
            "min_years": {"type": "integer", "description": "最低工作年限"},
            "education": {"type": "string", "description": "学历（v2.0.2 起为**精确匹配**，不是「及以上」；多个用逗号分隔）：大专/本科/硕士/博士。不传=不限"},
            "univ": {"type": "string",
@@ -150,7 +166,9 @@ TOOL_SPECS = [
            "stage": {"type": "string", "description": "投递阶段，取值：" + "/".join(STAGES)},
            "limit": {"type": "integer", "description": "最多返回条数，默认 20"}}),
     _spec("get_candidate",
-          "取某候选人的完整档案：基本信息、全部投递记录、技能（含原文证据）、标签。",
+          "取某候选人的完整档案：基本信息、联系方式、来源邮件、全部投递/面试/签约记录、"
+          "技能（含原文证据）、标签、备注；简历原文先给 2000 字摘录，"
+          "完整原文/附件正文请继续用 get_document_text。",
           {"candidate_id": {"type": "string",
                             "description": "候选人 id 或**姓名**（两种都行，系统自动解析）"}},
            ["candidate_id"]),
@@ -161,6 +179,23 @@ TOOL_SPECS = [
           {"candidate_ids": {"type": "array", "items": {"type": "string"},
                              "description": "候选人 id 或姓名列表，最多 20 个"}},
            ["candidate_ids"]),
+    _spec("get_source_mail",
+          "读取候选人的来源邮件：主题、发件人、收信时间、正文。"
+          "candidate_id 或 message_id 二选一；正文默认取前 8000 字，full=true 取完整。"
+          "老邮件可能只有标题/发件人（升级前未存正文），会如实返回空正文。",
+          {"candidate_id": {"type": "string", "description": "候选人 id 或姓名"},
+           "message_id": {"type": "string", "description": "邮件 Message-ID"},
+           "max_chars": {"type": "integer", "description": "正文截断长度，默认 8000"},
+           "full": {"type": "boolean", "description": "true=不截断正文"}}),
+    _spec("get_document_text",
+          "读取简历/附件原文。document_id 或 candidate_id 二选一；"
+          "不给 document_id 时列出该候选人的全部附件，并返回简历原文。"
+          "非简历附件（证书/作品集/成绩单）如果没有缓存文本，会现场解析原件。"
+          "max_chars 默认 12000，full=true 取完整原文。",
+          {"document_id": {"type": "integer", "description": "附件 id"},
+           "candidate_id": {"type": "string", "description": "候选人 id 或姓名"},
+           "max_chars": {"type": "integer", "description": "截断长度，默认 12000"},
+           "full": {"type": "boolean", "description": "true=不截断"}}),
     _spec("pool_stats",
           "人才库总览：人数、投递数、各档位分布、各阶段分布、待确认/信息缺失数量。"
           "要看某一维度的完整分布（做图表/汇报）时传 group_by，"
@@ -696,8 +731,9 @@ TOOL_SPECS = [
           ["active"]),
     _spec("manage_department",
           "【需 HR 确认】新建/更新/停用/启用部门。action=create/update 用 name+description；"
-          "action=active 用 department_id 或 name + active。只生成待确认提案。",
-          {"action": {"type": "string", "description": "create / update / active"},
+          "action=active 用 department_id 或 name + active；action=delete 对部门做停用"
+          "（系统不支持物理删除，历史岗位/投递保留）。只生成待确认提案。",
+          {"action": {"type": "string", "description": "create / update / active / delete"},
            "department_id": {"type": "integer", "description": "部门 id（active 时可用）"},
            "name": {"type": "string", "description": "部门名称"},
            "description": {"type": "string", "description": "部门说明"},
@@ -743,6 +779,61 @@ TOOL_SPECS = [
           "只生成待确认提案；确认后才会刷新技能分类。",
           {"pack": {"type": "string", "description": "领域包路径/名称"}},
           ["pack"]),
+    _spec("compare_channel",
+          "对比某候选人的两条通道：库内生效结论（规则/上次模型分析）vs 现在重跑一次模型分析。"
+          "只读、不落库、不改档位；模型不可用时如实返回原因。",
+          {"candidate_id": {"type": "string", "description": "候选人 id 或姓名"}},
+          ["candidate_id"]),
+    _spec("get_feedback_report",
+          "查看「系统建议 vs HR 定档」的口径偏差报告（只读）。days 默认 90。",
+          {"days": {"type": "integer", "description": "统计最近多少天，默认 90"}}),
+    _spec("export_feedback",
+          "导出「系统建议 vs HR 定档」偏差明细 CSV（只读）。返回 CSV 文本与下载地址。",
+          {"days": {"type": "integer", "description": "统计最近多少天，默认 90"},
+           "max_chars": {"type": "integer", "description": "返回 CSV 的最大字符数，默认 20000"}}),
+    _spec("manage_avatar",
+          "【需 HR 确认，action=status 除外】候选人头像管理："
+          "action=status（只读看补扫进度）/backfill_start/backfill_stop/"
+          "delete（去掉头像）/refresh（重新抽取）/upload（需 image_base64）。"
+          "candidate_id 对 delete/refresh/upload 必填。",
+          {"action": {"type": "string",
+                      "description": "status / backfill_start / backfill_stop / delete / refresh / upload"},
+           "candidate_id": {"type": "string", "description": "候选人 id 或姓名"},
+           "image_base64": {"type": "string",
+                            "description": "upload 时的 JPEG/PNG base64（不要带 data: 前缀）"}},
+          ["action"]),
+    _spec("update_job_info",
+          "【需 HR 确认】修改岗位名称 / 招聘数量 / 所属部门（不物理删除）。"
+          "job_id 或 title 二选一；至少提供一个要改的字段。只生成待确认提案。",
+          {"job_id": {"type": "integer", "description": "岗位 id（二选一）"},
+           "title": {"type": "string", "description": "当前岗位名（二选一）"},
+           "new_title": {"type": "string", "description": "新岗位名"},
+           "headcount": {"type": "integer", "description": "招聘数量；0 表示清空"},
+           "department_id": {"type": "integer", "description": "所属部门 id；0 表示清空"}},
+          []),
+    _spec("list_conversations",
+          "列出智能助手历史会话：会话 id、标题、更新时间、消息数。",
+          {"limit": {"type": "integer", "description": "默认 50"}}),
+    _spec("restore_chat_history",
+          "【需 HR 确认】恢复被清空的对话展示（保留期内有效）。只生成待确认提案。",
+          {}),
+    _spec("truncate_chat",
+          "【需 HR 确认】从某条运行记录起隐藏该会话的后续分支（编辑重发用）。"
+          "conversation_id 与 before_run_id 必填。只生成待确认提案。",
+          {"conversation_id": {"type": "string", "description": "会话 id"},
+           "before_run_id": {"type": "integer", "description": "从这条 run id 起隐藏"}},
+          ["conversation_id", "before_run_id"]),
+    _spec("import_recruit_plan_excel",
+          "【需 HR 确认】从本机 .xlsx 文件路径导入招聘计划。"
+          "year_id 可空（首次导入用 label 新建届别）；mode=merge/overwrite。"
+          "只生成待确认提案，HR 确认后才写库。",
+          {"file_path": {"type": "string", "description": "本机 .xlsx 绝对路径"},
+           "year_id": {"type": "integer", "description": "届别 id，可空"},
+           "label": {"type": "string", "description": "届别名称（首次导入时用）"},
+           "period_start": {"type": "string", "description": "起 YYYY-MM-DD"},
+           "period_end": {"type": "string", "description": "止 YYYY-MM-DD"},
+           "mode": {"type": "string", "description": "merge / overwrite，默认 merge"}},
+          ["file_path"]),
 ]
 
 
@@ -772,30 +863,76 @@ def _brief(c: dict) -> dict:
 
 
 def _detail_brief(cid: int, d: dict) -> dict:
-    """单个候选人档案 → 工具返回的固定形状（get_candidate / get_candidates 共用）。"""
+    """单个候选人档案 → 工具返回的固定形状（get_candidate / get_candidates 共用）。
+
+    v5.1.1：补上来源邮件、联系方式、备注、四六级/教育经历等字段。之前只给
+    「基本字段 + 技能」，HR 问「邮件标题里有没有已录用」「这个人的邮箱/备注」
+    时助手看不到，只能回答查不到 —— 而数据其实就在库里。
+    """
+    from ..crypto import decrypt
+
+    source_mail = d.get("source_mail")
+    if source_mail:
+        source_mail = {
+            **source_mail,
+            "body_text": (source_mail.get("body_text") or "")[:6000],
+            "body_html": (source_mail.get("body_html") or "")[:2000],
+            "body_truncated": len(source_mail.get("body_text") or "") > 6000,
+        }
     return {
         "candidate_id": cid, "name": d.get("name"),
         "education": d.get("edu_level"), "years": d.get("years_exp"),
         "school": d.get("school"), "major": d.get("major"),
         "current_org": d.get("current_org"),
+        "gender": d.get("gender"), "cet": d.get("cet"),
+        "cet_level": d.get("cet_level"), "grad_date": d.get("grad_date"),
+        "in_school": d.get("in_school"),
+        "first_degree_school": d.get("first_degree_school"),
+        "edu_history": d.get("edu_history"),
+        "uni_tier": d.get("uni_tier"), "bachelor_tier": d.get("bachelor_tier"),
+        "overseas": d.get("overseas"),
+        "phone": decrypt(d.get("phone_enc")) or "",
+        "email": decrypt(d.get("email_enc")) or "",
+        "note": d.get("note"), "app_note": d.get("app_note"),
+        "certificates": d.get("certificates") or [],
         "pool_status": d.get("pool_status"), "pii_level": d.get("pii_level"),
         "tier_suggested": d.get("tier_suggested"), "tier_final": d.get("tier_final"),
         "score": d.get("score"), "stage": d.get("stage"),
+        "status": d.get("status"), "application_id": d.get("application_id"),
+        "interview_unit": d.get("interview_unit"),
+        "interview_date": d.get("interview_date"),
+        "interview_slot": d.get("interview_slot"),
+        "interview_mode": d.get("interview_mode"),
+        "interview_place": d.get("interview_place"),
+        "outcome": d.get("outcome"),
+        "offer_sent_at": d.get("offer_sent_at"),
+        "signed_at": d.get("signed_at"),
+        "onboard_deadline": d.get("onboard_deadline"),
+        "onboard_status": d.get("onboard_status"),
+        "hire_unit": d.get("hire_unit"), "sign_status": d.get("sign_status"),
+        "source_mail": source_mail,
         "reasons": d.get("reasons"), "risks": d.get("risks"),
         "hit": d.get("hits"), "miss": d.get("miss"),
         "needs_review": d.get("needs_review"),
+        "missing_fields": d.get("missing_fields"),
         "applications": [{"application_id": a["id"], "job": a.get("job_title"),
                           "channel": a.get("channel"), "applied_at": a.get("applied_at"),
                           "tier": a.get("tier_final") or a.get("tier_suggested"),
                           "stage": a.get("stage"), "status": a.get("status"),
+                          "outcome": a.get("outcome"), "sign_status": a.get("sign_status"),
+                          "interview_date": a.get("interview_date"),
+                          "interview_unit": a.get("interview_unit"),
                           "score": a.get("score")} for a in d.get("applications", [])],
         "skills": [{"name": s["name"], "category": s.get("category"),
                     "level": s.get("level"), "verified": s.get("verified"),
                     "evidence": s.get("evidence")} for s in d.get("skills", [])],
         "tags": [t["name"] for t in d.get("tags", [])],
         "documents": [{"file": x.get("file_name"), "engine": x.get("parse_engine"),
-                       "parse_ok": x.get("parse_ok")} for x in d.get("documents", [])],
+                       "parse_ok": x.get("parse_ok"),
+                       "source_message_id": x.get("source_message_id"),
+                       "kind": x.get("kind")} for x in d.get("documents", [])],
         "raw_text_excerpt": (d.get("raw_text") or "")[:2000],
+        "raw_text_length": len(d.get("raw_text") or ""),
     }
 
 
@@ -1346,7 +1483,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 # 回填完整字段，并应用 job/stage/education 等硬筛选。
                 all_items = {c["id"]: c for c in db.list_candidates(conn, archived=False)}
                 allowed = None
-                if any(args.get(k) for k in ("job", "education", "stage", "tier", "univ")):
+                if any(args.get(k) for k in ("job", "education", "stage", "tier",
+                                             "univ", "mail_subject", "mail_from",
+                                             "mail_body", "certificate")):
                     _job_id = ctx.job_id
                     if args.get("job"):
                         _job_id, _jerr = _resolve_job_id(conn, args["job"])
@@ -1355,6 +1494,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                     allowed = {c["id"] for c in db.list_candidates(
                         conn, tier=args.get("tier"), education=args.get("education"),
                         stage=args.get("stage"), univ=args.get("univ"),
+                        mail_subject=args.get("mail_subject"),
+                        mail_from=args.get("mail_from"),
+                        mail_body=args.get("mail_body"),
+                        certificate=args.get("certificate"),
                         job_id=_job_id, archived=False)}
                 out = []
                 for r in (res.get("results") or []):
@@ -1406,6 +1549,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 skill=skill_terms, min_years=args.get("min_years"),
                 education=args.get("education"), stage=args.get("stage"),
                 univ=args.get("univ"),
+                mail_subject=args.get("mail_subject"),
+                mail_from=args.get("mail_from"),
+                mail_body=args.get("mail_body"),
+                certificate=args.get("certificate"),
                 job_id=job_id,
                 # 归档的人不在人才库里，助手也就不该把他们列出来（与界面同一口径）
                 archived=False)
@@ -1443,6 +1590,104 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             return _ok({"count": len(items), "items": items,
                         "errors": errors,
                         "note": "多人档案已批量读取；缺失的人放在 errors 里。"})
+
+        if name == "get_source_mail":
+            mid = str(args.get("message_id") or "").strip()
+            if not mid:
+                cid, _cerr = _resolve_cid(conn, args.get("candidate_id"))
+                if _cerr:
+                    return _err(_cerr["error"], _cerr.get("hint"))
+                docs = db.list_documents(conn, candidate_id=cid)
+                mid = next((str(d.get("source_message_id")) for d in docs
+                            if d.get("source_message_id")), "")
+                if not mid:
+                    return _ok({"candidate_id": cid, "note": "这位候选人没有来源邮件（可能是文件夹导入或手工上传）",
+                                "body_text": "", "body_html": ""})
+            row = conn.execute(
+                "SELECT message_id, uid, mailbox, subject, from_addr, received_at, "
+                "body_text, body_html FROM email_messages WHERE message_id = ?",
+                (mid,)).fetchone()
+            if not row:
+                return _err(f"没有找到邮件 {mid}")
+            text = row["body_text"] or ""
+            html = row["body_html"] or ""
+            # 升级前的邮件没存正文；点开时按 UID 回 IMAP 只读补取一次
+            if not text and not html and row["uid"]:
+                try:
+                    from .. import mailbox as _mb
+                    _cfg = _mb.load_config()
+                    if _cfg.get("mode") == "imap":
+                        _got = _mb.fetch_imap_body(_cfg, row["uid"], row["mailbox"])
+                        if _got:
+                            text = _got.get("body_text") or ""
+                            html = _got.get("body_html") or ""
+                            db.update_email(conn, mid, body_text=text, body_html=html)
+                except Exception:                              # noqa: BLE001
+                    pass
+            if not text and html:
+                # 只有 HTML 的邮件给模型一份可读纯文本（不改变入库内容）
+                text = re.sub(r"<[^>]+>", " ", html)
+                text = re.sub(r"\s+", " ", text).strip()
+            full = bool(args.get("full"))
+            limit = int(args.get("max_chars") or 8000)
+            if limit <= 0:
+                limit = 8000
+            out_text = text if full else text[:limit]
+            return _ok({"message_id": row["message_id"], "subject": row["subject"] or "",
+                        "from": row["from_addr"] or "", "received_at": row["received_at"] or "",
+                        "body_text": out_text, "body_html": html if full else html[:limit],
+                        "truncated": (not full and len(text) > limit),
+                        "note": ("" if text else "这封邮件没有入库正文（升级前收的邮件只存了标题/发件人）")})
+
+        if name == "get_document_text":
+            import os as _os
+            did = args.get("document_id")
+            docs: list[dict] = []
+            if did is not None:
+                doc = db.get_document(conn, int(did))
+                if not doc:
+                    return _err(f"未找到附件 #{did}")
+                docs = [doc]
+            else:
+                cid, _cerr = _resolve_cid(conn, args.get("candidate_id"))
+                if _cerr:
+                    return _err(_cerr["error"], _cerr.get("hint"))
+                docs = db.list_documents(conn, candidate_id=cid)
+                if not docs:
+                    return _err(f"候选人 #{cid} 没有附件")
+            # 没指定附件时优先读简历，不拿作品集当简历原文
+            resume_docs = [d for d in docs if (d.get("kind") or "resume") != "other"]
+            chosen = docs[0] if did is not None else ((resume_docs or docs)[0])
+            summaries = [{"document_id": d.get("id"), "file": d.get("file_name"),
+                          "kind": d.get("kind") or "resume",
+                          "parse_engine": d.get("parse_engine"),
+                          "parse_ok": d.get("parse_ok"),
+                          "size": d.get("size"),
+                          "download_url": f"/api/documents/{d.get('id')}/file",
+                          "preview_url": f"/api/documents/{d.get('id')}/file?inline=1"}
+                         for d in docs]
+            text = str(chosen.get("raw_text") or "")
+            engine = chosen.get("parse_engine") or "cached"
+            ok = chosen.get("parse_ok")
+            if not text:
+                raw_path = chosen.get("archived_path") or chosen.get("file_path") or ""
+                if raw_path:
+                    from ..paths import resolve_data_path
+                    full_path = raw_path if _os.path.isabs(raw_path) else resolve_data_path(raw_path)
+                    if _os.path.isfile(full_path):
+                        from ..pipeline import parse as _parse
+                        text, engine, ok = _parse.parse_file_ex(full_path)
+            full = bool(args.get("full"))
+            limit = int(args.get("max_chars") or 12000)
+            if limit <= 0:
+                limit = 12000
+            out_text = text if full else text[:limit]
+            return _ok({"document_id": chosen.get("id"),
+                        "file": chosen.get("file_name"), "kind": chosen.get("kind") or "resume",
+                        "parse_engine": engine, "parse_ok": ok,
+                        "text": out_text, "truncated": (not full and len(text) > limit),
+                        "documents": summaries,
+                        "note": ("" if text else "这份附件没有可读取的文本，原件已归档，可在界面预览")})
 
         if name == "pool_stats":
             s = db.pool_stats(conn)
@@ -2062,7 +2307,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                     "SELECT count(DISTINCT a.candidate_id) FROM applications a "
                     "JOIN candidates c ON c.id = a.candidate_id "
                     "WHERE c.merged_into IS NULL AND COALESCE(c.archived_at,'') = '' "
-                    "AND COALESCE(a.extract_mode,'') != 'llm+rule'").fetchone()[0]
+                    "AND COALESCE(a.extract_mode,'') NOT IN ('llm','llm+rule')").fetchone()[0]
                 desc = (f"批量重跑分析所有「规则通道」档案（当前 {n_heur} 位，"
                         f"本次最多 {limit} 位）")
             return _propose(conn, ctx, "reanalyze_batch",
@@ -3118,7 +3363,20 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                                  "active": active},
                                 f"{'启用' if active else '停用'}部门「{d.get('name')}」",
                                 risk="低")
-            return _err("action 只能是 create / update / active")
+            if action == "delete":
+                did = args.get("department_id")
+                d = db.get_department(conn, int(did)) if did else None
+                if not d:
+                    nm = str(args.get("name") or "").strip()
+                    hits = [x for x in db.list_departments(conn) if x.get("name") == nm]
+                    d = hits[0] if len(hits) == 1 else None
+                if not d:
+                    return _err("没有找到要删除的部门")
+                return _propose(conn, ctx, "manage_department",
+                                {"action": "delete", "department_id": int(d["id"])},
+                                f"删除部门「{d.get('name')}」（系统不支持物理删除，将停用并保留历史）",
+                                risk="高")
+            return _err("action 只能是 create / update / active / delete")
 
         if name == "manage_user":
             if not auth.can(ctx.role, "manage_users"):
@@ -3240,6 +3498,162 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                             f"导入领域包「{pack}」："
                             + str((preview or {}).get("summary") or "确认后刷新技能本体"),
                             risk="高")
+
+        # ---- v5.1.1：偏差报告 / 双通道对比 / 头像 / 岗位信息 / 对话历史 / 计划导入 ----
+        if name == "compare_channel":
+            cid, _cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if _cerr:
+                return _err(_cerr["error"], _cerr.get("hint"))
+            d = db.candidate_detail(conn, cid)
+            if not d:
+                return _err(f"未找到候选人 #{cid}")
+            jd, job_meta = db.resolve_candidate_job(conn, d)
+            apps = d.get("applications") or []
+            cur = apps[0] if apps else {}
+            rule = {"tier": cur.get("tier_final") or cur.get("tier_suggested"),
+                    "tier_final": cur.get("tier_final"), "score": cur.get("score"),
+                    "reasons": cur.get("reasons") or [], "risks": cur.get("risks") or [],
+                    "hits": cur.get("hit") or [], "miss": cur.get("miss") or [],
+                    "job": (job_meta or {}).get("title") or ""}
+            from . import llm as _llm
+            st = _llm.status()
+            if not jd:
+                return _ok({"candidate_id": cid, "rule": rule, "model": None,
+                            "reason_unavailable": "该候选人还没有可用岗位（未归岗且无建议岗位）"})
+            if not st.get("reachable") or not st.get("model_installed"):
+                return _ok({"candidate_id": cid, "rule": rule, "model": None,
+                            "reason_unavailable": "模型当前不可用，无法跑模型通道"})
+            cand = dict(d)
+            for k in ("score", "tier_suggested", "hits", "miss", "applied_at"):
+                if cur.get(k) is not None:
+                    cand[k] = cur.get(k)
+            model = analyze_fit(cand, jd)
+            return _ok({"candidate_id": cid, "job": job_meta, "rule": rule,
+                        "model": model,
+                        "note": "规则=库内生效结论；模型=现跑一次，仅参考，不改任何数据。"})
+
+        if name == "get_feedback_report":
+            from .. import feedback as _fb
+            return _ok({"ok": True, **_fb.decision_report(
+                conn, days=int(args.get("days") or 90))})
+
+        if name == "export_feedback":
+            from .. import feedback as _fb
+            days = int(args.get("days") or 90)
+            csv_text = _fb.export_csv(conn, days=days)
+            db.add_audit(conn, "feedback", "report", "export", "",
+                         f"{ctx.operator} 通过助手导出偏差明细 CSV（最近 {days} 天）",
+                         ctx.operator, ctx.role)
+            limit = int(args.get("max_chars") or 20000)
+            return _ok({"csv": csv_text[:max(1, limit)],
+                        "truncated": len(csv_text) > limit,
+                        "download_url": f"/api/feedback/export?days={days}"})
+
+        if name == "manage_avatar":
+            from .. import avatar as _avatar
+            action = str(args.get("action") or "").strip().lower()
+            if action == "status":
+                return _ok(_avatar.backfill_status())
+            if action in ("backfill_start", "backfill_stop"):
+                return _propose(conn, ctx, "manage_avatar", {"action": action},
+                                "启动历史头像补扫" if action.endswith("start")
+                                else "请求停止历史头像补扫", risk="低")
+            if action not in ("delete", "refresh", "upload"):
+                return _err("action 只能是 status / backfill_start / backfill_stop / delete / refresh / upload")
+            cid, _cerr = _resolve_cid(conn, args.get("candidate_id"))
+            if _cerr:
+                return _err(_cerr["error"], _cerr.get("hint"))
+            cand = db.get_candidate(conn, cid) or {}
+            payload = {"action": action, "candidate_id": cid}
+            if action == "upload":
+                b64 = str(args.get("image_base64") or "").strip()
+                if not b64:
+                    return _err("upload 需要 image_base64")
+                payload["image_base64"] = b64
+            label = {"delete": "去掉", "refresh": "重新抽取", "upload": "上传"}[action]
+            return _propose(conn, ctx, "manage_avatar", payload,
+                            f"{label}「{cand.get('name') or ('#' + str(cid))}」的头像",
+                            risk="低")
+
+        if name == "update_job_info":
+            jid = args.get("job_id")
+            job = db.get_job(conn, int(jid)) if jid else None
+            if not job:
+                title = str(args.get("title") or "").strip()
+                hits = [j for j in db.list_jobs(conn, include_inactive=True)
+                        if title and title in str(j.get("title") or "")]
+                job = hits[0] if len(hits) == 1 else None
+            if not job:
+                return _err("没有找到唯一岗位，请用 job_id 或更完整的岗位名")
+            fields = {}
+            if args.get("new_title") is not None:
+                nt = str(args.get("new_title") or "").strip()
+                if not nt:
+                    return _err("新岗位名不能为空")
+                fields["title"] = nt
+            if args.get("headcount") is not None:
+                hc = int(args.get("headcount") or 0)
+                if hc < 0:
+                    return _err("招聘数量不能为负数")
+                fields["headcount"] = hc if hc else None
+            if args.get("department_id") is not None:
+                did = int(args.get("department_id") or 0)
+                if did and not db.get_department(conn, did):
+                    return _err(f"部门 #{did} 不存在")
+                fields["department_id"] = did or None
+            if not fields:
+                return _err("没有要修改的岗位字段")
+            return _propose(conn, ctx, "update_job_info",
+                            {"job_id": int(job["id"]), **fields},
+                            f"修改岗位「{job.get('title')}」：" +
+                            "；".join(f"{k}={v}" for k, v in fields.items()), risk="中")
+
+        if name == "list_conversations":
+            rows = db.list_conversations(conn, ctx.operator,
+                                         limit=int(args.get("limit") or 50))
+            return _ok({"count": len(rows), "conversations": rows})
+
+        if name == "restore_chat_history":
+            return _propose(conn, ctx, "restore_chat_history", {},
+                            "恢复被清空的智能助手对话展示", risk="低")
+
+        if name == "truncate_chat":
+            cid = str(args.get("conversation_id") or "").strip()
+            try:
+                rid = int(args.get("before_run_id"))
+            except (TypeError, ValueError):
+                return _err("before_run_id 必须是数字")
+            if not cid:
+                return _err("conversation_id 不能为空")
+            if not db.get_conversation(conn, cid, ctx.operator):
+                return _err(f"没有找到会话 {cid}")
+            return _propose(conn, ctx, "truncate_chat",
+                            {"conversation_id": cid, "before_run_id": rid},
+                            f"隐藏会话 {cid} 从运行 #{rid} 起的后续分支", risk="中")
+
+        if name == "import_recruit_plan_excel":
+            fp = str(args.get("file_path") or "").strip()
+            if not fp or not fp.lower().endswith(".xlsx"):
+                return _err("file_path 必须是以 .xlsx 结尾的本机路径")
+            import os as _os
+            if not _os.path.isfile(fp):
+                return _err(f"文件不存在：{fp}")
+            if _os.path.getsize(fp) > 10 * 1024 * 1024:
+                return _err("文件超过 10 MB，请确认是不是招聘进度表")
+            try:
+                with open(fp, "rb") as fh:
+                    parsed = recruit_mod.parse_plan_xlsx(fh.read())
+            except Exception as exc:                      # noqa: BLE001
+                return _err(f"Excel 解析失败：{type(exc).__name__}: {exc}")
+            if not parsed.get("rows"):
+                return _err("没有解析到计划行：" + "；".join((parsed.get("errors") or [])[:5]))
+            payload = {"file_path": fp, "year_id": args.get("year_id"),
+                       "label": args.get("label"), "period_start": args.get("period_start"),
+                       "period_end": args.get("period_end"),
+                       "mode": args.get("mode") or "merge"}
+            return _propose(conn, ctx, "import_recruit_plan_excel", payload,
+                            f"导入招聘计划 Excel：{len(parsed['rows'])} 行"
+                            f"（{_os.path.basename(fp)}）", risk="中")
 
         # ---- v2.0.7：查学校（本地数据，零外发） ----
         if name == "school_info":

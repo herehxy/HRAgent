@@ -1298,6 +1298,10 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                    date_from: str | None = None, date_to: str | None = None,
                    interview_unit: str | None = None,
                    job: str | None = None,
+                   mail_subject: str | None = None,
+                   mail_from: str | None = None,
+                   mail_body: str | None = None,
+                   certificate: str | None = None,
                    outcome: str | None = None,
                    min_years: int | None = None, gender: str | None = None,
                    archived: str | None = None,
@@ -1383,6 +1387,10 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                                    date_from=(date_from or "").strip() or None,
                                    date_to=(date_to or "").strip() or None,
                                    interview_unit=(interview_unit or "").strip() or None,
+                                   mail_subject=(mail_subject or "").strip() or None,
+                                   mail_from=(mail_from or "").strip() or None,
+                                   mail_body=(mail_body or "").strip() or None,
+                                   certificate=(certificate or "").strip() or None,
                                    outcome=(outcome or "").strip() or None,
                                    # 分页请求时先**轻量**取（不装配技能明细）：
                                    # 1000 人时全装配是 59ms，而一屏只要 20 条。
@@ -2508,7 +2516,7 @@ def _needs_full_reanalysis(conn, limit: int, only_heuristic: bool,
                           ORDER BY COALESCE(applied_at,'') DESC, id DESC LIMIT 1)"""
     params: list = []
     if only_heuristic:
-        sql += " AND COALESCE(a.extract_mode, '') != 'llm+rule'"
+        sql += " AND COALESCE(a.extract_mode, '') NOT IN ('llm','llm+rule')"
     if ids:
         _ids = []
         for x in ids:

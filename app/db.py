@@ -257,6 +257,9 @@ CREATE TABLE IF NOT EXISTS email_messages (
     message_id TEXT UNIQUE,
     uid TEXT, mailbox TEXT,
     from_addr TEXT, subject TEXT,
+    -- v5.1.1：邮件正文入库（只读存档；用于「正文里提到某关键词」检索）
+    body_text TEXT,
+    body_html TEXT,
     received_at TEXT,
     has_attachment INTEGER DEFAULT 0,
     attachment_count INTEGER DEFAULT 0,
@@ -771,6 +774,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "in_school": "INTEGER",
             # v1.17：奖学金/荣誉/论文/专利
             "honors_json": "TEXT",
+            # v5.1.1：证书（资格类，如中级职称/PMP/注册安全工程师）
+            "certificates_json": "TEXT",
             # v4.0.18：AI 提炼的项目经历（不是简历原文，缓存避免每次打开档案都调模型）。
             # NULL = 还没提炼过；"[]"/空对象 = 已提炼但没有项目，界面不显示该区块。
             "projects_json": "TEXT",
@@ -1765,6 +1770,12 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
                     # 与导出共用本函数，只在 server 层筛会出现"界面上能筛、助手查不到"。
                     # 逗号分隔 = 并集；精确匹配（结论是枚举值，不存在子串误命中问题）。
                     outcome: str | None = None,
+                    # v5.1.1：来源邮件的标题 / 发件人（子串匹配）。简历原件里
+                    # 有 source_message_id，关联 email_messages 即可按邮件检索人。
+                    mail_subject: str | None = None,
+                    mail_from: str | None = None,
+                    mail_body: str | None = None,
+                    certificate: str | None = None,
                     stage: str | None = None, pool_status: str | None = None,
                     needs_review: bool | None = None, include_merged: bool = False,
                     archived: bool | None = None, limit: int | None = None,
@@ -1838,6 +1849,28 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
                     conds.append("a.outcome = ?")
                     args.append(o)
             where.append("(" + " OR ".join(conds) + ")")
+    # v5.1.1：按来源邮件的标题 / 发件人检索。候选人 → documents.source_message_id
+    # → email_messages。用 EXISTS 而不是 JOIN，避免一个人有多份附件时重复出行。
+    _mail_doc = ("EXISTS (SELECT 1 FROM documents dm "
+                 "JOIN email_messages mm ON mm.message_id = dm.source_message_id "
+                 "WHERE dm.candidate_id = c.id AND {cond})")
+    if mail_subject:
+        where.append(_mail_doc.format(
+            cond="LOWER(COALESCE(mm.subject,'')) LIKE ?"))
+        args.append("%" + str(mail_subject).strip().lower() + "%")
+    if mail_from:
+        where.append(_mail_doc.format(
+            cond="LOWER(COALESCE(mm.from_addr,'')) LIKE ?"))
+        args.append("%" + str(mail_from).strip().lower() + "%")
+    if mail_body:
+        where.append(_mail_doc.format(
+            cond="(LOWER(COALESCE(mm.body_text,'')) LIKE ?"
+                 " OR LOWER(COALESCE(mm.body_html,'')) LIKE ?)"))
+        _mb = "%" + str(mail_body).strip().lower() + "%"
+        args.extend([_mb, _mb])
+    if certificate:
+        where.append("LOWER(COALESCE(c.certificates_json,'')) LIKE ?")
+        args.append("%" + str(certificate).strip().lower() + "%")
     if keyword:
         # v1.23.5：关键词改为**在 SQL 里筛**（原来是把全库装配成对象后在 Python 里逐条比）。
         # 两个原因：
@@ -1855,10 +1888,18 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
             " OR LOWER(COALESCE(j.title,'')) LIKE ?"
             " OR LOWER(COALESCE(sj2.title,'')) LIKE ?"
             " OR LOWER(COALESCE(c.note,'')) LIKE ?"   # v1.25.7：备注可搜（"内推""谈薪"能找到人）
+            " OR LOWER(COALESCE(c.certificates_json,'')) LIKE ?"
+            " OR EXISTS (SELECT 1 FROM documents dk"
+            "            JOIN email_messages mk ON mk.message_id = dk.source_message_id"
+            "            WHERE dk.candidate_id = c.id"
+            "              AND (LOWER(COALESCE(mk.subject,'')) LIKE ?"
+            "                   OR LOWER(COALESCE(mk.from_addr,'')) LIKE ?"
+            "                   OR LOWER(COALESCE(mk.body_text,'')) LIKE ?"
+            "                   OR LOWER(COALESCE(mk.body_html,'')) LIKE ?))"
             " OR EXISTS (SELECT 1 FROM candidate_skills cs3 JOIN skills s3 ON s3.id = cs3.skill_id"
             "            WHERE cs3.candidate_id = c.id"
             "              AND LOWER(COALESCE(s3.canonical_name,'')) LIKE ?))")
-        args.extend([like] * 8)
+        args.extend([like] * 13)
     if where:
         sql += " WHERE " + " AND ".join(where)
     # 默认排序（v4.0.15，业务方 2026-11-02 明确要求）：**只看投递时间，最新在前**。
@@ -2075,6 +2116,15 @@ def _group_honors(raw) -> dict:
     return out
 
 
+def _load_certificates(raw) -> list[str]:
+    """证书列表（只读展示/检索；抽取时已按证书词表过滤）。"""
+    try:
+        items = json.loads(raw) if raw else []
+    except (ValueError, TypeError):
+        items = []
+    return [str(x).strip() for x in (items or []) if str(x).strip()]
+
+
 def load_projects(raw) -> dict | None:
     """解析 projects_json 缓存。
 
@@ -2245,6 +2295,8 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         "first_degree_school": univ_mod.clean_school_name(c.get("first_degree_school")),
         # v1.17：荣誉/论文/专利（按类分组，界面直接渲染）
         "honors": _group_honors(c.get("honors_json")),
+        # v5.1.1：资格类证书（与荣誉/论文/专利分开）
+        "certificates": _load_certificates(c.get("certificates_json")),
         # v4.0.18：AI 提炼的项目经历；None = 尚未提炼，界面据此懒加载一次
         "projects": load_projects(c.get("projects_json")),
         "projects_checked": c.get("projects_json") is not None,
@@ -4063,12 +4115,14 @@ def _source_mail_of(conn: sqlite3.Connection, resume_docs: list) -> dict | None:
         if not sid:
             return None
         row = conn.execute(
-            "SELECT subject, from_addr, received_at FROM email_messages "
-            "WHERE message_id = ?", (sid,)).fetchone()
+            "SELECT subject, from_addr, received_at, body_text, body_html "
+            "FROM email_messages WHERE message_id = ?", (sid,)).fetchone()
         if not row:
             return None
         return {"subject": row["subject"] or "", "from": row["from_addr"] or "",
-                "received_at": row["received_at"] or ""}
+                "received_at": row["received_at"] or "",
+                "body_text": row["body_text"] or "",
+                "body_html": row["body_html"] or ""}
     except Exception:                                    # noqa: BLE001
         return None
 
@@ -4194,17 +4248,26 @@ def decide_proposal(conn: sqlite3.Connection, pid: int, decision: str,
 # ============================================================
 
 def record_email(conn: sqlite3.Connection, rec: dict) -> int:
-    row = conn.execute("SELECT id FROM email_messages WHERE message_id = ?",
-                       (rec.get("message_id"),)).fetchone()
+    row = conn.execute("SELECT id, body_text, body_html FROM email_messages "
+                       "WHERE message_id = ?", (rec.get("message_id"),)).fetchone()
     if row:
+        # 老库里的邮件可能只有主题/发件人；拿到正文时补上（不覆盖已有正文）。
+        if rec.get("body_text") or rec.get("body_html"):
+            conn.execute(
+                "UPDATE email_messages SET body_text = COALESCE(NULLIF(body_text,''), ?),"
+                " body_html = COALESCE(NULLIF(body_html,''), ?) WHERE id = ?",
+                (rec.get("body_text") or "", rec.get("body_html") or "", row["id"]))
+            conn.commit()
         return row["id"]
     cur = conn.execute(
         """INSERT INTO email_messages
-           (message_id, uid, mailbox, from_addr, subject, received_at, has_attachment,
-            attachment_count, processed, added, skipped, failed, error, fetched_at, processed_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           (message_id, uid, mailbox, from_addr, subject, body_text, body_html,
+            received_at, has_attachment, attachment_count, processed, added, skipped,
+            failed, error, fetched_at, processed_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (rec.get("message_id"), rec.get("uid"), rec.get("mailbox"), rec.get("from_addr"),
-         rec.get("subject"), rec.get("received_at"),
+         rec.get("subject"), rec.get("body_text") or "", rec.get("body_html") or "",
+         rec.get("received_at"),
          1 if rec.get("has_attachment") else 0, rec.get("attachment_count", 0),
          1 if rec.get("processed") else 0, rec.get("added", 0), rec.get("skipped", 0),
          rec.get("failed", 0), rec.get("error"), rec.get("fetched_at", now()),

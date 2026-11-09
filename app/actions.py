@@ -540,8 +540,15 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
                 if not r:
                     return {"ok": False, "error": f"部门 #{did} 不存在"}
                 result["after"] = {"department_id": did, "active": bool(args["active"])}
+            elif action == "delete":
+                did = int(args["department_id"])
+                r = db.set_department_active(conn, did, False, operator)
+                if not r:
+                    return {"ok": False, "error": f"部门 #{did} 不存在"}
+                result["after"] = {"department_id": did, "deleted": True,
+                                   "note": "系统不支持物理删除，已停用并保留历史投递/岗位"}
             else:
-                return {"ok": False, "error": "action 只能是 create / update / active"}
+                return {"ok": False, "error": "action 只能是 create / update / active / delete"}
 
         elif tool == "manage_user":
             if not auth.can(role, "manage_users"):
@@ -695,6 +702,136 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
                 return {"ok": False, "error": str(exc)}
             result["after"] = r
 
+        elif tool == "manage_avatar":
+            if not auth.can(role, "chat"):
+                return _denied(conn, p, operator, role, "chat")
+            import base64
+            import io
+            import os as _os
+            from . import avatar as _avatar
+            from .paths import DATA_DIR
+            from PIL import Image
+            avatars_dir = _os.path.join(DATA_DIR, "avatars")
+            action = str(args.get("action") or "").strip().lower()
+            if action == "backfill_start":
+                result["after"] = _avatar.start_backfill(db_path, avatars_dir)
+            elif action == "backfill_stop":
+                result["after"] = _avatar.stop_backfill()
+            else:
+                cid = int(args["candidate_id"])
+                cand = db.get_candidate(conn, cid)
+                if not cand:
+                    return {"ok": False, "error": f"未找到候选人 #{cid}"}
+                if action == "delete":
+                    _avatar.clear(conn, cid)
+                    db.add_audit(conn, "candidate", str(cid), "avatar_clear", "",
+                                 "去掉证件照", operator, role)
+                    result["after"] = {"candidate_id": cid, "avatar_path": "-"}
+                elif action == "refresh":
+                    _avatar.reset(conn, cid)
+                    rel = _avatar.ensure(conn, cid, avatars_dir)
+                    ok = bool(rel) and rel != _avatar.NONE_MARK
+                    db.add_audit(conn, "candidate", str(cid), "avatar_refresh", "",
+                                 "重新抽取证件照" + ("" if ok else "（没抽到）"), operator, role)
+                    result["after"] = {"candidate_id": cid, "avatar_path": rel, "ok": ok}
+                elif action == "upload":
+                    raw = str(args.get("image_base64") or "").strip()
+                    try:
+                        data = base64.b64decode(raw, validate=False)
+                        img = Image.open(io.BytesIO(data)).convert("RGB")
+                        img.thumbnail((_avatar.AVATAR_SIZE, _avatar.AVATAR_SIZE))
+                    except Exception as exc:              # noqa: BLE001
+                        return {"ok": False,
+                                "error": f"图片解析失败：{type(exc).__name__}: {exc}"}
+                    _os.makedirs(avatars_dir, exist_ok=True)
+                    fn = f"{cid}.jpg"
+                    path = _os.path.join(avatars_dir, fn)
+                    img.save(path, "JPEG", quality=88)
+                    rel = f"data/avatars/{fn}"
+                    conn.execute("UPDATE candidates SET avatar_path = ?, updated_at = ? WHERE id = ?",
+                                 (rel, db.now(), cid))
+                    conn.commit()
+                    db.add_audit(conn, "candidate", str(cid), "avatar_upload", "",
+                                 "上传证件照", operator, role)
+                    result["after"] = {"candidate_id": cid, "avatar_path": rel}
+                else:
+                    return {"ok": False, "error": "action 只能是 backfill_start / backfill_stop / delete / refresh / upload"}
+
+        elif tool == "update_job_info":
+            if not auth.can(role, "settings"):
+                return _denied(conn, p, operator, role, "settings")
+            jid = int(args["job_id"])
+            job = db.get_job(conn, jid)
+            if not job:
+                return {"ok": False, "error": f"未找到岗位 #{jid}"}
+            patch = {}
+            if "title" in args:
+                patch["title"] = str(args["title"]).strip()
+            if "headcount" in args:
+                patch["headcount"] = args["headcount"]
+            if "department_id" in args:
+                did = args["department_id"]
+                patch["dept_id"] = did
+                patch["dept"] = (db.get_department(conn, int(did)) or {}).get("name", "") if did else ""
+            if not patch:
+                return {"ok": False, "error": "没有要修改的字段"}
+            sets = ", ".join(f"{k} = ?" for k in patch)
+            conn.execute(f"UPDATE jobs SET {sets}, updated_at = ? WHERE id = ?",
+                         (*patch.values(), db.now(), jid))
+            conn.commit()
+            db.add_audit(conn, "job", str(jid), "update",
+                         "；".join(f"{k}={job.get(k) or '（空）'}" for k in patch),
+                         "；".join(f"{k}={patch[k] or '（空）'}" for k in patch),
+                         operator, role)
+            result["after"] = {"job_id": jid, "changed": sorted(patch)}
+
+        elif tool == "restore_chat_history":
+            if not auth.can(role, "chat"):
+                return _denied(conn, p, operator, role, "chat")
+            result["after"] = db.restore_chat(conn, operator=operator, role=role)
+
+        elif tool == "truncate_chat":
+            if not auth.can(role, "chat"):
+                return _denied(conn, p, operator, role, "chat")
+            out = db.truncate_conversation(
+                conn, str(args["conversation_id"]), operator,
+                int(args["before_run_id"]), actor=operator, role=role)
+            if not out:
+                return {"ok": False, "error": "未找到该会话或该轮记录"}
+            result["after"] = out
+
+        elif tool == "import_recruit_plan_excel":
+            if not auth.can(role, "edit_plan"):
+                return _denied(conn, p, operator, role, "edit_plan")
+            import os as _os
+            fp = str(args.get("file_path") or "").strip()
+            if not _os.path.isfile(fp):
+                return {"ok": False, "error": f"文件不存在：{fp}"}
+            with open(fp, "rb") as fh:
+                parsed = recruit_mod.parse_plan_xlsx(fh.read())
+            if not parsed.get("rows"):
+                return {"ok": False, "error": "没有解析到计划行"}
+            year_id = args.get("year_id")
+            year = db.get_recruit_year(conn, year_id=int(year_id)) if year_id else None
+            if not year:
+                label = str(args.get("label") or "").strip()
+                if not label:
+                    return {"ok": False, "error": "首次导入请提供届别名称 label"}
+                tp = parsed.get("title_period") or {}
+                sug = recruit_mod.suggest_year()
+                out = recruit_mod.create_year(
+                    conn, label,
+                    args.get("period_start") or tp.get("period_start") or sug["period_start"],
+                    args.get("period_end") or tp.get("period_end") or sug["period_end"],
+                    operator=operator, role=role)
+                if not out.get("ok"):
+                    return {"ok": False, "error": "；".join(out.get("errors") or [])}
+                year = out["year"]
+            report = recruit_mod.apply_plan_import(
+                conn, parsed, int(year["id"]),
+                mode=str(args.get("mode") or "merge"), operator=operator, role=role)
+            result["after"] = {"year_id": year["id"], **report}
+
         else:
             return {"ok": False, "error": f"未知提案类型 {tool}"}
 
@@ -795,7 +932,7 @@ def _reanalyze_many(conn, ids: list[int], limit: int, operator: str, role: str) 
             """SELECT DISTINCT a.candidate_id AS cid
                  FROM applications a JOIN candidates c ON c.id = a.candidate_id
                 WHERE COALESCE(c.archived_at,'') = '' AND c.merged_into IS NULL
-                  AND COALESCE(a.extract_mode,'') != 'llm+rule'
+                  AND COALESCE(a.extract_mode,'') NOT IN ('llm','llm+rule')
                 ORDER BY COALESCE(a.applied_at,'') ASC, a.id ASC LIMIT ?""",
             (max(1, limit),)).fetchall()
         targets = [{"cid": r["cid"]} for r in rows]

@@ -1369,7 +1369,15 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .projectsec .proj-loading{padding:4px 0 2px}
 /* 四六级那一行：标签名加粗，值用同一套淡灰可点控件 */
 .honosec .cetrow b{color:var(--accent-ink);font-weight:650}
-.honosec .cetrow .edv{vertical-align:middle;margin-left:2px}
+/* v5.1.1：未填时只占一行高度。原来 .edv 继承 1.7 行高 + 空值伪元素，
+   在四六级/证书这一行会被撑成一个很高的浅蓝块（业务方截图反馈）。 */
+.honosec .cetrow{display:flex;align-items:center;flex-wrap:wrap;gap:4px}
+.honosec .cetrow .edv{vertical-align:middle;margin-left:2px;
+  height:24px;min-height:24px;padding:0 8px;line-height:1.15}
+.honosec .cetrow .edv.empty{height:24px;min-height:24px;line-height:1.15}
+.honosec .cetrow .edv.empty::after{line-height:1}
+.honosec .cetrow select{height:26px;min-height:26px;padding:0 8px;
+  font-size:13.5px;line-height:1.2}
 /* 教育经历里可点的学校/专业：虚下划线提示"这里能改"，与基本信息那套淡灰可点击一致 */
 .edu-click{cursor:pointer;border-bottom:1px dashed transparent;border-radius:2px}
 .edu-click:hover{background:var(--accent-soft);border-bottom-color:var(--accent-line);
@@ -4948,7 +4956,7 @@ function fullDetail(d){
   var parseFailed = !!d.parse_failed;
   var emailState = d.email_state || {};
   var extractMode = app0.extract_mode || '';
-  var extractTxt = extractMode === 'llm+rule' ? '模型 + 规则'
+  var extractTxt = (extractMode === 'llm+rule' || extractMode === 'llm') ? '模型'
     : (extractMode === 'heuristic' ? '规则通道（模型当时不可用，质量较低）'
     : (extractMode ? extractMode : '未记录'));
   var qualityHtml = '';
@@ -5176,6 +5184,12 @@ function fullDetail(d){
       rows.map(function(r){ return '<li>' + esc(r) + '</li>'; }).join('') +
       '</ol></div>';
   }).join('') || '<div class="hint">无</div>';
+  /* v5.1.1：资格类证书（中级职称/PMP/注册安全工程师…），与荣誉/论文/专利分开。 */
+  var certs = d.certificates || [];
+  var certHtml = certs.length
+    ? '<div class="ev certrow"><b>证书</b>：' +
+      certs.map(function(x){ return esc(x); }).join('、') + '</div>'
+    : '';
   /* 项目经历：已有 AI 缓存就直接渲染；没有缓存先留一个空挂载点，
      等 `openDetail` 异步拉取（避免打开档案就被模型调用卡住）。 */
   var projHtml = projectSectionHtml(d.projects);
@@ -5344,12 +5358,13 @@ function fullDetail(d){
     /* 荣誉 / 论文 / 专利 + **英语四六级**（业务方 2026-10-21：四六级从头部挪到这里 ——
        它是"资质"，和荣誉/论文/专利是同一类东西；放在姓名下面那排身份信息里显得突兀）。
        标题也跟着改成实情，不再只写三项。 */
-    '<div class="sec honosec profile-wide"><h3>荣誉 / 论文 / 专利 / 英语四六级</h3>' + honorHtml +
+    '<div class="sec honosec profile-wide"><h3>荣誉 / 论文 / 专利 / 英语四六级 / 证书</h3>' + honorHtml +
       '<div class="ev cetrow"><b>英语四六级</b>：' +
         edSel('edCetLv', [['', '未识别'], ['六级', '六级'], ['四级', '四级'],
                           ['专业八级', '专业八级'], ['专业四级', '专业四级'],
                           ['考研英语', '考研英语']], d.cet_level, 92) +
       '</div>' +
+      certHtml +
     '</div>' +
 
     /* 「基本信息」区块已删除（业务方 2026-10-21）：
@@ -12981,8 +12996,8 @@ async function batchReanalyze(){
   load();
 }
 async function analyzePending(){
-  /* 只处理“从未用大模型分析过”的人：extract_mode != llm+rule。
-     每轮 10 人；重跑成功后 extract_mode 会变成 llm+rule，自动从下一轮排除。 */
+  /* 只处理“从未用大模型分析过”的人：extract_mode 不是 llm/llm+rule。
+     每轮 10 人；重跑成功后 extract_mode 会变成 llm，自动从下一轮排除。 */
   var total = 0, failed = 0, rounds = 0;
   toast('正在分析未分析的人…');
   while(rounds < 300){

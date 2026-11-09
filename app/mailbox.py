@@ -564,9 +564,44 @@ def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:
     return out
 
 
+def _extract_body(msg: email.message.Message) -> tuple[str, str]:
+    """邮件正文 → (纯文本, HTML)。只取正文 part，附件与内嵌图片不算正文。
+
+    为什么要入库：之前只存主题/发件人，HR 问「邮件正文里提到已录用的投递人」
+    时助手只能回答查不到——数据其实在收信时已经解析过，只是被丢掉了。
+    """
+    texts: list[str] = []
+    htmls: list[str] = []
+    for part in msg.walk():
+        if part.get_content_maintype() == "multipart":
+            continue
+        if part.get_filename():
+            continue
+        disp = (part.get("Content-Disposition") or "").lower()
+        if "attachment" in disp:
+            continue
+        ctype = part.get_content_type()
+        if ctype not in ("text/plain", "text/html"):
+            continue
+        try:
+            data = part.get_payload(decode=True) or b""
+            charset = part.get_content_charset() or "utf-8"
+            text = data.decode(charset, errors="replace")
+        except Exception:                                      # noqa: BLE001
+            try:
+                text = part.get_content()
+            except Exception:                                  # noqa: BLE001
+                continue
+        if not str(text).strip():
+            continue
+        (htmls if ctype == "text/html" else texts).append(str(text))
+    return ("\n".join(texts)[:200000], "\n".join(htmls)[:200000])
+
+
 def parse_eml_bytes(raw: bytes, cfg: dict, fallback_id: str = "") -> dict:
     msg = email.message_from_bytes(raw, policy=email.policy.default)
     message_id = (msg.get("Message-ID") or "").strip() or fallback_id
+    body_text, body_html = _extract_body(msg)
     return {
         "message_id": message_id,
         "uid": fallback_id,
@@ -575,6 +610,8 @@ def parse_eml_bytes(raw: bytes, cfg: dict, fallback_id: str = "") -> dict:
         "subject": _decode_header(msg.get("Subject")),
         "received_at": _dt(msg.get("Date")),
         "attachments": extract_attachments(msg, cfg),
+        "body_text": body_text,
+        "body_html": body_html,
     }
 
 
@@ -713,6 +750,46 @@ def iter_imap(cfg: dict, cursor: str | None = None, limit: int = 200):
     finally:
         try:
             conn.logout()
+        except Exception:
+            pass
+
+
+def fetch_imap_body(cfg: dict, uid: str, folder: str | None = None) -> dict | None:
+    """按 UID 补取一封老邮件的正文（只读，不改已读）。
+
+    升级前收的邮件只存了标题/发件人；HR 点开某封时按 UID 回服务器取一次正文，
+    取到后写回 email_messages，下次就不用再取。
+    """
+    ic = cfg.get("imap") or {}
+    if not ic.get("host") or not str(uid or "").strip():
+        return None
+    password = _imap_password(ic)
+    if not password:
+        return None
+    ctx = ssl.create_default_context()
+    conn = None
+    try:
+        if ic.get("ssl", True):
+            conn = imaplib.IMAP4_SSL(ic["host"], int(ic.get("port", 993)), ssl_context=ctx)
+        else:
+            conn = imaplib.IMAP4(ic["host"], int(ic.get("port", 143)))
+        conn.login(ic.get("user", ""), password)
+        conn.select(folder or ic.get("folder", "INBOX"), readonly=True)
+        typ, payload = conn.uid("fetch", str(uid), "(BODY.PEEK[])")
+        if typ != "OK" or not payload or not isinstance(payload[0], tuple):
+            return None
+        mail = parse_eml_bytes(payload[0][1], cfg, fallback_id=f"imap:{folder or 'INBOX'}:{uid}")
+        return {"body_text": mail.get("body_text") or "",
+                "body_html": mail.get("body_html") or "",
+                "subject": mail.get("subject") or "",
+                "from_addr": mail.get("from_addr") or "",
+                "received_at": mail.get("received_at") or ""}
+    except Exception:                                          # noqa: BLE001
+        return None
+    finally:
+        try:
+            if conn is not None:
+                conn.logout()
         except Exception:
             pass
 

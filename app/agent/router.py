@@ -22,6 +22,8 @@ from .tools import TOOL_SPECS
 #: 任何问题都保留的最小工具集：找人、看档、看岗位、看总量
 CORE_MIN = [
     "search_candidates", "get_candidate", "get_candidates", "list_jobs", "pool_stats",
+    # 邮件/原件是"候选人的全部信息"的一部分，任何问题都保留
+    "get_source_mail", "get_document_text",
 ]
 
 #: 分组。工具名必须与 `TOOL_SPECS` 一致；`missing_tools()` 用于自检。
@@ -34,7 +36,7 @@ GROUPS: dict[str, list[str]] = {
         "set_tier", "add_tag", "add_note", "update_candidate_fields",
         "reanalyze_candidate", "merge_candidates", "split_candidate",
         "mark_review", "set_archive", "archive_batch",
-        "set_interview_info",
+        "set_interview_info", "compare_channel", "manage_avatar",
     ],
     "recruit": [
         # 读（招聘进度统一走 recruit_overview 的 view）
@@ -45,6 +47,7 @@ GROUPS: dict[str, list[str]] = {
         "set_stage", "set_sign_status", "bulk_initial_pass",
         "bulk_assign_job", "assign_job", "suggest_job", "route_pending",
         "archive_by_year", "set_interview_info", "manage_recruit_plan",
+        "import_recruit_plan_excel",
     ],
     "mail": [
         "mailbox_status", "list_mail_templates", "get_mail_template",
@@ -55,20 +58,23 @@ GROUPS: dict[str, list[str]] = {
         "list_proposals", "list_audit", "list_import_history", "list_agent_runs",
         "run_proactive_scan", "rebuild_brief", "clear_chat_history",
         "list_removed_files", "restore_source_files", "remove_source_files",
+        "get_feedback_report", "export_feedback", "list_conversations",
+        "restore_chat_history", "truncate_chat",
     ],
     "admin": [
         "create_job", "update_job_jd", "regrade_job", "ingest_resumes",
         "list_import_history", "export_resumes", "list_source_files",
         "get_settings", "save_settings",
         "get_model_config", "save_model_config", "update_interview_dict",
-        "route_pending",
+        "route_pending", "compare_channel",
     ],
     "system": [
         # v5.1：账号 / 部门 / 计划 / 岗位启停 / 领域包（此前只有界面能操作）
         "list_users", "manage_user",
         "list_departments", "manage_department",
         "list_recruit_plans", "manage_recruit_plan",
-        "set_job_active", "list_domain_packs", "import_domain_pack",
+        "set_job_active", "update_job_info", "import_recruit_plan_excel",
+        "list_domain_packs", "import_domain_pack",
     ],
     "office": [
         "export_roster", "export_resume_bundle", "export_interview_schedule",
@@ -97,7 +103,8 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
         "简历", "档案", "候选人", "技能", "会", "做过", "经历", "项目",
         "对比", "比较", "适合", "匹配", "分析", "面试提纲", "学校", "院校",
         "专业", "学历", "电话", "邮箱", "标签", "备注", "复核", "标记",
-        "合并", "拆分", "改档", "档位", "字段",
+        "合并", "拆分", "改档", "档位", "字段", "头像", "通道对比",
+        "模型规则对比", "规则通道", "通道", "原件", "正文", "邮件正文", "证书",
     ),
     "recruit": (
         "招聘", "进度", "缺口", "计划", "名额", "签约", "已签", "拒签",
@@ -113,7 +120,8 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
         "提案", "待确认", "审计", "操作记录", "巡检", "扫描", "待办",
         "摘要", "周报", "恢复", "清理", "删除会话", "运行记录",
         "导入记录", "导入历史", "重复检测", "重复简历", "被判重复", "被标记为重复",
-        "哪些重复", "为什么没入库", "没入库",
+        "哪些重复", "为什么没入库", "没入库", "偏差", "反馈报告", "对话历史",
+        "恢复对话", "截断", "会话",
     ),
     "admin": (
         "新建岗位", "jd", "导入", "导出简历", "设置", "配置", "模型",
@@ -122,7 +130,8 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
     "system": (
         "账号", "用户", "权限", "部门", "启用岗位", "停用岗位", "岗位启停",
         "启用", "停用", "领域包", "导入领域包", "技能本体",
-        "计划", "名额", "招聘计划", "届别",
+        "计划", "名额", "招聘计划", "届别", "岗位名称", "招聘数量", "所属部门",
+        "Excel导入", "计划导入", "导入计划",
     ),
     "office": (
         "导出", "excel", "表格", "名单", "csv", "下载", "报表", "打印", "日程", "面试安排",
@@ -151,7 +160,7 @@ def missing_tools() -> list[str]:
 
 
 def route_tools(message: str, history: list[dict] | None = None,
-                max_tools: int = 22) -> tuple[list[dict], list[str]]:
+                max_tools: int = 30) -> tuple[list[dict], list[str]]:
     """返回 `(本轮工具 specs, 命中的组名)`。
 
     `history` 只取最近两条用户消息，用于"那这个岗位呢"这类省略句；

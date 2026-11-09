@@ -715,6 +715,14 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         db.update_candidate(conn, cid,
                             honors_json=_json.dumps(_hon, ensure_ascii=False))
         result["notes"].append(f"识别到荣誉/论文/专利 {len(_hon)} 项")
+    # v5.1.1：资格类证书（中级职称/PMP/注册安全工程师…）。抽取器早已有这份数据，
+    # 但过去没有落库，导致档案和助手都看不到。有内容才写，避免把空数组刷进库。
+    _certs = [str(x).strip() for x in (cand.get("certificates") or []) if str(x).strip()]
+    if _certs:
+        import json as _json
+        db.update_candidate(conn, cid,
+                            certificates_json=_json.dumps(_certs, ensure_ascii=False))
+        result["notes"].append("识别到证书：" + "、".join(_certs[:8]))
 
     # v1.27.1：四六级由模型判定，但它给的档位/证据没通过原文自证时已退回规则值 ——
     # 这种情况必须留痕，否则 HR 看到的其实是规则值却以为是模型判的（不留静默降级）。
@@ -991,6 +999,12 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
         steps.append("更新字段：" + "、".join(db.AUDIT_FIELD_LABEL.get(k, k) for k in upd))
     if kept_hr:
         steps.append("保留人工更正：" + "、".join(db.AUDIT_FIELD_LABEL.get(k, k) for k in kept_hr))
+    _certs = [str(x).strip() for x in (cand.get("certificates") or []) if str(x).strip()]
+    if _certs:
+        with lk:
+            db.update_candidate(conn, candidate_id,
+                                certificates_json=json.dumps(_certs, ensure_ascii=False))
+        steps.append("更新证书：" + "、".join(_certs[:6]))
 
     # ---- ⑤ 重挂技能（新抽取到技能才重建，避免模型挂了把旧技能清空）----
     sk = cand.get("skill_detail") or []
@@ -1161,6 +1175,7 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
             db.record_email(conn, {
                 "message_id": mid, "uid": mail.get("uid"), "mailbox": mail.get("mailbox"),
                 "from_addr": mail.get("from_addr"), "subject": mail.get("subject"),
+                "body_text": mail.get("body_text"), "body_html": mail.get("body_html"),
                 "received_at": mail.get("received_at"),
                 "has_attachment": bool(mail.get("attachments")),
                 "attachment_count": len(mail.get("attachments") or []),

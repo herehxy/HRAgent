@@ -221,6 +221,15 @@ SYSTEM_PROMPT = (
     "7e) 做分布 / 占比 / 图表时，先调 pool_stats 并传 group_by"
     "（education/school/major/job/stage/tier/gender）拿真实分布，再按第 8 条输出图表；"
     "**不要自己拉全量列表再心算**，也不要把两个同义学历（专科/大专、研究生/硕士）分开列。\n"
+    "7h) HR 问「邮件标题/邮件名称/邮件正文包含某字样的人」「发件人是谁的投递」时，"
+    "用 search_candidates 的 mail_subject / mail_from / mail_body 参数"
+    "（keyword 也已包含邮件标题、发件人与正文）。"
+    "**不要说数据库里没有这个信息**——来源邮件已经随简历入库，先用工具查；"
+    "升级前收的老邮件可能只有标题/发件人，没有正文，这时如实说明。\n"
+    "7i) 需要看某人的完整简历原文/证书/作品集内容时，调 get_document_text"
+    "（full=true 取完整）；需要看来源邮件正文时调 get_source_mail。\n"
+    "7j) 问「有某证书的人」时，用 search_candidates 的 certificate 参数"
+    "（keyword 也已包含证书）；证书名以档案里的证书字段为准，不要自己猜。\n"
     # v4.3.3（业务方截图：要折线图和饼图，模型吐了两段 Mermaid 伪代码，界面
     # 按代码块原样显示）。界面现在能直接把 Mermaid 渲染成图，这里把格式说死：
     # 必须用 ```mermaid 代码块，数据必须来自本轮工具结果。

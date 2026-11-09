@@ -4,7 +4,8 @@
 
 1. **合规屏蔽**（`sanitize`）：送出前剔除民族/婚姻/生育/宗教/健康/身份证/住址等敏感属性，
    模型实际拿到的文本里这些取值已被替换为占位符；模型返回结果里的敏感键也会被丢弃。
-2. **双通道**：`llm`（OpenAI 兼容）失败或不可用时静默回退 `heuristic`，
+2. **双通道**：`llm`（OpenAI 兼容）可用时，字段/证书/荣誉/教育经历**一律以模型结果为准**，
+   不再用规则补字段或覆盖院校；只有模型不可用/调用失败时才回退 `heuristic`，
    保证流水线不中断——任何简历都不会因抽取失败而消失。
 3. **证据强制**（`normalize`）：每条技能都要有简历原文片段；
    模型声称的片段会被逐字核对，对不上则 `verified=0`，**不计入岗位命中**。
@@ -529,8 +530,6 @@ def _edu_history_from_llm(raw, text: str) -> list[dict]:
     src = str(text or "")
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
-    heuristic = _edu_history_heuristic(text)
-    heuristic_map = {(item["degree"], item["school"]): item for item in heuristic}
     for item in (raw if isinstance(raw, list) else []):
         if not isinstance(item, dict):
             continue
@@ -550,12 +549,6 @@ def _edu_history_from_llm(raw, text: str) -> list[dict]:
         major = str(item.get("major") or "").strip()[:40]
         start = str(item.get("start") or "").strip()[:10]
         end = str(item.get("end") or "").strip()[:10]
-        if not major:
-            major = str((heuristic_map.get(key) or {}).get("major") or "")
-        if not start:
-            start = str((heuristic_map.get(key) or {}).get("start") or "")
-        if not end:
-            end = str((heuristic_map.get(key) or {}).get("end") or "")
         out.append({"degree": deg, "school": sch,
                     "major": major, "start": start, "end": end})
     return out
@@ -1019,7 +1012,8 @@ def _norm_for_search(v: str) -> str:
 
 def verify_profile_against_text(fields: dict, field_evidence: dict,
                                 text: str) -> tuple[dict, list[str]]:
-    """**逐个字段验证据**：值必须能在原文里找到，否则丢掉并退回规则值。
+    """**逐个字段验证据**：值必须能在原文里找到，否则丢掉并记录未通过字段。
+    v5.1.1 起模型可用时不再用规则值覆盖；未通过的字段留空并由上层如实标注。
 
     为什么必须有这一步：模型抽的是"看起来对"的值，一旦它把
     `13800001111` 写成 `138-0000-1111` 还好（规范化后能对上），
@@ -1125,11 +1119,10 @@ def merge_honors(llm_items, rule_items) -> list[dict]:
 
 
 def extract_llm(text: str, jd: dict, model: str, base_url: str, api_key: str) -> dict:
-    # 简历原文不设上限会撑爆上下文窗口：附件上限 20MB，解析出的文本远超模型
-    # 可接收长度 → 超时或非 JSON → 被 except 静默降级为规则通道（用户只看到
-    # "抽取方式变成 heuristic"，不知发生了啥）。截断到 8000 字符足够抽取字段，
-    # 与 analyze._cand_brief 的 3000 上限同思路（抽取需要更多原文，故放宽）。
-    _text = (text or "")[:8000]
+    # v5.1.1（业务方）：原文尽量整份交给模型，不再只给前 8000 字——
+    # 院校/教育经历常在简历中后段，截断会导致模型看不到真实学校。
+    # 仍保留 30000 字上限兜底，避免异常超长扫描件把请求撑爆；正常简历远小于此。
+    _text = (text or "")[:30000]
     payload = {
         "model": model,
         "temperature": 0,
@@ -1342,52 +1335,26 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
                 # v1.27.1：四六级取**模型判定 + 原文证据自证**的结果（见 `_cet_from_llm`）。
                 "cet": cet_val,
             }
-            # 规则通道兜底填空，保证字段不全时不至于全空
-            heur = extract_heuristic(safe_text, jd)
             # 第一学历的证据单独给（模型按 first_degree_evidence 返回），
             # 合并进 field_evidence 才能走同一套"证据必须逐字在原文里"的校验。
             _ev = dict(clean.get("field_evidence") or {})
             if clean.get("first_degree_evidence"):
                 _ev.setdefault("first_degree_school", str(clean["first_degree_evidence"]))
             fields, _unverified = verify_profile_against_text(_llm_fields, _ev, text)
-            # 校验只负责"值可信"，证书与性别不参与那个校验，但必须补回来：
-            # 性别**永远只取本地规则**（合规红线，不依赖模型自觉）。
+            # v5.1.1（业务方）：**模型可用时不再做规则抽取/兜底**。
+            # 原文已经完整交给模型，院校/专业/学历等一律以模型结果为准；
+            # 规则只在模型不可用时（下面的 except/无 key 分支）才启用。
+            # 保留的只有：证据校验（反幻觉）、性别合规（不来自模型）、
+            # 四六级证据自证、年限合理性质检 —— 这些是校验，不是另一套抽取。
+            fields["education_history"] = _llm_fields.get("education_history") or []
             fields["certificates"] = _llm_fields.get("certificates") or []
             fields["gender"] = _find_gender(text)
-            # v1.27.1：四六级**不进** `verify_profile_against_text` ——
-            # 那条校验的规则是"值本身要在原文里找到"，而四六级存的是档位判断，
-            # 靠的是模型引的证据片段（`_cet_from_llm` 已经验过），不是值本身。
-            # 这里用上面算好的同一个值补回，别再调一次（两处各算一遍 = 必然分叉）。
             fields["cet"] = cet_val
             if cet_rejected:
-                # 模型给了档位但没通过原文自证 → 如实告诉 HR，不静默换成规则值
                 _unverified = list(_unverified or []) + ["cet"]
-            for k in ("name", "education", "years", "school", "major", "current_org"):
-                if not fields.get(k):
-                    fields[k] = heur.get(k)
-            # 学历历史按「学历 + 学校」合并：模型与规则各补对方缺的段落/专业。
-            fields["education_history"] = _merge_edu_history(
-                fields.get("education_history"), heur.get("education_history"))
-            # 有明确时间段的教育行时，第一学历以规则结果为准 —— 比模型的上下文猜测可靠。
-            if heur.get("first_degree_school"):
-                fields["first_degree_school"] = heur["first_degree_school"]
-            elif not fields.get("first_degree_school"):
-                fields["first_degree_school"] = None
-            if not fields.get("major") and heur.get("major"):
-                fields["major"] = heur["major"]
-            # v1.23.6：**工作年限合理性质检**。实测踩到：校招简历里写着
-            # 「出生年份：1999」+「2026年6月毕业」，模型算出 years=27
-            # （2026-1999），把出生年份当成了工作年限 —— 27 年经验的应届生。
-            # 规则通道没这个问题，所以只在模型值上做质检。
             fields["years"], _ys = _sanity_years(text, fields.get("years"))
-            if not fields["certificates"]:
-                fields["certificates"] = heur["certificates"]
-            _hc = heur.get("contact") or {}
-            _fc = fields.get("contact") or {}
-            fields["contact"] = {"phone": _fc.get("phone") or _hc.get("phone"),
-                                 "email": _fc.get("email") or _hc.get("email")}
 
-            out = _assemble(safe_text, fields, detail, mode="llm+rule")
+            out = _assemble(safe_text, fields, detail, mode="llm")
             # 年限被质检拦下时如实标注（不静默改数字）
             if _ys:
                 out["years_rejected"] = _ys
@@ -1402,9 +1369,9 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
             out["sensitive_found"] = sensitive_found
             out["sensitive_fields_removed"] = removed
             # v1.18：荣誉/论文/专利——**模型抽的逐条验过原文**才带出来，
-            # 验不过的直接丢（不让模型编的荣誉进档案）。规则抽的那份作为兜底补上。
-            out["honors"] = merge_honors(verify_honors_against_text(clean.get("honors"), safe_text),
-                                        extract_honors(safe_text))
+            # 验不过的直接丢（不让模型编的荣誉进档案）。v5.1.1：模型可用时
+            # 不再用规则抽取补，规则只在模型不可用的分支里启用。
+            out["honors"] = verify_honors_against_text(clean.get("honors"), safe_text)
             _fix_name_from_filename(out, filename)
             return out
         except (urllib.error.URLError, KeyError, ValueError, TypeError,

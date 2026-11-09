@@ -2526,7 +2526,8 @@ async function showDetail(cid){
    为什么单列一行：两者的字段质量差一档（技能靠词表扫 vs 模型读懂上下文），
    但界面上完全看不出来 —— 本项目就出过"模型静默降级、HR 以为分析过了"的事故。
    抽取方式取自 applications.extract_mode：
-     llm+rule = 模型抽取成功（规则做兜底合并）
+     llm = 模型抽取成功（原文整份交给模型；规则只在模型不可用时使用）
+     llm+rule = 旧版本模型抽取（规则兜底）
      heuristic = 规则通道（模型不可用/未启用）
      parse_failed = 没解析出文本 */
 function extractModeLine(d){
@@ -2537,7 +2538,7 @@ function extractModeLine(d){
     return `<div class="note" style="margin-bottom:6px">字段抽取方式：<b>未记录</b>
       （历史数据，早于本字段上线）。</div>`;
   }
-  if (m === 'llm+rule'){
+  if (m === 'llm' || m === 'llm+rule'){
     return `<div class="note" style="margin-bottom:6px;background:var(--accent-soft)">
       字段抽取方式：<b>模型 + 规则</b>　技能与荣誉都要求能在原文定位到证据，定位不到的不计入。</div>`;
   }
