@@ -225,21 +225,37 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None,
         "messages": messages,
         "temperature": cfg.get("temperature", 0),
         "stream": True,
+        # 让兼容端点把 token 用量作为最后一块 SSE 发回来；不支持该参数的
+        # 端点通常会忽略它，不影响正常流式输出。
+        "stream_options": {"include_usage": True},
     }
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = tool_choice or "auto"
-    req = urllib.request.Request(
-        f"{cfg['base_url'].rstrip('/')}/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "Authorization": f"Bearer {cfg.get('api_key', '')}",
-        },
-        method="POST",
-    )
-    with net.urlopen(req, timeout=cfg.get("timeout", 180)) as resp:
+    def _open_stream(p: dict):
+        req = urllib.request.Request(
+            f"{cfg['base_url'].rstrip('/')}/chat/completions",
+            data=json.dumps(p).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+                "Authorization": f"Bearer {cfg.get('api_key', '')}",
+            },
+            method="POST",
+        )
+        return net.urlopen(req, timeout=cfg.get("timeout", 180))
+
+    try:
+        resp = _open_stream(payload)
+    except urllib.error.HTTPError as exc:
+        # 个别严格端点不认识 stream_options（400/422）：去掉该字段重试一次，
+        # 代价只是这批请求拿不到 token usage（上层会用估算兜底）。
+        if exc.code in (400, 422) and "stream_options" in payload:
+            payload.pop("stream_options", None)
+            resp = _open_stream(payload)
+        else:
+            raise
+    with resp:
         ctype = (resp.headers.get("Content-Type") or "").lower()
         if "application/json" in ctype:
             body = json.loads(resp.read().decode("utf-8"))
@@ -251,36 +267,55 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None,
             }, "finish_reason": "stop", "usage": body.get("usage") or {},
                 "model": body.get("model") or cfg.get("model")}
             return
-        for raw in resp:
-            line = raw.decode("utf-8", "ignore").strip()
-            if not line or line.startswith(":"):
-                continue
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except ValueError:
-                continue
-            choices = chunk.get("choices") or []
-            if not choices:
-                # 有些服务商单独发一个 usage 块
-                yield {"delta": {}, "finish_reason": None,
-                       "usage": chunk.get("usage") or {},
+        import socket
+
+        saw_finish = False
+        try:
+            for raw in resp:
+                line = raw.decode("utf-8", "ignore").strip()
+                if not line or line.startswith(":"):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except ValueError:
+                    continue
+                choices = chunk.get("choices") or []
+                usage = chunk.get("usage") or {}
+                if not choices:
+                    # 有些服务商单独发一个 usage 块（stream_options.include_usage）
+                    yield {"delta": {}, "finish_reason": None,
+                           "usage": usage,
+                           "model": chunk.get("model") or cfg.get("model")}
+                    if usage and saw_finish:
+                        break
+                    continue
+                ch = choices[0]
+                delta = ch.get("delta") or ch.get("message") or {}
+                yield {"delta": delta, "finish_reason": ch.get("finish_reason"),
+                       "usage": usage,
                        "model": chunk.get("model") or cfg.get("model")}
-                continue
-            ch = choices[0]
-            delta = ch.get("delta") or ch.get("message") or {}
-            yield {"delta": delta, "finish_reason": ch.get("finish_reason"),
-                   "usage": chunk.get("usage") or {},
-                   "model": chunk.get("model") or cfg.get("model")}
-            # 有的兼容端点发完 finish_reason 后不立刻发 [DONE]、也不关连接，
-            # 继续等会让界面"答案已出完但一直发送中"。标准 SSE 的最后一个
-            # 内容块就带 finish_reason，收到即收尾；usage 以已收到的为准。
-            if ch.get("finish_reason") in ("stop", "length", "tool_calls"):
-                break
+                if ch.get("finish_reason") in ("stop", "length", "tool_calls"):
+                    saw_finish = True
+                    # 继续读最后一两条，把 usage 块收下来；不立刻 break。
+                    # 给 3 秒兜底：有的端点发完 finish 既不发 usage 也不关连接。
+                    try:
+                        _sock = getattr(getattr(resp, "fp", None), "raw", None)
+                        _sock = getattr(_sock, "_sock", None)
+                        if _sock is not None:
+                            _sock.settimeout(3)
+                    except Exception:                     # noqa: BLE001
+                        pass
+                    if usage:
+                        break
+        except (TimeoutError, OSError):
+            # 正常收尾：拿到 finish 后等 usage 超时，或连接已被服务端关闭
+            if not saw_finish:
+                raise
 
 
 def chat_json(system: str, user: str, cfg: dict | None = None) -> dict | None:

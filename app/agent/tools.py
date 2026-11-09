@@ -135,7 +135,7 @@ TOOL_SPECS = [
           {"mode": {"type": "string",
                     "description": "keyword（默认）/ semantic / skills / similar"},
            "query": {"type": "string",
-                     "description": "mode=semantic 时的自然语言描述，如「做过钛合金热处理工艺的人」"},
+                     "description": "mode=semantic 时的自然语言描述，如「做过某类工艺的人」"},
            "skills": {"type": "array", "items": {"type": "string"},
                       "description": "mode=skills 时的技能名列表"},
            "similar_to": {"type": "string",
@@ -210,7 +210,7 @@ TOOL_SPECS = [
            "mode": {"type": "string", "description": "all=全部具备（默认）/ any=具备其一"},
            "tier": {"type": "string", "description": "限定档位，可空"}}, ["skills"]),
     _spec("semantic_search",
-          "语义检索：用于说不清关键词的需求（如『有难熔合金研发背景的博士』）。"
+          "语义检索：用于说不清关键词的需求（如『有某类研发背景的博士』）。"
           "不如技能召回精确，适合探索性查找。",
           {"query": {"type": "string"}, "top_k": {"type": "integer", "description": "默认 5"}},
           ["query"]),
@@ -632,7 +632,7 @@ TOOL_SPECS = [
           {"view": {"type": "string",
                     "description": "progress / gaps / roster / signed / health / years"},
            "year": {"type": "string", "description": "届别名称，如 2027届；不传=当前届"},
-           "unit": {"type": "string", "description": "单位名，如 钛所；不传=全部"},
+           "unit": {"type": "string", "description": "单位名；不传=全部"},
            "education": {"type": "string", "description": "博士/硕士/本科/大专；不传=全部"},
            "outcome": {"type": "string",
                        "description": "roster 用：拟录用/不录用/已签约/拒签/毁约/未签约/未判；不传=全部"},
@@ -642,7 +642,7 @@ TOOL_SPECS = [
           "缺口最大的单位×学历。用户问「2027届招了多少 / 还差多少人 / 完成率多少」时用。"
           "不传届别 = 当前届。只读，不含任何联系方式。",
           {"year": {"type": "string", "description": "届别名称，如 2027届；不传=当前届"},
-           "unit": {"type": "string", "description": "单位名，如 钛所；不传=全部"},
+           "unit": {"type": "string", "description": "单位名；不传=全部"},
            "education": {"type": "string", "description": "博士/硕士/本科/大专；不传=全部"}}),
     _spec("recruit_gaps",
           "查某届签约缺口 > 0 的单位×学历，按缺口从大到小。"

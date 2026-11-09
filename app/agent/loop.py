@@ -126,8 +126,7 @@ def _strip_tool_call_text(text: str) -> str:
 
 
 SYSTEM_PROMPT = (
-    "你是西北有色金属研究院人才库智能体的 HR 助手，熟悉稀有金属材料（钛合金、难熔合金、"
-    "高温合金）研发与工艺岗位的招聘。\n"
+    "你是人才库智能体的 HR 招聘助手，负责人事招聘工作。\n"
     "铁律：\n"
     "1) 涉及候选人数量、条件筛选、技能、简历细节的问题，必须先调用工具取真实数据，"
     "严禁凭印象编造姓名、数字或经历；工具返回为空就如实说没有。\n"
@@ -1843,6 +1842,17 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
                     or int(_b.get("proposal_id")) in _mentioned
             except (TypeError, ValueError):
                 _b["current_turn"] = False
+        # 兜底：部分兼容端点即使请求了 usage 也不返回。至少按消息/答复估算，
+        # 让「今日 Token」不会是 0；有真实 usage 时一律优先真实值。
+        if (model and not usage.get("prompt_tokens")
+                and not usage.get("completion_tokens")):
+            try:
+                usage = {
+                    "prompt_tokens": _est_tokens(question or ""),
+                    "completion_tokens": _est_tokens(answer or ""),
+                }
+            except Exception:                              # noqa: BLE001
+                pass
         _run_id = db.log_agent_run(conn, {
             "session_id": ctx.session_id, "question": question, "answer": answer[:4000],
             "thinking": thinking,
