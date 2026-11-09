@@ -3,6 +3,7 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 pymupdf>=1.24
 markitdown[pdf,docx]>=0.1.6
+olefile>=0.47                # v5.0.1：老式 .doc（Word 97-2003）离线解析，不依赖本机 Office
 websocket-client>=1.8          # tests/ui_probe.py 的 Chrome DevTools 协议依赖
 openpyxl>=3.1               # v1.29：导出 xlsx。纯 Python、可离线装 wheel、打包无副作用
 rapidocr-onnxruntime>=1.4.4 # v4.4.1：扫描件/照片简历 OCR；打包时必须随 _internal 收集模型文件

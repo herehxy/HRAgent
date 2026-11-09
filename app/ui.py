@@ -1800,7 +1800,7 @@ async function viewPool(){
         <button class="btn-primary btn-lg" onclick="document.getElementById('upFile').click()"
                 title="手机拍的纸质简历照片、扫描件，直接选文件上传入库（不用先改配置目录）">上传简历照片/文件</button>
         <input id="upFile" type="file" multiple hidden
-               accept=".jpg,.jpeg,.png,.bmp,.webp,.pdf,.docx,.doc,.txt"
+               accept=".jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,.pdf,.docx,.doc,.txt"
                onchange="doUpload(this.files)">
         <!-- v1.29：唯一的导出入口（业务方定调「无论什么时候导出都是一个按钮」）。
              固定 13 列、含已归档、没走到那个阶段的字段留空标记；跟当前筛选一致。 -->
@@ -2770,7 +2770,7 @@ async function interview(cid){
 }
 async function doUpload(files){
   const arr = Array.from(files||[]).filter(f =>
-    /[.](jpe?g|png|bmp|webp|pdf|docx?|txt)$/i.test(f.name));
+    /[.](jpe?g|png|bmp|webp|tiff?|pdf|docx?|txt)$/i.test(f.name));
   if (!arr.length){ resultModal({title:'上传', kind:'warn', body:'没有可上传的文件（支持图片 / PDF / Word / txt）'}); return; }
   // v1.24.20：原本只弹一个 toast 就开始传。
   // toast 3.5 秒自动消失，而多份文件的裸字节上传常常要十几秒——
@@ -6567,8 +6567,9 @@ async function viewSys(){
         if (se.error) out += '<br><span class="small">' + esc(se.error) + '</span>';
         return out;
       })()}</div>
-      <div class="k">解析能力</div><div>PyMuPDF ${META.parse.pymupdf?'':'✗'} ·
-        MarkItDown ${META.parse.markitdown?'':'✗'} · OCR ${META.parse.ocr?'':'✗（图片简历将标『简历读不出』）'}</div>
+      <div class="k">解析能力</div><div>PDF ${META.parse.pymupdf?'':'✗'} ·
+        DOCX ${META.parse.docx?'':'✗'} · DOC ${META.parse.doc?'':'✗（老式 Word 需装 Office 或 LibreOffice）'} ·
+        OCR ${META.parse.ocr?'':'✗（图片简历将标『简历读不出』）'}</div>
       <div class="k">邮箱接入</div><div>模式 ${esc(META.mailbox.mode||'—')} ·
         只读 ${META.mailbox.readonly?'':'✗'} · 附件白名单 ${esc((META.mailbox.attachment_ext||[]).join(' '))}
         · 单个附件上限 ${META.mailbox.max_attachment_mb==null?20:META.mailbox.max_attachment_mb} MB

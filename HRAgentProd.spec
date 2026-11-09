@@ -33,7 +33,7 @@ hiddenimports = [
     "uvicorn.protocols.websockets", "uvicorn.protocols.websockets.auto",
     "uvicorn.protocols.websockets.websockets_impl",
     "uvicorn.lifespan", "uvicorn.lifespan.on",
-    "pymupdf", "markitdown",
+    "pymupdf", "markitdown", "mammoth", "magika", "olefile",
     "app", "app.server", "app.profile_migrate", "app.version",
     "app.agent", "app.agent.loop", "app.agent.tools", "app.agent.llm",
     "app.pipeline",
@@ -51,6 +51,12 @@ datas += (
     + collect_all("fitz")[0]
     + collect_all("rapidocr_onnxruntime")[0]
     + collect_all("cv2")[0]
+    + collect_all("shapely")[0]
+    # MarkItDown 只是 PDF/DOCX 的第三回退；它依赖 magika 的 ONNX 模型数据，
+    # 不 collect_all 的话打包版一构造就 FileNotFoundError（v5.0.0 的根因之一）。
+    + collect_all("magika")[0]
+    + collect_all("markitdown")[0]
+    + collect_all("mammoth")[0]
 )
 binaries = (
     collect_all("pymupdf")[1]
@@ -67,6 +73,12 @@ hiddenimports += (
     + collect_all("rapidocr_onnxruntime")[2]
     + collect_all("onnxruntime")[2]
     + collect_all("numpy")[2]
+    + collect_all("cv2")[2]
+    + collect_all("pyclipper")[2]
+    + collect_all("shapely")[2]
+    + collect_all("magika")[2]
+    + collect_all("markitdown")[2]
+    + collect_all("mammoth")[2]
 )
 
 a = Analysis(

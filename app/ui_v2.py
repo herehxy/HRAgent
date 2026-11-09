@@ -3400,7 +3400,7 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   <button class="btn btn-primary btn-lg" id="btnUpload" onclick="document.getElementById('upFile').click()"
           title="手机拍的纸质简历照片、扫描件，直接选文件上传入库（不用先改配置目录）">上传简历照片/文件</button>
   <input id="upFile" type="file" multiple hidden
-         accept=".jpg,.jpeg,.png,.bmp,.webp,.pdf,.docx,.doc,.txt" onchange="doUpload(this.files)">
+         accept=".jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,.pdf,.docx,.doc,.txt" onchange="doUpload(this.files)">
   <span class="vdiv"></span>
   <button class="btn btn-green btn-lg" onclick="doExport()">导出名单</button>
   <button class="btn btn-green btn-lg" onclick="doBundle()">下载初筛简历</button>
@@ -6153,7 +6153,7 @@ async function doIngest(source){
 
 async function doUpload(files){
   var arr = Array.prototype.filter.call(files || [], function(f){
-    return /[.](jpe?g|png|bmp|webp|pdf|docx?|txt)$/i.test(f.name);
+    return /[.](jpe?g|png|bmp|webp|tiff?|pdf|docx?|txt)$/i.test(f.name);
   });
   if(!arr.length){
     resultModal({title:'上传', kind:'warn', body:'没有可上传的文件（支持图片 / PDF / Word / txt）'});

@@ -1040,8 +1040,12 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
             conn.commit()
 
     # ---- ⑧ 重算分析结论（画像 + 建议档同步）----
+    # 原件已重新解析：旧的项目经历摘要可能来自上一版简历，先清缓存，
+    # 让 analyze_one 在下面按新原文重炼（它只在 projects_json 为 NULL 时调模型）。
+    with lk:
+        db.update_candidate(conn, candidate_id, projects_json=None)
     analyze_one(conn, candidate_id, app_id, source="manual_reanalyze", wlock=lk)
-    steps.append("重算系统自动分析")
+    steps.append("重算系统自动分析（含项目经历）")
 
     with lk:                                    # 审计也是写，v1.24.8
         def _fmt_value(v):
@@ -1592,6 +1596,24 @@ def analyze_one(conn, candidate_id: int, application_id: int,
     if not ins:
         return None
 
+    # 项目经历：**入库分析阶段一并提炼并缓存**（v5.0.1）。
+    # 过去只在前端打开档案时按需调模型，HR 每点一个人都要等十几秒；
+    # 现在随自动分析预先算好，点开档案直接命中缓存。已有缓存不重复调用；
+    # 完整重分析会先清空缓存（server.reanalyze），因此换简历后仍会重炼。
+    proj_payload = None
+    if not cand.get("projects_checked"):
+        raw_text = str(cand.get("raw_text") or "").strip()
+        if raw_text:
+            try:
+                from .agent import llm as _llm
+                _cfg = _llm.load_cfg() or {}
+                if _cfg.get("enabled", True) and _cfg.get("api_key"):
+                    from .pipeline import projects as projects_mod
+                    proj_payload = projects_mod.summarize(raw_text, _cfg)
+            except Exception as exc:                       # noqa: BLE001
+                print(f"[projects] 候选人#{candidate_id} 项目经历预提炼失败："
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+
     # 落库：只包住写操作，串行化的成本约 1.7ms，可忽略
     with lk:
         db.upsert_insight(conn, candidate_id, application_id,
@@ -1602,6 +1624,9 @@ def analyze_one(conn, candidate_id: int, application_id: int,
                           source=ins.get("source") or source,
                           model=ins.get("model") or "",
                           business_direction=ins.get("business_direction"))
+        if proj_payload is not None:
+            db.update_candidate(conn, candidate_id,
+                                projects_json=json.dumps(proj_payload, ensure_ascii=False))
         # 模型建议档位 → 更新 tier_suggested（HR 未确认时才更新）
         mt = ins.get("suggested_tier")
         if mt and mt in tiers_mod.all_tiers() and application_id:

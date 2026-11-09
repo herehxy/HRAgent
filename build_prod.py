@@ -16,6 +16,10 @@ HERE = os.path.abspath(os.path.dirname(__file__))
 WORKSPACE = os.path.dirname(HERE)
 BUILD_RUNTIME = os.path.join(HERE, ".runtime_pyinstaller")
 RUNTIME_DEPS = os.path.join(HERE, ".runtime_local")
+#: 运行期依赖的第二来源：OCR 的 rapidocr/cv2/pyclipper/shapely 只在
+#: `.runtime_deps` 里（`.runtime_local` 是 PyInstaller 打包用的精简运行时）。
+#: 放在 sys.path **末尾**，让 `.runtime_local` 里的同名包优先，缺的再从这里补。
+RUNTIME_DEPS_ALT = os.path.join(HERE, ".runtime_deps")
 ASSETS = os.path.join(HERE, "build_prod_assets")
 TEMPLATE = os.path.join(ASSETS, "config_template")
 DIST = os.path.join(HERE, "dist_prod")
@@ -192,6 +196,9 @@ def run_pyinstaller(spec: str, dist_path: str, work_path: str,
     version_tag = f"{sys.version_info.major}{sys.version_info.minor}"
     if version_tag == "312":
         sys.path.insert(0, RUNTIME_DEPS)
+        # OCR 相关包只存在于 .runtime_deps；放末尾，缺什么补什么
+        if os.path.isdir(RUNTIME_DEPS_ALT) and RUNTIME_DEPS_ALT not in sys.path:
+            sys.path.append(RUNTIME_DEPS_ALT)
     # Prefer PyInstaller from the active interpreter (the same runtime as the
     # application); fall back to the vendored build copy only when absent.
     try:

@@ -44,10 +44,13 @@ DEFAULT_CONFIG = {
     "folder_dir": "data/resumes",        # 手工导入简历的本地文件夹（界面上要看得见）
     "archive_dir": "data/archive",
     # v1.27：默认白名单补上图片格式 —— 作品集、成绩单、证书扫描件大量是
-    # jpg/png。**不加就会被 extract_attachments 直接丢弃**，等于"收不到"。
-    # 它们按 kind='other' 归档，不进人才库（见 classify_attachment）。
+    # jpg/png；v5.0.1 再补 webp/bmp/tif/tiff，手机照片、扫描件都可能以这些
+    # 格式随邮件投递。**不加就会被 extract_attachments 直接丢弃**，等于"收不到"。
+    # 多附件邮件里图片按 kind='other' 归档；单附件（或整封没有更明确的简历）
+    # 时会把最大的一份当简历，走 OCR 入库。
     "attachment_ext": [".pdf", ".docx", ".doc", ".txt", ".md",
-                       ".jpg", ".jpeg", ".png", ".xlsx", ".xls"],
+                       ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff",
+                       ".xlsx", ".xls"],
     "max_attachment_mb": 20,
     "imap": {
         "host": "",
@@ -462,7 +465,8 @@ def classify_attachment(filename: str, total: int = 1) -> str:
         return "resume"
     # 无扩展名/未知类型（如 `1`、`image`）：不猜，当附件
     ext = name.rsplit(".", 1)[-1] if "." in name else ""
-    if ext not in ("pdf", "doc", "docx", "txt", "md", "rtf"):
+    if ext not in ("pdf", "doc", "docx", "txt", "md", "rtf",
+                   "jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"):
         return "other"
     # 多附件邮件里，第二份及以后默认是补充材料（见 docstring）
     if total > 1:
@@ -478,22 +482,35 @@ def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:
     """
     exts = tuple(e.lower() for e in cfg.get("attachment_ext", []))
     limit = int(cfg.get("max_attachment_mb", 20)) * 1024 * 1024
+    # 正文里直接粘贴/嵌入的照片：很多客户端不给文件名，只给 image/* 和 inline。
+    # 按 MIME 补扩展名；小于 16KB 的 inline 图片当作签名 logo/图标跳过，
+    # 避免把每一封邮件都拆出一堆"照片附件"。
+    _inline_min = 16 * 1024
+    _image_suffix = {"image/jpeg": ".jpg", "image/jpg": ".jpg",
+                     "image/png": ".png", "image/webp": ".webp",
+                     "image/bmp": ".bmp", "image/tiff": ".tif"}
     out: list[dict] = []
     for part in msg.walk():
         if part.get_content_maintype() == "multipart":
             continue
         disp = (part.get("Content-Disposition") or "").lower()
+        ctype = part.get_content_type()
         filename = part.get_filename()
         if filename:
             filename = _decode_header(filename)
         if not filename:
-            # 少数客户端把附件当 inline 且不带文件名，按扩展名兜底
-            if "attachment" not in disp and "inline" not in disp:
+            # 少数客户端把附件当 inline 且不带文件名，按内容类型兜底。
+            # 正文里直接贴的照片常常只有 Content-ID、没有 Content-Disposition，
+            # 这类也要收（下面按 16KB 门槛排除签名 logo/图标）。
+            if ("attachment" not in disp and "inline" not in disp
+                    and not part.get("Content-ID")):
                 continue
-            ctype = part.get_content_type()
             guess = {"application/pdf": ".pdf",
                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx"}
-            filename = "attachment" + guess.get(ctype, "")
+            if ctype in _image_suffix:
+                filename = "照片" + _image_suffix[ctype]
+            else:
+                filename = "attachment" + guess.get(ctype, "")
         if not filename.lower().endswith(exts):
             continue
         try:
@@ -502,9 +519,12 @@ def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:
             continue
         if not data or len(data) > limit:
             continue
+        if (ctype.startswith("image/") and len(data) < _inline_min
+                and ("inline" in disp or part.get("Content-ID"))):
+            continue
         out.append({
             "filename": safe_filename(filename),
-            "mime": part.get_content_type(),
+            "mime": ctype,
             "data": data,
         })
     # 先抽完再定 kind：`classify_attachment` 需要知道本封邮件共有几个附件。
@@ -523,11 +543,24 @@ def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:
         elif _kind == "resume":
             _has_resume = True
         _a["kind"] = _kind
-    # 如果整封邮件一个 resume 都没有（全是"成绩单/证书"），
-    # 退回原口径：**第一份**当简历 —— 否则这封邮件就完全没人可建档，
-    # 附件散落在"未挂人"状态，比多建一个人更糟。
+    # 如果整封邮件一个 resume 都没有（例如只拍了张照片、或全是"成绩单/证书"），
+    # 仍要选一份当简历 —— 否则这封邮件就完全没人可建档，附件散落在"未挂人"
+    # 状态，比多建一个人更糟。
+    #
+    # v5.0.1：不再机械地取第一份。优先排除文件名明确写着证书/成绩单/作品集的
+    # 附件，再按体积取最大的一份 —— 手机拍的照片简历通常比签名 logo、
+    # 证书缩略图大得多；把 logo 当简历去 OCR，只会得到一份空档案。
     if out and not _has_resume:
-        out[0]["kind"] = "resume"
+        candidates = [a for a in out
+                      if not any(h in a["filename"].lower() for h in _OTHER_HINTS)]
+        # 有正式文档（PDF/Word）时优先当简历：一封邮件同时带「张三.pdf」和
+        # 一张大照片时，PDF 更可能是简历，照片是补充材料。只有全是图片时，
+        # 才按体积挑最大的一张（手机照片通常远大于签名 logo）。
+        _doc_exts = (".pdf", ".doc", ".docx", ".rtf", ".txt", ".md")
+        docs = [a for a in candidates if a["filename"].lower().endswith(_doc_exts)]
+        pool = docs or candidates or out
+        pick = max(pool, key=lambda a: len(a.get("data") or b""))
+        pick["kind"] = "resume"
     return out
 
 

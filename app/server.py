@@ -1727,6 +1727,33 @@ def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias=
         conn.close()
 
 
+def _prefetch_projects(conn, cid: int, detail: dict | None = None) -> dict | None:
+    """把项目经历预先提炼进缓存（已有缓存/无原文/模型未配置时跳过）。
+
+    v5.0.1：入库自动分析、手动「重新分析」都会调用它。过去项目经历只靠前端
+    打开档案时按需拉取，HR 点一个人等十几秒；现在分析阶段先算好，点开即读缓存。
+    """
+    d = detail or db.candidate_detail(conn, cid)
+    if not d or d.get("projects_checked"):
+        return None
+    raw = str(d.get("raw_text") or "").strip()
+    if not raw or not _llm_enabled():
+        return None
+    try:
+        cfg = llm.load_cfg() or {}
+        if not cfg.get("api_key"):
+            return None
+        out = projects_mod.summarize(raw, cfg)
+    except Exception as exc:                               # noqa: BLE001
+        print(f"[projects] 候选人#{cid} 项目经历预提炼失败："
+              f"{type(exc).__name__}: {exc}")
+        return None
+    if out is not None:
+        db.update_candidate(conn, cid,
+                            projects_json=json.dumps(out, ensure_ascii=False))
+    return out
+
+
 @app.get("/api/candidates/{cid}/projects")
 def api_candidate_projects(cid: int,
                            x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
@@ -1826,8 +1853,8 @@ def api_candidate_reanalyze(cid: int, full: bool = True, req: dict | None = None
                 }
             if not r.get("ok"):
                 return r
-            # 原件已重新解析：旧的 AI 项目总结可能来自上一版简历，清掉缓存下次重提炼
-            db.update_candidate(conn, cid, projects_json=None)
+            # 项目经历缓存由 reanalyze_full → analyze_one 按新原文重炼（v5.0.1），
+            # 这里不能再清一次，否则刚预提炼好的缓存会被抹掉、下次点开又调模型。
             r["insight"] = db.get_insight(conn, cid)
             r["note"] = ("完整重新分析完成：原件已重解析、字段已用模型重抽、"
                          "技能已重建、建议档已重算、分析结论已刷新。"
@@ -1846,6 +1873,8 @@ def api_candidate_reanalyze(cid: int, full: bool = True, req: dict | None = None
                           source=ins.get("source") or "manual",
                           model=ins.get("model") or "",
                           business_direction=ins.get("business_direction"))
+        # 只刷新分析文字时也顺手补项目经历缓存（没有缓存才调模型）
+        _prefetch_projects(conn, cid, d)
         # 模型建议档位 → 更新 tier_suggested（HR 未确认时才更新；D 不覆盖）
         _mt = ins.get("suggested_tier")
         if _mt and _mt in ("A", "B", "C", "D") and app_id:
@@ -6761,7 +6790,9 @@ def api_mailbox_preview(req: MailboxTestReq, limit: int = 10,
                 "total": len(mails), "mails": list(reversed(mails)),
                 "message": f"当前是 eml 演练模式：目录里 {len(mails)} 封"}
     host, port, ssl_on, user, folder, password = _resolve_imap(req)
-    exts = tuple(cfg.get("attachment_ext") or (".pdf", ".docx", ".doc", ".txt", ".md"))
+    exts = tuple(cfg.get("attachment_ext") or
+                 (".pdf", ".docx", ".doc", ".txt", ".md",
+                  ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"))
     return mb.preview_imap(host, port, ssl_on, user, password, folder,
                            limit=int(limit or 10), exts=exts)
 
