@@ -28,7 +28,8 @@ from . import llm
 from . import tools as tools_write
 from .router import route_tools, tool_catalog_text
 from .skills import match_skill
-from .tools import DISABLED_TOOLS, STAGES, TOOL_SPECS, ToolCtx, execute
+from .tools import (DISABLED_TOOLS, MANAGE_BY_OLD, STAGES, TOOL_SPECS,
+                    ToolCtx, execute)
 
 # --------------------------------------------------------------- 文本形式的工具调用
 #
@@ -841,9 +842,12 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
     if _skill:
         ctx.skill, ctx.skill_name = _skill["id"], _skill["name"]
         _have = {s["function"]["name"] for s in _allowed_specs}
+        # SOP 里写的还是旧写工具名时，映射到域级入口；旧工具仍可执行，但不
+        # 再直接暴露给模型，避免一次 SOP 把 42 个旧写工具重新塞回上下文。
+        _skill_tools = {MANAGE_BY_OLD.get(t, t) for t in _skill["tools"]}
         for _s in TOOL_SPECS:
             _n = _s["function"]["name"]
-            if _n in _skill["tools"] and _n not in _have:
+            if _n in _skill_tools and _n not in _have:
                 _allowed_specs.append(_s)
                 _have.add(_n)
         _route_groups = list(_route_groups) + ["skill:" + _skill["id"]]

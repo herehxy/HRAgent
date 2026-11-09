@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import re
 
-from .tools import COMPUTE_TOOLS, READ_TOOLS, TOOL_SPECS
+from .tools import (COMPUTE_TOOLS, MANAGE_TOOL_NAMES, READ_TOOLS,
+                    TOOL_SPECS, WRITE_TOOLS)
 
 #: 任何问题都保留的最小工具集：找人、看档、看岗位、看总量
 CORE_MIN = [
@@ -39,6 +40,7 @@ GROUPS: dict[str, list[str]] = {
         "reanalyze_candidate", "merge_candidates", "split_candidate",
         "mark_review", "set_archive", "archive_batch",
         "set_interview_info", "compare_channel", "manage_avatar",
+        "manage_candidate",
     ],
     "recruit": [
         # 读（招聘进度统一走 recruit_overview 的 view）
@@ -49,26 +51,27 @@ GROUPS: dict[str, list[str]] = {
         "set_stage", "set_sign_status", "bulk_initial_pass",
         "bulk_assign_job", "assign_job", "suggest_job", "route_pending",
         "archive_by_year", "set_interview_info", "get_interview_dict", "manage_recruit_plan",
-        "import_recruit_plan_excel",
+        "import_recruit_plan_excel", "manage_interview", "manage_plan",
+        "manage_candidate",
     ],
     "mail": [
         "mailbox_status", "list_mail_templates", "get_mail_template",
         "preview_mail", "draft_email", "get_mail_config", "save_mail_config",
-        "manage_mail_template",
+        "manage_mail_template", "manage_mail",
     ],
     "govern": [
         "list_proposals", "list_audit", "list_import_history", "list_agent_runs",
         "run_proactive_scan", "rebuild_brief", "clear_chat_history",
         "list_removed_files", "restore_source_files", "remove_source_files",
         "get_feedback_report", "export_feedback", "list_conversations",
-        "restore_chat_history", "truncate_chat",
+        "restore_chat_history", "truncate_chat", "manage_system",
     ],
     "admin": [
         "create_job", "update_job_jd", "regrade_job", "ingest_resumes",
         "list_import_history", "export_resumes", "list_source_files",
         "get_settings", "save_settings",
         "get_model_config", "save_model_config", "update_interview_dict",
-        "route_pending", "compare_channel",
+        "route_pending", "compare_channel", "manage_job",
     ],
     "system": [
         # v5.1：账号 / 部门 / 计划 / 岗位启停 / 领域包（此前只有界面能操作）
@@ -77,6 +80,7 @@ GROUPS: dict[str, list[str]] = {
         "list_recruit_plans", "manage_recruit_plan",
         "set_job_active", "update_job_info", "import_recruit_plan_excel",
         "list_domain_packs", "import_domain_pack",
+        "manage_job", "manage_plan", "manage_system",
     ],
     "office": [
         "export_roster", "export_resume_bundle", "export_interview_schedule",
@@ -97,6 +101,9 @@ HIDDEN_TOOLS = {
     # 旧版只给“去页面下载”的指引；新版 export_resume_bundle 才真的给下载链接
     "export_resumes",
 }
+# 旧写工具全部保留在 execute() 中做兼容，但不再直接暴露给模型；
+# 模型统一走 6 个 manage_* action 入口，减少工具选择噪声。
+HIDDEN_TOOLS |= (WRITE_TOOLS - MANAGE_TOOL_NAMES)
 
 #: 关键词 → 组。中文按**实际说法**列，不要求穷尽；命中一个词即可。
 #: 读/写不在这里区分——写工具即便被路由进来，也只能生成待确认提案。
@@ -192,17 +199,19 @@ def route_tools(message: str, history: list[dict] | None = None,
         names = list(DEFAULT_NAMES)
     else:
         primary = groups[0]
-        names = list(CORE_MIN) + list(GROUPS.get(primary, []))
+        names = [n for n in (list(CORE_MIN) + list(GROUPS.get(primary, [])))
+                 if n not in HIDDEN_TOOLS]
         # 次组只补**读/算**工具。次组里的写工具通常不是当前问题的主意图，
         # 全部塞进来只会推高上下文；主组才保留完整读写能力。
         for g in groups[1:]:
             extra = [n for n in GROUPS.get(g, [])
-                     if n not in names and (n in READ_TOOLS or n in COMPUTE_TOOLS)]
+                     if n not in names and n not in HIDDEN_TOOLS
+                     and (n in READ_TOOLS or n in COMPUTE_TOOLS)]
             if len(names) + len(extra) <= max_tools:
                 names.extend(extra)
 
     # 去重 + 保持 TOOL_SPECS 的声明顺序（模型看到的顺序稳定）
-    wanted = set(names) - HIDDEN_TOOLS
+    wanted = set(names)
     specs = [s for s in TOOL_SPECS if s["function"]["name"] in wanted]
     if len(specs) > max_tools:
         core = [s for s in specs if s["function"]["name"] in CORE_MIN]

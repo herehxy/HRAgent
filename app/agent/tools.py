@@ -32,6 +32,59 @@ from ..pipeline import normalize as nz
 from ..pipeline.analyze import analyze_fit, draft_interview
 from ..pipeline.tier import grade, major_match
 
+#: 域级写工具：把同类写操作收敛成一个 action 入口；底层旧工具名仍保留，
+#: execute() 会把 action 原样转给旧工具，因此提案/校验/审计逻辑完全复用。
+MANAGE_ACTIONS: dict[str, dict[str, str]] = {
+    "manage_candidate": {
+        "set_stage": "set_stage", "set_tier": "set_tier",
+        "add_tag": "add_tag", "add_note": "add_note",
+        "update_candidate_fields": "update_candidate_fields",
+        "reanalyze_candidate": "reanalyze_candidate",
+        "reanalyze_batch": "reanalyze_batch",
+        "merge_candidates": "merge_candidates",
+        "split_candidate": "split_candidate", "mark_review": "mark_review",
+        "set_archive": "set_archive", "archive_batch": "archive_batch",
+        "archive_by_year": "archive_by_year", "assign_job": "assign_job",
+        "suggest_job": "suggest_job",
+        "bulk_initial_pass": "bulk_initial_pass",
+        "bulk_assign_job": "bulk_assign_job",
+        "set_sign_status": "set_sign_status",
+        "route_pending": "route_pending", "manage_avatar": "manage_avatar",
+    },
+    "manage_job": {
+        "create_job": "create_job", "update_job_jd": "update_job_jd",
+        "regrade_job": "regrade_job", "set_job_active": "set_job_active",
+        "update_job_info": "update_job_info",
+    },
+    "manage_interview": {
+        "set_interview_info": "set_interview_info",
+        "update_interview_dict": "update_interview_dict",
+    },
+    "manage_mail": {
+        "manage_mail_template": "manage_mail_template",
+        "save_mail_config": "save_mail_config",
+    },
+    "manage_plan": {
+        "manage_recruit_plan": "manage_recruit_plan",
+        "import_recruit_plan_excel": "import_recruit_plan_excel",
+    },
+    "manage_system": {
+        "manage_user": "manage_user", "manage_department": "manage_department",
+        "import_domain_pack": "import_domain_pack",
+        "save_settings": "save_settings", "save_model_config": "save_model_config",
+        "rebuild_brief": "rebuild_brief",
+        "clear_chat_history": "clear_chat_history",
+        "restore_chat_history": "restore_chat_history",
+        "truncate_chat": "truncate_chat",
+        "remove_source_files": "remove_source_files",
+        "restore_source_files": "restore_source_files",
+    },
+}
+MANAGE_TOOL_NAMES = set(MANAGE_ACTIONS)
+#: 旧写工具名 → 域级入口（SOP/旧提示词仍写旧名字时自动映射）
+MANAGE_BY_OLD = {old: manage for manage, acts in MANAGE_ACTIONS.items()
+                 for old in acts.values()}
+
 WRITE_TOOLS = {"set_stage", "set_tier", "add_tag", "merge_candidates", "add_note",
                # v1.16 补齐：这些动作以前只有界面能点，agent 调不到
                "assign_job", "suggest_job", "mark_review",
@@ -50,7 +103,10 @@ WRITE_TOOLS = {"set_stage", "set_tier", "add_tag", "merge_candidates", "add_note
                "import_domain_pack",
                # v5.1.1：头像 / 岗位信息 / 对话历史 / 招聘计划 Excel
                "manage_avatar", "update_job_info", "restore_chat_history",
-               "truncate_chat", "import_recruit_plan_excel"}
+               "truncate_chat", "import_recruit_plan_excel",
+               # 域级 action 入口（底层旧工具仍可用）
+               "manage_candidate", "manage_job", "manage_interview",
+               "manage_mail", "manage_plan", "manage_system"}
 # ingest_resumes / export_resumes **不在** WRITE_TOOLS：它们是直接执行的
 # （取数据、给下载指引），标成"写·需确认"会让界面与实际行为不一致。
 # run_proactive_scan 也**不在** WRITE_TOOLS：它只建提案、不改业务数据，
@@ -834,6 +890,53 @@ TOOL_SPECS = [
            "period_end": {"type": "string", "description": "止 YYYY-MM-DD"},
            "mode": {"type": "string", "description": "merge / overwrite，默认 merge"}},
           ["file_path"]),
+    # ---- v5.1.3：域级写入口（底层旧工具名保留兼容，模型只需看到这 6 个） ----
+    _spec("manage_candidate",
+          "【需 HR 确认】候选人域写操作统一入口。action 取：set_stage / set_tier / "
+          "add_tag / add_note / update_candidate_fields / reanalyze_candidate / "
+          "reanalyze_batch / merge_candidates / split_candidate / mark_review / "
+          "set_archive / archive_batch / archive_by_year / assign_job / suggest_job / "
+          "bulk_initial_pass / bulk_assign_job / set_sign_status / route_pending / "
+          "manage_avatar。payload 沿用对应旧工具参数（candidate_id/application_id/"
+          "stage/tier/ids 等）。只生成待确认提案。",
+          {"action": {"type": "string", "description": "见工具说明"},
+           "payload": {"type": "object", "description": "对应 action 的参数对象"}},
+          ["action"]),
+    _spec("manage_job",
+          "【需 HR 确认】岗位域写操作统一入口。action 取：create_job / update_job_jd / "
+          "regrade_job / set_job_active / update_job_info。payload 沿用对应旧工具参数。"
+          "只生成待确认提案。",
+          {"action": {"type": "string", "description": "见工具说明"},
+           "payload": {"type": "object", "description": "对应 action 的参数对象"}},
+          ["action"]),
+    _spec("manage_interview",
+          "【需 HR 确认】面试域写操作统一入口。action 取：set_interview_info / "
+          "update_interview_dict。payload 沿用对应旧工具参数。只生成待确认提案。",
+          {"action": {"type": "string", "description": "见工具说明"},
+           "payload": {"type": "object", "description": "对应 action 的参数对象"}},
+          ["action"]),
+    _spec("manage_mail",
+          "【需 HR 确认】邮件域写操作统一入口。action 取：manage_mail_template / "
+          "save_mail_config。payload 沿用对应旧工具参数。只生成待确认提案；"
+          "发送邮件仍由 HR 在邮件编辑器确认。",
+          {"action": {"type": "string", "description": "见工具说明"},
+           "payload": {"type": "object", "description": "对应 action 的参数对象"}},
+          ["action"]),
+    _spec("manage_plan",
+          "【需 HR 确认】招聘计划域写操作统一入口。action 取：manage_recruit_plan / "
+          "import_recruit_plan_excel。payload 沿用对应旧工具参数。只生成待确认提案。",
+          {"action": {"type": "string", "description": "见工具说明"},
+           "payload": {"type": "object", "description": "对应 action 的参数对象"}},
+          ["action"]),
+    _spec("manage_system",
+          "【需 HR 确认】系统管理域写操作统一入口（仅管理员/HR）：action 取："
+          "manage_user / manage_department / import_domain_pack / save_settings / "
+          "save_model_config / rebuild_brief / clear_chat_history / restore_chat_history / "
+          "truncate_chat / remove_source_files / restore_source_files。"
+          "payload 沿用对应旧工具参数。只生成待确认提案。",
+          {"action": {"type": "string", "description": "见工具说明"},
+           "payload": {"type": "object", "description": "对应 action 的参数对象"}},
+          ["action"]),
 ]
 
 
@@ -1449,6 +1552,21 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
         return _err(
             f"工具 {name} 在本系统中不提供。原因：系统不做对外发送、不做删除、不做淘汰决定。"
             "若确需对外沟通或删除，请由 HR 在系统外人工完成。")
+
+    # 域级写入口：把 action 还原成旧工具名，直接复用原有 handler 的校验、
+    # 摘要、风险与提案逻辑。旧工具名仍在 execute() 里可用（兼容旧提示词/脚本）。
+    if name in MANAGE_ACTIONS:
+        action = str(args.get("action") or "").strip()
+        mapping = MANAGE_ACTIONS[name]
+        target = mapping.get(action)
+        if not target:
+            return _err(f"未知 action：{action or '（空）'}",
+                        hint="可用 action：" + "、".join(sorted(mapping)))
+        payload = args.get("payload")
+        if not isinstance(payload, dict):
+            payload = {k: v for k, v in args.items()
+                       if k not in ("action", "payload")}
+        return execute(target, payload, ctx)
 
     conn = db.connect(ctx.db_path)
     try:
