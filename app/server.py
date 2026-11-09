@@ -1297,6 +1297,7 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                    overseas: str | None = None, bachelor: str | None = None,
                    date_from: str | None = None, date_to: str | None = None,
                    interview_unit: str | None = None,
+                   job: str | None = None,
                    outcome: str | None = None,
                    min_years: int | None = None, gender: str | None = None,
                    archived: str | None = None,
@@ -1352,8 +1353,25 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
         want_strong = [s for s in (strong or "").split(",") if s.strip()]
         want_cet = (cet or "").strip()
         _cet_parts = [c for c in want_cet.split(",") if c.strip()]
+        # v5.1：岗位筛选。`__unassigned__` = 未归岗（job_id IS NULL）；
+        # 其余按岗位 id 或名称精确匹配。UI 传的是岗位 id，助手/URL 可以传名称。
+        _job_filter = (job or "").strip()
+        _job_id = None
+        if _job_filter in ("__unassigned__", "未归岗", "-1"):
+            _job_id = -1
+        elif _job_filter:
+            if _job_filter.isdigit():
+                _job_id = int(_job_filter)
+            else:
+                _hits = [j for j in db.list_jobs(conn, include_inactive=True)
+                         if str(j.get("title") or "") == _job_filter]
+                if len(_hits) == 1:
+                    _job_id = int(_hits[0]["id"])
+                else:
+                    _job_id = -2          # 名称不唯一/不存在 → 返回空集，不静默放行
         items = db.list_candidates(conn, tier=tier, keyword=kw, stage=stage,
                                    min_years=min_years,
+                                   job_id=_job_id,
                                    univ=want_univ or None,
                                    strong=want_strong or None,
                                    cet=want_cet or None,

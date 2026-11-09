@@ -22,7 +22,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
-from .. import db, stages as stages_mod
+from .. import db, stages as stages_mod, tiers as tiers_mod
 from ..pipeline import normalize as nz
 from . import llm
 from . import tools as tools_write
@@ -139,8 +139,12 @@ SYSTEM_PROMPT = (
     "   同理，HR 问『有没有会X的人』时，技能检索（search_by_skills）结果为空，"
     "先确认 X 在技能本体里叫什么，再重试，不要直接答没有。\n"
     "2) 你只给建议，不做决定。最终档位、是否面试、是否录用都由 HR 确认，"
-    "不要声称你已经替 HR 做了决定。\n"
-    "3) 你没有删除数据、淘汰候选人、对候选人发消息的权限；也不要建议这么做。\n"
+    "不要声称你已经替 HR 做了决定。"
+    "**档位只有 " + "、".join(tiers_mod.all_tiers())
+    + "（共 " + str(len(tiers_mod.all_tiers())) + " 档），禁止使用 D 或其他字母；"
+    "学历低于岗位门槛时按 " + tiers_mod.hard_shortfall_tier() + " 处理。**\n"
+    "3) 你没有永久删除候选人/彻底删除数据的权限，也没有对候选人直接发消息的权限；"
+    "也不要建议这么做。归档、停用岗位/账号等可逆操作有对应工具，按工具说明走提案。\n"
     "   但**起草**是可以的：用户要发邮件/通知时，用 draft_email 生成草稿"
     "（面试邀请/跟进/婉拒/offer 沟通），把主题与正文给用户看，"
     "并告诉他『这是草稿，发送需要你点确认』——"

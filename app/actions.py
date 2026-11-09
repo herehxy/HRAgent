@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from . import auth, db, stages as stages_mod
+from . import auth, db, recruit as recruit_mod, stages as stages_mod
 
 
 
@@ -279,12 +279,20 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             d0 = db.candidate_detail(conn, cid) or {}
             label = {"name": "姓名", "edu_level": "学历", "school": "学校",
                      "major": "专业", "phone_enc": "电话", "email_enc": "邮箱",
-                     "note": "备注"}   # v1.25.7：人工备注也进审计文案
+                     "note": "备注", "gender": "性别", "grad_date": "毕业时间",
+                     "current_org": "当前单位", "first_degree_school": "第一学历院校",
+                     "cet": "四六级", "in_school": "在读状态",
+                     "edu_history": "教育经历"}
             old_map = {"name": d0.get("name") or "", "edu_level": d0.get("edu_level") or "",
                        "school": d0.get("school") or "", "major": d0.get("major") or "",
                        "note": d0.get("note") or "",
                        "phone_enc": decrypt(d0.get("phone_enc")) or "",
-                       "email_enc": decrypt(d0.get("email_enc")) or ""}
+                       "email_enc": decrypt(d0.get("email_enc")) or "",
+                       "gender": d0.get("gender") or "", "grad_date": d0.get("grad_date") or "",
+                       "current_org": d0.get("current_org") or "",
+                       "first_degree_school": d0.get("first_degree_school") or "",
+                       "cet": d0.get("cet") or "", "in_school": d0.get("in_school") or 0,
+                       "edu_history": d0.get("edu_history") or ""}
             # ⚠️ 只按**用户可见字段**写审计文案：phone_bidx/email_bidx 是派生字段、
             # 没有中文名，混进来会让 label[k] 抛 KeyError —— 这正是 v1.24.21
             # 那个"保存成功却报 500"的根因。这里从一开始就按 label 过滤。
@@ -418,6 +426,274 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             db.add_audit(conn, "settings", "agent_chat", "clear", "",
                          f"清空对话历史（{n} 条）", operator, role)
             result["after"] = {"cleared": n}
+
+        elif tool == "set_interview_info":
+            if not auth.can(role, "set_stage"):
+                return _denied(conn, p, operator, role, "set_stage")
+            aid = int(args["application_id"])
+            app = db.get_application(conn, aid)
+            if not app:
+                return {"ok": False, "error": f"未找到投递 #{aid}"}
+            allowed = ("interview_unit", "interview_date", "interview_slot",
+                       "interview_mode", "interview_place", "hire_unit",
+                       "signed_at", "onboard_deadline", "onboard_status",
+                       "offer_sent_at")
+            fields = {k: args[k] for k in allowed if k in args}
+            outcome = str(args.get("outcome") or "").strip() or None
+            if outcome:
+                cur_stage = str(app.get("stage") or "").strip()
+                target = stages_mod.auto_advance_stage(cur_stage, cur_stage, outcome)
+                if not stages_mod.outcome_allowed_from(cur_stage, target, outcome):
+                    return {"ok": False,
+                            "error": f"当前阶段「{cur_stage or '未设置'}」不能打结论「{outcome}」"}
+            if fields:
+                db.update_application_fields(conn, aid, operator=operator, role=role, **fields)
+            if outcome:
+                cur_stage = str(app.get("stage") or "").strip()
+                target = stages_mod.auto_advance_stage(cur_stage, cur_stage, outcome)
+                if target != cur_stage:
+                    db.set_application_stage(conn, aid, target, outcome=outcome,
+                                             operator=operator, role=role,
+                                             skip_auto_archive=True)
+                else:
+                    db.update_application_fields(conn, aid, operator=operator,
+                                                 role=role, outcome=outcome)
+            result["after"] = {"application_id": aid, "changed": sorted(fields),
+                               "outcome": outcome}
+
+        elif tool == "manage_mail_template":
+            if not auth.can(role, "settings"):
+                return _denied(conn, p, operator, role, "settings")
+            action = str(args.get("action") or "").strip().lower()
+            if action == "save":
+                name = str(args.get("name") or "").strip()
+                tid = args.get("id")
+                if tid:
+                    old = db.get_mail_template(conn, int(tid))
+                    if not old:
+                        return {"ok": False, "error": f"模板 #{tid} 不存在"}
+                else:
+                    same = [t for t in db.list_mail_templates(conn)
+                            if t.get("name") == name]
+                    if same:
+                        return {"ok": False,
+                                "error": f"已有同名模板「{name}」，请用 id={same[0]['id']} 修改"}
+                new_id = db.upsert_mail_template(
+                    conn, name, str(args.get("scene") or "其他通知"),
+                    str(args.get("subject") or ""), str(args.get("body") or ""),
+                    int(tid) if tid else None, args.get("kind") or None)
+                db.add_audit(conn, "settings", f"mail_template#{new_id}", "update", "",
+                             f"保存邮件模板「{name}」", operator, role)
+                result["after"] = {"template_id": new_id, "name": name}
+            elif action == "delete":
+                tid = int(args["id"])
+                t = db.get_mail_template(conn, tid)
+                if not t:
+                    return {"ok": False, "error": f"模板 #{tid} 不存在"}
+                db.delete_mail_template(conn, tid)
+                db.add_audit(conn, "settings", f"mail_template#{tid}", "delete",
+                             t.get("name") or "", "", operator, role)
+                result["after"] = {"deleted": tid, "name": t.get("name")}
+            else:
+                return {"ok": False, "error": "action 只能是 save / delete"}
+
+        elif tool == "set_job_active":
+            if not auth.can(role, "settings"):
+                return _denied(conn, p, operator, role, "settings")
+            jid = int(args["job_id"])
+            active = bool(args["active"])
+            r = db.set_job_active(conn, jid, active, operator)
+            if not r:
+                return {"ok": False, "error": f"未找到岗位 #{jid}"}
+            result["after"] = {"job_id": jid, "title": r.get("title"), "active": active}
+
+        elif tool == "manage_department":
+            if not auth.can(role, "settings"):
+                return _denied(conn, p, operator, role, "settings")
+            action = str(args.get("action") or "").strip().lower()
+            if action in ("create", "update"):
+                name = str(args.get("name") or "").strip()
+                desc = str(args.get("description") or "")
+                did = args.get("department_id")
+                if did:
+                    d = db.get_department(conn, int(did))
+                    if not d:
+                        return {"ok": False, "error": f"部门 #{did} 不存在"}
+                    same = conn.execute(
+                        "SELECT id FROM departments WHERE name = ? AND id <> ?",
+                        (name, int(did))).fetchone()
+                    if same:
+                        return {"ok": False, "error": f"已有同名部门「{name}」"}
+                    conn.execute(
+                        "UPDATE departments SET name=?, description=?, active=1, updated_at=? "
+                        "WHERE id=?", (name, desc, db.now(), int(did)))
+                    conn.commit()
+                    db.add_audit(conn, "department", str(did), "update",
+                                 d.get("name") or "", name, operator, role)
+                    out_id = int(did)
+                else:
+                    out_id = db.upsert_department(conn, name, desc, operator)
+                result["after"] = {"department_id": out_id, "name": name}
+            elif action == "active":
+                did = int(args["department_id"])
+                r = db.set_department_active(conn, did, bool(args["active"]), operator)
+                if not r:
+                    return {"ok": False, "error": f"部门 #{did} 不存在"}
+                result["after"] = {"department_id": did, "active": bool(args["active"])}
+            else:
+                return {"ok": False, "error": "action 只能是 create / update / active"}
+
+        elif tool == "manage_user":
+            if not auth.can(role, "manage_users"):
+                return _denied(conn, p, operator, role, "manage_users")
+            action = str(args.get("action") or "").strip().lower()
+            username = str(args.get("username") or "").strip()
+            user = db.get_user(conn, username)
+            if action == "create":
+                if user:
+                    return {"ok": False, "error": f"账号「{username}」已存在"}
+                new_role = str(args.get("role") or "").strip()
+                if new_role not in auth.ROLES:
+                    return {"ok": False, "error": "角色只能是 hr / admin / viewer"}
+                db.create_user(conn, username, str(args.get("password") or ""),
+                               new_role, str(args.get("display_name") or "").strip())
+                db.add_audit(conn, "user", username, "create", "",
+                             f"{operator} 创建账号「{username}」（角色 {new_role}）",
+                             operator, role)
+                result["after"] = {"username": username, "role": new_role}
+            elif action == "update":
+                if not user:
+                    return {"ok": False, "error": f"账号「{username}」不存在"}
+                new_role = args.get("role")
+                active = args.get("active")
+                losing_admin = (user.get("role") == "admin" and user.get("active")
+                                and ((new_role is not None and new_role != "admin")
+                                     or active is False))
+                if losing_admin and db.count_active_admins(conn) <= 1:
+                    return {"ok": False,
+                            "error": "这是最后一个启用中的管理员，不能再停用或降级"}
+                if active is False and username == operator:
+                    return {"ok": False, "error": "不能停用自己当前登录的账号"}
+                changed = []
+                if args.get("display_name") is not None:
+                    disp = str(args.get("display_name") or "").strip() or username
+                    conn.execute("UPDATE users SET display_name=? WHERE username=?",
+                                 (disp, username))
+                    changed.append("显示名")
+                if new_role is not None and new_role != user.get("role"):
+                    if new_role not in auth.ROLES:
+                        return {"ok": False, "error": "角色只能是 hr / admin / viewer"}
+                    db.set_user_role(conn, username, new_role)
+                    changed.append("角色")
+                if active is not None and bool(active) != bool(user.get("active")):
+                    db.set_user_active(conn, username, bool(active))
+                    changed.append("启用状态")
+                kicked = 0
+                if new_role is not None or active is not None:
+                    kicked = db.delete_user_sessions(conn, username)
+                db.add_audit(conn, "user", username, "update", "",
+                             f"{operator} 修改账号「{username}」：{'、'.join(changed) or '无变化'}"
+                             + (f"（清除 {kicked} 个会话）" if kicked else ""),
+                             operator, role)
+                result["after"] = {"username": username, "changed": changed}
+            elif action == "password":
+                if not user:
+                    return {"ok": False, "error": f"账号「{username}」不存在"}
+                db.set_user_password(conn, username, str(args.get("password") or ""))
+                kicked = db.delete_user_sessions(conn, username)
+                db.add_audit(conn, "user", username, "set_password", "",
+                             f"{operator} 重置账号「{username}」的密码"
+                             f"（清除 {kicked} 个会话）", operator, role)
+                result["after"] = {"username": username, "sessions_cleared": kicked}
+            elif action == "delete":
+                if not user:
+                    return {"ok": False, "error": f"账号「{username}」不存在"}
+                if username == operator:
+                    return {"ok": False, "error": "不能删除自己当前登录的账号"}
+                if (user.get("role") == "admin" and user.get("active")
+                        and db.count_active_admins(conn) <= 1):
+                    return {"ok": False, "error": "这是最后一个启用中的管理员，不能删除"}
+                db.set_user_active(conn, username, False)
+                kicked = db.delete_user_sessions(conn, username)
+                db.add_audit(conn, "user", username, "delete", "",
+                             f"{operator} 停用账号「{username}」（保留记录供审计）",
+                             operator, role)
+                result["after"] = {"username": username, "active": False,
+                                   "sessions_cleared": kicked}
+            else:
+                return {"ok": False, "error": "action 只能是 create / update / password / delete"}
+
+        elif tool == "manage_recruit_plan":
+            if not auth.can(role, "edit_plan"):
+                return _denied(conn, p, operator, role, "edit_plan")
+            action = str(args.get("action") or "").strip().lower()
+            if action == "create_year":
+                yid = db.create_recruit_year(
+                    conn, str(args.get("label") or "").strip(),
+                    str(args.get("period_start") or "").strip(),
+                    str(args.get("period_end") or "").strip(),
+                    operator=operator, role=role)
+                result["after"] = {"year_id": yid}
+            elif action == "update_year":
+                year_id = int(args["year_id"])
+                fields = {k: args[k] for k in
+                          ("label", "period_start", "period_end", "org_label", "note")
+                          if k in args}
+                r = db.update_recruit_year(conn, year_id, fields,
+                                           operator=operator, role=role)
+                if not r:
+                    return {"ok": False, "error": f"未找到届别 #{year_id}"}
+                result["after"] = {"year_id": year_id,
+                                   "changed": sorted(fields)}
+            elif action in ("add_unit", "update_rows", "delete_unit"):
+                year_id = int(args["year_id"])
+                year = db.get_recruit_year(conn, year_id=year_id)
+                if not year:
+                    return {"ok": False, "error": f"未找到届别 #{year_id}"}
+                if action == "add_unit":
+                    unit = str(args.get("unit_name") or "").strip()
+                    levels = [x for x in (args.get("edu_levels") or [])
+                              if x in recruit_mod.EDU_LEVELS] or list(recruit_mod.EDU_LEVELS)
+                    added = 0
+                    for i, edu in enumerate(levels):
+                        out = db.save_recruit_plan(
+                            conn, year_id=year_id, unit_name=unit, edu_level=edu,
+                            plan_approved=int(args.get("plan_approved") or 0),
+                            plan_extra=int(args.get("plan_extra") or 0),
+                            plan_carryover=int(args.get("plan_carryover") or 0),
+                            plan_cancel=int(args.get("plan_cancel") or 0),
+                            sort_order=i, mode="merge")
+                        added += 1 if out.get("action") == "inserted" else 0
+                    db.add_audit(conn, "recruit_plan", str(year_id), "add_unit", "",
+                                 f"{unit}：新增 {added} 行", operator, role)
+                    result["after"] = {"year_id": year_id, "unit_name": unit,
+                                       "added": added}
+                elif action == "update_rows":
+                    rows = args.get("rows") or []
+                    errors = recruit_mod.validate_plan_rows(rows)
+                    if errors:
+                        return {"ok": False, "error": "；".join(errors)}
+                    changed = db.update_recruit_plans_batch(
+                        conn, year_id, rows, operator=operator, role=role)
+                    result["after"] = {"year_id": year_id, "changed": len(changed)}
+                else:
+                    r = db.delete_recruit_unit(
+                        conn, year_id, str(args.get("unit_name") or "").strip(),
+                        operator=operator, role=role)
+                    result["after"] = {"year_id": year_id, **r}
+            else:
+                return {"ok": False, "error": "action 只能是 create_year / add_unit / update_rows / delete_unit"}
+
+        elif tool == "import_domain_pack":
+            if not auth.can(role, "settings"):
+                return _denied(conn, p, operator, role, "settings")
+            from .pipeline import domains as _domains
+            try:
+                r = _domains.import_pack(conn, str(args.get("pack") or ""),
+                                         operator=operator)
+            except (ValueError, FileNotFoundError) as exc:
+                return {"ok": False, "error": str(exc)}
+            result["after"] = r
 
         else:
             return {"ok": False, "error": f"未知提案类型 {tool}"}

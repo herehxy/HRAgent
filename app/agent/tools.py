@@ -24,7 +24,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
-from .. import db, stages as stages_mod, tiers as tiers_mod
+from .. import auth, db, stages as stages_mod, tiers as tiers_mod
 from .. import export as export_mod
 from .. import recruit as recruit_mod
 from .. import search as search_mod
@@ -43,7 +43,11 @@ WRITE_TOOLS = {"set_stage", "set_tier", "add_tag", "merge_candidates", "add_note
                "reanalyze_batch", "route_pending", "archive_by_year",
                "bulk_initial_pass", "bulk_assign_job", "set_sign_status",
                "restore_source_files", "remove_source_files", "rebuild_brief",
-               "clear_chat_history"}
+               "clear_chat_history",
+               # v5.1：系统管理类写操作（此前只有界面能操作）
+               "set_interview_info", "manage_mail_template", "set_job_active",
+               "manage_department", "manage_user", "manage_recruit_plan",
+               "import_domain_pack"}
 # ingest_resumes / export_resumes **不在** WRITE_TOOLS：它们是直接执行的
 # （取数据、给下载指引），标成"写·需确认"会让界面与实际行为不一致。
 # run_proactive_scan 也**不在** WRITE_TOOLS：它只建提案、不改业务数据，
@@ -73,7 +77,9 @@ READ_TOOLS = {"search_candidates", "get_candidate", "get_candidates", "pool_stat
               "export_roster",
               # v4.4.0：面试日程 Excel / .ics
               "export_interview_schedule", "export_interview_ics",
-              "export_resume_bundle"}
+              "export_resume_bundle",
+              # v5.1：系统管理类只读
+              "list_users", "list_departments", "list_recruit_plans", "list_domain_packs"}
 COMPUTE_TOOLS = {"analyze_fit", "compare_candidates", "draft_interview_questions",
                  "draft_email", "preview_mail"}
 
@@ -131,7 +137,8 @@ TOOL_SPECS = [
            "top_k": {"type": "integer", "description": "semantic/skills/similar 返回条数，默认 10"},
            "tier": {"type": "string", "description": tiers_mod.enum_str("/") + "/REVIEW/UNCONFIRMED/ALL"},
            "job": {"type": "string",
-                   "description": "岗位名称（如『科学研究』）。按**归岗关系**筛选：只返回归到该岗位下的人。"
+                   "description": "岗位名称（如『科学研究』）或『未归岗』。按**归岗关系**筛选："
+                                  "只返回归到该岗位下的人；『未归岗』返回尚未归岗的人。"
                                   "岗位名以 list_jobs 的返回为准。"},
            "keyword": {"type": "string", "description": "姓名、院校、专业关键词（院校用全称）"},
            "min_years": {"type": "integer", "description": "最低工作年限"},
@@ -443,7 +450,8 @@ TOOL_SPECS = [
 
     # ------------------------------ 字段更正 / 重算 / 批处理（v1.25） ------------------------------
     _spec("update_candidate_fields",
-          "【需 HR 确认】更正候选人字段：姓名 / 学历 / 学校 / 专业 / 电话 / 邮箱 / 备注。"
+          "【需 HR 确认】更正候选人字段：姓名 / 学历 / 学校 / 专业 / 电话 / 邮箱 / 备注 / "
+          "性别 / 毕业时间 / 当前单位 / 第一学历院校 / 四六级 / 在读状态 / 教育经历。"
           "只生成待确认提案；HR 确认后落库并记录改前改后（电话/邮箱加密存储）。"
           "备注是 HR 的自由工作记录（沟通印象、内推关系、谈薪情况……），≤500 字，空串表示清空。"
           "**技能与年限不在此处改**——那必须来自简历原文与证据核对。"
@@ -454,7 +462,15 @@ TOOL_SPECS = [
            "school": {"type": "string"}, "major": {"type": "string"},
            "phone": {"type": "string"}, "email": {"type": "string"},
            "note": {"type": "string",
-                    "description": "人工备注（≤500 字）：沟通印象/内推关系/谈薪情况等；空串表示清空"}},
+                    "description": "人工备注（≤500 字）：沟通印象/内推关系/谈薪情况等；空串表示清空"},
+           "gender": {"type": "string", "description": "男 / 女；空串表示未识别"},
+           "grad_date": {"type": "string", "description": "毕业时间，YYYY-MM 或 YYYY-MM-DD"},
+           "current_org": {"type": "string", "description": "当前/最近工作单位"},
+           "first_degree_school": {"type": "string", "description": "第一学历院校"},
+           "cet": {"type": "string", "description": "四六级原文，如 CET-6 / 六级"},
+           "in_school": {"type": "boolean", "description": "是否在读"},
+           "edu_history": {"type": "array", "items": {"type": "object"},
+                           "description": "教育经历列表：[{school, degree, major, start, end}]"}},
           ["candidate_id"]),
     _spec("reanalyze_candidate",
           "【需 HR 确认】对某位候选人**完整重跑分析**（重新解析原件 → 重抽字段 → 重建技能 "
@@ -624,6 +640,109 @@ TOOL_SPECS = [
     _spec("recruit_years",
           "列出系统里已有的招聘届别及起止日期。用户问「有哪些届 / 现在统计的是哪一届」时用。",
           {}),
+    # ---- v5.1：系统管理类读写（此前只有界面能操作） ----
+    _spec("list_users",
+          "列出系统账号：用户名、显示名、角色、启用状态。仅管理员可用；不返回密码。",
+          {"include_inactive": {"type": "boolean",
+                                "description": "是否包含已停用账号，默认 true"}}),
+    _spec("list_departments",
+          "列出部门及每个部门下的岗位数（含停用部门）。",
+          {}),
+    _spec("list_recruit_plans",
+          "查看某届招聘计划的「单位 × 学历」名额。year 传届别名称（如 2027届），"
+          "不传=当前届；同时返回已有届别列表。只读。",
+          {"year": {"type": "string", "description": "届别名称，如 2027届；不传=当前届"}}),
+    _spec("list_domain_packs",
+          "列出系统可导入的领域包（技能本体包）及所在目录。只读。",
+          {}),
+    _spec("set_interview_info",
+          "【需 HR 确认】登记/修改面试与录用信息：面试日期、时段、单位、方式、地点、"
+          "面试结论、录用单位、签约时间、入职最后期限/情况、录用函发送时间；"
+          "也可用于面试改期。application_id 或 candidate_id 二选一。"
+          "只生成待确认提案，HR 确认后才落库。",
+          {"application_id": {"type": "integer", "description": "投递编号（二选一）"},
+           "candidate_id": {"type": "string", "description": "候选人 id 或姓名（二选一）"},
+           "interview_date": {"type": "string", "description": "面试日期 YYYY-MM-DD"},
+           "interview_slot": {"type": "string", "description": "面试时段，如 09:30-10:30"},
+           "interview_unit": {"type": "string", "description": "面试单位"},
+           "interview_mode": {"type": "string", "description": "现场 / 线上"},
+           "interview_place": {"type": "string", "description": "会议室或线上会议链接"},
+           "outcome": {"type": "string", "description": "面试结论：拟录用 / 不录用"},
+           "hire_unit": {"type": "string", "description": "录用单位"},
+           "signed_at": {"type": "string", "description": "签约时间 YYYY-MM-DD"},
+           "onboard_deadline": {"type": "string", "description": "入职最后期限 YYYY-MM-DD"},
+           "onboard_status": {"type": "string", "description": "未入职 / 已入职 / 放弃"},
+           "offer_sent_at": {"type": "string", "description": "录用函发送时间 YYYY-MM-DD HH:MM"},
+           "reason": {"type": "string", "description": "变更理由"}}),
+    _spec("manage_mail_template",
+          "【需 HR 确认】新建、修改或删除邮件模板。action=save 需 name/scene/subject/body"
+          "（id 为空=新建，传 id=修改；kind 可选 interview_invite/offer/other）；"
+          "action=delete 需 id 或 name。只生成待确认提案。",
+          {"action": {"type": "string", "description": "save / delete"},
+           "id": {"type": "integer", "description": "模板 id（修改/删除时可用）"},
+           "name": {"type": "string", "description": "模板名"},
+           "scene": {"type": "string", "description": "适用场景，默认 其他通知"},
+           "subject": {"type": "string", "description": "邮件主题"},
+           "body": {"type": "string", "description": "邮件正文（支持 {变量} 占位符）"},
+           "kind": {"type": "string",
+                    "description": "用途：interview_invite / offer / other"}},
+          ["action"]),
+    _spec("set_job_active",
+          "【需 HR 确认】启用或停用岗位（不物理删除，历史投递仍可查看）。"
+          "job_id 或 title 二选一。只生成待确认提案。",
+          {"job_id": {"type": "integer", "description": "岗位 id（二选一）"},
+           "title": {"type": "string", "description": "岗位名称（二选一，允许模糊匹配）"},
+           "active": {"type": "boolean", "description": "true=启用，false=停用"}},
+          ["active"]),
+    _spec("manage_department",
+          "【需 HR 确认】新建/更新/停用/启用部门。action=create/update 用 name+description；"
+          "action=active 用 department_id 或 name + active。只生成待确认提案。",
+          {"action": {"type": "string", "description": "create / update / active"},
+           "department_id": {"type": "integer", "description": "部门 id（active 时可用）"},
+           "name": {"type": "string", "description": "部门名称"},
+           "description": {"type": "string", "description": "部门说明"},
+           "active": {"type": "boolean", "description": "true=启用，false=停用"}},
+          ["action"]),
+    _spec("manage_user",
+          "【需 HR 确认】管理系统账号（仅管理员）：action=create/update/password/delete。"
+          "create 需 username/password/role；update 可改 display_name/role/active；"
+          "password 重置密码；delete 停用账号（软删，保留审计）。只生成待确认提案。",
+          {"action": {"type": "string", "description": "create / update / password / delete"},
+           "username": {"type": "string", "description": "账号名"},
+           "password": {"type": "string", "description": "密码（create/password 时必填）"},
+           "role": {"type": "string", "description": "角色：hr / admin / viewer"},
+           "display_name": {"type": "string", "description": "显示名"},
+           "active": {"type": "boolean", "description": "启用/停用（update 时可用）"}},
+          ["action", "username"]),
+    _spec("manage_recruit_plan",
+          "【需 HR 确认】维护招聘计划：action=create_year 新建届别（label/period_start/"
+          "period_end）；action=update_year 修改届别（year_id + 要改的字段）；"
+          "action=add_unit 新增单位计划（year_id/unit_name/edu_levels/"
+          "plan_approved 等）；action=update_rows 批量改计划数（year_id/rows）；"
+          "action=delete_unit 删除单位（year_id/unit_name）。只生成待确认提案。",
+          {"action": {"type": "string",
+                      "description": "create_year / update_year / add_unit / update_rows / delete_unit"},
+           "year_id": {"type": "integer", "description": "届别 id"},
+           "label": {"type": "string", "description": "届别名称，如 2027届"},
+           "period_start": {"type": "string", "description": "开始日期 YYYY-MM-DD"},
+           "period_end": {"type": "string", "description": "结束日期 YYYY-MM-DD"},
+           "org_label": {"type": "string", "description": "组织名称，默认 院本部"},
+           "note": {"type": "string", "description": "备注"},
+           "unit_name": {"type": "string", "description": "单位名称"},
+           "edu_levels": {"type": "array", "items": {"type": "string"},
+                          "description": "学历列表，默认全部（博士/硕士/本科/大专）"},
+           "plan_approved": {"type": "integer", "description": "计划人数"},
+           "plan_extra": {"type": "integer", "description": "增补人数"},
+           "plan_carryover": {"type": "integer", "description": "结转人数"},
+           "plan_cancel": {"type": "integer", "description": "取消人数"},
+           "rows": {"type": "array", "items": {"type": "object"},
+                    "description": "update_rows 用：[{id, plan_approved, plan_extra, ...}]"}},
+          ["action"]),
+    _spec("import_domain_pack",
+          "【需 HR 确认】导入领域包（技能本体与分类）。pack 为领域包路径或包名。"
+          "只生成待确认提案；确认后才会刷新技能分类。",
+          {"pack": {"type": "string", "description": "领域包路径/名称"}},
+          ["pack"]),
 ]
 
 
@@ -761,6 +880,8 @@ def _resolve_job_id(conn, key: str) -> tuple[int | None, str | None]:
     key = re.sub(r"(岗位|职位)$", "", (key or "").strip()).strip()
     if not key:
         return None, None
+    if key in ("未归岗", "__unassigned__"):
+        return -1, None
     jobs = db.list_jobs(conn, include_inactive=True)
     hits = [j for j in jobs if (j.get("title") or "").strip() == key]
     if not hits:
@@ -1603,11 +1724,11 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                              "库内是上次重算写下的结论。可在「部门与岗位」页对该岗位点"
                              "「重新分析」刷新库内结论。"),
                 }
-            # v1.12：**档位答案取库内生效值**——学历门槛由规则定（不达标→D）、
-            # A/B/C 由模型的自动分析给出。现算只负责"学历门槛结论 + 技能命中 + 专业方向"：
-            # 规则已经产不出 A/B/C，拿现算值当答案会让所有学历达标的人显示成"待分析"。
+            # v1.12：**档位答案取库内生效值**——学历门槛由规则定（不达标→hard_shortfall_tier）、
+            # 其余档位由模型的自动分析给出。现算只负责"学历门槛结论 + 技能命中 + 专业方向"：
+            # 规则已经产不出正常档位，拿现算值当答案会让所有学历达标的人显示成"待分析"。
             _stored = _db_app.get("tier_final") or _db_app.get("tier_suggested")
-            _rule = g["tier_suggested"]                     # 现算：None 或 D
+            _rule = g["tier_suggested"]                     # 现算：None 或 hard_shortfall_tier
             if _stored == tiers_mod.hard_shortfall_tier() or _rule == tiers_mod.hard_shortfall_tier():
                 _src = "学历门槛（规则判定，可复现）"
             elif _stored:
@@ -1628,8 +1749,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 "consistency": consistency,
                 "needs_review": g["needs_review"],
                 "unverified_skills": cand["unverified_skills"],
-                "method": ("档位：学历门槛由规则判（不达标→D），A/B/C 由模型分析给出；"
-                           "本工具不调模型，只做现算的学历门槛与技能/专业方向核对"),
+                "method": ("档位只有 " + "/".join(tiers_mod.all_tiers()) + " 三档："
+                           f"学历门槛由规则判（不达标→{tiers_mod.hard_shortfall_tier()}），"
+                           "其余档位由模型分析给出；本工具不调模型，"
+                           "只做现算的学历门槛与技能/专业方向核对"),
             })
 
         # ---------------- 邮件模板与配置（v1.25） ----------------
@@ -1828,7 +1951,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 return _err(f"未找到候选人 #{cid}")
             _LABEL = {"name": "姓名", "edu_level": "学历", "school": "学校",
                       "major": "专业", "phone_enc": "电话", "email_enc": "邮箱",
-                      "note": "备注"}   # v1.25.7：人工备注
+                      "note": "备注", "gender": "性别", "grad_date": "毕业时间",
+                      "current_org": "当前单位", "first_degree_school": "第一学历院校",
+                      "cet": "四六级", "in_school": "在读状态",
+                      "edu_history": "教育经历"}   # v1.25.7：人工备注；v5.1 扩展
             fields: dict = {}
             if args.get("name") is not None:
                 nm = str(args.get("name") or "").strip()
@@ -1858,6 +1984,32 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 if len(nt) > 500:
                     return _err("备注最多 500 字（当前 %d 字）" % len(nt))
                 fields["note"] = nt or None
+            if args.get("gender") is not None:
+                g = str(args.get("gender") or "").strip()
+                if g and g not in ("男", "女"):
+                    return _err("性别只能填：男 / 女（或留空表示未识别）")
+                fields["gender"] = g or None
+            if args.get("grad_date") is not None:
+                gd = str(args.get("grad_date") or "").strip()
+                if gd and not re.fullmatch(r"\d{4}-\d{2}(-\d{2})?", gd):
+                    return _err("毕业时间格式应为 YYYY-MM 或 YYYY-MM-DD")
+                fields["grad_date"] = gd or None
+            if args.get("current_org") is not None:
+                fields["current_org"] = str(args.get("current_org") or "").strip() or None
+            if args.get("first_degree_school") is not None:
+                fields["first_degree_school"] = (
+                    str(args.get("first_degree_school") or "").strip() or None)
+            if args.get("cet") is not None:
+                fields["cet"] = str(args.get("cet") or "").strip() or None
+            if args.get("in_school") is not None:
+                fields["in_school"] = 1 if args.get("in_school") else 0
+            if args.get("edu_history") is not None:
+                eh = args.get("edu_history")
+                if not isinstance(eh, list):
+                    return _err("edu_history 必须是数组")
+                if any(not isinstance(x, dict) for x in eh):
+                    return _err("edu_history 的每一项必须是对象")
+                fields["edu_history"] = json.dumps(eh, ensure_ascii=False) if eh else None
             if not fields:
                 return _err("没有要修改的字段")
             from ..crypto import decrypt
@@ -1865,7 +2017,12 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                     "school": d.get("school") or "", "major": d.get("major") or "",
                     "note": d.get("note") or "",
                     "phone_enc": decrypt(d.get("phone_enc")) or "",
-                    "email_enc": decrypt(d.get("email_enc")) or ""}
+                    "email_enc": decrypt(d.get("email_enc")) or "",
+                    "gender": d.get("gender") or "", "grad_date": d.get("grad_date") or "",
+                    "current_org": d.get("current_org") or "",
+                    "first_degree_school": d.get("first_degree_school") or "",
+                    "cet": d.get("cet") or "", "in_school": d.get("in_school") or 0,
+                    "edu_history": d.get("edu_history") or ""}
             pairs = []
             for k, v in fields.items():
                 old = _cur.get(k) or ""
@@ -2743,6 +2900,346 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             return _propose(conn, ctx, "add_note",
                             {"application_id": aid, "note": args["note"]},
                             f"给投递 #{aid} 写入备注：{str(args['note'])[:60]}", risk="低")
+
+        # ---- v5.1：系统管理类只读 ----
+        if name == "list_users":
+            if not auth.can(ctx.role, "manage_users"):
+                return _err("当前角色无权查看账号列表")
+            rows = db.list_users(conn)
+            if args.get("include_inactive") is False:
+                rows = [u for u in rows if u.get("active")]
+            return _ok({"count": len(rows), "users": rows})
+
+        if name == "list_departments":
+            rows = db.list_departments(conn)
+            return _ok({"count": len(rows), "departments": rows})
+
+        if name == "list_recruit_plans":
+            years = db.list_recruit_years(conn)
+            label = str(args.get("year") or "").strip()
+            year = None
+            if label:
+                year = next((y for y in years if str(y.get("label") or "") == label), None)
+                if not year:
+                    return _err(f"没有找到届别「{label}」",
+                                hint="可用届别：" + "、".join(
+                                    str(y.get("label") or "") for y in years))
+            else:
+                year = db.get_default_recruit_year(conn)
+            if not year:
+                return _ok({"years": years, "plans": [], "note": "系统里还没有招聘届别"})
+            plans = db.list_recruit_plans(conn, int(year["id"]))
+            return _ok({"year": year, "years": years, "count": len(plans),
+                        "plans": plans})
+
+        if name == "list_domain_packs":
+            from ..pipeline import domains as _domains
+            packs = _domains.list_packs()
+            return _ok({"count": len(packs), "dir": _domains.pack_dir(),
+                        "packs": packs})
+
+        # ---- v5.1：系统管理类写操作（提案 + HR 确认） ----
+        if name == "set_interview_info":
+            aid = args.get("application_id")
+            app = None
+            if aid is not None:
+                try:
+                    app = db.get_application(conn, int(aid))
+                except (TypeError, ValueError):
+                    app = None
+                if not app:
+                    return _err(f"未找到投递 #{aid}")
+            else:
+                cid, cerr = _resolve_cid(conn, args.get("candidate_id"))
+                if cerr:
+                    return _err(cerr["error"], cerr.get("hint"))
+                rows = conn.execute(
+                    "SELECT id FROM applications WHERE candidate_id=? ORDER BY id",
+                    (cid,)).fetchall()
+                if not rows:
+                    return _err("这位候选人还没有投递记录")
+                if len(rows) > 1:
+                    names = "、".join("#%s" % r["id"] for r in rows)
+                    return _err(f"这位候选人有 {len(rows)} 条投递（{names}），需要指明哪一条",
+                                hint="请告诉我要修改哪条投递，例如「投递 #%s」" % rows[0]["id"])
+                app = db.get_application(conn, rows[0]["id"])
+                aid = app["id"]
+            fields: dict = {}
+            for key in ("interview_date", "interview_unit", "interview_slot",
+                        "interview_mode", "interview_place", "hire_unit", "signed_at",
+                        "onboard_deadline", "onboard_status", "offer_sent_at"):
+                if key in args and args.get(key) is not None:
+                    val = str(args.get(key) or "").strip()
+                    fields[key] = val or None
+            for key in ("interview_date", "signed_at", "onboard_deadline"):
+                v = fields.get(key)
+                if v and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+                    return _err(f"{key} 格式应为 YYYY-MM-DD")
+            if fields.get("offer_sent_at"):
+                v = fields["offer_sent_at"]
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?", v):
+                    return _err("offer_sent_at 格式应为 YYYY-MM-DD 或 YYYY-MM-DD HH:MM")
+                fields["offer_sent_at"] = v.replace("T", " ")
+            if fields.get("onboard_status") and fields["onboard_status"] not in (
+                    "未入职", "已入职", "放弃"):
+                return _err("onboard_status 只能是：未入职 / 已入职 / 放弃")
+            outcome = str(args.get("outcome") or "").strip() or None
+            if outcome:
+                _cur = str(app.get("stage") or "").strip()
+                _target = stages_mod.auto_advance_stage(_cur, _cur, outcome)
+                if not stages_mod.outcome_allowed_from(_cur, _target, outcome):
+                    _ok_oc = stages_mod.outcomes_of(_cur) or stages_mod.all_outcomes()
+                    return _err(f"当前阶段「{_cur or '未设置'}」不能打结论「{outcome}」"
+                                + (f"；可选 {'/'.join(_ok_oc)}" if _ok_oc else ""))
+                fields["outcome"] = outcome
+            if not fields:
+                return _err("没有要修改的面试/录用字段")
+            cand = db.get_candidate(conn, app["candidate_id"]) or {}
+            _labels = {"interview_date": "面试日期", "interview_slot": "面试时段",
+                       "interview_unit": "面试单位", "interview_mode": "面试方式",
+                       "interview_place": "面试地点", "outcome": "面试结论",
+                       "hire_unit": "录用单位", "signed_at": "签约时间",
+                       "onboard_deadline": "入职期限", "onboard_status": "入职情况",
+                       "offer_sent_at": "录用函发送时间"}
+            _pairs = "；".join(f"{_labels.get(k, k)}={v or '（空）'}"
+                               for k, v in fields.items())
+            return _propose(conn, ctx, "set_interview_info",
+                            {"application_id": int(aid), **fields},
+                            f"登记/修改 {cand.get('name') or ('#' + str(app['candidate_id']))} "
+                            f"投递 #{aid} 的面试/录用信息：{_pairs}",
+                            risk="中")
+
+        if name == "manage_mail_template":
+            action = str(args.get("action") or "").strip().lower()
+            if action == "save":
+                nm = str(args.get("name") or "").strip()
+                body = str(args.get("body") or "")
+                if not nm:
+                    return _err("模板名不能为空")
+                if not body.strip():
+                    return _err("模板正文不能为空")
+                tid = args.get("id")
+                if tid:
+                    t = db.get_mail_template(conn, int(tid))
+                    if not t:
+                        return _err(f"模板 #{tid} 不存在")
+                else:
+                    same = [t for t in db.list_mail_templates(conn) if t.get("name") == nm]
+                    if same:
+                        return _err(f"已有同名模板「{nm}」",
+                                    hint=f"要修改请带 id={same[0]['id']}；要新建请换个名字")
+                kind = str(args.get("kind") or "").strip() or None
+                if kind and kind not in ("interview_invite", "offer", "other"):
+                    return _err("kind 只能是 interview_invite / offer / other")
+                payload = {"action": "save", "id": int(tid) if tid else None,
+                           "name": nm, "scene": str(args.get("scene") or "其他通知").strip(),
+                           "subject": str(args.get("subject") or ""),
+                           "body": body, "kind": kind}
+                return _propose(conn, ctx, "manage_mail_template", payload,
+                                f"{'修改' if tid else '新建'}邮件模板「{nm}」", risk="中")
+            if action == "delete":
+                tid = args.get("id")
+                t = None
+                if tid:
+                    t = db.get_mail_template(conn, int(tid))
+                else:
+                    nm = str(args.get("name") or "").strip()
+                    t = next((x for x in db.list_mail_templates(conn)
+                              if x.get("name") == nm), None)
+                if not t:
+                    return _err("没有找到要删除的模板")
+                return _propose(conn, ctx, "manage_mail_template",
+                                {"action": "delete", "id": int(t["id"])},
+                                f"删除邮件模板「{t.get('name') or t['id']}」", risk="中")
+            return _err("action 只能是 save / delete")
+
+        if name == "set_job_active":
+            active = args.get("active")
+            if not isinstance(active, bool):
+                return _err("active 必须是 true 或 false")
+            jid = args.get("job_id")
+            job = None
+            if jid is not None:
+                job = db.get_job(conn, int(jid))
+            else:
+                title = str(args.get("title") or "").strip()
+                if not title:
+                    return _err("请提供 job_id 或 title")
+                hits = [j for j in db.list_jobs(conn, include_inactive=True)
+                        if title in str(j.get("title") or "")]
+                if len(hits) != 1:
+                    return _err(f"按「{title}」匹配到 {len(hits)} 个岗位",
+                                hint="请用更完整的岗位名，或先用 list_jobs 查 id")
+                job = hits[0]
+            if not job:
+                return _err("岗位不存在")
+            return _propose(conn, ctx, "set_job_active",
+                            {"job_id": int(job["id"]), "active": active},
+                            f"{'启用' if active else '停用'}岗位「{job.get('title')}」",
+                            risk="中")
+
+        if name == "manage_department":
+            action = str(args.get("action") or "").strip().lower()
+            if action in ("create", "update"):
+                nm = str(args.get("name") or "").strip()
+                if not nm:
+                    return _err("部门名称不能为空")
+                did = args.get("department_id")
+                if did:
+                    if not db.get_department(conn, int(did)):
+                        return _err(f"部门 #{did} 不存在")
+                elif action == "update":
+                    return _err("修改部门需要 department_id")
+                payload = {"action": action,
+                           "department_id": int(did) if did else None,
+                           "name": nm,
+                           "description": str(args.get("description") or "")}
+                return _propose(conn, ctx, "manage_department", payload,
+                                f"{'新建' if action == 'create' else '修改'}部门「{nm}」",
+                                risk="低")
+            if action == "active":
+                active = args.get("active")
+                if not isinstance(active, bool):
+                    return _err("active 必须是 true 或 false")
+                did = args.get("department_id")
+                d = None
+                if did:
+                    d = db.get_department(conn, int(did))
+                else:
+                    nm = str(args.get("name") or "").strip()
+                    hits = [x for x in db.list_departments(conn)
+                            if x.get("name") == nm]
+                    if len(hits) == 1:
+                        d = hits[0]
+                if not d:
+                    return _err("没有找到要操作的部门")
+                return _propose(conn, ctx, "manage_department",
+                                {"action": "active", "department_id": int(d["id"]),
+                                 "active": active},
+                                f"{'启用' if active else '停用'}部门「{d.get('name')}」",
+                                risk="低")
+            return _err("action 只能是 create / update / active")
+
+        if name == "manage_user":
+            if not auth.can(ctx.role, "manage_users"):
+                return _err("当前角色无权管理账号")
+            action = str(args.get("action") or "").strip().lower()
+            username = str(args.get("username") or "").strip()
+            if not username or len(username) > 40:
+                return _err("账号名必须 1-40 个字符")
+            role = str(args.get("role") or "").strip() or None
+            if role and role not in auth.ROLES:
+                return _err("角色只能是 hr / admin / viewer")
+            if action == "create":
+                pwd = str(args.get("password") or "")
+                if len(pwd) < 8:
+                    return _err("密码至少 8 位")
+                if not role:
+                    return _err("新建账号需要指定角色")
+            elif action == "password":
+                pwd = str(args.get("password") or "")
+                if len(pwd) < 8:
+                    return _err("密码至少 8 位")
+            elif action == "update":
+                if not any(k in args for k in ("role", "display_name", "active")):
+                    return _err("update 至少要改 display_name / role / active 之一")
+            elif action != "delete":
+                return _err("action 只能是 create / update / password / delete")
+            payload = {"action": action, "username": username}
+            for key in ("password", "role", "display_name", "active"):
+                if key in args and args.get(key) is not None:
+                    payload[key] = args[key]
+            return _propose(conn, ctx, "manage_user", payload,
+                            f"账号管理：{action}「{username}」", risk="高")
+
+        if name == "manage_recruit_plan":
+            action = str(args.get("action") or "").strip().lower()
+            if action == "create_year":
+                label = str(args.get("label") or "").strip()
+                if not label:
+                    return _err("届别名称不能为空")
+                for key in ("period_start", "period_end"):
+                    v = str(args.get(key) or "").strip()
+                    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+                        return _err(f"{key} 格式应为 YYYY-MM-DD")
+                payload = {"action": action, "label": label,
+                           "period_start": args["period_start"],
+                           "period_end": args["period_end"]}
+                return _propose(conn, ctx, "manage_recruit_plan", payload,
+                                f"新建招聘届别「{label}」", risk="中")
+            if action == "update_year":
+                try:
+                    _yid = int(args.get("year_id") or 0)
+                except (TypeError, ValueError):
+                    _yid = 0
+                if not _yid or not db.get_recruit_year(conn, year_id=_yid):
+                    return _err("届别不存在，需要有效的 year_id")
+                _fields = {k: args[k] for k in
+                           ("label", "period_start", "period_end", "org_label", "note")
+                           if k in args and args[k] is not None}
+                if not _fields:
+                    return _err("没有要修改的届别字段")
+                for key in ("period_start", "period_end"):
+                    if key in _fields and not re.fullmatch(
+                            r"\d{4}-\d{2}-\d{2}", str(_fields[key])):
+                        return _err(f"{key} 格式应为 YYYY-MM-DD")
+                return _propose(conn, ctx, "manage_recruit_plan",
+                                {"action": "update_year", "year_id": _yid, **_fields},
+                                f"修改招聘届别 #{_yid}", risk="中")
+            try:
+                year_id = int(args.get("year_id") or 0)
+            except (TypeError, ValueError):
+                year_id = 0
+            if not year_id:
+                return _err("需要 year_id（可先用 list_recruit_plans 查）")
+            if action == "add_unit":
+                unit = str(args.get("unit_name") or "").strip()
+                if not unit:
+                    return _err("单位名称不能为空")
+                levels = args.get("edu_levels") or list(recruit_mod.EDU_LEVELS)
+                levels = [x for x in levels if x in recruit_mod.EDU_LEVELS]
+                if not levels:
+                    return _err("学历必须包含至少一档")
+                payload = {"action": action, "year_id": year_id, "unit_name": unit,
+                           "edu_levels": levels,
+                           "plan_approved": int(args.get("plan_approved") or 0),
+                           "plan_extra": int(args.get("plan_extra") or 0),
+                           "plan_carryover": int(args.get("plan_carryover") or 0),
+                           "plan_cancel": int(args.get("plan_cancel") or 0)}
+                return _propose(conn, ctx, "manage_recruit_plan", payload,
+                                f"新增单位计划「{unit}」（{year_id}）", risk="中")
+            if action == "update_rows":
+                rows = args.get("rows") or []
+                if not isinstance(rows, list) or not rows:
+                    return _err("rows 不能为空")
+                errors = recruit_mod.validate_plan_rows(rows)
+                if errors:
+                    return _err("；".join(errors))
+                return _propose(conn, ctx, "manage_recruit_plan",
+                                {"action": action, "year_id": year_id, "rows": rows},
+                                f"批量修改招聘计划：{len(rows)} 行", risk="中")
+            if action == "delete_unit":
+                unit = str(args.get("unit_name") or "").strip()
+                if not unit:
+                    return _err("单位名称不能为空")
+                return _propose(conn, ctx, "manage_recruit_plan",
+                                {"action": action, "year_id": year_id, "unit_name": unit},
+                                f"删除单位计划「{unit}」（{year_id}）", risk="高")
+            return _err("action 只能是 create_year / add_unit / update_rows / delete_unit")
+
+        if name == "import_domain_pack":
+            pack = str(args.get("pack") or "").strip()
+            if not pack:
+                return _err("pack 不能为空")
+            from ..pipeline import domains as _domains
+            try:
+                preview = _domains.preview_import(pack)
+            except (ValueError, FileNotFoundError) as exc:
+                return _err(str(exc))
+            return _propose(conn, ctx, "import_domain_pack", {"pack": pack},
+                            f"导入领域包「{pack}」："
+                            + str((preview or {}).get("summary") or "确认后刷新技能本体"),
+                            risk="高")
 
         # ---- v2.0.7：查学校（本地数据，零外发） ----
         if name == "school_info":

@@ -3369,6 +3369,8 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
         <button type="button" class="sel msbtn" onclick="msToggle('msCet')">四六级：不限 ▾</button>
         <div class="msPanel"></div>
       </div>
+      <!-- 岗位筛选（v5.1）：按归岗关系筛选；「未归岗」是特殊值，后端按 job_id IS NULL 处理 -->
+      <select id="fJob" class="sel"><option value="">岗位：不限</option><option value="__unassigned__">未归岗</option></select>
       <!-- 面试部门（原版有、v2 缺）：后端 `interview_unit` 支持顿号/逗号分隔的多值匹配 -->
       <select id="fUnit" class="sel"><option value="">面试部门：不限</option></select>
       <select id="fOutcome" class="sel"><option value="">面试结论：不限</option></select>
@@ -3911,7 +3913,7 @@ document.addEventListener('keydown', function(ev){
 });
 function clearFilters(){
   ['kw','fEdu','fStage','fTier','fGender','fUniv','fBachelor','fCet','fOutcome',
-   'fOverseas','fUnit'].forEach(function(id){
+   'fOverseas','fJob','fUnit'].forEach(function(id){
     var el = document.getElementById(id);
     if(!el) return;
     if(el.multiple){   // 多选下拉必须逐个取消选中，赋空串清不掉
@@ -3948,7 +3950,7 @@ function urlState(){
   var p = new URLSearchParams();
   [['kw','kw'],['education','fEdu'],['stage','fStage'],['gender','fGender'],
    ['univ','fUniv'],['bachelor','fBachelor'],['cet','fCet'],['outcome','fOutcome'],
-   ['overseas','fOverseas'],['interview_unit','fUnit'],
+   ['overseas','fOverseas'],['job','fJob'],['interview_unit','fUnit'],
    ['date_from','fDateFrom'],['date_to','fDateTo']].forEach(function(kv){
     var el = document.getElementById(kv[1]);
     var v = el ? String(el.value || '').trim() : '';
@@ -4011,6 +4013,9 @@ function applyUrlState(){
   set('kw','kw'); set('fStage','stage'); set('fGender','gender');
   set('fUniv','univ'); set('fBachelor','bachelor'); set('fOutcome','outcome');
   set('fOverseas','overseas');
+  /* 岗位选项来自异步 /api/jobs；这里先记下 URL 值，选项就绪后再选中 */
+  var jobEl = document.getElementById('fJob');
+  if(jobEl && p.has('job')) jobEl.dataset.pending = p.get('job');
   /* 面试部门的选项来自数据/字典，启动时可能还没有这一项；先把 URL 里的值
      补成一个 option 再选中，否则 `.value = ...` 会被浏览器静默重置成空。 */
   var uEl = document.getElementById('fUnit');
@@ -4072,6 +4077,7 @@ function query(){
      界面控件在、change 也绑了 load，但请求里没带参数 —— 结果当然一模一样，
      表现就是"选了等于没选"。控件齐全不代表参数齐全，这条只能靠断点/看请求抓。 */
   add('overseas','fOverseas');
+  add('job','fJob');
   add('interview_unit','fUnit');
   if(TAB !== 'ALL') p.push('tier=' + encodeURIComponent(TAB));
   /* 投递时间：具体日期的起止范围。只填一端就只卡一端；
@@ -7109,6 +7115,31 @@ async function load(opts){
   fillUnitSel(ITEMS);
   syncUrlState(!opts || opts.push !== false);
 }
+/* 岗位筛选下拉：岗位列表来自 /api/jobs；「未归岗」是特殊值。
+   选项是异步加载的，所以保留 URL 里带进来的值（dataset.pending）。 */
+function fillJobSel(items){
+  var sel = document.getElementById('fJob');
+  if(!sel) return;
+  var cur = sel.value || sel.dataset.pending || '';
+  var jobs = (items || []).filter(function(j){ return j && j.id != null; });
+  /* 顺序：不限 → 现有全部岗位 → 未归岗（用户要求未归岗放在最下面） */
+  var opts = ['<option value="">岗位：不限</option>'];
+  jobs.forEach(function(j){
+    opts.push('<option value="' + esc(String(j.id)) + '">' +
+      esc(j.title || '未命名') + (j.active === 0 ? '（停用）' : '') + '</option>');
+  });
+  opts.push('<option value="__unassigned__">未归岗</option>');
+  sel.innerHTML = opts.join('');
+  var ok = Array.prototype.some.call(sel.options, function(o){ return o.value === cur; });
+  sel.value = ok ? cur : '';
+  delete sel.dataset.pending;
+}
+async function loadJobFilterOptions(){
+  try{
+    var r = await api('/api/jobs');
+    fillJobSel(r.items || []);
+  }catch(e){ /* 筛选器加载失败不影响人才库主体，保持默认「不限」 */ }
+}
 /* 面试部门下拉的选项：当前这批人的 `interview_unit` 并集 + 字典里的单位。
    不只靠字典，是因为实际数据里常有字典外的历史写法；每次加载顺手刷新，
    选项才跟着数据走（与 facets 的做法同理）。 */
@@ -7176,7 +7207,7 @@ document.getElementById('kw').addEventListener('input', function(e){
   clearTimeout(kwTimer);
   kwTimer = setTimeout(doSearch, 120);            // 清空 → 恢复全量
 });
-['fEdu','fStage','fGender','fUniv','fBachelor','fCet','fDateFrom','fDateTo','fOutcome','fOverseas','fUnit'].forEach(function(id){
+['fEdu','fStage','fGender','fUniv','fBachelor','fCet','fDateFrom','fDateTo','fOutcome','fOverseas','fJob','fUnit'].forEach(function(id){
   var el = document.getElementById(id);
   /* 换筛选条件必须回到第 1 页：停在第 2 页再筛，很可能直接看到空列表 */
   if(el) el.addEventListener('change', function(){ PAGE.page = 1; load(); });
@@ -8234,6 +8265,7 @@ async function initOrg(){
   box.innerHTML = '<div class="hint" style="padding:20px">读取岗位…</div>';
   var j = await api('/api/jobs');
   JOBS = j.items || [];
+  fillJobSel(JOBS);
   /* ⚠️ 类名**不能**用 `top2`（2026-10-20 修复）：
      `.top2` 是人才库那条工具栏的类，而 CSS 里有一组"非人才库视图让位"规则
      `body.v-org .top2{display:none!important}`（见本文件 CSS 区）——
@@ -14339,6 +14371,7 @@ document.getElementById('loginForm').addEventListener('submit', function(ev){
     enterDefaultView();
     applyPermissions();
     load({push:false});
+    loadJobFilterOptions();
     /* 右侧默认展示「概览 · 待办」（业务方 2026-10-21）：没人选中时不该只留一句
        "左侧选一个人" —— 那块地方占着半屏，正好放今天该干什么。 */
     showOverview();
@@ -14355,6 +14388,7 @@ document.getElementById('loginForm').addEventListener('submit', function(ev){
     enterDefaultView();
     applyPermissions();
     load({push:false});
+    loadJobFilterOptions();
     showOverview();
   });
 })();

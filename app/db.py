@@ -1781,7 +1781,11 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
         where.append("c.merged_into IS NULL")
     if archived is not None:
         where.append("c.archived_at IS " + ("NOT NULL" if archived else "NULL"))
-    if job_id:
+    # job_id = -1 是「未归岗」哨兵：最新一条投递没有 job_id（含还没有投递的人）。
+    # 其它负数（如 -2 表示按名称没解析到唯一岗位）按普通 id 处理 → 自然返回空集。
+    if job_id == -1:
+        where.append("a.job_id IS NULL")
+    elif job_id:
         where.append("a.job_id = ?")
         args.append(job_id)
     if stage:

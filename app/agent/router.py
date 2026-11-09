@@ -34,20 +34,22 @@ GROUPS: dict[str, list[str]] = {
         "set_tier", "add_tag", "add_note", "update_candidate_fields",
         "reanalyze_candidate", "merge_candidates", "split_candidate",
         "mark_review", "set_archive", "archive_batch",
+        "set_interview_info",
     ],
     "recruit": [
         # 读（招聘进度统一走 recruit_overview 的 view）
-        "pipeline_overview", "recruit_overview",
+        "pipeline_overview", "recruit_overview", "list_recruit_plans",
         # 办公：名单下载
         "export_roster",
         # 写（只出提案）
         "set_stage", "set_sign_status", "bulk_initial_pass",
         "bulk_assign_job", "assign_job", "suggest_job", "route_pending",
-        "archive_by_year",
+        "archive_by_year", "set_interview_info", "manage_recruit_plan",
     ],
     "mail": [
         "mailbox_status", "list_mail_templates", "get_mail_template",
         "preview_mail", "draft_email", "get_mail_config", "save_mail_config",
+        "manage_mail_template",
     ],
     "govern": [
         "list_proposals", "list_audit", "list_import_history", "list_agent_runs",
@@ -60,6 +62,13 @@ GROUPS: dict[str, list[str]] = {
         "get_settings", "save_settings",
         "get_model_config", "save_model_config", "update_interview_dict",
         "route_pending",
+    ],
+    "system": [
+        # v5.1：账号 / 部门 / 计划 / 岗位启停 / 领域包（此前只有界面能操作）
+        "list_users", "manage_user",
+        "list_departments", "manage_department",
+        "list_recruit_plans", "manage_recruit_plan",
+        "set_job_active", "list_domain_packs", "import_domain_pack",
     ],
     "office": [
         "export_roster", "export_resume_bundle", "export_interview_schedule",
@@ -109,6 +118,11 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
     "admin": (
         "新建岗位", "jd", "导入", "导出简历", "设置", "配置", "模型",
         "密钥", "字典", "重算", "重新分析", "来源文件", "回收站", "邮箱配置",
+    ),
+    "system": (
+        "账号", "用户", "权限", "部门", "启用岗位", "停用岗位", "岗位启停",
+        "启用", "停用", "领域包", "导入领域包", "技能本体",
+        "计划", "名额", "招聘计划", "届别",
     ),
     "office": (
         "导出", "excel", "表格", "名单", "csv", "下载", "报表", "打印", "日程", "面试安排",
