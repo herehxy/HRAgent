@@ -1,10 +1,10 @@
 """按意图选择本轮要暴露给模型的工具（模型无关的确定性路由）。
 
-为什么需要：`TOOL_SPECS` 现在有 68 个工具，一次性全塞给模型会带来三个问题：
+为什么需要：`TOOL_SPECS` 现在有近百个工具，一次性全塞给模型会带来三个问题：
 
 1. **选择困难**：弱模型在 `search_candidates` / `semantic_search` /
    `search_by_skills` / `similar_candidates` 之间反复试探；
-2. **上下文浪费**：68 份工具说明占掉大量 token，真正的问题反而被挤掉；
+2. **上下文浪费**：所有工具说明占掉大量 token，真正的问题反而被挤掉；
 3. **误调用**：模型看到 `save_model_config` 就更容易去改配置。
 
 这里用**关键词 + 分组**做确定性路由，不依赖任何模型能力，也不改变
@@ -17,7 +17,9 @@
 """
 from __future__ import annotations
 
-from .tools import TOOL_SPECS
+import re
+
+from .tools import COMPUTE_TOOLS, READ_TOOLS, TOOL_SPECS
 
 #: 任何问题都保留的最小工具集：找人、看档、看岗位、看总量
 CORE_MIN = [
@@ -46,7 +48,7 @@ GROUPS: dict[str, list[str]] = {
         # 写（只出提案）
         "set_stage", "set_sign_status", "bulk_initial_pass",
         "bulk_assign_job", "assign_job", "suggest_job", "route_pending",
-        "archive_by_year", "set_interview_info", "manage_recruit_plan",
+        "archive_by_year", "set_interview_info", "get_interview_dict", "manage_recruit_plan",
         "import_recruit_plan_excel",
     ],
     "mail": [
@@ -100,7 +102,8 @@ HIDDEN_TOOLS = {
 #: 读/写不在这里区分——写工具即便被路由进来，也只能生成待确认提案。
 KEYWORDS: dict[str, tuple[str, ...]] = {
     "profile": (
-        "简历", "档案", "候选人", "技能", "会", "做过", "经历", "项目",
+        "简历", "档案", "候选人", "技能", "会什么", "会哪些", "会做", "会用",
+        "掌握", "具备", "做过", "经历", "项目",
         "对比", "比较", "适合", "匹配", "分析", "面试提纲", "学校", "院校",
         "专业", "学历", "电话", "邮箱", "标签", "备注", "复核", "标记",
         "合并", "拆分", "改档", "档位", "字段", "头像", "通道对比",
@@ -108,7 +111,8 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
     ),
     "recruit": (
         "招聘", "进度", "缺口", "计划", "名额", "签约", "已签", "拒签",
-        "毁约", "完成率", "届", "单位", "分布", "人数", "统计", "面试名单",
+        "毁约", "完成率", "届别", "本届", "上届", "哪届", "哪些单位", "各单位",
+        "单位缺口", "单位分布", "单位名额", "录用单位", "面试单位", "分布", "人数", "统计", "面试名单",
         "待面试", "offer", "录用", "入职", "归岗", "岗位", "推进", "阶段",
         "初筛", "面试", "上会", "审批", "应招", "转上年度",
     ),
@@ -131,10 +135,10 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
         "账号", "用户", "权限", "部门", "启用岗位", "停用岗位", "岗位启停",
         "启用", "停用", "领域包", "导入领域包", "技能本体",
         "计划", "名额", "招聘计划", "届别", "岗位名称", "招聘数量", "所属部门",
-        "Excel导入", "计划导入", "导入计划",
+        "修改岗位", "改岗位", "岗位信息", "Excel导入", "计划导入", "导入计划",
     ),
     "office": (
-        "导出", "excel", "表格", "名单", "csv", "下载", "报表", "打印", "日程", "面试安排",
+        "导出", "excel", "表格", "名单", "csv", "下载", "报表", "打印", "日程",
     ),
 }
 
@@ -178,6 +182,10 @@ def route_tools(message: str, history: list[dict] | None = None,
         n = sum(1 for w in words if w.lower() in low)
         if n:
             scores[group] = n
+    # 「2027届」这类届别说法没有固定关键词，单独加分；否则只问届别时会漏掉
+    # 招聘域，退到默认读工具集。
+    if re.search(r"\d{4}\s*届", text):
+        scores["recruit"] = scores.get("recruit", 0) + 2
     groups = [g for g, _ in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))]
 
     if not groups:
@@ -185,9 +193,11 @@ def route_tools(message: str, history: list[dict] | None = None,
     else:
         primary = groups[0]
         names = list(CORE_MIN) + list(GROUPS.get(primary, []))
-        # 次组只在还有余量时加入；主组已经够用时不再堆工具
+        # 次组只补**读/算**工具。次组里的写工具通常不是当前问题的主意图，
+        # 全部塞进来只会推高上下文；主组才保留完整读写能力。
         for g in groups[1:]:
-            extra = [n for n in GROUPS.get(g, []) if n not in names]
+            extra = [n for n in GROUPS.get(g, [])
+                     if n not in names and (n in READ_TOOLS or n in COMPUTE_TOOLS)]
             if len(names) + len(extra) <= max_tools:
                 names.extend(extra)
 
@@ -204,7 +214,7 @@ def route_tools(message: str, history: list[dict] | None = None,
 def tool_catalog_text(specs: list[dict]) -> str:
     """给"不支持原生 function calling"的模型看的紧凑工具清单。
 
-    只列本轮路由到的工具，不列 68 个；参数只写名字和类型，详细约束仍由
+    只列本轮路由到的工具，不列全部工具；参数只写名字和类型，详细约束仍由
     `execute()` 在服务端校验。模型按下面的 XML 输出，`loop._text_tool_calls`
     会把它解析成真正的工具调用。
     """
