@@ -4177,6 +4177,9 @@ function renderPager(){
     '<button class="btn sm" onclick="gotoPage(' + (cur - 1) + ')"' + (cur <= 1 ? ' disabled' : '') + '>上一页</button>' +
     '<span class="num">第 ' + cur + ' / ' + pages + ' 页　共 ' + total + ' 人</span>' +
     '<button class="btn sm" onclick="gotoPage(' + (cur + 1) + ')"' + (cur >= pages ? ' disabled' : '') + '>下一页</button>' +
+    '<button class="btn sm pgsel" id="pgSelAll" onclick="togglePageSelect()" ' +
+      'title="勾选当前页的全部候选人">' +
+      (pageAllSelected() ? '取消全选' : '全选本页') + '</button>' +
     '<span class="pgbreak"></span>' +
     '<span class="pgjumpwrap"><span class="hint">跳至</span>' +
     '<input class="pgjump" id="pgJump" value="' + cur + '" ' +
@@ -6365,6 +6368,16 @@ async function doBundle(){
   saveBlob(await r.blob(), '初筛通过-' + span + '.zip');
   toast('已打包：' + span);
 }
+function pageAllSelected(){
+  return ITEMS.length > 0 && ITEMS.every(function(x){ return !!SEL[x.id]; });
+}
+function togglePageSelect(){
+  var on = !pageAllSelected();
+  setAll(on);
+  var chk = document.getElementById('chkAll');
+  if(chk) chk.checked = on;
+  renderPager();
+}
 function setAll(on){
   Object.keys(ITEMS.reduce(function(m, x){ m[x.id] = 1; return m; }, {})).forEach(function(k){
     SEL[k] = on;
@@ -6401,6 +6414,11 @@ function syncSel(){
     c.disabled = n === 0;
     c.title = n > 5 ? '最多固定 5 个档案，请减少勾选' : '选择 2-5 人后打开固定档案标签';
   }
+  /* 分页条上的「全选本页」：逐行勾选后也要同步文案（全选 ↔ 取消全选） */
+  var pgs = document.getElementById('pgSelAll');
+  if(pgs) pgs.textContent = pageAllSelected() ? '取消全选' : '全选本页';
+  var all = document.getElementById('chkAll');
+  if(all) all.checked = pageAllSelected();
 }
 async function initialPassChecked(){
   var ids = Object.keys(SEL).filter(function(k){ return SEL[k]; }).map(Number);
