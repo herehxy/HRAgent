@@ -1947,8 +1947,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .sched-more:hover{color:var(--accent-ink)}
 .sched-cell.drag-over{background:var(--accent-soft);outline:2px dashed var(--accent);outline-offset:-3px}
 .sched-empty{padding:28px;text-align:center;color:var(--ink-3);font-size:14px}
-.sched-week{min-width:760px;border:1px solid var(--line);border-radius:10px;overflow:hidden;
-  background:var(--surface)}
+/* 有并发的日列会被 schedDayWidth 加宽；超出时整张周表横向滚动，
+   表头和表体在同一个滚动容器里，不会错位。 */
+.sched-week{min-width:760px;border:1px solid var(--line);border-radius:10px;
+  overflow-x:auto;overflow-y:hidden;background:var(--surface)}
 .sched-weekhead{display:flex;background:var(--surface-2);border-bottom:1px solid var(--line)}
 .sched-weekhead .sched-timecol{border-right:1px solid var(--line)}
 .sched-weekhead .sched-dayhead{flex:1;min-width:92px;padding:7px 8px;font-size:12.5px;
@@ -10671,6 +10673,55 @@ function schedEventSpan(ev){
   if(a != null && b != null && b > a) return b - a;
   return schedDurationMinutes(ev && ev.edu_level);
 }
+/* 同一天里时间重叠的面试要并排，而不是叠在同一个绝对定位条上。
+   做法：按开始时间排序，传递重叠的放进同一组，组内贪心分 lane
+   （放进第一个已经结束的 lane，否则新开一列）。 */
+function schedLaneLayout(list){
+  var items = list.map(function(e){
+    var s = schedMinutesOf(schedEventStart(e));
+    var span = schedEventSpan(e);
+    var start = (s == null ? 0 : s);
+    return {ev:e, s:start, e:start + (span || 0), lane:0, lanes:1};
+  }).sort(function(a, b){
+    return a.s - b.s ||
+      String(a.ev.candidate_name || '').localeCompare(String(b.ev.candidate_name || ''), 'zh');
+  });
+  var i = 0;
+  while(i < items.length){
+    var cluster = [items[i]];
+    var clusterEnd = items[i].e;
+    var j = i + 1;
+    while(j < items.length && items[j].s < clusterEnd){
+      cluster.push(items[j]);
+      clusterEnd = Math.max(clusterEnd, items[j].e);
+      j++;
+    }
+    var laneEnds = [];
+    cluster.forEach(function(it){
+      var lane = -1;
+      for(var k = 0; k < laneEnds.length; k++){
+        if(laneEnds[k] <= it.s){ lane = k; break; }
+      }
+      if(lane < 0){
+        lane = laneEnds.length;
+        laneEnds.push(it.e);
+      }else{
+        laneEnds[lane] = it.e;
+      }
+      it.lane = lane;
+    });
+    cluster.forEach(function(it){ it.lanes = laneEnds.length; });
+    i = j;
+  }
+  return items;
+}
+/* 周视图里让有并发的日列按 lane 数变宽；日视图只有一列，直接铺满。
+   表头 dayhead 和表体 daycol 必须用同一个宽度，否则会错位。 */
+function schedDayWidth(lanes){
+  if(SCHED.view === 'day') return 'flex:1 1 0;min-width:0';
+  var n = Math.max(1, lanes || 1);
+  return 'flex:' + n + ' 1 0;min-width:' + Math.max(92, n * 64) + 'px';
+}
 function schedRangeText(dateStr, slot, edu){
   var ev = {interview_date:dateStr, interview_slot:slot, edu_level:edu};
   var st = schedEventStart(ev), en = schedEventEnd(ev);
@@ -10898,11 +10949,22 @@ function schedWeekHtml(){
   var days = [];
   for(var i = 0; i < (SCHED.view === 'day' ? 1 : 7); i++) days.push(schedAddDays(start, i));
   var today = new Date();
+  /* 先按天算出 timed 事件的分列结果；表头和表体用同一份 maxLanes，
+     否则表头与格子会错位。 */
+  var dayData = days.map(function(d){
+    var list = schedEventsOn(d);
+    var allDay = list.filter(function(e){ return !schedEventStart(e); });
+    var timed = schedLaneLayout(list.filter(function(e){ return !!schedEventStart(e); }));
+    var lanes = timed.reduce(function(m, it){ return Math.max(m, it.lanes); }, 1);
+    return {d:d, allDay:allDay, timed:timed, lanes:lanes};
+  });
   var head = '<div class="sched-weekhead"><div class="sched-timecol"></div>' +
-    days.map(function(d){
+    dayData.map(function(dd){
+      var d = dd.d;
       var wd = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()];
       return '<div class="sched-dayhead' + (schedSameDay(d, today) ? ' today' : '') +
-        '">周' + wd + ' · ' + (d.getMonth() + 1) + '/' + d.getDate() + '</div>';
+        '" style="' + schedDayWidth(dd.lanes) + '">周' + wd + ' · ' +
+        (d.getMonth() + 1) + '/' + d.getDate() + '</div>';
     }).join('') + '</div>';
   var labels = '<div class="sched-timecol"><div class="sched-allday-label">全天</div>' +
     (function(){
@@ -10913,23 +10975,25 @@ function schedWeekHtml(){
       }
       return out;
     })() + '<div class="sched-endtime">' + H1 + ':00</div></div>';
-  var cols = days.map(function(d){
-    var list = schedEventsOn(d);
-    var allDay = list.filter(function(e){ return !schedEventStart(e); });
-    var timed = list.filter(function(e){ return !!schedEventStart(e); });
+  var cols = dayData.map(function(dd){
     var lines = '';
     for(var h = H0; h < H1; h++) lines += '<div class="sched-hline" style="height:' + HOUR + 'px"></div>';
-    var timedHtml = timed.map(function(e){
+    var timedHtml = dd.timed.map(function(it){
+      var e = it.ev;
       var t = schedEventStart(e).split(':');
       var mins = Number(t[0]) * 60 + Number(t[1]) - H0 * 60;
       var top = Math.max(0, Math.min((H1 - H0) * HOUR - 24, mins / 60 * HOUR));
       var span = schedEventSpan(e);
       var hpx = Math.max(20, Math.min((H1 - H0) * HOUR - top, span / 60 * HOUR));
+      var left = (it.lane / it.lanes * 100).toFixed(3);
+      var width = (100 / it.lanes).toFixed(3);
       return schedChip(e, true).replace('<button ',
-        '<button style="top:' + top.toFixed(0) + 'px;height:' + hpx.toFixed(0) + 'px" ');
+        '<button style="top:' + top.toFixed(0) + 'px;height:' + hpx.toFixed(0) +
+        'px;left:calc(' + left + '% + 3px);width:calc(' + width + '% - 6px);right:auto" ');
     }).join('');
-    return '<div class="sched-daycol" data-date="' + schedYmd(d) + '">' +
-      '<div class="sched-allday">' + allDay.map(function(e){ return schedChip(e, false); }).join('') + '</div>' +
+    return '<div class="sched-daycol" style="' + schedDayWidth(dd.lanes) +
+      '" data-date="' + schedYmd(dd.d) + '">' +
+      '<div class="sched-allday">' + dd.allDay.map(function(e){ return schedChip(e, false); }).join('') + '</div>' +
       '<div class="sched-hours">' + lines + timedHtml + '</div></div>';
   }).join('');
   return '<div class="sched-week' + (SCHED.view === 'day' ? ' single' : '') + '">' +
