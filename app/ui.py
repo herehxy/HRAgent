@@ -6208,7 +6208,7 @@ async function renderMailCfgInto(boxId){
         <input id="cfgMaxMb" value="${c.max_attachment_mb==null?20:c.max_attachment_mb}" style="width:90px">
         <span class="small">MB。邮件附件与「本地文件夹导入」<b>共用</b>这一条上限：
           超过的文件不导入、也不删（此前文件夹导入没有这条校验，一本书的 PDF 就是这么进来的）。</span></div>
-      <div class="k">同岗重复天数</div><div><input id="cfgDays" value="${c.same_job_reapply_days==null?30:c.same_job_reapply_days}" style="width:90px">
+      <div class="k">同岗重复天数</div><div><input id="cfgDays" value="${c.same_job_reapply_days==null?365:c.same_job_reapply_days}" style="width:90px">
         <span class="small">天内重复投递按「新版本」归档</span></div>
     </div>
     <div class="bar" style="margin-top:16px">
@@ -6574,7 +6574,7 @@ async function viewSys(){
       <div class="k">邮箱接入</div><div>模式 ${esc(META.mailbox.mode||'—')} ·
         只读 ${META.mailbox.readonly?'':'✗'} · 附件白名单 ${esc((META.mailbox.attachment_ext||[]).join(' '))}
         · 单个附件上限 ${META.mailbox.max_attachment_mb==null?20:META.mailbox.max_attachment_mb} MB
-        · 同岗重复投递归并为新版本（${META.mailbox.same_job_reapply_days} 天内）</div>
+        · 同一人后续简历沿用同一投递；已归档者重投会新建投递（历史窗口配置：${META.mailbox.same_job_reapply_days} 天）</div>
       <div class="k">岗位</div><div>${(META.jobs||[]).length} 个（含已停用）</div>
     </div>
   </div>`;

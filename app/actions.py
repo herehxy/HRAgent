@@ -37,6 +37,11 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             return {"ok": False, "error": f"未找到提案 #{proposal_id}"}
         if p["status"] != "待确认":
             return {"ok": False, "error": f"提案 #{proposal_id} 已是『{p['status']}』状态，无需重复处理"}
+        # **原子领取**：只有把「待确认」成功改成「执行中」的请求才能继续执行。
+        # 两个并发点击（或双击/重试）否则会各执行一遍副作用。
+        if not db.claim_proposal(conn, proposal_id, operator):
+            return {"ok": False,
+                    "error": f"提案 #{proposal_id} 正被处理或已处理，请刷新后查看结果"}
 
         if decision != "approve":
             db.decide_proposal(conn, proposal_id, "reject", operator, role, "已拒绝")
@@ -555,6 +560,8 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
                 return _denied(conn, p, operator, role, "manage_users")
             action = str(args.get("action") or "").strip().lower()
             username = str(args.get("username") or "").strip()
+            # 「最后一个管理员」校验与写入放进同一个写事务，防两个提案并发各降级一个。
+            db.begin_immediate(conn)
             user = db.get_user(conn, username)
             if action == "create":
                 if user:
@@ -581,20 +588,28 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
                             "error": "这是最后一个启用中的管理员，不能再停用或降级"}
                 if active is False and username == operator:
                     return {"ok": False, "error": "不能停用自己当前登录的账号"}
+                if new_role is not None and new_role not in auth.ROLES:
+                    return {"ok": False, "error": "角色只能是 hr / admin / viewer"}
                 changed = []
+                _sets: list[str] = []
+                _vals: list = []
                 if args.get("display_name") is not None:
                     disp = str(args.get("display_name") or "").strip() or username
-                    conn.execute("UPDATE users SET display_name=? WHERE username=?",
-                                 (disp, username))
+                    _sets.append("display_name=?")
+                    _vals.append(disp)
                     changed.append("显示名")
                 if new_role is not None and new_role != user.get("role"):
-                    if new_role not in auth.ROLES:
-                        return {"ok": False, "error": "角色只能是 hr / admin / viewer"}
-                    db.set_user_role(conn, username, new_role)
+                    _sets.append("role=?")
+                    _vals.append(new_role)
                     changed.append("角色")
                 if active is not None and bool(active) != bool(user.get("active")):
-                    db.set_user_active(conn, username, bool(active))
+                    _sets.append("active=?")
+                    _vals.append(1 if active else 0)
                     changed.append("启用状态")
+                if _sets:
+                    conn.execute(f"UPDATE users SET {', '.join(_sets)} WHERE username=?",
+                                 (*_vals, username))
+                conn.commit()
                 kicked = 0
                 if new_role is not None or active is not None:
                     kicked = db.delete_user_sessions(conn, username)
@@ -620,7 +635,8 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
                 if (user.get("role") == "admin" and user.get("active")
                         and db.count_active_admins(conn) <= 1):
                     return {"ok": False, "error": "这是最后一个启用中的管理员，不能删除"}
-                db.set_user_active(conn, username, False)
+                conn.execute("UPDATE users SET active=0 WHERE username=?", (username,))
+                conn.commit()
                 kicked = db.delete_user_sessions(conn, username)
                 db.add_audit(conn, "user", username, "delete", "",
                              f"{operator} 停用账号「{username}」（保留记录供审计）",
@@ -841,6 +857,17 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
         result["message"] = "提案已由 HR 确认并生效"
         return result
     finally:
+        # 任何提前返回/异常：若提案仍停在「执行中」，放回「待确认」，
+        # 不让一次失败把提案永久锁死。成功路径此时已是「已执行/已拒绝」。
+        try:
+            # 先回滚未提交的零散写入：某条工具校验失败提前返回时，
+            # 不能让 finally 里的 release/查询把半截改动顺手提交掉。
+            conn.rollback()
+            _cur = db.get_proposal(conn, proposal_id)
+            if _cur and _cur.get("status") == "执行中":
+                db.release_proposal(conn, proposal_id)
+        except Exception:                                    # noqa: BLE001
+            pass
         conn.close()
 
 
@@ -907,7 +934,7 @@ def _reanalyze_one(conn, cid: int, operator: str, role: str) -> dict:
     from . import ingest as _ing
     from . import mailbox as _mb
     from .agent import llm as _llm
-    c = _llm.load_cfg()
+    c = _llm.load_cfg("extract")
     if not c.get("enabled", True) or not c.get("api_key"):
         return {"ok": False, "error": "模型未启用或未配置 API Key，无法完整重新分析"}
     conf = {"api_key": c.get("api_key"), "base_url": c.get("base_url"),

@@ -126,8 +126,12 @@ def validate_year(conn, label: str, period_start: str, period_end: str,
 def create_year(conn, label: str, period_start: str, period_end: str,
                 org_label: str = "院本部", note: str = "",
                 operator: str = "HR", role: str = "hr") -> dict:
+    # 「届期不重叠」是先查后写：并发创建两个届别时都能通过校验。
+    # 用写事务把校验+插入串起来，第二个请求会等第一个提交后再校验。
+    db.begin_immediate(conn)
     errors = validate_year(conn, label, period_start, period_end)
     if errors:
+        conn.rollback()          # 释放写锁；调用方可能复用这条连接
         return {"ok": False, "errors": errors}
     # 统一存 ISO（YYYY-MM-DD）：年/月/日各种写法都先归一再落库，
     # 否则重叠判断与默认届别（字符串比较）会被 "2026/9/1" 之类的写法骗过。
@@ -135,18 +139,22 @@ def create_year(conn, label: str, period_start: str, period_end: str,
     yid = db.create_recruit_year(conn, label, _s.isoformat(), _e.isoformat(),
                                  org_label=org_label, note=note,
                                  operator=operator, role=role)
+    conn.commit()            # 显式释放 BEGIN IMMEDIATE 的写锁
     return {"ok": True, "id": yid, "year": db.get_recruit_year(conn, year_id=yid)}
 
 
 def update_year(conn, year_id: int, fields: dict,
                 operator: str = "HR", role: str = "hr") -> dict:
+    db.begin_immediate(conn)
     cur = db.get_recruit_year(conn, year_id=year_id)
     if not cur:
+        conn.rollback()
         return {"ok": False, "errors": ["未找到该届别"]}
     merged = {**cur, **(fields or {})}
     errors = validate_year(conn, merged.get("label"), merged.get("period_start"),
                            merged.get("period_end"), exclude_id=year_id)
     if errors:
+        conn.rollback()
         return {"ok": False, "errors": errors}
     patch = dict(fields or {})
     for k in ("period_start", "period_end"):
@@ -155,6 +163,7 @@ def update_year(conn, year_id: int, fields: dict,
             if _d:
                 patch[k] = _d.isoformat()
     out = db.update_recruit_year(conn, year_id, patch, operator=operator, role=role)
+    conn.commit()            # 显式释放 BEGIN IMMEDIATE 的写锁
     return {"ok": True, "year": out}
 
 

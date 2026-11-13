@@ -24,10 +24,12 @@ from datetime import datetime, timedelta
 
 from .. import db, stages as stages_mod, tiers as tiers_mod
 from ..pipeline import normalize as nz
+from . import context_governance as cg
 from . import llm
 from . import tools as tools_write
 from .router import route_tools, tool_catalog_text
 from .skills import match_skill
+from .tool_args import validate_tool_args
 from .tools import (DISABLED_TOOLS, MANAGE_BY_OLD, STAGES, TOOL_SPECS,
                     ToolCtx, execute)
 
@@ -680,14 +682,10 @@ def _finalize_tool_calls(acc: dict) -> list[dict]:
 def _est_tokens(text: str) -> int:
     """粗略 token 估算：中文≈1 字 1 token，英文/符号≈4 字符 1 token。
 
-    只用于右栏"上下文用量"的可视化，精度足够；真实计费仍以模型返回的
-    `usage` 为准（`agent_runs.tokens_in/out`）。
+    只用于右栏"上下文用量"的可视化与预算治理，精度足够；真实计费仍以模型
+    返回的 `usage` 为准（`agent_runs.tokens_in/out`）。
     """
-    s = str(text or "")
-    if not s:
-        return 0
-    cjk = len(re.findall(r"[一-鿿]", s))
-    return max(1, int(cjk + (len(s) - cjk) * 0.28))
+    return cg.estimate_tokens(text)
 
 
 def build_context_estimate(*, window: int = 1_000_000, messages_text: str = "",
@@ -698,12 +696,20 @@ def build_context_estimate(*, window: int = 1_000_000, messages_text: str = "",
                            model: str = "",
                            params: dict | None = None,
                            window_source: str = "config",
-                           model_params: str = "") -> dict:
-    """构造右栏「上下文」面板的数据（估算，不调模型）。"""
+                           model_params: str = "",
+                           budget: int | None = None,
+                           governance: dict | None = None) -> dict:
+    """构造右栏「上下文」面板的数据（估算，不调模型）。
+
+    `budget` 是治理后的输入预算（不是模型窗口）；`governance` 是本轮裁剪统计。
+    两者都只用于展示，不参与权限或业务判断。
+    """
     try:
         win = int(window or 1_000_000)
     except (TypeError, ValueError):
         win = 1_000_000
+    if not budget:
+        budget = cg.resolve_budget(win, max_output_tokens=(params or {}).get("max_tokens"))["budget"]
     specs = allowed_specs or []
     sys_tools_text = (tool_catalog_text(specs) if text_tools
                       else json.dumps(specs, ensure_ascii=False))
@@ -722,7 +728,10 @@ def build_context_estimate(*, window: int = 1_000_000, messages_text: str = "",
             "parts": parts, "source": "estimate",
             "model": str(model or ""), "params": dict(params or {}),
             "model_params": str(model_params or ""),
-            "window_source": window_source}
+            "window_source": window_source,
+            "budget": int(budget),
+            "budget_percent": round(used * 100.0 / budget, 1) if budget else 0,
+            "governance": dict(governance or {})}
 
 
 _SIMPLE_GREET_RE = re.compile(
@@ -833,9 +842,24 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         return _finalize(ctx, user_message, answer, trace, "offline", 0, {}, started,
                          thinking="")
 
-    # 模型无关的工具路由：68 个工具按意图收成 10~22 个。
+    # 先确定模型窗口/预算，再路由工具：32k 窗口不能像 1M 窗口一样给 30 个
+    # 工具，否则系统提示词 + 工具说明就吃掉一半输入。
+    _win, _win_source = llm.model_context_window(cfg)
+    if not _win:
+        try:
+            _win = int(cfg.get("context_window") or 1_000_000)
+            _win_source = "config" if cfg.get("context_window") else "default"
+        except (TypeError, ValueError):
+            _win, _win_source = 1_000_000, "default"
+    _budget_info = cg.resolve_budget(
+        _win, max_output_tokens=cfg.get("max_tokens"),
+        configured_budget=cfg.get("context_budget_tokens"),
+        cap=cfg.get("context_budget_cap"))
+
+    # 模型无关的工具路由：近百个工具按意图收成 10~22 个（小窗口再自动减少）。
     # 没有命中任何关键词时给一组覆盖面最广的读工具，避免"问什么都缺工具"。
-    _allowed_specs, _route_groups = route_tools(user_message, history)
+    _allowed_specs, _route_groups = route_tools(
+        user_message, history, max_tools=_budget_info["max_tools"])
     # 业务 SOP：命中就注入固定步骤，并把该 SOP 需要的工具补进本轮可见集。
     # 不额外调用模型，不增加一轮延迟；只是让模型少走弯路。
     _skill = match_skill(user_message, history)
@@ -868,6 +892,16 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
     except Exception:                                        # noqa: BLE001
         _memory = ""
 
+    # 记忆和 SOP 都是 system 注入；先各自截断，避免一条旧会话把预算吃光。
+    _memory = cg.clip_text(_memory, _budget_info["memory_tokens"],
+                           marker="\n…（会话记忆过长，已截断）…\n") if _memory else ""
+    _skill_text = ""
+    if _skill:
+        _skill_text = cg.clip_text(
+            _skill["sop"] + "\n输出要求：" + _skill["output"],
+            _budget_info["skill_tokens"],
+            marker="\n…（SOP 过长，已截断）…\n")
+
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
     _wd = "一二三四五六日"[datetime.now().weekday()]
     messages.append({"role": "system", "content":
@@ -880,8 +914,7 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         messages.append({"role": "system", "content": tool_catalog_text(_allowed_specs)})
     if _skill:
         messages.append({"role": "system", "content":
-                         "【当前 SOP：" + _skill["name"] + "】\n" + _skill["sop"] +
-                         "\n输出要求：" + _skill["output"]})
+                         "【当前 SOP：" + _skill["name"] + "】\n" + _skill_text})
     if _memory:
         messages.append({"role": "system", "content":
                          "【本会话此前的要点（系统自动整理，只用于保持上下文；"
@@ -891,16 +924,13 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
             messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": user_message})
 
-    # 上下文用量（估算）：右栏"上下文"面板用。窗口大小可在 config/model.json
-    # 里用 `context_window` 覆盖；默认按 1M（MiMo v2.6 的窗口）算。
-    _win, _win_source = llm.model_context_window(cfg)
+    # 上下文治理：先按预算裁历史/记忆，再给右栏一个真实基线。
+    # 这一步不调模型；每轮工具执行后还会再治理一次。
+    _gov0 = cg.govern_messages(
+        messages, budget=_budget_info["budget"],
+        tool_limit=_budget_info["tool_result_tokens"],
+        history_message_tokens=_budget_info["history_message_tokens"])
     _model_params = llm.model_parameter_count(cfg)
-    if not _win:
-        try:
-            _win = int(cfg.get("context_window") or 1_000_000)
-            _win_source = "config" if cfg.get("context_window") else "default"
-        except (TypeError, ValueError):
-            _win, _win_source = 1_000_000, "default"
     _msgs_text = "\n".join(
         str(m.get("content") or "") for m in messages
         if m.get("role") in ("user", "assistant"))
@@ -916,7 +946,21 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         allowed_specs=_allowed_specs, text_tools=_text_tools,
         skill=_skill, memory=_memory,
         model=str(cfg.get("model") or ""), params=_ctx_params,
-        window_source=_win_source, model_params=_model_params)
+        window_source=_win_source, model_params=_model_params,
+        budget=_budget_info["budget"], governance=_gov0)
+    ctx.metrics = {
+        "budget_info": dict(_budget_info),
+        "governance": dict(_gov0),
+        "tool_calls": 0,
+        "tool_errors": 0,
+        "tool_result_tokens": 0,
+        "prompt_tokens_est": 0,
+        "context_trimmed_total": 0,
+        "context_trimmed_max": 0,
+        "rounds_detail": [],
+        "max_rounds": 0,
+        "alert_thresholds": dict(cfg.get("context_alerts") or {}),
+    }
 
     trace: list[dict] = []
     usage_total: dict = {}
@@ -925,6 +969,7 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
     # 一句话批量任务通常包含 3~5 个动作，4 轮很容易做到一半就收尾
     if _skill and _skill["id"] == "one_sentence_batch":
         max_rounds = max(max_rounds, 6)
+    ctx.metrics["max_rounds"] = max_rounds
     rounds = 0
     _SPEC_BY_NAME = {s["function"]["name"]: s for s in _allowed_specs}
     # 模型每一轮的 `reasoning_content` 按顺序拼起来。只用于界面展示与回放，
@@ -938,6 +983,28 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
 
     def _thinking_text() -> str:
         return "\n\n".join(thinking_parts)
+
+    def _govern_for_turn() -> dict:
+        """每次模型调用前执行一次上下文治理，并累计本轮 prompt 估算。"""
+        g = cg.govern_messages(
+            messages, budget=_budget_info["budget"],
+            tool_limit=_budget_info["tool_result_tokens"],
+            history_message_tokens=_budget_info["history_message_tokens"])
+        ctx.metrics["governance"] = g
+        ctx.metrics["prompt_tokens_est"] = int(
+            ctx.metrics.get("prompt_tokens_est") or 0) + int(g["estimated_after"])
+        _trim = int(g.get("trimmed_tokens") or 0)
+        ctx.metrics["context_trimmed_total"] = int(
+            ctx.metrics.get("context_trimmed_total") or 0) + _trim
+        ctx.metrics["context_trimmed_max"] = max(
+            int(ctx.metrics.get("context_trimmed_max") or 0), _trim)
+        return g
+
+    def _usage_delta(before: dict, after: dict) -> dict:
+        out = {}
+        for k in ("prompt_tokens", "completion_tokens", "cache_hit_tokens"):
+            out[k] = max(0, int(after.get(k, 0) or 0) - int(before.get(k, 0) or 0))
+        return out
 
     def _activate_text_mode() -> None:
         """端点拒绝原生 tools 时，切到 XML 文本协议（只切一次）。"""
@@ -1044,12 +1111,15 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         prepared = []
         for tc in calls:
             fn = (tc.get("function") or {}).get("name", "")
+            parse_error = None
             try:
                 args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
             except ValueError:
                 args = {}
+                parse_error = "arguments 不是合法 JSON"
             if not isinstance(args, dict):
                 args = {}
+                parse_error = parse_error or "arguments 必须是 JSON 对象"
             spec = _SPEC_BY_NAME.get(fn)
             result = None
             if not spec:
@@ -1064,11 +1134,23 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                 missing = [k for k in required
                            if k not in args or args[k] is None
                            or args[k] == "" or args[k] == []]
-                if missing:
+                args, bad_args = validate_tool_args(spec, args)
+                if parse_error:
+                    result = json.dumps({
+                        "error": parse_error, "tool": fn,
+                        "hint": "把 arguments 修成合法 JSON 对象后重新调用这个工具。",
+                    }, ensure_ascii=False)
+                elif missing:
                     result = json.dumps({
                         "error": "缺少必填参数：" + "、".join(missing),
                         "tool": fn, "missing": missing,
                         "hint": "补齐参数后重新调用这个工具，不要改用其它工具。",
+                    }, ensure_ascii=False)
+                elif bad_args:
+                    result = json.dumps({
+                        "error": "参数格式不正确：" + "；".join(bad_args),
+                        "tool": fn, "invalid": bad_args,
+                        "hint": "按工具参数说明修正类型/枚举值后重试。",
                     }, ensure_ascii=False)
             prepared.append({"tc": tc, "fn": fn, "args": args, "result": result})
 
@@ -1078,7 +1160,17 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                    "args": p["args"]})
 
         def _record(p: dict) -> None:
-            fn, result = p["fn"], p["result"]
+            fn, result = p["fn"], str(p["result"] or "")
+            # 前端/历史回放保留原来的结果（草稿全文不能截）；给模型的副本
+            # 单独按预算压缩，避免一条 20 万字的工具结果把后续每轮都拖爆。
+            model_result = cg.compact_tool_result(
+                fn, result, max_tokens=_budget_info["tool_result_tokens"])
+            ctx.metrics["tool_calls"] = int(ctx.metrics.get("tool_calls") or 0) + 1
+            ok = _tool_ok(result)
+            if not ok:
+                ctx.metrics["tool_errors"] = int(ctx.metrics.get("tool_errors") or 0) + 1
+            ctx.metrics["tool_result_tokens"] = int(
+                ctx.metrics.get("tool_result_tokens") or 0) + cg.estimate_tokens(model_result)
             # v1.13.9：邮件草稿要**完整**带回（正文会被 900 字截断，
             # 截断了前端就渲染不出卡片）；其余工具仍然只留摘要。
             trace.append({"tool": fn, "args": p["args"],
@@ -1087,15 +1179,15 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                           "write": fn in WRITE_TOOLS,
                           # 结果可能被截到 900 字，不能再靠 json.loads 判断成败；
                           # 在截断前把 ok / download 记下来。
-                          "ok": _tool_ok(result),
+                          "ok": ok,
                           "download": _download_of({"result": result}),
                           "disabled": fn in DISABLED_TOOLS})
             _emit({"type": "tool_result", "id": p["tc"].get("id", ""),
                    "tool": fn, "tool_label": _TOOL_LABEL.get(fn, fn),
-                   "ok": _tool_ok(result), "summary": _result_brief(result)})
+                   "ok": ok, "summary": _result_brief(result)})
             _live_update(ctx, trace, thinking=_thinking_text())
             messages.append({"role": "tool", "tool_call_id": p["tc"].get("id", ""),
-                             "name": fn, "content": result})
+                             "name": fn, "content": model_result})
 
         runnable = [p for p in prepared if p["result"] is None]
         # 同一批里全是只读工具 → 并行执行。5 次读取档案串行虽然每次不慢，
@@ -1138,9 +1230,29 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                                  rounds, usage_total, started, model_used,
                                  thinking=_thinking_text())
             rounds += 1
+            # 每轮模型调用前都治理一次：上一轮的工具结果可能很长，不能等到
+            # 下一次提问才裁；这里只改“给模型看的副本”，trace 不变。
+            _gov = _govern_for_turn()
+            _detail = {
+                "round": rounds,
+                "prompt_estimate": int(_gov.get("estimated_after") or 0),
+                "tool_tokens": int(_gov.get("tool_tokens") or 0),
+                "tool_ratio": round(float(_gov.get("tool_ratio") or 0.0), 4),
+                "trimmed_tokens": int(_gov.get("trimmed_tokens") or 0),
+                "budget": int(_budget_info["budget"]),
+                "prompt_tokens": 0,
+                "cache_hit_tokens": 0,
+                "tool_calls": 0,
+                "tool_errors": 0,
+            }
+            ctx.metrics["rounds_detail"].append(_detail)
+            _u0 = dict(usage_total)
             msg = _turn(messages, _tools)
             model_used = msg.get("_model") or model_used
             _accumulate(usage_total, msg.get("_usage"))
+            _ruse = _usage_delta(_u0, usage_total)
+            _detail["prompt_tokens"] = _ruse["prompt_tokens"]
+            _detail["cache_hit_tokens"] = _ruse["cache_hit_tokens"]
             _note_reasoning(msg)
             calls = msg.get("tool_calls") or []
             if not calls:
@@ -1181,14 +1293,36 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                 return _finalize(ctx, user_message, "已停止。", trace, "stopped",
                                  rounds, usage_total, started, model_used,
                                  thinking=_thinking_text())
+            _c0 = int(ctx.metrics.get("tool_calls") or 0)
+            _e0 = int(ctx.metrics.get("tool_errors") or 0)
             _run_calls(calls)
+            _detail["tool_calls"] = int(ctx.metrics.get("tool_calls") or 0) - _c0
+            _detail["tool_errors"] = int(ctx.metrics.get("tool_errors") or 0) - _e0
         # 轮次用尽，强制收敛；不再做邮件/口头提案等出口兜底，
         # 最终答复以模型输出为准。
         messages.append({"role": "user", "content": "请基于已获取的信息直接给出最终答复。"})
+        rounds += 1
+        _gov = _govern_for_turn()
+        _detail = {
+            "round": rounds,
+            "prompt_estimate": int(_gov.get("estimated_after") or 0),
+            "tool_tokens": int(_gov.get("tool_tokens") or 0),
+            "tool_ratio": round(float(_gov.get("tool_ratio") or 0.0), 4),
+            "trimmed_tokens": int(_gov.get("trimmed_tokens") or 0),
+            "budget": int(_budget_info["budget"]),
+            "prompt_tokens": 0,
+            "cache_hit_tokens": 0,
+            "tool_calls": 0,
+            "tool_errors": 0,
+        }
+        ctx.metrics["rounds_detail"].append(_detail)
+        _u0 = dict(usage_total)
         final = _turn(messages, None)
         _accumulate(usage_total, final.get("_usage"))
+        _ruse = _usage_delta(_u0, usage_total)
+        _detail["prompt_tokens"] = _ruse["prompt_tokens"]
+        _detail["cache_hit_tokens"] = _ruse["cache_hit_tokens"]
         _note_reasoning(final)
-        rounds += 1
         _fa = _strip_tool_call_text(final.get("content") or "").strip()
         _streamed_answer = _fa
         # 数据来源兜底已停用，见上方说明；不再替换最终答复。
@@ -1769,6 +1903,70 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
     thinking = (thinking or "").strip()
     if len(thinking) > 20000:
         thinking = thinking[:20000] + "\n\n…（思考过程过长，已截断）"
+    # 兜底：部分兼容端点即使请求了 usage 也不返回。至少按消息/答复估算，
+    # 让「今日 Token」不会是 0；有真实 usage 时一律优先真实值。
+    if (model and not usage.get("prompt_tokens")
+            and not usage.get("completion_tokens")):
+        try:
+            usage = {
+                "prompt_tokens": _est_tokens(question or ""),
+                "completion_tokens": _est_tokens(answer or ""),
+            }
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    # ---- 本轮运行指标：先算，再写 agent_runs，并随答复返回给右栏 ----
+    _metrics = dict(getattr(ctx, "metrics", {}) or {})
+    _budget_info = dict(_metrics.get("budget_info") or {})
+    _budget = int(_budget_info.get("budget")
+                  or (ctx.context or {}).get("budget") or 0)
+    _prompt_est = int(_metrics.get("prompt_tokens_est") or 0)
+    _tokens_in = int(usage.get("prompt_tokens") or 0) if usage else 0
+    _effective_in = _tokens_in or _prompt_est
+    _tool_tokens = int(_metrics.get("tool_result_tokens") or 0)
+    _tool_calls = int(_metrics.get("tool_calls") or 0)
+    _tool_errors = int(_metrics.get("tool_errors") or 0)
+    # 估算与真实 usage 的口径可能有几个点误差；占比按 0~100% 收敛，
+    # 避免出现“工具结果占输入 130%”这种没有解释价值的数字。
+    _tool_ratio = min(1.0, (_tool_tokens / _effective_in)) if _effective_in else 0.0
+    _tool_error_rate = (_tool_errors / _tool_calls) if _tool_calls else 0.0
+    _cache_hit = int(usage.get("cache_hit_tokens") or 0) if usage else 0
+    _cache_reported = int(usage.get("cache_reported") or 0) if usage else 0
+    _cache_rate = (_cache_hit / _effective_in) if (_cache_reported and _effective_in) else 0.0
+    _gov = dict(_metrics.get("governance") or {})
+    _trimmed_total = int(_metrics.get("context_trimmed_total")
+                         or _gov.get("trimmed_tokens") or 0)
+    _trimmed_max = int(_metrics.get("context_trimmed_max")
+                       or _gov.get("trimmed_tokens") or 0)
+    _alerts = cg.evaluate_alerts(
+        tokens_in=_tokens_in, prompt_estimate=_prompt_est,
+        budget=_budget, tool_tokens=_tool_tokens,
+        tool_calls=_tool_calls, tool_errors=_tool_errors,
+        rounds=rounds, max_rounds=int(_metrics.get("max_rounds") or 5),
+        cache_hit_tokens=_cache_hit, cache_reported=_cache_reported,
+        trimmed_tokens=_trimmed_max,
+        thresholds=_metrics.get("alert_thresholds") or {})
+    _alert_level = cg.alert_level(_alerts)
+    _metrics_payload = {
+        "budget": _budget,
+        "window": int(_budget_info.get("window") or (ctx.context or {}).get("window") or 0),
+        "prompt_tokens": _tokens_in,
+        "prompt_estimate": _prompt_est,
+        "usage_source": "actual" if _tokens_in else ("estimated" if _prompt_est else "none"),
+        "tool_tokens": _tool_tokens,
+        "tool_ratio": round(_tool_ratio, 4),
+        "tool_calls": _tool_calls,
+        "tool_errors": _tool_errors,
+        "tool_error_rate": round(_tool_error_rate, 4),
+        "cache_hit_tokens": _cache_hit,
+        "cache_reported": _cache_reported,
+        "cache_rate": round(_cache_rate, 4) if _cache_reported else None,
+        "context_trimmed_tokens": _trimmed_total,
+        "context_trimmed_max": _trimmed_max,
+        "governance": _gov,
+        "rounds_detail": list(_metrics.get("rounds_detail") or []),
+    }
+
     # 有真实 usage 时，用 prompt_tokens 校准上下文总量；分项按比例缩放。
     # 流式端点没返回 usage 时保留估算值，不强行编一个数。
     _actual_prompt = int(usage.get("prompt_tokens") or 0) if usage else 0
@@ -1787,6 +1985,20 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
         ctx.context["used"] = _actual_prompt
         ctx.context["percent"] = round(_actual_prompt * 100.0 / _win, 1) if _win else 0
         ctx.context["source"] = "actual"
+    if ctx.context:
+        # 面板的“预算占用”是**单次请求**口径（最后一次模型调用）；指标里的
+        # tool_ratio 才是整轮累计口径，两者不能混。
+        _panel_used = _actual_prompt or int(_gov.get("estimated_after") or 0)
+        ctx.context["budget"] = _budget
+        ctx.context["budget_percent"] = (
+            round(_panel_used * 100.0 / _budget, 1) if _budget else 0)
+        ctx.context["governance"] = _gov
+        ctx.context["context_trimmed"] = _trimmed_total
+        ctx.context["tool_ratio"] = round(_tool_ratio, 4)
+        ctx.context["tool_error_rate"] = round(_tool_error_rate, 4)
+        ctx.context["cache_rate"] = round(_cache_rate, 4) if _cache_reported else None
+        ctx.context["alerts"] = _alerts
+        ctx.context["metrics"] = _metrics_payload
     _live_update(ctx, trace, status="done", mode=mode, rounds=rounds,
                  thinking=thinking)
     # v1.14：**只回传本轮产生的提案**。
@@ -1846,17 +2058,6 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
                     or int(_b.get("proposal_id")) in _mentioned
             except (TypeError, ValueError):
                 _b["current_turn"] = False
-        # 兜底：部分兼容端点即使请求了 usage 也不返回。至少按消息/答复估算，
-        # 让「今日 Token」不会是 0；有真实 usage 时一律优先真实值。
-        if (model and not usage.get("prompt_tokens")
-                and not usage.get("completion_tokens")):
-            try:
-                usage = {
-                    "prompt_tokens": _est_tokens(question or ""),
-                    "completion_tokens": _est_tokens(answer or ""),
-                }
-            except Exception:                              # noqa: BLE001
-                pass
         _run_id = db.log_agent_run(conn, {
             "session_id": ctx.session_id, "question": question, "answer": answer[:4000],
             "thinking": thinking,
@@ -1877,8 +2078,30 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
             "tokens_out": usage.get("completion_tokens", 0),
             "cache_hit_tokens": usage.get("cache_hit_tokens", 0),
             "cache_reported": usage.get("cache_reported", 0),
+            # v5.1.4：上下文治理与运行指标。明细在 metrics_json，汇总单独成列，
+            # 方便 /api/agent/metrics 直接 SQL 聚合，不必每次解析 JSON。
+            "tool_tokens": _tool_tokens,
+            "tool_ratio": round(_tool_ratio, 4),
+            "tool_calls_count": _tool_calls,
+            "tool_errors": _tool_errors,
+            "tool_error_rate": round(_tool_error_rate, 4),
+            "context_budget": _budget,
+            "context_trimmed": _trimmed_total,
+            "alert_level": _alert_level,
+            "alerts": _alerts,
+            "metrics": _metrics_payload,
             "latency_ms": latency, "status": "ok", "mode": mode, "operator": ctx.operator,
         })
+        # 高等级告警另写审计：agent_runs 会被“清空对话”软隐藏，审计不会，
+        # 运维以后仍能查到“哪一轮上下文/工具出了问题”。
+        if _alert_level == "high" and _run_id:
+            try:
+                db.add_audit(
+                    conn, "agent_run", str(_run_id), "context_alert", "",
+                    "；".join(a.get("message", "") for a in _alerts if a.get("level") == "high"),
+                    ctx.operator, ctx.role)
+            except Exception:                              # noqa: BLE001
+                pass
     finally:
         conn.close()
     # v1.13.7：把本轮起草出的邮件草稿带出去（前端渲染成卡片，一键进编辑器）。
@@ -1927,6 +2150,8 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
         "rounds": rounds,
         "latency_ms": latency,
         "tokens": usage,
+        "metrics": _metrics_payload,
+        "alerts": _alerts,
         "session_id": ctx.session_id,
         "run_id": _run_id,
         "pending_proposals": briefs,

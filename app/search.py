@@ -379,9 +379,11 @@ def similar_to(conn, cid: int, top_k: int = 5, cfg: dict | None = None) -> dict:
     base = vectors[cid]
     scored = [(oid, _cosine(base, v)) for oid, v in vectors.items() if oid != cid]
     scored.sort(key=lambda t: -t[1])
-    items = {c["id"]: c for c in db.list_candidates(conn)}
+    # 只装配候选结果里的那批人（原来每次都把全库 list_candidates 重载一遍）
+    _top = scored[:max(1, int(top_k))]
+    items = {c["id"]: c for c in db.list_candidates(conn, ids=[o[0] for o in _top])}
     results = []
-    for oid, score in scored[:max(1, int(top_k))]:
+    for oid, score in _top:
         c = items.get(oid)
         if not c or c.get("archived_at"):
             continue  # 已归档的不再出现在相似人才里
@@ -403,9 +405,12 @@ def by_skills(conn, skills: list[str], mode: str = "all", include_tier: str | No
         items = [i for i in items if i.get("tier_effective") == include_tier]
     items = [i for i in items if not i.get("archived_at")]  # 已归档的不再召回
 
+    # 技能明细一次 IN 查询取回（原来每个命中的人各查一次，命中 100 人 = 100 条 SQL）
+    _rows_by = db.candidate_skill_rows_many(conn, [c["id"] for c in items],
+                                            verified_only=True)
     results = []
     for c in items:
-        rows = {r["name"]: r for r in db.candidate_skill_rows(conn, c["id"], verified_only=True)}
+        rows = {r["name"]: r for r in _rows_by.get(c["id"], [])}
         matched = [s for s in resolved if s in rows]
         results.append({
             "candidate_id": c["id"], "name": c.get("name"), "tier": c.get("tier_effective"),

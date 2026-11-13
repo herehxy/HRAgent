@@ -1,0 +1,14 @@
+{
+  "id": "generic@1",
+  "name": "通用文档",
+  "doc_type": "other",
+  "aliases": ["other", "generic"],
+  "apply": "employee",
+  "fields": [
+    {"key": "name", "labels": ["姓名"], "type": "text"},
+    {"key": "phone", "labels": ["手机", "联系电话", "电话"], "type": "phone"},
+    {"key": "email", "labels": ["邮箱", "电子邮箱"], "type": "email"},
+    {"key": "id_card", "labels": ["身份证号码", "身份证号", "公民身份号码"], "type": "id_card"},
+    {"key": "address", "labels": ["住址", "地址"], "type": "text", "join_next": true}
+  ]
+}

@@ -51,7 +51,7 @@ def _llm_conf(use: bool) -> dict | None:
         return None
     from app.agent import llm
 
-    c = llm.load_cfg()
+    c = llm.load_cfg("extract")
     return {"api_key": c.get("api_key"), "base_url": c.get("base_url"), "model": c.get("model")}
 
 

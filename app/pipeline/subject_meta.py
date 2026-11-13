@@ -184,10 +184,10 @@ def parse(text: str) -> dict:
     return {"fields": out, "note": note, "segments": segs}
 
 
-#: 可用主题/文件名覆盖的字段：**只碰"人"的属性**。
+#: 可由主题/文件名**补充**的字段：只补简历里没有的值，绝不覆盖正文/模型抽取结果。
 #: 技能、年限、证书一律不动——那些必须来自简历正文与证据核对，
 #: 让标题去改它们等于绕过了"反幻觉"那道闸。
-_OVERRIDABLE = ("name", "education", "school", "major", "gender")
+_SUPPLEMENTABLE = ("name", "education", "school", "major", "gender")
 
 #: "教育/专业上下文"词表：标题猜出的姓名如果在原文里**只**出现在这类行里，
 # 就不足以作证（实测坑：错位解析出的「材料学」恰好在"…材料学专业…"行里，
@@ -219,48 +219,44 @@ def _name_evidence(raw_text: str, name: str) -> str:
 
 
 def apply_to_candidate(cand: dict, meta: dict, raw_text: str = "") -> tuple[dict, list[str]]:
-    """把主题/文件名解析到的字段写进抽取结果，返回 `(cand, 实际采用的字段名)`。
+    """把主题/文件名解析到的字段**补充**进抽取结果，返回 `(cand, 实际补充的字段名)`。
 
-    只在**解析有值**时覆盖；解析不出来就保持正文抽取的结果不动。
-    冲突时以主题为准（这是投递方按我们的格式填的），但会在明细里说明。
+    口径（业务方 2026-11-13）：**个人信息以简历为准**。主题/文件名只用于
+    岗位方向等补充信息，以及简历里完全缺失的个人字段；简历已有值时一律不覆盖，
+    即使标题写的是另一个值——只在 `title_override_notes` 里留一条冲突说明。
 
     **姓名额外过一道证据校验**：标题/文件名的姓名是"按位置猜"出来的，位置规则
     遇到没见过的写法就可能猜错（实测把「博士应聘」「科学研究」这类词当成了姓名）。
-    所以当正文已经抽出姓名、且**标题里的姓名在简历原文里找不到**时，不覆盖，
-    只记一条存疑说明——宁可保留正文抽出来的名字，也不要凭空改名。
+    所以简历没有姓名、只能用标题兜底时，标题姓名若只在专业/院校上下文出现，
+    仍不采用——宁可留空让 HR 补，也不要凭空造一个名字。
     """
     fields = (meta or {}).get("fields") or {}
     used: list[str] = []
     conflicts: list[str] = []
     label = {"name": "姓名", "education": "学历", "school": "学校",
              "major": "专业", "gender": "性别"}
-    for k in _OVERRIDABLE:
+    for k in _SUPPLEMENTABLE:
         v = fields.get(k)
         if not v:
             continue
         old = cand.get(k)
+        # 简历（含模型抽取）已有值：保留简历值，哪怕标题写的是另一个。
+        # 把冲突留痕，HR 能看到"标题与简历不一致"，但档案不会被标题改错。
+        if old not in (None, ""):
+            if str(old) != str(v):
+                conflicts.append(
+                    f"{label[k]}（简历为「{old}」，标题/文件名写「{v}」，保留简历值）")
+            continue
         if k == "name":
             # 姓名与其它字段不一样：它是"按位置猜"出来的，必须过证据关。
             # v1.29.5（业务方 2026-10-16）：证据标准从"出现过就行"升级为
             # "要像在说人"——只出现在专业/院校上下文里的名字（错位产物）不采信。
             ev = _name_evidence(raw_text, str(v))
-            if ev == "edu_only" or (ev == "absent" and old and str(old) != str(v)):
-                if old and str(old) != str(v):
-                    conflicts.append(
-                        f"姓名（标题/文件名写「{v}」，但简历原文里找不到、或只出现在"
-                        f"专业/院校上下文里，保留正文抽出的「{old}」）")
-                else:
-                    conflicts.append(
-                        f"姓名（标题/文件名写「{v}」，原文里只在专业/院校上下文出现，"
-                        "未采用，请人工确认）")
+            if ev == "edu_only":
+                conflicts.append(
+                    f"姓名（标题/文件名写「{v}」，原文里只在专业/院校上下文出现，"
+                    "未采用，请人工确认）")
                 continue
-            if old and str(old) != str(v):
-                conflicts.append(f"姓名（正文抽取为「{old}」，以标题为准）")
-            cand[k] = v
-            used.append(label[k])
-            continue
-        if old and str(old) != str(v):
-            conflicts.append(f"{label[k]}（正文抽取为「{old}」，以标题为准）")
         cand[k] = v
         used.append(label[k])
     if conflicts:

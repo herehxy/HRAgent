@@ -29,10 +29,13 @@
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import re
 import sys
+import threading
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -44,12 +47,56 @@ from . import sanitize
 
 EDU_RANK = {"大专": 1, "专科": 1, "本科": 2, "学士": 2, "研究生": 3, "硕士": 3, "博士": 4}
 
+#: 抽取结果缓存：同一份简历、同一个模型、同一个岗位方向，重复分析/重试时不必再烧一次 token。
+#: 键里带 prompt 版本，改提示词时手工 bump，避免旧缓存掩盖新逻辑。
+_LLM_PROMPT_VERSION = "2026-11-13"
+_LLM_CACHE: dict[tuple, dict] = {}
+_LLM_CACHE_LOCK = threading.Lock()
+_LLM_CACHE_MAX = 64
+
 #: 学历同义写法 → 标准档位。
 #: 简历里写「工学学士」「硕士研究生」「专科」都是常事，不归一会有两个后果：
 #: ① 该条教育经历被整行丢弃（原来词表里没有「学士」）；
 #: ② 即使认出来，`degree` 存成「学士」，下游按 `== "本科"` 找第一学历的代码会漏掉人。
 #: 归一之后全链路只有 大专/本科/硕士/博士 四种取值，与 `EDU_RANK` 的键保持一致。
-_DEGREE_ALIAS = {"学士": "本科", "研究生": "硕士", "专科": "大专"}
+_DEGREE_ALIAS = {
+    "学士": "本科", "大学本科": "本科",
+    "研究生": "硕士", "硕士研究生": "硕士",
+    "博士研究生": "博士",
+    "专科": "大专", "高职": "大专",
+}
+
+
+def normalize_degree(value: str | None) -> str | None:
+    """把简历/模型里的学历写法归一成 大专/本科/硕士/博士。
+
+    模型经常返回“硕士研究生”“博士研究生”“工学学士”这类完整写法；
+    不归一会被 `EDU_RANK`/`DEGREE_WORDS` 的白名单挡掉，表现为学历空白或
+    教育经历整段丢失。规则通道与模型通道共用这一张表。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return None
+    s = _DEGREE_ALIAS.get(s, s)
+    if s in EDU_RANK:
+        return _DEGREE_ALIAS.get(s, s)
+    # “工学学士”“管理学硕士”这类带前缀的写法：取包含的学位词。
+    for raw, canon in (("博士", "博士"), ("硕士", "硕士"),
+                       ("本科", "本科"), ("学士", "本科"),
+                       ("大专", "大专"), ("专科", "大专")):
+        if raw in s:
+            return canon
+    return None
+
+
+#: 证据校验时，归一后的学历还允许在原文里以这些同义写法出现。
+#: 否则“原文写研究生、模型归一成硕士”会被误判成原文没有这个值。
+_DEGREE_EVIDENCE_FORMS = {
+    "大专": ("大专", "专科", "高职"),
+    "本科": ("本科", "学士", "大学本科"),
+    "硕士": ("硕士", "研究生"),
+    "博士": ("博士", "博士研究生"),
+}
 
 # 证书词表（与技能本体分开：证书属于"资格"而非"能力"）
 CERT_LEXICON = [
@@ -533,7 +580,7 @@ def _edu_history_from_llm(raw, text: str) -> list[dict]:
     for item in (raw if isinstance(raw, list) else []):
         if not isinstance(item, dict):
             continue
-        deg = str(item.get("degree") or "").strip()
+        deg = normalize_degree(item.get("degree"))
         # v2.0.8：**校名必须先清洗**再进闸门。模型会把"在……就读""本硕……"整段当校名
         # （实测脏样本：`在太原理工大学`、`本硕太原理工大学`），这些值既能通过
         # "在原文里"这道闸，又匹配不上院校名单 → 层次/排名全空、同一所学校显示成多条。
@@ -561,7 +608,7 @@ def _merge_edu_history(primary, fallback) -> list[dict]:
     for item in list(primary or []) + list(fallback or []):
         if not isinstance(item, dict):
             continue
-        degree = str(item.get("degree") or "").strip()
+        degree = normalize_degree(item.get("degree"))
         school = _valid_school_name(item.get("school"))
         if degree not in DEGREE_WORDS or not school:
             continue
@@ -1040,9 +1087,15 @@ def verify_profile_against_text(fields: dict, field_evidence: dict,
             bad.append(k)
             continue
         ev = str((field_evidence or {}).get(k) or "")
-        # 证据片段本身必须在原文里（证明模型不是凭空写的），且值也要在原文里
+        # 证据片段本身必须在原文里（证明模型不是凭空写的），且值也要在原文里。
+        # 学历是归一后的标准词，原文可能写的是同义写法（研究生/学士/专科），
+        # 所以按同义表检查，不能只匹配标准词。
         ev_ok = bool(ev) and _norm_for_search(ev) in t_norm
-        val_ok = _norm_for_search(v) in t_norm
+        if k == "education":
+            val_ok = any(_norm_for_search(x) in t_norm
+                         for x in _DEGREE_EVIDENCE_FORMS.get(v, (v,)))
+        else:
+            val_ok = _norm_for_search(v) in t_norm
         if ev_ok and val_ok:
             ok[k] = v
         else:
@@ -1287,10 +1340,22 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
 
     if use_llm and llm_conf and llm_conf.get("api_key"):
         try:
-            raw = extract_llm(safe_text, jd,
-                              model=llm_conf.get("model", "deepseek-chat"),
-                              base_url=llm_conf.get("base_url", "https://api.deepseek.com/v1"),
-                              api_key=llm_conf["api_key"])
+            _model = llm_conf.get("model", "deepseek-chat")
+            _base = llm_conf.get("base_url", "https://api.deepseek.com/v1")
+            _ck = (hashlib.sha1(safe_text.encode("utf-8")).hexdigest(),
+                   str(_model), str(_base), str((jd or {}).get("role") or ""),
+                   _LLM_PROMPT_VERSION)
+            with _LLM_CACHE_LOCK:
+                _cached = _LLM_CACHE.get(_ck)
+            if _cached is not None:
+                raw = copy.deepcopy(_cached)
+            else:
+                raw = extract_llm(safe_text, jd, model=_model,
+                                  base_url=_base, api_key=llm_conf["api_key"])
+                with _LLM_CACHE_LOCK:
+                    if len(_LLM_CACHE) >= _LLM_CACHE_MAX:
+                        _LLM_CACHE.pop(next(iter(_LLM_CACHE)), None)
+                    _LLM_CACHE[_ck] = copy.deepcopy(raw)
             clean, removed = sanitize.strip_forbidden(raw)
             # v1.27.1：四六级**由模型判定**（带原文证据自证），规则只兜底。
             # 必须在 `_llm_fields` 之前算 —— 下面两处都要用同一个值，
@@ -1315,7 +1380,7 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
             # 前提是它们真的写在简历里（原文没有的一律丢掉，退回规则值）。
             _llm_fields = {
                 "name": clean.get("name"),
-                "education": clean.get("education") if clean.get("education") in EDU_RANK else None,
+                "education": normalize_degree(clean.get("education")),
                 "years": int(clean["years"]) if str(clean.get("years", "")).strip().isdigit() else None,
                 "school": clean.get("school"),
                 # v1.29：第一学历院校。与 school 分开抽、分开验 —— 简历里常有两所学校，

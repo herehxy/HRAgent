@@ -64,3 +64,19 @@ _pack_data/
 
 # 真实用户档案的整份镜像（真实简历 + 证件照 + 密钥）——绝不入库
 _prod_verify/
+
+# ---------- 本地审查/构建临时文件（2026-11-13 推送前补） ----------
+_review_fix_backup_*/
+_tmp_build_*.log
+_codex_probe*.py
+_codex_inspect.py
+*~RF*.TMP
+app/_bak_*.py
+app/*.bak-*
+app/_ui_check.js
+tests/_launch_tmp/
+tests/_perf_tmp_data/
+# 本地面试字典 / 检索配置（含单位与内网端点），远端保留示例
+config/interview.json
+config/search.json
+

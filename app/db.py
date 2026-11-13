@@ -36,6 +36,10 @@ from . import tiers as tiers_mod
 # 而延迟导入会让 `cet_level` 的口径在"有时可用有时不可用"之间摇摆。
 from .pipeline import extract as extract_mod
 
+#: 结构版本。每次新增表/列/索引时 +1，并写入 settings.schema_version。
+#: 这不是完整迁移框架，但至少能让排障时回答"这个库是哪一版结构"。
+SCHEMA_VERSION = 1
+
 SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -75,6 +79,8 @@ CREATE INDEX IF NOT EXISTS idx_cand_merged ON candidates(merged_into);
 -- `IS NULL`（人才库列表）则去借 idx_cand_merged —— 能用，但那是巧合，
 -- 一旦 merged_into 的选择性变化就会退化。两处都该有自己的索引。
 CREATE INDEX IF NOT EXISTS idx_cand_archived ON candidates(archived_at);
+-- 人才库默认排序：最近一次收到简历的导入时间（last_active_at）。
+CREATE INDEX IF NOT EXISTS idx_cand_last_active ON candidates(last_active_at DESC);
 
 -- ---------- 投递（N 次） ----------
 CREATE TABLE IF NOT EXISTS applications (
@@ -120,6 +126,95 @@ CREATE INDEX IF NOT EXISTS idx_app_cand_applied ON applications(candidate_id, ap
 CREATE INDEX IF NOT EXISTS idx_app_latest
     ON applications(candidate_id, COALESCE(applied_at, '') DESC, id DESC);
 
+-- ---------- 在职人员档案（历史表，保留数据） ----------
+-- 在职人员模块已移除：招聘流程不再自动生成 employees 记录。
+-- 表结构保留，只用于兼容旧数据与备份，不再有前端/接口入口。
+CREATE TABLE IF NOT EXISTS employees (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_no TEXT UNIQUE,
+    candidate_id INTEGER,
+    application_id INTEGER UNIQUE,
+    name TEXT,
+    former_name TEXT,
+    avatar_path TEXT,
+    gender TEXT,
+    birth_date TEXT,
+    ethnicity TEXT,
+    political_status TEXT,
+    marital_status TEXT,
+    native_place TEXT,
+    phone_enc TEXT,
+    email_enc TEXT,
+    id_card_enc TEXT,
+    id_card_bidx TEXT,
+    address TEXT,
+    household_address TEXT,
+    health_status TEXT,
+    emergency_contact TEXT,
+    emergency_relation TEXT,
+    emergency_phone_enc TEXT,
+    edu_level TEXT,
+    school TEXT,
+    major TEXT,
+    graduation_date TEXT,
+    work_start_date TEXT,
+    professional_title TEXT,
+    foreign_language TEXT,
+    computer_skill TEXT,
+    personnel_file_location TEXT,
+    self_evaluation TEXT,
+    unit TEXT,
+    department TEXT,
+    position TEXT,
+    job_level TEXT,
+    direct_manager TEXT,
+    work_location TEXT,
+    employment_type TEXT,
+    employment_status TEXT DEFAULT '试用期',
+    onboard_date TEXT,
+    probation_end_date TEXT,
+    regular_date TEXT,
+    leave_date TEXT,
+    contract_no TEXT,
+    contract_start TEXT,
+    contract_end TEXT,
+    education_json TEXT,
+    work_history_json TEXT,
+    family_json TEXT,
+    certificates_json TEXT,
+    source TEXT,
+    note TEXT,
+    extra_json TEXT,
+    created_at TEXT, updated_at TEXT,
+    created_by TEXT, updated_by TEXT,
+    archived_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_emp_status ON employees(employment_status, id);
+CREATE INDEX IF NOT EXISTS idx_emp_unit ON employees(unit, department, id);
+CREATE INDEX IF NOT EXISTS idx_emp_onboard ON employees(onboard_date);
+CREATE INDEX IF NOT EXISTS idx_emp_app ON employees(application_id);
+CREATE INDEX IF NOT EXISTS idx_emp_bidx ON employees(id_card_bidx);
+
+CREATE TABLE IF NOT EXISTS employee_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id INTEGER NOT NULL,
+    doc_type TEXT DEFAULT 'other',
+    file_hash TEXT,
+    file_name TEXT,
+    file_path TEXT,
+    mime TEXT,
+    size INTEGER,
+    ocr_status TEXT DEFAULT '待识别',
+    ocr_engine TEXT,
+    ocr_text TEXT,
+    ocr_json TEXT,
+    extracted_json TEXT,
+    review_status TEXT DEFAULT '待复核',
+    created_at TEXT, updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_empdoc_emp ON employee_documents(employee_id, id);
+CREATE INDEX IF NOT EXISTS idx_empdoc_hash ON employee_documents(file_hash);
+
 -- ---------- 附件（原件与解析分离） ----------
 CREATE TABLE IF NOT EXISTS documents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,9 +227,13 @@ CREATE TABLE IF NOT EXISTS documents (
     source_message_id TEXT,
     raw_text TEXT, text_len INTEGER,
     parse_engine TEXT, parse_ok INTEGER DEFAULT 1,
+    kind TEXT DEFAULT 'resume',            -- resume / other；老库由 _ensure_columns 补
     created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_doc_cand ON documents(candidate_id);
+-- 档案页/重新分析都要按"简历附件、最新在前"取，避免全表排序。
+CREATE INDEX IF NOT EXISTS idx_doc_cand_kind_id
+    ON documents(candidate_id, kind, id DESC);
 CREATE INDEX IF NOT EXISTS idx_doc_msg  ON documents(source_message_id);
 
 -- ---------- 技能本体 ----------
@@ -293,6 +392,20 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     cache_hit_tokens INTEGER DEFAULT 0,
     -- 服务商是否上报过缓存字段；0=没报（不能显示 0%），1=报了（0 也是真实 0%）
     cache_reported INTEGER DEFAULT 0,
+    -- v5.1.4：上下文治理与运行质量指标（每轮问答一行）。
+    -- tool_ratio / tool_error_rate 存 0~1 的小数，界面再换算百分比。
+    tool_tokens INTEGER DEFAULT 0,
+    tool_ratio REAL DEFAULT 0,
+    tool_calls_count INTEGER DEFAULT 0,
+    tool_errors INTEGER DEFAULT 0,
+    tool_error_rate REAL DEFAULT 0,
+    context_budget INTEGER DEFAULT 0,
+    context_trimmed INTEGER DEFAULT 0,
+    alert_level TEXT DEFAULT '',
+    -- alerts_json: [{code,level,message,value,threshold}, ...]
+    -- metrics_json: 预算/分轮 token/工具占比/缓存/治理统计
+    alerts_json TEXT,
+    metrics_json TEXT,
     latency_ms INTEGER, status TEXT, mode TEXT,
     operator TEXT, ts TEXT,
     -- v5：编辑/重发时旧分支只软隐藏（不删除），审计与成本记录仍保留。
@@ -353,6 +466,37 @@ CREATE TABLE IF NOT EXISTS embeddings (
 -- ---------- 设置 ----------
 CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT);
 
+-- ---------- 后台任务（2026-11-13） ----------
+-- 导入/收取/分析/发信的进度原来只在进程内存里，刷新页面还能靠内存查，
+-- 但**服务重启后任务就彻底消失**。这里落一份快照：启动、进度更新、结束都写，
+-- 页面刷新或服务重启后至少能看到"上次跑到哪、为什么中断"，而不是一片空白。
+CREATE TABLE IF NOT EXISTS background_tasks (
+    task_id TEXT PRIMARY KEY,
+    kind TEXT DEFAULT 'general',
+    title TEXT DEFAULT '',
+    total INTEGER DEFAULT 0,
+    done INTEGER DEFAULT 0,
+    failed INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'running',
+    message TEXT DEFAULT '',
+    meta_json TEXT,
+    data_json TEXT,
+    started_at REAL,
+    updated_at TEXT,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_bg_tasks_status
+    ON background_tasks(status, started_at DESC);
+
+-- ---------- 邮件发送幂等键 ----------
+-- 原来幂等表只在 server 进程内存里：服务重启/多 worker/多实例后，
+-- 同一 client_request_id 会再次投递 SMTP。邮件不可撤回，必须跨进程持久化。
+CREATE TABLE IF NOT EXISTS mail_requests (
+    client_request_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    created_at TEXT
+);
+
 -- ---------- 招聘届别与年度计划（v4.0.16） ----------
 -- 届别是统计边界：招生/校招按“届”走，而不是自然年。
 -- 起止日期用于判定“签约时间是否属于本届”，所以必须显式存、且不允许重叠。
@@ -391,6 +535,8 @@ CREATE INDEX IF NOT EXISTS idx_recruit_plans_year ON recruit_plans(year_id);
 _JSON_FIELDS = (
     "reasons", "risks", "hits", "miss", "preferred_hit",
     "breakdown", "aliases", "tool_calls", "args",
+    "alerts_json", "metrics_json",
+    "extra_json", "ocr_json", "extracted_json",
 )
 
 
@@ -515,6 +661,42 @@ _INIT_LOCK = threading.Lock()
 _MIGRATION_BY_PATH: dict[str, dict] = {}
 
 
+class _PooledConnection(sqlite3.Connection):
+    """按线程复用的 SQLite 连接：`close()` 回池而不是真正关闭。
+
+    原来每个请求 `db.connect()` 都新建连接（PRAGMA + 迁移检查约 2ms，
+    一个请求里常开 2-4 条）。连接按线程缓存：FastAPI 的同步路由在线程池里跑，
+    同一线程的下一个请求直接复用，不再重复开销。
+
+    安全性：归还前强制 `rollback()`，避免把上一个请求未提交的事务/游标
+    带给下一个请求；`close()` 被调用两次或线程池已满时才真正关闭。
+    """
+
+    _pool_key: tuple | None = None
+
+    def close(self) -> None:                             # noqa: D401
+        try:
+            if self.in_transaction:
+                self.rollback()
+        except Exception:                                # noqa: BLE001
+            pass
+        pool = getattr(_db_pool_local, "by_key", None)
+        key = getattr(self, "_pool_key", None)
+        if getattr(self, "_pool_owner", None) != threading.get_ident():
+            key = None                      # 跨线程归还：不池化，直接关掉
+        if pool is not None and key is not None and key not in pool and len(pool) < 8:
+            self.row_factory = sqlite3.Row
+            pool[key] = self
+            return
+        try:
+            super().close()
+        except Exception:                                # noqa: BLE001
+            pass
+
+
+_db_pool_local = threading.local()
+
+
 def connect(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """打开连接：自动建表、自动迁移 v0.1 数据、自动补列。
 
@@ -533,12 +715,30 @@ def connect(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     directory = os.path.dirname(os.path.abspath(db_path))
     if directory:
         os.makedirs(directory, exist_ok=True)
-    conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
+    # 按线程复用连接（见 `_PooledConnection`）。`:memory:` 不池化——
+    # 复用同一条内存库连接会让"新连接应该是空库"的语义失真。
+    pool_key = None
+    conn = None
+    if db_path and db_path != ":memory:":
+        pool_key = (os.path.abspath(db_path), bool(check_same_thread))
+        pool = getattr(_db_pool_local, "by_key", None)
+        if pool is None:
+            pool = {}
+            _db_pool_local.by_key = pool
+        conn = pool.pop(pool_key, None)
+    if conn is None:
+        conn = sqlite3.connect(db_path, check_same_thread=check_same_thread,
+                               factory=_PooledConnection)
+    conn._pool_key = pool_key
+    conn._pool_owner = threading.get_ident()
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     # 并发写保护：默认 busy_timeout=0 时，后台巡检正在写与 HR 正在点会直接
     # 抛 database is locked；5 秒等待对本地单文件库足够。
     conn.execute("PRAGMA busy_timeout = 5000")
+    # WAL 下 synchronous=NORMAL 已能保证进程崩溃不丢已提交事务，
+    # 又比 FULL 少一次 fsync；批量导入/OCR 时差距明显。
+    conn.execute("PRAGMA synchronous = NORMAL")
     key = os.path.abspath(db_path)
     if key not in _INITIALIZED:
         with _INIT_LOCK:
@@ -550,6 +750,196 @@ def connect(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     if key in _MIGRATION_BY_PATH:
         _MIGRATIONS[id(conn)] = _MIGRATION_BY_PATH[key]
     return conn
+
+
+def schema_info(conn: sqlite3.Connection) -> dict:
+    """返回库结构版本与 SQLite 版本，用于启动日志/排障。"""
+    try:
+        row = conn.execute("SELECT v FROM settings WHERE k='schema_version'").fetchone()
+        stored = int(row["v"]) if row and str(row["v"]).isdigit() else None
+    except sqlite3.Error:
+        stored = None
+    return {"schema_version": stored, "current_schema": SCHEMA_VERSION,
+            "sqlite": sqlite3.sqlite_version}
+
+
+def task_upsert(db_path: str, rec: dict) -> None:
+    """把后台任务快照写入 `background_tasks`（幂等 upsert）。
+
+    任何失败都只吞掉：任务进度是**辅助可观测信息**，不能因为写日志失败
+    把正在跑的收取/分析任务打断。调用方通常会节流，不会每条进度都写。
+    """
+    if not db_path or not rec.get("task_id"):
+        return
+    status = str(rec.get("status") or "running")
+    finished = rec.get("finished_at") or (now() if status in ("done", "error") else None)
+    meta = rec.get("meta") or {}
+    data = rec.get("data") or {}
+    try:
+        conn = connect(db_path)
+        try:
+            conn.execute(
+                """INSERT INTO background_tasks
+                   (task_id, kind, title, total, done, failed, status, message,
+                    meta_json, data_json, started_at, updated_at, finished_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(task_id) DO UPDATE SET
+                     kind=excluded.kind, title=excluded.title,
+                     total=excluded.total, done=excluded.done,
+                     failed=excluded.failed, status=excluded.status,
+                     message=excluded.message, meta_json=excluded.meta_json,
+                     data_json=excluded.data_json, started_at=excluded.started_at,
+                     updated_at=excluded.updated_at, finished_at=excluded.finished_at""",
+                (rec["task_id"], rec.get("kind") or "general", rec.get("title") or "",
+                 int(rec.get("total") or 0), int(rec.get("done") or 0),
+                 int(rec.get("failed") or 0), status, rec.get("message") or "",
+                 json.dumps(meta, ensure_ascii=False),
+                 json.dumps(data, ensure_ascii=False),
+                 rec.get("started_at"), now(), finished))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:                                      # noqa: BLE001
+        pass
+
+
+def _task_decode(row: sqlite3.Row) -> dict:
+    out = dict(row)
+    for k in ("meta", "data"):
+        raw = out.pop(k + "_json", None)
+        try:
+            out[k] = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            out[k] = {}
+    # 兼容进度 API：把 data 里的 report/result 提升到顶层
+    for k, v in (out.get("data") or {}).items():
+        out.setdefault(k, v)
+    return out
+
+
+def task_get(db_path: str, task_id: str) -> dict | None:
+    if not db_path or not task_id:
+        return None
+    try:
+        conn = connect(db_path)
+        try:
+            row = conn.execute("SELECT * FROM background_tasks WHERE task_id = ?",
+                               (task_id,)).fetchone()
+            return _task_decode(row) if row else None
+        finally:
+            conn.close()
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+def task_list(db_path: str, *, kind: str | None = None,
+              include_done: bool = False, limit: int = 50) -> list[dict]:
+    if not db_path:
+        return []
+    sql = "SELECT * FROM background_tasks"
+    where, args = [], []
+    if kind:
+        where.append("kind = ?")
+        args.append(kind)
+    if not include_done:
+        where.append("status = 'running'")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY started_at DESC LIMIT ?"
+    args.append(int(limit or 50))
+    try:
+        conn = connect(db_path)
+        try:
+            return [_task_decode(r) for r in conn.execute(sql, args).fetchall()]
+        finally:
+            conn.close()
+    except Exception:                                      # noqa: BLE001
+        return []
+
+
+def task_mark_interrupted(db_path: str, message: str = "服务重启，任务已中断",
+                          stale_seconds: int = 600) -> int:
+    """启动时把**确实已经没人更新**的 running 任务标成中断。
+
+    不能无条件把所有 running 都标 error：两个实例共用一个库、或旧进程还没退干净时，
+    启动中的新实例会把另一个实例正在跑的任务误伤成「中断」。
+    任务执行期间至少每秒会刷新一次 updated_at（进度落库），
+    因此只处理超过 `stale_seconds`（默认 10 分钟）没有任何更新的任务。
+    """
+    if not db_path:
+        return 0
+    try:
+        cutoff = (datetime.now() - timedelta(seconds=max(0, int(stale_seconds)))
+                  ).strftime("%Y-%m-%d %H:%M:%S")
+        conn = connect(db_path)
+        try:
+            cur = conn.execute(
+                "UPDATE background_tasks SET status='error', message=?, "
+                "finished_at=?, updated_at=? "
+                "WHERE status='running' AND COALESCE(updated_at, '') <= ?",
+                (message, now(), now(), cutoff))
+            conn.commit()
+            return cur.rowcount or 0
+        finally:
+            conn.close()
+    except Exception:                                      # noqa: BLE001
+        return 0
+
+
+def task_cleanup(db_path: str, days: int = 30) -> int:
+    """清理保留期外的后台任务快照（以及配套的邮件幂等键）。
+
+    任务表里存着导入明细（文件名、候选人、路径），长期不清理会变成一份
+    绕开候选人 purge 的 PII 残留；同时 report 体积也会让库持续膨胀。
+    """
+    if not db_path:
+        return 0
+    try:
+        cutoff = (datetime.now() - timedelta(days=max(1, int(days)))
+                  ).strftime("%Y-%m-%d %H:%M:%S")
+        conn = connect(db_path)
+        try:
+            cur = conn.execute(
+                "DELETE FROM background_tasks "
+                "WHERE status IN ('done', 'error') "
+                "AND COALESCE(finished_at, updated_at, '') <= ?", (cutoff,))
+            n = cur.rowcount or 0
+            # 幂等键与任务同寿命：任务记录清掉后，旧键继续留着会让前端
+            # 得到一个「已发送」但其实没有任务可查的回应。
+            conn.execute("DELETE FROM mail_requests WHERE COALESCE(created_at, '') <= ?",
+                         (cutoff,))
+            conn.commit()
+            return n
+        finally:
+            conn.close()
+    except Exception:                                      # noqa: BLE001
+        return 0
+
+
+def mail_request_claim(db_path: str, req_id: str, task_id: str) -> tuple[str, bool]:
+    """原子登记邮件幂等键。返回 (最终 task_id, 是否由本次请求创建)。
+
+    跨进程/重启有效：INSERT OR IGNORE + PRIMARY KEY 决定唯一赢家；
+    已有记录时返回原 task_id，调用方据此回放原任务状态而不是再发一封邮件。
+    """
+    req_id = str(req_id or "").strip()
+    if not req_id:
+        return task_id, True
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO mail_requests "
+            "(client_request_id, task_id, created_at) VALUES (?,?,?)",
+            (req_id, task_id, now()))
+        conn.commit()
+        if cur.rowcount:
+            return task_id, True
+        row = conn.execute(
+            "SELECT task_id FROM mail_requests WHERE client_request_id = ?",
+            (req_id,)).fetchone()
+        return (row["task_id"] if row else task_id), False
+    finally:
+        conn.close()
 
 
 def _rename_legacy_stage(conn: sqlite3.Connection) -> int:
@@ -588,6 +978,11 @@ def _init_schema(conn: sqlite3.Connection) -> dict | None:
     _ensure_columns(conn)
     _ensure_extra_indexes(conn)       # v4.0.16：索引依赖 _ADD 补出来的列
     _rename_legacy_stage(conn)        # v4.0.9：全部简历 → 新投递
+    # 记录结构版本（不是完整迁移框架，但排障时能知道库是哪一版）。
+    conn.execute(
+        "INSERT INTO settings(k, v) VALUES('schema_version', ?) "
+        "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+        (str(SCHEMA_VERSION),))
     conn.commit()
     return migration
 
@@ -750,6 +1145,10 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     否则升级后的老库会缺列、在运行到查询时才报 `no such column`。
     """
     _ADD = {
+        # 首次登录/管理员重置后强制改密（v6.0.0 审查 O11）。
+        "users": {
+            "must_change_password": "INTEGER DEFAULT 0",
+        },
         "jobs": {
             "dept_id": "INTEGER",
             "active": "INTEGER DEFAULT 1",
@@ -863,6 +1262,19 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             # 现在 outcome 只放面试结论，签约状态单独一列，招聘进度按这一列同步。
             "sign_status": "TEXT",
         },
+        # v5.2：在职人员档案的完整入职登记表字段（老库由这里补列）。
+        "employees": {
+            "former_name": "TEXT", "ethnicity": "TEXT",
+            "political_status": "TEXT", "marital_status": "TEXT",
+            "native_place": "TEXT", "household_address": "TEXT",
+            "health_status": "TEXT", "emergency_relation": "TEXT",
+            "professional_title": "TEXT", "foreign_language": "TEXT",
+            "computer_skill": "TEXT", "personnel_file_location": "TEXT",
+            "self_evaluation": "TEXT", "education_json": "TEXT",
+            "work_history_json": "TEXT", "family_json": "TEXT",
+            "certificates_json": "TEXT",
+            "avatar_path": "TEXT",
+        },
         # v1.29：模板用途。**必须显式存**而不是按模板名判断 ——
         # 模板名 HR 随时会改（「初面邀约」改成「面试通知」），按名字匹配的话
         # 改个名"发信自动回写面试信息"就静默失效了。用途是结构化的，改名字不影响。
@@ -896,6 +1308,17 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "context_json": "TEXT",
             "cache_hit_tokens": "INTEGER DEFAULT 0",
             "cache_reported": "INTEGER DEFAULT 0",
+            # v5.1.4：上下文治理/运行指标（老库由这里补列）
+            "tool_tokens": "INTEGER DEFAULT 0",
+            "tool_ratio": "REAL DEFAULT 0",
+            "tool_calls_count": "INTEGER DEFAULT 0",
+            "tool_errors": "INTEGER DEFAULT 0",
+            "tool_error_rate": "REAL DEFAULT 0",
+            "context_budget": "INTEGER DEFAULT 0",
+            "context_trimmed": "INTEGER DEFAULT 0",
+            "alert_level": "TEXT DEFAULT ''",
+            "alerts_json": "TEXT",
+            "metrics_json": "TEXT",
         },
         "agent_conversations": {
             "memory_json": "TEXT",
@@ -988,7 +1411,9 @@ def _decode(d: dict) -> dict:
             try:
                 d[k] = json.loads(d[k])
             except (ValueError, TypeError):
-                d[k] = [] if k not in ("breakdown", "args") else {}
+                d[k] = ({} if k in ("breakdown", "args", "alerts_json", "metrics_json",
+                                    "extra_json", "ocr_json", "extracted_json")
+                        else [])
     for k in ("needs_review", "has_attachment", "processed", "active", "blind", "verified", "parse_ok"):
         if k in d and d[k] is not None:
             d[k] = bool(d[k])
@@ -1700,7 +2125,7 @@ def app_status_display(item: dict) -> tuple[str, str]:
 
 
 def _attach_skills(conn: sqlite3.Connection, items: list[dict],
-                   with_skills: bool = True) -> list[dict]:
+                   with_skills: bool = True, with_detail: bool = True) -> list[dict]:
     """给列表项补技能明细与派生字段。
 
     `with_skills=False`（v1.23.5）：**只补不查库的派生字段**，跳过技能查询。
@@ -1732,7 +2157,9 @@ def _attach_skills(conn: sqlite3.Connection, items: list[dict],
     for i in items:
         if with_skills:
             i["skills"] = bucket.get(i["id"], [])
-            i["skill_detail"] = detail.get(i["id"], [])
+            # 列表卡片只用技能名；带证据的 skill_detail 在 50 人页里约 180KB，
+            # 只有详情/助手分析需要。with_detail=False 时不下发。
+            i["skill_detail"] = detail.get(i["id"], []) if with_detail else []
         else:
             i["skills"] = []
             i["skill_detail"] = []
@@ -1779,6 +2206,7 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
                     stage: str | None = None, pool_status: str | None = None,
                     needs_review: bool | None = None, include_merged: bool = False,
                     archived: bool | None = None, limit: int | None = None,
+                    ids: list[int] | None = None,
                     light: bool = False) -> list[dict]:
     """`archived` 参数三态（v1.4 软归档）：
     `None`（默认）不过滤——统计、合并等内部口径保持全量，行为与旧版完全一致；
@@ -1900,13 +2328,24 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
             "            WHERE cs3.candidate_id = c.id"
             "              AND LOWER(COALESCE(s3.canonical_name,'')) LIKE ?))")
         args.extend([like] * 13)
+    # 只取指定 id（技能检索命中的那批）：避免 `search_candidates_by_skills`
+    # 把全库装配一遍再在 Python 里过滤。空列表直接返回空集。
+    if ids is not None:
+        _ids = [int(x) for x in ids]
+        if not _ids:
+            return []
+        where.append("c.id IN (" + ",".join("?" * len(_ids)) + ")")
+        args.extend(_ids)
     if where:
         sql += " WHERE " + " AND ".join(where)
-    # 默认排序（v4.0.15，业务方 2026-11-02 明确要求）：**只看投递时间，最新在前**。
+    # 默认排序（v4.0.15，业务方 2026-11-02；2026-11-13 调整）：
+    # **按最近一次收到简历的导入时间，最新在前**。
     # 不再按档位做任何特殊处理，也不再按分数排 —— 分数受"是否识别出年限/技能词表
-    # 命中"影响，不能当排序依据；档位是判断结果，不是时间。HR 的工作方式是
-    # "刚收到的简历先看"，所以列表只按 applied_at 倒序，同一天再按 id 倒序兜底。
-    sql += " ORDER BY COALESCE(a.applied_at,'') DESC, c.id DESC"
+    # 命中"影响，不能当排序依据；档位是判断结果，不是时间。
+    # 用 `last_active_at` 而不是 `applied_at`：同一岗位的新版本简历会并入原投递，
+    # `applied_at` 仍是首次投递时间；只看它的话，HR 刚收到的新版本不会浮上来。
+    # `last_active_at` 在每次收到简历（含重复件）时刷新，正好是"最新导入时间"。
+    sql += " ORDER BY COALESCE(c.last_active_at, a.applied_at, '') DESC, c.id DESC"
     if limit:
         sql += f" LIMIT {int(limit)}"
     items = [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
@@ -1929,6 +2368,13 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
             it["missing_fields"] = _mf
         it["parse_failed"] = (it.get("doc_parse_ok") is not None
                               and not it.get("doc_parse_ok"))
+    # 轻量模式（列表分页 / 打包导出）不返回详情专用的大字段：
+    # honors_json / projects_json / edu_history 在 50 人页里合计约 300KB，
+    # 列表卡片一个都用不到，只有完整档案才需要。
+    if light:
+        for it in items:
+            for _heavy in ("honors_json", "projects_json", "edu_history"):
+                it.pop(_heavy, None)
     # 院校层次标签（v1.7.3）：每条都挂上（不限筛选时卡片也要显示 985/211 标签）。
     # **筛选也放这里**（v1.23.4）：原来只在 server 层筛，导致智能助手的
     # `search_candidates` 根本没这个参数——HR 问"985 的人有哪些"，
@@ -3263,26 +3709,58 @@ def candidate_skill_names(conn: sqlite3.Connection, candidate_id: int,
     return [r["name"] for r in candidate_skill_rows(conn, candidate_id, verified_only)]
 
 
+def candidate_skill_rows_many(conn: sqlite3.Connection, candidate_ids: list[int],
+                              verified_only: bool = False) -> dict[int, list[dict]]:
+    """一次取回多个候选人的技能明细（按 candidate_id 分组）。
+
+    技能检索原来对每个命中的人各查一次 `candidate_skill_rows`（N+1）；
+    命中 100 人就是 100 条 SQL。这里改成一条 IN 查询。
+    """
+    ids = [int(x) for x in candidate_ids]
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    sql = ("SELECT cs.candidate_id, s.id, s.canonical_name AS name, s.category, "
+           "cs.level, cs.verified, cs.evidence, cs.source "
+           "FROM candidate_skills cs JOIN skills s ON s.id = cs.skill_id "
+           f"WHERE cs.candidate_id IN ({marks})")
+    if verified_only:
+        sql += " AND cs.verified = 1"
+    sql += " ORDER BY cs.candidate_id, s.category, s.canonical_name"
+    out: dict[int, list[dict]] = {}
+    for r in conn.execute(sql, ids).fetchall():
+        d = _decode(dict(r))
+        out.setdefault(int(d["candidate_id"]), []).append(d)
+    return out
+
+
 def search_candidates_by_skills(conn: sqlite3.Connection, names: list[str],
                                 mode: str = "all", verified_only: bool = True) -> list[dict]:
-    """按技能本体名检索候选人。mode: all=全中 / any=任一命中。"""
-    want = {n.strip() for n in names if n and n.strip()}
+    """按技能本体名检索候选人。mode: all=全中 / any=任一命中。
+
+    原来的实现先取全库候选人 id，再逐人查技能（N+1），命中后又把全库
+    `list_candidates()` 重载一遍。现在用一条 GROUP BY 找出命中的人，
+    再按 id 只装配这批人的投递/档案字段。
+    """
+    want = sorted({n.strip() for n in names if n and n.strip()})
     if not want:
         return []
-    ids = [
-        r["id"] for r in conn.execute(
-            "SELECT id FROM candidates WHERE merged_into IS NULL").fetchall()
-    ]
-    out = []
-    for cid in ids:
-        have = set(candidate_skill_names(conn, cid, verified_only))
-        ok = want <= have if mode == "all" else bool(want & have)
-        if ok:
-            out.append(cid)
-    if not out:
+    marks = ",".join("?" * len(want))
+    sql = ("SELECT cs.candidate_id AS cid, "
+           "COUNT(DISTINCT s.canonical_name) AS hits "
+           "FROM candidate_skills cs JOIN skills s ON s.id = cs.skill_id "
+           f"WHERE s.canonical_name IN ({marks})")
+    args: list = list(want)
+    if verified_only:
+        sql += " AND cs.verified = 1"
+    sql += " GROUP BY cs.candidate_id"
+    if mode == "all":
+        sql += " HAVING hits >= ?"
+        args.append(len(want))
+    ids = [int(r["cid"]) for r in conn.execute(sql, args).fetchall()]
+    if not ids:
         return []
-    wanted = set(out)
-    return [c for c in list_candidates(conn) if c["id"] in wanted]
+    return list_candidates(conn, ids=ids)
 
 
 # ============================================================
@@ -3394,6 +3872,7 @@ AUDIT_LABEL = {
     "create": "新建了", "update": "修改了", "set_password": "重置了密码",
     "import_domain": "导入了领域词表", "send": "发送了邮件",
     "chat_clear": "清空了对话", "chat_restore": "恢复了对话", "chat_purge": "清理了对话记录",
+    "context_alert": "触发了上下文告警",
     "update": "修改了", "edit_settings": "修改了系统设置", "edit_config": "修改了配置",
     # 提案的处置：`db.decide_proposal` 传的 action 就是 decision 本身
     "approve": "确认执行了提案", "reject": "拒绝了提案",
@@ -3415,6 +3894,7 @@ AUDIT_FIELD_LABEL = {
     # key **长度倒序**替换（短的先替会把长的切碎），加新键不必考虑书写顺序。
     "cet": "英语四六级",
     "first_degree_school": "第一学历（本科）院校",
+    "edu_history": "教育经历", "in_school": "在读状态",
 }
 
 
@@ -3445,8 +3925,18 @@ def audit_field_value(field: str, value) -> str:
     v = v.strip()
     if not v:
         return "（空）"
-    if field in AUDIT_MASK_FIELDS and "phone" in field and len(v) >= 7:
-        return v[:3] + "*" * max(4, len(v) - 7) + v[-4:]
+    if field in AUDIT_MASK_FIELDS:
+        # 电话保留前 3 后 4，邮箱保留首字符 + 域名 —— 审计是"谁改了什么"的
+        # 追溯记录，不是第二份 PII 台账。原实现只判断了 "phone"，
+        # 改邮箱时会把完整邮箱明文写进 audit_log（候选人 purge 后仍残留）。
+        if "email" in field and len(v) >= 5:
+            try:
+                from . import crypto             # 延迟导入：避免 db↔crypto 循环
+                return crypto.mask_email(v)
+            except Exception:                    # noqa: BLE001
+                return v[:1] + "***@" + (v.split("@", 1)[1] if "@" in v else "")
+        if "phone" in field and len(v) >= 7:
+            return v[:3] + "*" * max(4, len(v) - 7) + v[-4:]
     return v
 
 #: 同名的动作在实体不同时说法不同（如 create）。
@@ -3468,7 +3958,7 @@ AUDIT_ENTITY_LABEL = {
     "proposal": "提案", "settings": "系统设置", "source_file": "来源文件",
     "ontology": "领域词表", "chat": "对话", "bundle": "打包", "feedback": "反馈",
     "insight": "分析", "interview_dict": "面试字典", "mailbox": "邮箱配置",
-    "user": "账号",
+    "user": "账号", "agent_run": "助手运行",
 }
 
 
@@ -3823,9 +4313,15 @@ def list_proposals(conn: sqlite3.Connection, status: str | None = None, limit: i
                                          audit_label("proposal", d.get("tool") or ""))
         # 敏感值已加密落库（enc:...），下发给前端前统一掩码，
         # 既不出密文也不出明文，只提示「已设置」。
-        if isinstance(d.get("args"), str):
+        # ⚠️ `_decode()` 在上一步已经把 args 从 JSON 字符串解析成 dict，
+        # 原来只判断 isinstance(str) 的掩码分支**永远不执行** ——
+        # 等于把 enc: 密文（或降级时的明文）原样下发到了前端。
+        _args = d.get("args")
+        if isinstance(_args, dict):
+            d["args"] = _mask_sensitive_args(_args)
+        elif isinstance(_args, str):
             try:
-                _a = json.loads(d["args"])
+                _a = json.loads(_args)
                 d["args"] = json.dumps(_mask_sensitive_args(_a), ensure_ascii=False)
             except Exception:
                 pass
@@ -4243,6 +4739,44 @@ def decide_proposal(conn: sqlite3.Connection, pid: int, decision: str,
     return get_proposal(conn, pid)
 
 
+def claim_proposal(conn: sqlite3.Connection, pid: int, operator: str = "HR") -> bool:
+    """原子地把「待确认」提案标记为「执行中」。
+
+    两个并发 decide 请求原来都读到「待确认」，然后各自执行一遍副作用
+    （建岗位/加备注/合并档案……），最后都写「已执行」——重复执行既难查也难回滚。
+    `UPDATE ... WHERE status='待确认'` 的 rowcount 是唯一的裁决：只有一个请求能拿到 1。
+    """
+    cur = conn.execute(
+        "UPDATE proposals SET status='执行中', decided_by=?, decided_at=? "
+        "WHERE id=? AND status='待确认'",
+        (operator, now(), pid))
+    conn.commit()
+    return (cur.rowcount or 0) == 1
+
+
+def release_proposal(conn: sqlite3.Connection, pid: int) -> None:
+    """执行失败/提前返回时把「执行中」放回「待确认」，避免提案卡死。"""
+    conn.execute(
+        "UPDATE proposals SET status='待确认', decided_by=NULL, decided_at=NULL "
+        "WHERE id=? AND status='执行中'", (pid,))
+    conn.commit()
+
+
+def release_stale_proposals(conn: sqlite3.Connection, stale_minutes: int = 60) -> int:
+    """启动时释放在「执行中」卡住超过阈值的提案（进程崩溃/被杀留下的）。
+
+    正常路径由 `actions.apply_proposal` 的 finally 放回；但进程直接退出时
+    finally 不会跑，提案会永久停在「执行中」，HR 再也无法处理。
+    """
+    cutoff = (datetime.now() - timedelta(minutes=max(1, int(stale_minutes)))
+              ).strftime("%Y-%m-%d %H:%M:%S")
+    cur = conn.execute(
+        "UPDATE proposals SET status='待确认', decided_by=NULL, decided_at=NULL "
+        "WHERE status='执行中' AND COALESCE(decided_at, '') <= ?", (cutoff,))
+    conn.commit()
+    return cur.rowcount or 0
+
+
 # ============================================================
 # 收信台账
 # ============================================================
@@ -4423,8 +4957,11 @@ def log_agent_run(conn: sqlite3.Connection, rec: dict) -> int:
         """INSERT INTO agent_runs
            (session_id, question, answer, thinking, context_json, model,
             tool_calls, rounds, tokens_in, tokens_out, cache_hit_tokens,
-            cache_reported, latency_ms, status, mode, operator, ts)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            cache_reported, tool_tokens, tool_ratio, tool_calls_count,
+            tool_errors, tool_error_rate, context_budget, context_trimmed,
+            alert_level, alerts_json, metrics_json,
+            latency_ms, status, mode, operator, ts)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (rec.get("session_id"), rec.get("question"), rec.get("answer"),
          rec.get("thinking") or "",
          json.dumps(rec.get("context") or {}, ensure_ascii=False),
@@ -4432,6 +4969,12 @@ def log_agent_run(conn: sqlite3.Connection, rec: dict) -> int:
          json.dumps(rec.get("tool_calls", []), ensure_ascii=False), rec.get("rounds", 0),
          rec.get("tokens_in", 0), rec.get("tokens_out", 0),
          rec.get("cache_hit_tokens", 0), rec.get("cache_reported", 0),
+         rec.get("tool_tokens", 0), rec.get("tool_ratio", 0),
+         rec.get("tool_calls_count", 0), rec.get("tool_errors", 0),
+         rec.get("tool_error_rate", 0), rec.get("context_budget", 0),
+         rec.get("context_trimmed", 0), rec.get("alert_level", ""),
+         json.dumps(rec.get("alerts") or [], ensure_ascii=False),
+         json.dumps(rec.get("metrics") or {}, ensure_ascii=False),
          rec.get("latency_ms", 0),
          rec.get("status", "ok"), rec.get("mode"), rec.get("operator", "HR"), _stamp),
     )
@@ -4448,7 +4991,14 @@ def list_agent_runs(conn: sqlite3.Connection, limit: int = 50,
         args.append(operator)
     sql += " ORDER BY id DESC LIMIT ?"
     args.append(int(limit))
-    return [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
+    out = []
+    for row in conn.execute(sql, args).fetchall():
+        rec = _decode(dict(row))
+        # 给 API/界面一个稳定别名；数据库列名保留 *_json，避免和旧列冲突。
+        rec["alerts"] = rec.get("alerts_json") or []
+        rec["metrics"] = rec.get("metrics_json") or {}
+        out.append(rec)
+    return out
 
 
 # ============================================================
@@ -4741,7 +5291,8 @@ def chat_history(conn: sqlite3.Connection, limit: int = 300,
             base_args.append(operator)
 
     sql = ("SELECT id, question, answer, thinking, context_json, mode, rounds, "
-           "tool_calls, status, ts, tokens_in, tokens_out, latency_ms "
+           "tool_calls, status, ts, tokens_in, tokens_out, latency_ms, "
+           "metrics_json, alerts_json "
            "FROM agent_runs" + where + " ORDER BY id ASC LIMIT ?")
     query_args = list(base_args) + [int(limit)]
 
@@ -4791,6 +5342,8 @@ def chat_history(conn: sqlite3.Connection, limit: int = 300,
                              "tools": tcs,
                              "downloads": downloads,
                              "latency_ms": d.get("latency_ms"),
+                             "metrics": d.get("metrics_json") or {},
+                             "alerts": d.get("alerts_json") or [],
                              "proposals": props, "drafts": drafts,
                              "tokens": (d.get("tokens_in") or 0) + (d.get("tokens_out") or 0)})
 
@@ -5060,7 +5613,8 @@ def agent_metrics(conn: sqlite3.Connection, days: int = 7) -> dict:
     since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     rows = conn.execute(
         """SELECT latency_ms, status, tokens_in, tokens_out, cache_hit_tokens,
-                  cache_reported, mode, ts
+                  cache_reported, mode, ts, rounds, tool_tokens, tool_calls_count,
+                  tool_errors, alert_level, context_trimmed
            FROM agent_runs WHERE ts >= ? ORDER BY id""", (since,)).fetchall()
     n = len(rows)
     ok = sum(1 for r in rows if (r["status"] or "") == "ok")
@@ -5082,6 +5636,15 @@ def agent_metrics(conn: sqlite3.Connection, days: int = 7) -> dict:
     t_out = sum(int(r["tokens_out"] or 0) for r in today_rows)
     t_hit = sum(int(r["cache_hit_tokens"] or 0) for r in today_rows)
     t_cache_reported = sum(1 for r in today_rows if int(r["cache_reported"] or 0))
+    tool_tokens = sum(int(r["tool_tokens"] or 0) for r in rows)
+    tool_calls = sum(int(r["tool_calls_count"] or 0) for r in rows)
+    tool_errors = sum(int(r["tool_errors"] or 0) for r in rows)
+    t_tool_tokens = sum(int(r["tool_tokens"] or 0) for r in today_rows)
+    t_tool_calls = sum(int(r["tool_calls_count"] or 0) for r in today_rows)
+    t_tool_errors = sum(int(r["tool_errors"] or 0) for r in today_rows)
+    alert_rows = [r for r in rows if str(r["alert_level"] or "").strip()]
+    today_alert_rows = [r for r in today_rows if str(r["alert_level"] or "").strip()]
+    high_alert_rows = [r for r in alert_rows if str(r["alert_level"]) == "high"]
 
     def _rate(hit: int, prompt: int):
         return round(hit * 100.0 / prompt, 1) if prompt else None
@@ -5094,6 +5657,17 @@ def agent_metrics(conn: sqlite3.Connection, days: int = 7) -> dict:
         "tokens_in": sum(int(r["tokens_in"] or 0) for r in rows),
         "tokens_out": sum(int(r["tokens_out"] or 0) for r in rows),
         "cache_hit_tokens": sum(int(r["cache_hit_tokens"] or 0) for r in rows),
+        # 上下文治理 / 工具质量：百分比与 today_* 口径一致，None=没有可算的样本。
+        "tool_tokens": tool_tokens,
+        "tool_calls": tool_calls,
+        "tool_errors": tool_errors,
+        "tool_ratio": _rate(tool_tokens, sum(int(r["tokens_in"] or 0) for r in rows)),
+        "tool_error_rate": _rate(tool_errors, tool_calls),
+        "avg_rounds": round(sum(int(r["rounds"] or 0) for r in rows) / n, 1) if n else 0,
+        "context_trimmed": sum(int(r["context_trimmed"] or 0) for r in rows),
+        "alert_runs": len(alert_rows),
+        "high_alert_runs": len(high_alert_rows),
+        "alert_rate": round(len(alert_rows) * 100.0 / n, 1) if n else 0,
         "today_runs": len(today_rows),
         "today_tokens": t_in + t_out,
         "today_tokens_in": t_in,
@@ -5104,6 +5678,9 @@ def agent_metrics(conn: sqlite3.Connection, days: int = 7) -> dict:
         # 没报才是“未上报”，两者不能混。
         "today_cache_rate": (_rate(t_hit, t_in)
                              if t_cache_reported and t_in else None),
+        "today_tool_ratio": _rate(t_tool_tokens, t_in),
+        "today_tool_error_rate": _rate(t_tool_errors, t_tool_calls),
+        "today_alert_runs": len(today_alert_rows),
         "by_mode": by_mode,
     }
 
@@ -5156,20 +5733,30 @@ def embedding_count(conn: sqlite3.Connection, model: str | None = None) -> int:
 # ============================================================
 
 def create_user(conn: sqlite3.Connection, username: str, password: str, role: str = "viewer",
-                display_name: str = "") -> int:
+                display_name: str = "", must_change: bool = False) -> int:
     from .crypto import hash_password
 
     pw, salt = hash_password(password)
     cur = conn.execute(
-        """INSERT INTO users (username, display_name, role, password_hash, salt, active, created_at)
-           VALUES (?,?,?,?,?,1,?)
+        """INSERT INTO users (username, display_name, role, password_hash, salt, active,
+                              must_change_password, created_at)
+           VALUES (?,?,?,?,?,1,?,?)
            ON CONFLICT(username) DO UPDATE SET role = excluded.role,
              password_hash = excluded.password_hash, salt = excluded.salt,
-             display_name = excluded.display_name, active = 1""",
-        (username, display_name or username, role, pw, salt, now()),
+             display_name = excluded.display_name, active = 1,
+             must_change_password = excluded.must_change_password""",
+        (username, display_name or username, role, pw, salt,
+         1 if must_change else 0, now()),
     )
     conn.commit()
     return cur.lastrowid
+
+
+def set_user_must_change(conn: sqlite3.Connection, username: str,
+                         must_change: bool) -> None:
+    conn.execute("UPDATE users SET must_change_password = ? WHERE username = ?",
+                 (1 if must_change else 0, username))
+    conn.commit()
 
 
 def get_user(conn: sqlite3.Connection, username: str) -> dict | None:
@@ -5190,7 +5777,8 @@ def set_user_password(conn: sqlite3.Connection, username: str, password: str) ->
     if not get_user(conn, username):
         return False
     pw, salt = hash_password(password)
-    conn.execute("UPDATE users SET password_hash = ?, salt = ? WHERE username = ?",
+    conn.execute("UPDATE users SET password_hash = ?, salt = ?, "
+                 "must_change_password = 0 WHERE username = ?",
                  (pw, salt, username))
     conn.commit()
     return True
@@ -5221,6 +5809,21 @@ def delete_user_sessions(conn: sqlite3.Connection, username: str) -> int:
     return cur.rowcount or 0
 
 
+def begin_immediate(conn: sqlite3.Connection) -> None:
+    """开启写事务（立即拿写锁），用于"先查后写"的并发校验。
+
+    SQLite 的默认事务只在第一条 DML 时才拿写锁：两个请求都先 SELECT
+    「还有几个管理员」/「届期是否重叠」，都能通过校验，然后各自写入。
+    这里提前 BEGIN IMMEDIATE，让校验与写入落进同一个写事务。
+    已在事务中时不做任何事（调用方可能复用了连接）。
+    """
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as exc:
+        if "within a transaction" not in str(exc).lower():
+            raise
+
+
 def count_active_admins(conn: sqlite3.Connection) -> int:
     """还能登录的管理员数量。**防止把最后一个管理员停用/降级导致没人能管账号。**"""
     row = conn.execute(
@@ -5244,7 +5847,11 @@ def create_session(conn: sqlite3.Connection, username: str, role: str, ttl_hours
 
 
 def get_session(conn: sqlite3.Connection, token: str) -> dict | None:
-    row = conn.execute("SELECT * FROM sessions WHERE token = ?", (token,)).fetchone()
+    # 带上 users.must_change_password：登录态下也要知道是否必须先改初始密码。
+    row = conn.execute(
+        "SELECT s.*, COALESCE(u.must_change_password, 0) AS must_change_password "
+        "FROM sessions s LEFT JOIN users u ON u.username = s.username "
+        "WHERE s.token = ?", (token,)).fetchone()
     if not row:
         return None
     d = dict(row)

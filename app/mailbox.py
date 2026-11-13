@@ -63,7 +63,9 @@ DEFAULT_CONFIG = {
         "readonly": True,
     },
     "dedup": {
-        "same_job_reapply_days": 30,
+        # 历史兼容项（默认 365 天）。2026-11-13 起同一个人始终沿用最近一条投递，
+        # 不再按天数新建投递；保留该键是为了老配置/界面不报错。
+        "same_job_reapply_days": 365,
     },
 }
 
@@ -472,6 +474,126 @@ def classify_attachment(filename: str, total: int = 1) -> str:
     if total > 1:
         return "other"
     return "resume"
+
+
+# ---------------------------------------------------------------- 附件内容判定
+#
+# 文件名只作为线索，不再作为“谁是简历”的唯一依据：
+# `技术研发岗-硕士-西安科技大学-电子信息-淡永康-男.pdf` 不含“简历”二字，
+# `CD389237_CODE5705....png` 也可能是一张身份证照片。多附件邮件必须看正文：
+# 有手机/邮箱/教育/工作/项目等特征的才是简历；身份证/毕业证/成绩单要排除。
+#
+# `_prepare_attachments()`（ingest.py）会先对每份附件解析一次，把文本挂到
+# `_text`，这里只做评分与排序；同一封邮件最终只选一份简历，其余仍走
+# `kind='other'` 归档，不重复建档（业务口径：一封邮件最多一个人）。
+_RESUME_TEXT_HINTS = (
+    "教育经历", "教育背景", "工作经历", "工作经验", "项目经历", "项目经验",
+    "实习经历", "自我评价", "求职意向", "专业技能", "技能特长", "主修课程",
+)
+_OTHER_TEXT_HINTS = (
+    "公民身份号码", "签发机关", "有效期限",
+    "毕业证书", "学位证书", "成绩单", "荣誉证书", "获奖证书",
+    "作品集", "portfolio",
+)
+_PHONE_RE = re.compile(r"1[3-9]\d{9}")
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_STRUCTURED_RESUME_RE = re.compile(r"(技术研发|研发岗|工程师|应聘|求职)")
+_SCHOOL_RE = re.compile(r"(大学|学院|学校)")
+_DEGREE_RE = re.compile(r"(博士|硕士|本科|大专|专科)")
+
+#: 正文分数达到这个值，才认为“这份附件读出来确实像简历”。
+#: 低于它的（身份证/证书/空 OCR）不参与“内容选简历”，改走文件名兜底。
+RESUME_SCORE_MIN = 20.0
+
+
+def attachment_resume_score(filename: str, text: str = "") -> float:
+    """同一封邮件内，给“这份附件有多像简历”打分。只用于排序，不做最终裁决。"""
+    name = os.path.basename(str(filename or "")).lower()
+    body = str(text or "")
+    score = 0.0
+    if not body.strip():
+        score -= 100.0
+    else:
+        compact = re.sub(r"\s+", "", body)
+        score += min(25.0, len(compact) / 40.0)          # 1000 字约 25 分
+        if _PHONE_RE.search(body):
+            score += 25.0
+        if _EMAIL_RE.search(body):
+            score += 12.0
+        hits = sum(1 for h in _RESUME_TEXT_HINTS if h in body)
+        score += min(30.0, hits * 6.0)
+        if "姓名" in body:
+            score += 6.0
+        if "学历" in body or "毕业院校" in body or "学校" in body:
+            score += 6.0
+        other_hits = sum(1 for h in _OTHER_TEXT_HINTS if h in body)
+        score -= min(60.0, other_hits * 20.0)
+    # 文件名线索：明确写“简历/应聘/求职”加分；写“证书/成绩单/作品集”扣分。
+    if any(h in name for h in _RESUME_HINTS):
+        score += 80.0
+    if any(h in name for h in _OTHER_HINTS):
+        score -= 45.0
+    if _STRUCTURED_RESUME_RE.search(name):
+        score += 20.0
+    if _SCHOOL_RE.search(name):
+        score += 8.0
+    if _DEGREE_RE.search(name):
+        score += 5.0
+    # 同等内容下，正式文档比图片更像简历（图片多为补充材料）。
+    ext = os.path.splitext(name)[1]
+    if ext in (".pdf", ".doc", ".docx", ".rtf"):
+        score += 12.0
+    elif ext in (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"):
+        score += 4.0
+    return score
+
+
+def choose_resume_attachment(atts: list[dict]) -> int:
+    """从一封邮件的附件里选出最像简历的那份，返回下标；没有附件返回 -1。
+
+    `atts` 里的 `_text` / `_ok` 由 `ingest._prepare_attachments()` 填好。
+    规则分两段：
+      1. 有正文且分数 >= `RESUME_SCORE_MIN` 的，按分数/是否解析成功/
+         是否正式文档/体积排序 —— 内容优先，避免把身份证照片当简历；
+      2. 一份都读不出“像简历”的，退回文件名与扩展名兜底：优先 PDF/Word，
+         其次体积最大的图片 —— 保住“扫描件 OCR 失败也要建档”的旧行为。
+    """
+    if not atts:
+        return -1
+    if len(atts) == 1:
+        return 0
+
+    def _text(i: int) -> str:
+        a = atts[i]
+        val = a.get("_text")
+        return str(val if val is not None else a.get("text") or "")
+
+    def _ok(i: int) -> bool:
+        a = atts[i]
+        val = a.get("_ok")
+        if val is None:
+            return bool(_text(i).strip())
+        return bool(val)
+
+    def _is_doc(i: int) -> bool:
+        ext = os.path.splitext(str(atts[i].get("filename") or "").lower())[1]
+        return ext in (".pdf", ".doc", ".docx", ".rtf", ".txt", ".md")
+
+    scored = [attachment_resume_score(atts[i].get("filename"), _text(i))
+              for i in range(len(atts))]
+    readable = [i for i in range(len(atts))
+                if _ok(i) and _text(i).strip() and scored[i] >= RESUME_SCORE_MIN]
+    if readable:
+        return max(readable, key=lambda i: (scored[i], 1 if _is_doc(i) else 0,
+                                            len(atts[i].get("data") or b""), -i))
+    # 内容都不可用时：文件名明确不是简历的（证书/成绩单）尽量不选。
+    candidates = [i for i in range(len(atts))
+                  if not any(h in str(atts[i].get("filename") or "").lower()
+                             for h in _OTHER_HINTS)]
+    pool = candidates or list(range(len(atts)))
+    return max(pool, key=lambda i: (1 if _is_doc(i) else 0,
+                                    scored[i],
+                                    len(atts[i].get("data") or b""), -i))
 
 
 def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:

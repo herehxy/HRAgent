@@ -100,7 +100,18 @@ def save_cfg(base_url: str | None = None, model: str | None = None,
     return {"changed": changed, "env_override": env_override}
 
 
-def load_cfg() -> dict:
+def load_cfg(task: str | None = None) -> dict:
+    """读取模型配置。
+
+    `task="extract"` 时支持**任务级模型覆盖**（2026-11-13）：
+    简历抽取是批处理、对延迟/成本敏感，可以和对话用不同模型。
+    两种写法都支持，优先级从低到高：
+
+        "tasks": {"extract": {"model": "...", "base_url": "...", "api_key": "..."}}
+        "extract_model": "...", "extract_base_url": "...", "extract_api_key": "..."
+
+    环境变量仍然最高优先级；任务覆盖只影响传了 task 的调用方。
+    """
     cfg: dict = {}
     if os.path.exists(CONFIG_PATH):
         try:
@@ -122,6 +133,20 @@ def load_cfg() -> dict:
                     cfg[k] = sec[k]
         except (ValueError, OSError):
             pass
+    # 2.5) 任务级覆盖：先嵌套 tasks.<task>，再顶层 <task>_<key>。
+    #      只覆盖模型相关键，不把整份任务配置混进主配置。
+    _task = str(task or "").strip().lower()
+    if _task:
+        _over = (cfg.get("tasks") or {}).get(_task) or {}
+        for k in ("model", "base_url", "api_key", "temperature", "max_tokens",
+                  "timeout", "extra_body", "thinking"):
+            if k in _over:
+                cfg[k] = _over[k]
+        for k in ("model", "base_url", "api_key", "temperature", "max_tokens",
+                  "timeout", "extra_body", "thinking"):
+            _k = f"{_task}_{k}"
+            if _k in cfg:
+                cfg[k] = cfg[_k]
     # 3) 环境变量优先级最高
     if os.environ.get("LLM_BASE_URL"):
         cfg["base_url"] = os.environ["LLM_BASE_URL"]
@@ -134,18 +159,36 @@ def load_cfg() -> dict:
     return cfg
 
 
+def _retryable(exc: Exception) -> bool:
+    """模型端点的临时故障：网络错误/超时/429/5xx 值得重试；
+    400/401/403/404 重试只会白发请求，立即失败让上层决定降级。"""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in (429, 500, 502, 503, 504)
+    return isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError, OSError))
+
+
 def _post(path: str, payload: dict, cfg: dict) -> dict:
-    req = urllib.request.Request(
-        f"{cfg['base_url'].rstrip('/')}{path}",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {cfg.get('api_key', '')}",
-        },
-        method="POST",
-    )
-    with net.urlopen(req, timeout=cfg.get("timeout", 180)) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    """POST 非流式请求；对临时网络故障重试两次（1s/2s 退避）。"""
+    last: Exception | None = None
+    for attempt in range(3):
+        req = urllib.request.Request(
+            f"{cfg['base_url'].rstrip('/')}{path}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {cfg.get('api_key', '')}",
+            },
+            method="POST",
+        )
+        try:
+            with net.urlopen(req, timeout=cfg.get("timeout", 180)) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:                           # noqa: BLE001
+            last = exc
+            if attempt >= 2 or not _retryable(exc):
+                raise
+            time.sleep(0.8 * (2 ** attempt))
+    raise last if last else RuntimeError("模型请求失败")
 
 
 def _apply_provider_quirks(payload: dict, cfg: dict, stream: bool = False) -> dict:

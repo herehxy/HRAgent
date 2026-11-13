@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
+from . import paths as _paths
 from . import stages as stages_mod
 from . import xlsx as xlsx_mod
 
@@ -285,6 +286,6 @@ def _latest_resume_doc(conn, cid: int) -> tuple[str, str] | None:
     doc = docs[0]
     rel = doc.get("archived_path") or doc.get("file_path") or ""
     p = _abs_stored(rel) if rel else ""
-    if not p or not os.path.exists(p):
+    if not p or not _paths.lp_exists(p):
         return None
     return p, str(doc.get("file_name") or os.path.basename(p))

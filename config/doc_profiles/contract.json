@@ -1,0 +1,15 @@
+{
+  "id": "contract@1",
+  "name": "劳动合同",
+  "doc_type": "contract",
+  "aliases": ["contract", "labor_contract"],
+  "apply": "employee",
+  "fields": [
+    {"key": "name", "labels": ["乙方", "姓名"], "type": "text"},
+    {"key": "unit", "labels": ["甲方", "用人单位", "工作单位", "单位"], "type": "text"},
+    {"key": "position", "labels": ["岗位", "职位", "职务"], "type": "text"},
+    {"key": "contract_no", "labels": ["合同编号", "合同号"], "type": "text"},
+    {"key": "contract_start", "labels": ["合同开始", "起始日期", "开始日期"], "type": "date"},
+    {"key": "contract_end", "labels": ["合同结束", "终止日期", "结束日期"], "type": "date"}
+  ]
+}

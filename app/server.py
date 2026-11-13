@@ -44,6 +44,8 @@
 """
 from __future__ import annotations
 
+import base64
+import hmac
 import io
 import json
 import os
@@ -51,7 +53,10 @@ import queue
 import sqlite3
 import time as _time
 import re
+import secrets
 import shutil
+import hashlib
+import mimetypes
 import sys
 import threading
 import time
@@ -62,6 +67,7 @@ import zipfile
 # 注：v1.24.8 起批量分析全部改串行，已不再使用 ThreadPoolExecutor，
 # 故此处不再 import —— 留着会让人以为"还能开并发"。
 from datetime import datetime
+from typing import Literal
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request, Query
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Response,
@@ -95,6 +101,7 @@ from .agent.tools import ToolCtx, catalog as tool_catalog
 from .pipeline import domains as domains_mod
 from .pipeline import majors as mj
 from .pipeline import normalize as nz
+from .pipeline import ocr as ocr_mod
 from .pipeline import parse as parse_mod
 from .pipeline import projects as projects_mod
 from .pipeline import extract as extract_mod
@@ -240,6 +247,25 @@ async def _sqlite_busy_handler(request: Request, exc: sqlite3.OperationalError):
 # （DNS rebinding）或从任意页面发跨站表单（本地 CSRF）打到本机接口。
 # 对「会改变状态」的请求校验 Host / Origin / Referer，非本机来源一律 403。
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+#: 反向代理部署时允许的 Host/Origin（逗号分隔）。默认只允许本机；
+#: 例如 TP_ALLOWED_HOSTS=hr.example.internal,hr.example.com
+_ALLOWED_HOSTS = {
+    h.strip().lower().split(":", 1)[0]
+    for h in (os.environ.get("TP_ALLOWED_HOSTS") or "").split(",")
+    if h.strip()
+}
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    """严格的本机回环判断（不像 `_is_local_host` 那样包含 TP_ALLOWED_HOSTS）。"""
+    if not host:
+        return False
+    h = host.lower()
+    if h.startswith("["):
+        h = h[1:h.index("]")] if "]" in h else h[1:]
+    else:
+        h = h.rsplit(":", 1)[0]
+    return h in _LOCAL_HOSTS
 
 
 def _is_local_host(host: str | None) -> bool:
@@ -251,7 +277,7 @@ def _is_local_host(host: str | None) -> bool:
         h = h[1:-1]
     else:
         h = host.rsplit(":", 1)[0].lower()
-    return h in _LOCAL_HOSTS
+    return h in _LOCAL_HOSTS or h in _ALLOWED_HOSTS
 
 
 @app.middleware("http")
@@ -289,21 +315,63 @@ async def _guard_local_origin(request: Request, call_next):
 # 前端 `/api/tasks/{task_id}` 轮询，弹窗里画进度条。
 _PROGRESS: dict[str, dict] = {}
 _PROGRESS_LOCK = threading.Lock()
+_PROGRESS_LAST: dict[str, float] = {}
+
+
+def _persist_progress(tid: str, *, force: bool = False) -> None:
+    """把 server 侧任务快照节流落库；失败不影响任务本身。"""
+    with _PROGRESS_LOCK:
+        p = dict(_PROGRESS.get(tid) or {})
+        last = _PROGRESS_LAST.get(tid, 0.0)
+    if not p:
+        return
+    now_t = _time.time()
+    if not force and now_t - last < 1.0:
+        return
+    _PROGRESS_LAST[tid] = now_t
+    data = {k: v for k, v in p.items()
+            if k not in ("title", "total", "done", "failed", "status", "message",
+                         "started_at", "kind", "meta")}
+    db.task_upsert(DB_PATH, {
+        "task_id": tid, "kind": p.get("kind") or "general",
+        "title": p.get("title") or "", "total": p.get("total") or 0,
+        "done": p.get("done") or 0, "failed": p.get("failed") or 0,
+        "status": p.get("status") or "running", "message": p.get("message") or "",
+        "meta": p.get("meta") or {}, "data": data,
+        "started_at": p.get("started_at"),
+    })
 #: 邮件请求幂等表：client_request_id -> task_id。网络中断后前端重试同一封邮件时，
 #: 后端返回原任务，而不是再发一封。
 _MAIL_REQ: dict[str, str] = {}
 _MAIL_REQ_LOCK = threading.Lock()
 
 
+#: 已完成任务在内存里保留多久（秒）。到期后只留数据库快照，
+#: 避免长时间运行后 `_PROGRESS` 无上限增长。
+_PROGRESS_KEEP_SECONDS = 1800
+
+
+def _prune_progress_locked() -> None:
+    """清掉过期已完成任务（调用方必须已持有 `_PROGRESS_LOCK`）。"""
+    cutoff = _time.time() - _PROGRESS_KEEP_SECONDS
+    for tid in [t for t, p in _PROGRESS.items()
+                if p.get("status") in ("done", "error")
+                and (p.get("finished_at") or 0) < cutoff]:
+        _PROGRESS.pop(tid, None)
+        _PROGRESS_LAST.pop(tid, None)
+
+
 def _progress_new(title: str, total: int, *, kind: str = "general",
-                  meta: dict | None = None) -> str:
-    """开一个新任务，返回 task_id。"""
-    tid = uuid.uuid4().hex[:12]
+                  meta: dict | None = None, task_id: str | None = None) -> str:
+    """开一个新任务，返回 task_id。`task_id` 可由调用方预先生成（邮件幂等用）。"""
+    tid = task_id or uuid.uuid4().hex[:12]
     with _PROGRESS_LOCK:
+        _prune_progress_locked()
         _PROGRESS[tid] = {"title": title, "total": total, "done": 0,
                           "failed": 0, "status": "running", "message": "",
                           "started_at": _time.time(), "kind": kind,
                           "meta": meta or {}}
+    _persist_progress(tid, force=True)
     return tid
 
 
@@ -322,10 +390,13 @@ def _progress_set(tid: str, *, done: int | None = None,
             p["failed"] = failed
         if status is not None:
             p["status"] = status
+            if status in ("done", "error"):
+                p["finished_at"] = _time.time()
         if message is not None:
             p["message"] = message
         if extra:
             p.update(extra)
+    _persist_progress(tid, force=status in ("done", "error"))
 
 
 @app.get("/api/tasks/active")
@@ -337,7 +408,8 @@ def api_tasks_active(kind: str | None = None, include_done: bool = False,
     除了可停止的收取/导入任务，也返回邮件发送任务。页面刷新或误关进度窗后，
     前端可以靠这里恢复轮询，而不是重新提交一封邮件。
     """
-    _session(x_tp_token, x_tp_role)
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
     wanted = str(kind or "").strip()
     items: list[dict] = []
     with _PROGRESS_LOCK:
@@ -358,6 +430,16 @@ def api_tasks_active(kind: str | None = None, include_done: bool = False,
             item = dict(t)
             item.setdefault("kind", "ingest")
             items.append(item)
+    # 兜底：进程内存里没有、但 `background_tasks` 里有的任务
+    # （服务重启后 / 进度更新间隔内）。同 id 以内存为准，避免状态倒退。
+    seen = {str(x.get("task_id")) for x in items}
+    for t in db.task_list(DB_PATH, kind=(wanted or "ingest"),
+                          include_done=include_done, limit=50):
+        if str(t.get("task_id")) in seen:
+            continue
+        t = dict(t)
+        t.setdefault("kind", wanted or "ingest")
+        items.append(t)
     items.sort(key=lambda x: x.get("started_at") or 0, reverse=True)
     return {"ok": bool(items), "task": (items[0] if items else None),
             "tasks": items, "count": len(items)}
@@ -375,12 +457,16 @@ def api_task_progress(task_id: str,
     有两张进度表：server 模块级（批量重跑/手动分析）与 ingest 模块级
     （入库后自动分析，后台线程跑的）。这里两张都查。
     """
-    _session(x_tp_token, x_tp_role)
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
     with _PROGRESS_LOCK:
         p = _PROGRESS.get(task_id)
     if not p:
         # 自动分析的任务登记在 ingest 模块的进度表里
         p = ingest_mod.get_progress(task_id) if hasattr(ingest_mod, "get_progress") else None
+    if not p:
+        # 内存里没有（服务重启/页面刷新很久之后）→ 读持久化快照。
+        p = db.task_get(DB_PATH, task_id)
     if not p:
         return {"ok": False, "task_id": task_id, "error": "任务不存在或已过期"}
     total = p.get("total") or 0
@@ -394,7 +480,7 @@ def api_task_progress(task_id: str,
            "percent": max(0, min(100, percent))}
     # v1.29.4：收取任务把**完整报表**与停止标记挂在进度里带回
     # （最后一次轮询就能拿全，前端不需要再来一次结果请求）。
-    for _k in ("report", "stopped"):
+    for _k in ("report", "stopped", "meta"):
         if _k in p:
             out[_k] = p[_k]
     if "result" in p:
@@ -496,6 +582,11 @@ def require(session: dict, perm: str) -> None:
     # 否则 resolve() 若回退成 hr 全权限，不带令牌就能删库/导出。
     if session.get("anonymous"):
         raise HTTPException(status_code=401, detail="未登录或会话已失效")
+    # 首次登录/管理员重置后必须先改密：除了 /api/me 与本人改密接口，
+    # 其余业务接口一律不放行（否则默认密码可以无限期使用）。
+    if session.get("must_change_password"):
+        raise HTTPException(status_code=403,
+                            detail="首次登录或密码已被重置，请先修改初始密码")
     if not auth.can(session["role"], perm):
         raise HTTPException(status_code=403, detail=f"当前角色（{session['role']}）无 {perm} 权限")
 
@@ -650,14 +741,14 @@ def login_bg():
     for cand in (_os.path.join(BASE, "app", "login_bg.jpg"),
                  _os.path.join(_os.path.dirname(BASE), "app", "login_bg.jpg"),
                  _os.path.join(BASE, "login_bg.jpg")):
-        if _os.path.isfile(cand):
+        if __paths.lp_isfile(cand):
             return FileResponse(cand, media_type="image/jpeg",
                                 headers={"Cache-Control": "public, max-age=31536000, immutable"})
     raise HTTPException(status_code=404, detail="背景图未随包分发")
 
 
 @app.get("/api/login-hint")
-def api_login_hint() -> dict:
+def api_login_hint(request: Request) -> dict:
     """登录页要显示的提示。**不需要鉴权** —— 未登录时就要能读到它。
 
     只暴露两件事：有没有账号、默认密码是不是还没改。
@@ -679,14 +770,20 @@ def api_login_hint() -> dict:
             full = db.get_user(conn, u["username"]) or {}
             if full.get("password_hash") and _verify(
                     auth.DEFAULT_PASSWORD, full["password_hash"], full["salt"]):
+                # **只对本机访问**回显默认密码：Docker/反代对外时，
+                # 这个未鉴权接口不能把"账号 + 默认密码"直接送给任何访问者。
+                # 登录后服务端会强制改密（require() 拦截），泄露窗口仅限首次登录前。
+                _local = _is_loopback_host(request.headers.get("host") or "")
+                _pw_line = (f"密码：{auth.DEFAULT_PASSWORD}\n" if _local
+                            else "密码：请查看首次部署日志或联系管理员\n")
                 return {
                     "first_run": True,
                     "username": u["username"],
                     # 用 \n 分行（前端 `white-space:pre-line` 会保留）：
                     # 账号、密码、提醒三件事挤在一行读起来很累。
                     "hint": (f"首次使用\n账号：{u['username']}\n"
-                             f"密码：{auth.DEFAULT_PASSWORD}\n"
-                             f"（登录后请立即修改）"),
+                             + _pw_line
+                             + "（登录后必须修改初始密码）"),
                 }
         return {"first_run": False, "username": "", "hint": ""}
     finally:
@@ -747,6 +844,7 @@ def api_me(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
         "role": s["role"],
         "role_label": auth.role_label(s["role"]),
         "permissions": s["permissions"],
+        "must_change_password": bool(s.get("must_change_password")),
         "auth_enabled": _auth_enabled(),
     }
 
@@ -863,6 +961,9 @@ def api_user_update(username: str, req: UserUpdateReq,
     require(s, "manage_users")
     conn = db.connect(DB_PATH)
     try:
+        # 校验与写入必须在同一个写事务里：两个并发请求否则都会读到
+        # "还有 2 个管理员"然后各自降级一个，最后 0 个管理员。
+        db.begin_immediate(conn)
         user = db.get_user(conn, username)
         if not user:
             raise HTTPException(status_code=404, detail="账号不存在")
@@ -881,17 +982,25 @@ def api_user_update(username: str, req: UserUpdateReq,
             raise HTTPException(status_code=409, detail="不能停用自己当前登录的账号")
 
         changed = []
+        _sets: list[str] = []
+        _vals: list = []
         if req.display_name is not None:
             disp = req.display_name.strip() or username
-            conn.execute("UPDATE users SET display_name = ? WHERE username = ?",
-                         (disp, username))
+            _sets.append("display_name = ?")
+            _vals.append(disp)
             changed.append("显示名")
         if req.role is not None and req.role != user.get("role"):
-            db.set_user_role(conn, username, req.role)
+            _sets.append("role = ?")
+            _vals.append(req.role)
             changed.append(f"角色→{auth.role_label(req.role)}")
         if req.active is not None and bool(req.active) != bool(user.get("active")):
-            db.set_user_active(conn, username, bool(req.active))
+            _sets.append("active = ?")
+            _vals.append(1 if req.active else 0)
             changed.append("启用" if req.active else "停用")
+        if _sets:
+            conn.execute(f"UPDATE users SET {', '.join(_sets)} WHERE username = ?",
+                         (*_vals, username))
+        conn.commit()
         # 角色或启用状态变了 → 踢掉旧会话，新权限立刻生效
         kicked = 0
         if req.role is not None or req.active is not None:
@@ -956,6 +1065,7 @@ def api_user_delete(username: str,
         raise HTTPException(status_code=409, detail="不能删除自己当前登录的账号")
     conn = db.connect(DB_PATH)
     try:
+        db.begin_immediate(conn)
         user = db.get_user(conn, username)
         if not user:
             raise HTTPException(status_code=404, detail="账号不存在")
@@ -963,7 +1073,8 @@ def api_user_delete(username: str,
                 and db.count_active_admins(conn) <= 1:
             raise HTTPException(status_code=409,
                                 detail="这是最后一个启用中的管理员，不能删除")
-        db.set_user_active(conn, username, False)
+        conn.execute("UPDATE users SET active = 0 WHERE username = ?", (username,))
+        conn.commit()
         kicked = db.delete_user_sessions(conn, username)
         db.add_audit(conn, "user", username, "delete", "",
                      f"{s['username']} 停用了账号「{username}」（保留记录供审计追溯）",
@@ -983,6 +1094,7 @@ def api_me(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
 def api_meta(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
              x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
     conn = db.connect(DB_PATH)
     try:
         jd = _load_optional(JD_PATH)
@@ -991,7 +1103,7 @@ def api_meta(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
             _ontology = nz.describe()
         except (OSError, ValueError):
             _ontology = {}
-        return {
+        data = {
             "session": s,
             "product_version": PRODUCT_VERSION,
             "jd": jd,
@@ -1039,6 +1151,12 @@ def api_meta(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
             "stages": db.STAGES,
             "tier_labels": db.TIER_LABELS,
         }
+        # 没有「系统配置」权限的角色（如 viewer）不应拿到邮箱账号、
+        # 内部存储路径与模型配置：这些不是招聘数据，却是部署细节。
+        if not auth.can(s["role"], "settings"):
+            for _k in ("mailbox", "storage", "settings", "model"):
+                data.pop(_k, None)
+        return data
     finally:
         conn.close()
 
@@ -1089,22 +1207,31 @@ def _store_upload_and_ingest(body: bytes, safe: str, jd, tiers,
     长时间阻塞的一段，期间进度轮询和别的上传都会一起卡住。
     """
     import os as _os
+    import shutil as _shutil
     import time as _t
     from . import ingest as _ing
     inbox = _os.path.join(DATA_DIR, "inbox")
-    _os.makedirs(inbox, exist_ok=True)
+    # 每次上传用**独立子目录**：原来所有上传都写进共享 inbox 再重扫整个目录，
+    # 于是每次上传都会把历史文件重新 ingest 一遍（磁盘只增不减），
+    # 并发上传时还会把对方刚写入的文件一起吞掉。
+    upload_dir = _os.path.join(inbox, f"_upload_{uuid.uuid4().hex[:12]}")
+    _os.makedirs(upload_dir, exist_ok=True)
     stamp = _t.strftime("%Y%m%d_%H%M%S")
     # 文件名按整条路径预算压短：附件原名可能 150+ 字符，
     # 不压就逼近 Windows 的 260 上限，写盘直接报 WinError 206。
-    dest = _os.path.join(inbox, _paths.fit_name(inbox, f"{stamp}_{safe}"))
+    dest = _os.path.join(upload_dir, _paths.fit_name(upload_dir, f"{stamp}_{safe}"))
     i = 1
     while _paths.lp_exists(dest):
-        dest = _os.path.join(inbox, _paths.fit_name(inbox, f"{stamp}_{i}_{safe}"))
+        dest = _os.path.join(upload_dir, _paths.fit_name(upload_dir, f"{stamp}_{i}_{safe}"))
         i += 1
-    with _paths.lp_open(dest, "wb") as fh:
-        fh.write(body)
-    rep = _ing.ingest_dir(inbox, jd, tiers, DB_PATH, job_id=None,
-                          use_llm=use_llm, llm_conf=conf)
+    try:
+        with _paths.lp_open(dest, "wb") as fh:
+            fh.write(body)
+        rep = _ing.ingest_dir(upload_dir, jd, tiers, DB_PATH, job_id=None,
+                              use_llm=use_llm, llm_conf=conf)
+    finally:
+        # 原件已在 ingest 内复制到归档区（archived_path），临时上传目录可以删。
+        _shutil.rmtree(upload_dir, ignore_errors=True)
     return _os.path.basename(dest), rep
 
 
@@ -1153,7 +1280,7 @@ async def api_upload(request: Request, name: str = Query(...),
     _use_llm = _llm_enabled()
     _conf = None
     if _use_llm:
-        _c = llm.load_cfg()
+        _c = llm.load_cfg('extract')
         _conf = {"api_key": _c.get("api_key"), "base_url": _c.get("base_url"),
                  "model": _c.get("model")}
     stored, rep = await run_in_threadpool(_store_upload_and_ingest, body, safe, jd, tiers,
@@ -1241,8 +1368,11 @@ def _sort_dict_items(key: str, values: list) -> list:
 
 
 @app.get("/api/interview-dict")
-def api_interview_dict() -> dict:
+def api_interview_dict(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     """面试字典（只读）。前端下拉框按这个渲染。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
     return _load_interview_dict()
 
 
@@ -1306,6 +1436,7 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
                    min_years: int | None = None, gender: str | None = None,
                    archived: str | None = None,
                    page: int = 0, page_size: int = 0,
+                   ids_only: bool = False,
                    x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                    x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     """人才库列表。
@@ -1472,6 +1603,11 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
         facets["全部"] = len(items)
         if want:
             items = [i for i in items if db.gender_matches(i.get("gender"), want)]
+        # 「全选筛选结果」专用：只回 id，不装配建议岗位/分析/档位明细。
+        # 前端勾选跨页时不需要整页对象；几千人时这能省掉绝大部分装配成本。
+        if ids_only:
+            return {"ok": True, "ids": [i["id"] for i in items],
+                    "total": len(items)}
         # 建议岗位：**只读库，绝不在这里调模型**（v1.13.2）。
         # 结论落在 `applications.suggested_job_id`（+ `suggested_job_reason`），
         # 由入库时的 `ingest._route_by_open_jobs`、或 HR 主动点的「判断建议岗位」写入。
@@ -1513,19 +1649,19 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
             items = items[(cur - 1) * page_size: cur * page_size]
             # 只为这一页装配技能明细（上面是轻量取的）——
             # 一次 IN 查询 20 人，而不是把全库 1000 人都装配出来再丢掉 980 个
-            db._attach_skills(conn, items)
+            db._attach_skills(conn, items, with_detail=False)
             paging = {"page": cur, "page_size": page_size, "total": total_after_filter,
                       "total_pages": pages}
         # 自动分析结果（v1.8「入库即分析」）：在分页之后按当前页批量取，
         # 只对真正会下发的那批人查库——一次 IN 查询，不做 N+1。
         # 未分析完（后台线程还在跑）时为 None，界面显示"分析中…"，不是错误状态。
-        imap = db.insights_for(conn, [i["id"] for i in items])
-        # 档位来源明细（v1.12）：学历门槛现算 + 库内生效档位与来源，口径与完整档案一致
-        # （见 `_tier_detail_of`）。计算很轻（约 5ms/人）且只对当前页做，直接跟着列表下发。
-        # 档位明细要用"岗位 JD"与"技能分类"：各查一次供整页复用（不再逐人查库）
-        _jdm, _cats = _jd_map(conn), _skill_cats(conn)
+        # 分析文本与档位来源明细只有**完整档案**面板会用（列表卡片不读这两个字段）。
+        # 分页请求里不下发，省一次 IN 查询和每人一次 major_match（约 5ms/人）。
+        imap = db.insights_for(conn, [i["id"] for i in items]) if not paging else {}
+        _jdm, _cats = (_jd_map(conn), _skill_cats(conn)) if not paging else ({}, [])
         for i in items:
-            i["insight"] = imap.get(i["id"])
+            if not paging:
+                i["insight"] = imap.get(i["id"])
             # 学历达标判断：必须放在 job_suggestion 算完之后
             # （未归岗的人靠"建议岗位"才有尺子可比）
             i["edu_check"] = _edu_check(i, jobs_map)
@@ -1533,8 +1669,14 @@ def api_candidates(tier: str | None = None, kw: str | None = None,
             i["exp_display"] = freshness.exp_label(
                 i.get("years_exp"), bool(i.get("years_exp")), i.get("grad_date"),
                 in_school=bool(i.get("in_school")))
-            i["tier_detail"] = _tier_detail_of(i, _jdm, _cats)
+            if not paging:
+                i["tier_detail"] = _tier_detail_of(i, _jdm, _cats)
         presented = auth.present_list(items)
+        # 头像走 `<img src>`，带不了请求头；下发短时票据 URL，不把会话令牌塞进 URL。
+        for _it in presented:
+            _it["avatar_url"] = _ticket_url(
+                f"/api/candidates/{_it['id']}/avatar",
+                f"avatar:{_it['id']}", s, 3600)
         out = {"count": len(presented), "items": presented,
                # v1.13.4：入库即分析的开关状态与待分析人数。列表页靠它渲染开关与
                # "分析待分析的人（N）"按钮——顺带带上是��为了不多发一个请求。
@@ -1711,13 +1853,17 @@ def api_candidate(cid: int, x_tp_token: str | None = Header(default=None, alias=
         # 查看完整档案 -> 留痕（保密检查会要这份凭证）
         db.add_audit(conn, "candidate", str(cid), "view", "", f"{s['username']} 查看完整档案",
                      s["username"], s["role"])
-        latest_doc = d["documents"][0] if d.get("documents") else {}
+        # 只认简历附件（最新一份在前）；不能把最新上传的证书当成"当前简历"。
+        _docs = d.get("resume_documents") or d.get("documents") or []
+        latest_doc = _docs[0] if _docs else {}
         raw = d.get("raw_text") or ""
         # v4.0.17：操作记录只给系统管理员（本机模式视为管理员）随详情下发；
         # 其他角色即使能看档案，也不下发审计片段。
         _audit_ok = (s.get("mode") == "local") or auth.can(s["role"], "manage_users")
         return {
             **auth.present_candidate(d),
+            "avatar_url": _ticket_url(f"/api/candidates/{cid}/avatar",
+                                      f"avatar:{cid}", s, 3600),
             # 档位来源明细（与列表同一份口径）：完整档案是 HR 逐条核对的地方，
             # 这里没有它就只能看到档位=B却不知道凭什么（v1.12 修）
             # 与列表同一份口径：直接读库算明细（不再借工具重算）
@@ -1848,7 +1994,7 @@ def api_candidate_reanalyze(cid: int, full: bool = True, req: dict | None = None
     from .pipeline.analyze import auto_insight
 
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    require(s, "ingest")
     conn = db.connect(DB_PATH)
     try:
         d = db.candidate_detail(conn, cid)
@@ -1860,7 +2006,7 @@ def api_candidate_reanalyze(cid: int, full: bool = True, req: dict | None = None
                 return {"ok": False, "error": "模型未启用，无法完整重新分析；"
                                               "请先在「模型设置」里配置模型",
                         "hint": "只刷新分析文本可改用「只看分析」（full=false）"}
-            _c = llm.load_cfg()
+            _c = llm.load_cfg('extract')
             _conf = {"api_key": _c.get("api_key"), "base_url": _c.get("base_url"),
                      "model": _c.get("model")}
             _jd, _tiers = _jd_tiers()
@@ -1937,7 +2083,7 @@ def api_candidate_reanalyze(cid: int, full: bool = True, req: dict | None = None
 
 
 @app.get("/api/candidates/{cid}/avatar")
-def api_candidate_avatar(cid: int, token: str | None = None,
+def api_candidate_avatar(cid: int, ticket: str | None = None,
                          x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                          x_tp_role: str | None = Header(default=None, alias="X-TP-Role")):
     """证件照（卡片头像 / 档案用）。v2.0.4。
@@ -1945,10 +2091,11 @@ def api_candidate_avatar(cid: int, token: str | None = None,
     **懒抽**：`avatar_path` 还是 NULL 时，第一次请求才去原件里抽一张；
     抽不到就记 `"-"`，以后不再重试 —— 否则每次渲染 20 张卡片都要重开 20 个 PDF。
 
-    为什么用 query `token` 而不是只认 header：这个地址是给 `<img src>` 用的，
-    `<img>` 带不了自定义头。和 `/api/sources/file` 走同一个 `_file_session` 口径。
+    为什么用 query `ticket` 而不是只认 header：这个地址是给 `<img src>` 用的，
+    `<img>` 带不了自定义头。和 `/api/sources/file` 走同一个 `_file_session` 口径；
+    `ticket` 由 `/api/files/sign` 签发的短时票据，不是登录会话令牌。
     """
-    s = _file_session(x_tp_token, token)
+    s = _file_session(x_tp_token, ticket, f"avatar:{cid}")
     require(s, "read")
     conn = db.connect(DB_PATH)
     try:
@@ -1981,7 +2128,7 @@ def api_candidate_avatar_refresh(cid: int,
                                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     """**重新抽取**证件照（抽错一张图时用）。"""
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    require(s, "ingest")
     conn = db.connect(DB_PATH)
     try:
         if not conn.execute("SELECT 1 FROM candidates WHERE id = ?", (cid,)).fetchone():
@@ -2002,7 +2149,7 @@ def api_candidate_avatar_clear(cid: int,
                                x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     """**去掉**证件照（抽到的不是这个人 / 不想显示）。卡片自动回落到"姓首字"。"""
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    require(s, "ingest")
     conn = db.connect(DB_PATH)
     try:
         if not conn.execute("SELECT 1 FROM candidates WHERE id = ?", (cid,)).fetchone():
@@ -2021,7 +2168,7 @@ def api_avatar_backfill_start(
         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     """可选地补齐历史头像。只处理 avatar_path=NULL，跳过已确认和无照片标记。"""
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    require(s, "ingest")
     state = avatar_mod.start_backfill(DB_PATH, AVATAR_DIR)
     return {"ok": True, **state,
             "note": ("已启动历史头像补扫（后台串行，不覆盖已有头像）" if state.get("running")
@@ -2041,7 +2188,7 @@ def api_avatar_backfill_stop(
         x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    require(s, "ingest")
     return {"ok": True, **avatar_mod.stop_backfill(),
             "note": "已请求停止；当前这一张抽完后就停"}
 
@@ -2151,7 +2298,7 @@ def api_candidate_rename(cid: int, req: dict,
     电话/邮箱是加密存储的，修改时同步更新盲索引（用于跨渠道身份比对）。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    require(s, "edit_candidate")
     req = req or {}
     fields: dict = {}
     if "name" in req:
@@ -2296,7 +2443,7 @@ def api_candidate_edu_history(cid: int, req: dict,
         "上面显示改了、档位还按旧学校判"。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    require(s, "edit_candidate")
     req = req or {}
     try:
         k = int(req.get("index", -1))
@@ -2389,7 +2536,7 @@ def api_candidate_note(cid: int, req: dict,
     独立接口单独保存更顺手。修改写审计（改前/改后全文留痕）；备注内容可被搜索。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    require(s, "add_note")
     req = req or {}
     note = str(req.get("note") or "").strip()
     if len(note) > 500:
@@ -2546,13 +2693,13 @@ def api_reanalyze_batch(req: ReanalyzeBatchReq,
     进度（v1.24.9）：每批返回 task_id，前端轮询 /api/tasks/{task_id} 画进度条。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    require(s, "ingest")
     if not _llm_enabled():
         return {"ok": False, "analyzed": 0, "remaining": 0, "failed": 0,
                 "error": "模型未启用，无法完整重新分析；请先在「模型设置」里配置模型"}
     limit = max(1, min(int(req.limit or 5), 12))
     jd, tiers = _jd_tiers()
-    conf_c = llm.load_cfg()
+    conf_c = llm.load_cfg('extract')
     conf = {"api_key": conf_c.get("api_key"), "base_url": conf_c.get("base_url"),
             "model": conf_c.get("model")}
     cfg = mb.load_config()
@@ -2986,6 +3133,27 @@ def _startup_purge_task() -> None:
     daemon 线程随进程退出，不留残留。**清理失败只打印、不阻断启动**——
     数据清理是后台维护动作，不该让 HR 打不开工作台。
     """
+    # 上次进程里的 running 任务不可能还活着：标成中断，避免 UI 永远转圈。
+    try:
+        _n = db.task_mark_interrupted(
+            DB_PATH, "服务重启，任务已中断；已处理的文件/邮件会保留，可重新发起")
+        if _n:
+            print(f"[tasks] 启动清理：{_n} 个未完成后台任务标记为中断")
+    except Exception as exc:                               # noqa: BLE001
+        print(f"[tasks] 启动标记中断任务失败（不影响使用）：{exc}", file=sys.stderr)
+    # 上次进程崩溃时可能留下「执行中」的提案；超过 60 分钟没人推进就放回待确认。
+    try:
+        _conn = db.connect(DB_PATH)
+        try:
+            _pn = db.release_stale_proposals(_conn)
+        finally:
+            _conn.close()
+        if _pn:
+            print(f"[proposals] 启动清理：{_pn} 条卡在「执行中」的提案已放回待确认")
+    except Exception as exc:                               # noqa: BLE001
+        print(f"[proposals] 启动释放卡住提案失败（不影响使用）：{exc}",
+              file=sys.stderr)
+
     def _loop() -> None:
         while True:
             time.sleep(24 * 3600)
@@ -3002,6 +3170,14 @@ def _startup_purge_task() -> None:
                           f"清空满 {out['days']} 天的对话运行记录")
             except Exception as exc:                       # noqa: BLE001
                 print(f"[purge] 对话定时清理失败：{exc}", file=sys.stderr)
+            # 后台任务快照（含导入明细）同样按 30 天保留期清理，
+            # 否则删掉候选人后任务报表里仍留着姓名/文件名。
+            try:
+                _tn = db.task_cleanup(DB_PATH, days=30)
+                if _tn:
+                    print(f"[purge] 定时清理：删除 {_tn} 条 30 天前的后台任务快照")
+            except Exception as exc:                       # noqa: BLE001
+                print(f"[purge] 任务快照清理失败：{exc}", file=sys.stderr)
 
     try:
         out = _purge_expired()
@@ -3017,6 +3193,12 @@ def _startup_purge_task() -> None:
                   f"{out['days']} 天的对话运行记录（保留期内已无人恢复）")
     except Exception as exc:                               # noqa: BLE001
         print(f"[purge] 对话启动清理失败（不影响使用）：{exc}", file=sys.stderr)
+    try:
+        _tn = db.task_cleanup(DB_PATH, days=30)
+        if _tn:
+            print(f"[purge] 启动清理：删除 {_tn} 条 30 天前的后台任务快照")
+    except Exception as exc:                               # noqa: BLE001
+        print(f"[purge] 任务快照启动清理失败（不影响使用）：{exc}", file=sys.stderr)
     # ---- v3.0.2（关键性能修复）：**启动钩子必须立刻返回** ----
     # uvicorn 的 `startup()` 是 `await self.lifespan.startup()` **之后**才
     # `loop.create_server(...)` 绑端口（见 uvicorn/server.py:116 与 182）。
@@ -3377,8 +3559,13 @@ def _export_filters(overseas, bachelor, date_from, date_to,
 
 
 def _export_response(headers: list[str], rows: list[list], text_cols: set[int],
-                     meta: str, scope: str, n: int, fmt: str, stamp: str):
-    """导出响应：xlsx（默认）或 csv。**同时把导出动作写审计。**"""
+                     meta: str, scope: str, n: int, fmt: str, stamp: str,
+                     *, operator: str, role: str):
+    """导出响应：xlsx（默认）或 csv。**同时把导出动作写审计。**
+
+    operator/role 必须由调用方显式传入：原来放在模块级 `_export_operator`
+    里，并发导出时 A 的审计可能记到 B 名下。
+    """
     if (fmt or "xlsx").lower() == "csv":
         data = xlsx_mod.csv_bytes(rows, headers)
         media = "text/csv; charset=utf-8"
@@ -3392,8 +3579,7 @@ def _export_response(headers: list[str], rows: list[list], text_cols: set[int],
     conn = db.connect(DB_PATH)
     try:
         db.add_audit(conn, "export", scope, "export", f"{n} 条",
-                     f"导出「{scope}」{n} 条｜{meta}",
-                     _export_operator[0], _export_operator[1])
+                     f"导出「{scope}」{n} 条｜{meta}", operator, role)
     finally:
         conn.close()
     name = urllib.parse.quote(f"{scope}-{stamp}.{ext}")
@@ -3401,10 +3587,6 @@ def _export_response(headers: list[str], rows: list[list], text_cols: set[int],
         content=data, media_type=media,
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{name}",
                  "X-Export-Rows": str(n)})
-
-
-#: 导出接口的操作用户（`_export_response` 里写审计要用；由路由设置）
-_export_operator = ["HR", "hr"]
 
 
 @app.get("/api/export/roster")
@@ -3432,8 +3614,7 @@ def api_export_roster(scope: str = "候选人名单",
     （13 列含电话明文、是要外发的，这是受控动作）。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "read")
-    _export_operator[0], _export_operator[1] = s["username"], s["role"]
+    require(s, "export")
     conn = db.connect(DB_PATH)
     try:
         headers, rows, tcols, n = export_mod.build_roster(
@@ -3447,7 +3628,8 @@ def api_export_roster(scope: str = "候选人名单",
     # `fmt` 与 `format` 两个名字都收：HR/脚本两种写法都会用，
     # 而"传了 format=csv 却拿到 xlsx"是那种**看起来成功**的错。
     return _export_response(headers, rows, tcols, meta, scope, n, format or fmt,
-                            datetime.now().strftime("%Y%m%d-%H%M"))
+                            datetime.now().strftime("%Y%m%d-%H%M"),
+                            operator=s["username"], role=s["role"])
 
 
 def _ics_escape(value) -> str:
@@ -3467,7 +3649,7 @@ def api_export_interview_ics(date_from: str | None = None, date_to: str | None =
     具体时刻（HR 常写"上午/下午"，猜成 09:00 反而会误导）。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "read")
+    require(s, "export")
     conn = db.connect(DB_PATH)
     try:
         items = db.list_candidates(conn, stage=stage or "待面试", archived=False)
@@ -3530,8 +3712,7 @@ def api_export_interview_schedule(date_from: str | None = None, date_to: str | N
                                   x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
     """面试日程 Excel（比 .ics 更适合 HR 直接筛选、打印、发群）。"""
     s = _session(x_tp_token, x_tp_role)
-    require(s, "read")
-    _export_operator[0], _export_operator[1] = s["username"], s["role"]
+    require(s, "export")
     conn = db.connect(DB_PATH)
     try:
         headers, rows, tcols, n = export_mod.build_interview_schedule(
@@ -3542,7 +3723,8 @@ def api_export_interview_schedule(date_from: str | None = None, date_to: str | N
     span = f"（{date_from or '最早'} 至 {date_to or '最新'}）" if (date_from or date_to) else ""
     meta = xlsx_mod.meta_line("面试日程", span, n)
     return _export_response(headers, rows, tcols, meta, "面试日程", n,
-                            format or fmt, datetime.now().strftime("%Y%m%d-%H%M"))
+                            format or fmt, datetime.now().strftime("%Y%m%d-%H%M"),
+                            operator=s["username"], role=s["role"])
 
 
 @app.get("/api/export/resume-bundle")
@@ -3559,7 +3741,7 @@ def api_export_resume_bundle(job_id: int | None = None, stage: str | None = None
     没有原件的人跳过，不阻塞其他人。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "read")
+    require(s, "export")
     filters: dict = {}
     if job_id:
         filters["job_id"] = int(job_id)
@@ -3631,7 +3813,7 @@ def api_bundle_initial_pass(date_from: str | None = Query(default=None),
     所以"简历包里那张表"和"导出的名单"永远是一套口径。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "read")
+    require(s, "export")
 
     def _day(value, label: str) -> str:
         v = str(value or "").strip()[:10]
@@ -3783,7 +3965,7 @@ def api_interview_calendar_export(
         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
     """日程页导出 Excel（xlsx）：日期列强制文本并留足列宽，避免 Excel 显示 ####。"""
     s = _session(x_tp_token, x_tp_role)
-    require(s, "read")
+    require(s, "export")
     _re_date = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     if not _re_date.fullmatch(str(date_from or "")) or not _re_date.fullmatch(str(date_to or "")):
         raise HTTPException(status_code=422, detail="日期格式应为 YYYY-MM-DD")
@@ -3817,10 +3999,10 @@ def api_interview_calendar_export(
             it.get("interview_unit") or "", it.get("interview_mode") or "",
             it.get("stage") or "", it.get("interview_place") or "",
         ])
-    _export_operator[0], _export_operator[1] = s["username"], s["role"]
     meta = xlsx_mod.meta_line("面试日程", f"（{date_from} 至 {date_to}）", len(rows))
     return _export_response(headers, rows, {0, 1, 3}, meta, "面试日程", len(rows),
-                            "xlsx", f"{date_from}至{date_to}")
+                            "xlsx", f"{date_from}至{date_to}",
+                            operator=s["username"], role=s["role"])
 
 
 @app.post("/api/interviews/{aid}/reschedule")
@@ -4058,7 +4240,7 @@ def api_candidate_cet(cid: int, req: dict,
     写审计：`AUDIT_FIELD_LABEL["cet"]` 会把它显示成「英语四六级」。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    require(s, "edit_candidate")
     req = req or {}
     level = str(req.get("level") or "").strip()
     raw = str(req.get("raw") or "").strip()
@@ -4147,6 +4329,17 @@ def api_ingest(req: IngestReq | None = Body(default=None),
     require(s, "ingest")
     req = req or IngestReq()
 
+    # 同一时间只允许一个收取/导入任务：两个任务同时扫同一个来源目录
+    # 会互相抢文件、重复计数，而且前端进度弹窗也只有一个。
+    try:
+        _running = [t for t in ingest_mod.list_running() if t.get("stoppable")]
+    except Exception:                                      # noqa: BLE001
+        _running = []
+    if _running:
+        raise HTTPException(
+            status_code=409,
+            detail="已有导入/收取任务在进行中，请等待完成或先停止再发起新的任务")
+
     # 路径类校验留在这里同步做：目录错/建不出来当场 4xx，不进任务排队
     cfg = mb.load_config()
     folder = None
@@ -4160,7 +4353,7 @@ def api_ingest(req: IngestReq | None = Body(default=None),
                 raise HTTPException(status_code=400,
                                     detail=f"导入文件夹不存在且无法创建：{folder}（{exc}）")
     title = "收取邮箱简历" if req.source != "folder" else "导入本地文件夹"
-    tid = ingest_mod.register_progress(title, 0, stoppable=True)
+    tid = ingest_mod.register_progress(title, 0, stoppable=True, db_path=DB_PATH)
     threading.Thread(target=_run_ingest_task, name="ingest-fetch", daemon=True,
                      args=(tid, req.source, folder, s.get("username") or "hr",
                            req.use_llm)).start()
@@ -4180,11 +4373,11 @@ def _run_ingest_task(tid: str, source: str, folder: str | None,
         jd, tiers = _jd_tiers()
         _use_llm = use_llm
         if _use_llm is None:
-            _c0 = llm.load_cfg()
+            _c0 = llm.load_cfg('extract')
             _use_llm = bool(_c0.get("api_key"))
         llm_conf = None
         if _use_llm:
-            c = llm.load_cfg()
+            c = llm.load_cfg('extract')
             llm_conf = {"api_key": c.get("api_key"), "base_url": c.get("base_url"),
                         "model": c.get("model")}
         cfg = mb.load_config()
@@ -4214,10 +4407,15 @@ def _run_ingest_task(tid: str, source: str, folder: str | None,
         # 导入后自动做**增量**建索引：只补"画像变了/还没索引"的人，不做全量重建
         report["index"] = _auto_index()
         _remember_ingest(report, operator)
-        if report.get("error") and not (report.get("mails") or report.get("added")):
-            ingest_mod.update_progress(tid, status="error",
-                                       message=f"收取失败：{report['error']}",
-                                       extra={"report": report})
+        if report.get("error"):
+            # 即使已经收到几封，连接中途断掉也不能显示"收取完成"——
+            # 否则 HR 看到"完成"就不会再点第二次，剩下的邮件永远收不进来。
+            ingest_mod.update_progress(
+                tid, status="error",
+                message=(f"收取中断：{report['error']}"
+                         f"（已收 {report.get('added', 0)} 封，"
+                         "下次会从断点继续）"),
+                extra={"report": report})
         else:
             ingest_mod.update_progress(
                 tid, status="done",
@@ -4276,7 +4474,7 @@ def api_sources(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"
         try:
             for name in sorted(os.listdir(abs_folder)):
                 full = os.path.join(abs_folder, name)
-                if not os.path.isfile(full):
+                if not _paths.lp_isfile(full):
                     continue
                 if not name.lower().endswith(tuple(parse_mod.SUPPORTED)):
                     continue
@@ -4304,7 +4502,7 @@ def api_sources(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"
             if not os.path.isdir(mdir):
                 continue
             for name in sorted(os.listdir(mdir)):
-                if os.path.isfile(os.path.join(mdir, name)) and not name.startswith("."):
+                if _paths.lp_isfile(os.path.join(mdir, name)) and not name.startswith("."):
                     removed.append({"name": name, "month": month})
     conn = db.connect(DB_PATH)
     try:
@@ -4336,20 +4534,130 @@ def api_sources(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"
     }
 
 
-def _file_session(header_token: str | None, query_token: str | None) -> dict:
-    """文件类接口的会话解析：允许用查询参数补令牌。
+#: 文件类短时票据的签名密钥。优先用主密钥；降级环境（没装 cryptography）
+#: 用进程级随机密钥——重启后旧票据失效，但不会退回到"URL 里带长期会话令牌"。
+_FILE_SIGN_SECRET: bytes | None = None
+_FILE_TICKET_TTL = 600
 
-    预览/下载走的是浏览器原生导航（`<a href>`、`window.open`、新标签页），
-    没法带自定义请求头——登录模式下如果只认 `X-TP-Token`，这几个入口会直接 401。
-    所以**仅文件类只读接口**接受 `?token=` 兜底；其余接口仍只认请求头。
 
-    `?token=` 的代价是令牌会落进浏览器历史、`Referer` 头与代理日志。彻底改法是
-    一次性签名（`文件名 + 过期时间 + HMAC`）；在改成签名之前，先用响应头把两处
-    最容易漏的地方堵上（代码审查 P1-17）：
-    · `Referrer-Policy: no-referrer`——跳转/内联资源不再把带令牌的 URL 带出去；
-    · `Cache-Control: no-store`——不进磁盘缓存，换机器/公用机不留痕。
+def _file_sign_secret() -> bytes:
+    global _FILE_SIGN_SECRET
+    if _FILE_SIGN_SECRET is None:
+        key = None
+        try:
+            from .crypto import get_key
+            key = get_key(create=False)
+        except Exception:                                  # noqa: BLE001
+            key = None
+        _FILE_SIGN_SECRET = key or secrets.token_bytes(32)
+    return _FILE_SIGN_SECRET
+
+
+def _file_ticket(scope: str, session: dict, ttl: int = _FILE_TICKET_TTL) -> str:
+    """给一个文件资源签短时票据（不把登录令牌放进 URL）。
+
+    scope 形如 `avatar:12` / `doc:34` / `source:简历.pdf` / `outbox:ab12...`；
+    票据绑定资源，拿到一张票据不能顺手改成别的人/文件。
     """
-    return _session(header_token or query_token, None)
+    payload = {"s": str(scope), "u": session.get("username") or "",
+               "r": session.get("role") or "", "e": int(time.time()) + int(ttl)}
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"),
+                     sort_keys=True).encode("utf-8")
+    sig = hmac.new(_file_sign_secret(), raw, hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") + "." + sig
+
+
+def _ticket_url(url: str, scope: str, session: dict,
+                ttl: int = _FILE_TICKET_TTL) -> str:
+    sep = "&" if "?" in url else "?"
+    return url + sep + "ticket=" + _file_ticket(scope, session, ttl)
+
+
+def _verify_file_ticket(ticket: str | None, scope: str) -> dict | None:
+    """校验票据签名/过期时间/资源 scope；失败一律返回 None。"""
+    try:
+        body, sig = str(ticket or "").rsplit(".", 1)
+        raw = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
+        expect = hmac.new(_file_sign_secret(), raw, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expect):
+            return None
+        payload = json.loads(raw.decode("utf-8"))
+        if int(payload.get("e") or 0) < int(time.time()):
+            return None
+        if str(payload.get("s") or "") != str(scope):
+            return None
+        if not payload.get("u") or not payload.get("r"):
+            return None
+        return payload
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+def _file_session(header_token: str | None, query_token: str | None,
+                  scope: str | None = None) -> dict:
+    """文件类接口的会话解析。
+
+    预览/下载走浏览器原生导航（`<a href>`、`window.open`、`<img>`），带不了
+    自定义请求头，所以允许查询参数。但查询参数里**不再放登录会话令牌**——
+    那是长期凭据，会落进浏览器历史、Referer 与代理日志。改成 `/api/files/sign`
+    换取的短时（10 分钟）HMAC 票据，且票据绑定具体资源。
+    """
+    if header_token:
+        return _session(header_token, None)
+    if not _auth_enabled():
+        return _session(None, None)
+    if query_token and scope:
+        payload = _verify_file_ticket(query_token, scope)
+        if payload:
+            role = str(payload["r"])
+            return {"username": str(payload["u"]), "role": role,
+                    "display_name": str(payload["u"]),
+                    "permissions": auth.permissions(role),
+                    "anonymous": False, "mode": "login", "ticket": True}
+    # 票据无效 → 匿名，由 require() 统一 401（不静默放行）
+    return _session(None, None)
+
+
+@app.post("/api/files/sign")
+def api_file_sign(req: dict = Body(...),
+                  x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """用登录态换一张**短时文件票据**（浏览器原生导航用，不把会话令牌塞进 URL）。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    kind = str(req.get("kind") or "").strip().lower()
+    inline = bool(req.get("inline"))
+    if kind == "document":
+        try:
+            did = int(req.get("id"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="缺少文件 id")
+        scope = f"doc:{did}"
+        url = f"/api/documents/{did}/file" + ("?inline=1" if inline else "")
+    elif kind == "source":
+        name = str(req.get("name") or "").strip()
+        _source_file_path(name)                      # 只允许来源目录内的白名单文件
+        scope = f"source:{name}"
+        url = ("/api/sources/file?inline=" + ("1" if inline else "0")
+               + "&name=" + urllib.parse.quote(name))
+    elif kind == "outbox":
+        oid = str(req.get("id") or "").strip()
+        if not _outbox_path(oid):
+            raise HTTPException(status_code=404, detail="附件不存在或已被清理")
+        scope = f"outbox:{oid}"
+        url = (f"/api/mail/outbox/{urllib.parse.quote(oid)}"
+               + "?name=" + urllib.parse.quote(str(req.get("name") or "")))
+    elif kind == "avatar":
+        try:
+            cid = int(req.get("id"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="缺少候选人 id")
+        scope = f"avatar:{cid}"
+        url = f"/api/candidates/{cid}/avatar"
+    else:
+        raise HTTPException(status_code=422, detail="不支持的资源类型")
+    return {"ok": True, "url": _ticket_url(url, scope, s),
+            "expires_in": _FILE_TICKET_TTL}
 
 
 #: 文件类响应的兜底安全头（配合 `_file_session` 的说明一起看）
@@ -4360,11 +4668,11 @@ _FILE_SAFE_HEADERS = {"Referrer-Policy": "no-referrer",
 
 
 @app.get("/api/documents/{did}/file")
-def api_document_file(did: int, inline: int = 0, token: str | None = None,
+def api_document_file(did: int, inline: int = 0, ticket: str | None = None,
                       x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")):
     """下载/预览简历原件。inline=1 时在浏览器里直接打开（PDF、文本可预览）。"""
-    s = _file_session(x_tp_token, token)
+    s = _file_session(x_tp_token, ticket, f"doc:{did}")
     require(s, "read")
     conn = db.connect(DB_PATH)
     try:
@@ -4504,7 +4812,7 @@ def _zip_response(pairs: list[tuple[str, str]], zip_name: str,
 
 
 @app.get("/api/sources/file")
-def api_source_file(name: str, inline: int = 0, token: str | None = None,
+def api_source_file(name: str, inline: int = 0, ticket: str | None = None,
                     x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                     x_tp_role: str | None = Header(default=None, alias="X-TP-Role")):
     """预览/下载**来源文件夹里**的简历（含尚未入库的那些）。
@@ -4512,7 +4820,7 @@ def api_source_file(name: str, inline: int = 0, token: str | None = None,
     入库后的原件走 `/api/documents/{did}/file`；这里是导入**之前**也要能看内容，
     否则 HR 只能凭文件名猜这份简历该不该导。
     """
-    s = _file_session(x_tp_token, token)
+    s = _file_session(x_tp_token, ticket, f"source:{name}")
     require(s, "read")
     real = _source_file_path(name)
     base = os.path.basename(real)
@@ -4550,7 +4858,7 @@ def api_sources_bundle(req: BundleReq,
     否则一次勾了十份、其中一份原件丢了，整批都下不来，HR 还得逐个试。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "read")
+    require(s, "export")
 
     pairs: list[tuple[str, str]] = []
     skipped: list[str] = []
@@ -4643,7 +4951,7 @@ def _free_path(folder: str, name: str) -> str:
     stem, ext = os.path.splitext(name)
     path = os.path.join(folder, name)
     i = 2
-    while os.path.exists(path):
+    while _paths.lp_exists(path):
         path = os.path.join(folder, f"{stem}({i}){ext}")
         i += 1
     return path
@@ -4776,14 +5084,14 @@ def api_sources_removed(x_tp_token: str | None = Header(default=None, alias="X-T
                 continue
             for name in sorted(os.listdir(mdir)):
                 full = os.path.join(mdir, name)
-                if not os.path.isfile(full) or name.startswith("."):
+                if not _paths.lp_isfile(full) or name.startswith("."):
                     continue
                 st = os.stat(full)
                 items.append({
                     "name": name, "size": st.st_size,
                     "removed_at": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
                     "month": month,
-                    "conflict": os.path.exists(os.path.join(src, name)),
+                    "conflict": _paths.lp_exists(os.path.join(src, name)),
                 })
     conn = db.connect(DB_PATH)
     try:
@@ -4820,14 +5128,14 @@ def api_sources_restore(req: SourceNamesReq,
         if os.path.isdir(REMOVED_DIR):
             for month in sorted(os.listdir(REMOVED_DIR), reverse=True):
                 cand = os.path.join(REMOVED_DIR, month, base)
-                if os.path.isfile(cand):
+                if _paths.lp_isfile(cand):
                     found = cand
                     break
         if not found:
             skipped.append({"name": base, "why": "回收目录里没有这份文件"})
             continue
         target = os.path.join(dest_dir, base)
-        if os.path.exists(target):
+        if _paths.lp_exists(target):
             skipped.append({"name": base, "why": "来源文件夹已有同名文件，未覆盖"})
             continue
         try:
@@ -5384,7 +5692,7 @@ def api_agent_status(x_tp_token: str | None = Header(default=None, alias="X-TP-T
 def api_analyze(cid: int, x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                 x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     s = _session(x_tp_token, x_tp_role)
-    require(s, "chat")
+    require(s, "ingest")
     conn = db.connect(DB_PATH)
     try:
         d = db.candidate_detail(conn, cid)
@@ -5453,7 +5761,8 @@ def api_explain(cid: int, x_tp_token: str | None = Header(default=None, alias="X
 # ============================================================
 
 class DecideReq(BaseModel):
-    decision: str = "approve"    # approve | reject
+    # 不允许默认值：客户端传 {} / 拼错时应当 422，而不是**静默批准**。
+    decision: Literal["approve", "reject"]
 
 
 @app.get("/api/proposals")
@@ -5708,7 +6017,7 @@ def api_model_config_get(x_tp_token: str | None = Header(default=None, alias="X-
         src = "环境变量 LLM_API_KEY"
     elif c.get("api_key_env"):
         src = f"环境变量 {c['api_key_env']}" if os.environ.get(c["api_key_env"]) else "未解析到（该环境变量未设置）"
-    elif os.path.exists(llm.SECRETS_PATH):
+    elif _paths.lp_exists(llm.SECRETS_PATH):
         src = "密钥文件 config/secrets.json"
     else:
         src = "config/model.json" if key else "未配置"
@@ -5801,7 +6110,7 @@ def api_embedding_config_set(req: EmbeddingCfgReq,
         raise HTTPException(status_code=400, detail="向量模型地址要以 http:// 或 https:// 开头")
     path = search.CONFIG_PATH
     try:
-        cur = json.loads(open(path, encoding="utf-8").read()) if os.path.exists(path) else {}
+        cur = json.loads(open(path, encoding="utf-8").read()) if _paths.lp_exists(path) else {}
     except (OSError, ValueError):
         cur = {}
     changed: list[str] = []
@@ -6630,7 +6939,7 @@ def api_mailbox_config(x_tp_token: str | None = Header(default=None, alias="X-TP
     # 没写过就是空串，输入框里显示占位提示。行为侧仍用合并后的 cfg。
     raw: dict = {}
     try:
-        if os.path.exists(mb.CONFIG_PATH):
+        if _paths.lp_exists(mb.CONFIG_PATH):
             with open(mb.CONFIG_PATH, encoding="utf-8") as fh:
                 raw = json.load(fh) or {}
     except (OSError, ValueError):
@@ -7085,7 +7394,7 @@ def api_feedback_export(days: int = 90,
     谁在什么时候把候选人数据导出去了，审计里必须答得上来。
     """
     s = _session(x_tp_token, x_tp_role)
-    require(s, "read")
+    require(s, "export")
     conn = db.connect(DB_PATH)
     try:
         text = feedback_mod.export_csv(conn, days=int(days))
@@ -7265,7 +7574,8 @@ def api_mail_template_delete(tid: int,
 def api_smtp_get(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     """发信配置（密码只回是否已设置，不回显）。"""
-    _session(x_tp_token, x_tp_role)
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
     conf = mail_send_mod.load_smtp()
     # v4.0.0：没配过就回空串。`load_smtp()` 内部有 smtp.163.com / 465 的兜底
     # （发信时要用），但那不该在界面上冒充"用户已设定"。
@@ -7541,7 +7851,7 @@ async def api_mail_outbox(request: Request, name: str = "",
     # 此时复用同一个 id 会让收件人看到的名字变回第一次那个 —— 所以同内容时
     # 记一份"别名"，按最新一次的原名返回。
     path = os.path.join(_outbox_dir(), digest + ext)
-    if not os.path.exists(path):
+    if not _paths.lp_exists(path):
         with open(path, "wb") as fh:
             fh.write(body)
     safe_name = os.path.basename(str(name or ""))[:120] or f"附件{ext}"
@@ -7559,19 +7869,19 @@ async def api_mail_outbox(request: Request, name: str = "",
 
 @app.get("/api/mail/outbox/{outbox_id}")
 def api_mail_outbox_open(outbox_id: str, name: str = "", inline: int = 1,
-                         token: str | None = None,
+                         ticket: str | None = None,
                          x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                          x_tp_role: str | None = Header(default=None, alias="X-TP-Role")):
     """打开/下载一个**临时附件**（v1.29.10，业务方要"附件要能预览"）。
 
-    浏览器原生导航带不了自定义请求头，登录模式下用 `?token=` 兜底 ——
-    与 `/api/documents/{did}/file` 同一口径。路径只认 outbox 目录内的
-    十六进制 id（`_outbox_path` 双重校验），不接受任何外部路径。
+    浏览器原生导航带不了自定义请求头，登录模式下用 `/api/files/sign` 换取的
+    短时 `?ticket=` —— 与 `/api/documents/{did}/file` 同一口径。路径只认
+    outbox 目录内的十六进制 id（`_outbox_path` 双重校验），不接受任何外部路径。
     """
-    s = _file_session(x_tp_token, token)
+    s = _file_session(x_tp_token, ticket, f"outbox:{outbox_id}")
     require(s, "read")
     p = _outbox_path(outbox_id)
-    if not p or not os.path.exists(p):
+    if not p or not _paths.lp_exists(p):
         raise HTTPException(status_code=404, detail="附件不存在或已被清理")
     fn = os.path.basename(str(name or ""))[:120] or os.path.basename(p)
     if not os.path.splitext(fn)[1]:
@@ -7597,7 +7907,7 @@ def api_mail_outbox_delete(outbox_id: str,
     p = _outbox_path(outbox_id)
     if not p:
         raise HTTPException(status_code=400, detail="附件编号不合法")
-    removed = os.path.exists(p)
+    removed = _paths.lp_exists(p)
     if removed:
         try:
             os.remove(p)
@@ -7647,7 +7957,7 @@ def _mail_send_sync(req: MailSendReq, s: dict) -> dict:
                 if getattr(_a, "outbox_id", None):
                     _op = _outbox_path(_a.outbox_id)
                     _on = _a.filename2 or _a.filename or "附件"
-                    if not _op or not os.path.exists(_op):
+                    if not _op or not _paths.lp_exists(_op):
                         att_missing.append(f"{_on}（临时附件已不在暂存区）")
                         continue
                     try:
@@ -7666,7 +7976,7 @@ def _mail_send_sync(req: MailSendReq, s: dict) -> dict:
                     att_missing.append(f"{_name}（附件 #{_a.document_id} 不在库里）")
                     continue
                 _p = _d.get("archived_path") or ""
-                if not _p or not os.path.exists(_p):
+                if not _p or not _paths.lp_exists(_p):
                     att_missing.append(f"{_name}（原件文件已不在归档区）")
                     continue
                 try:
@@ -7830,6 +8140,24 @@ def _run_mail_send_task(tid: str, req: MailSendReq, session: dict) -> None:
         )
 
 
+def _mail_dedup_response(tid: str) -> dict:
+    """回放一条已存在的发信任务（内存优先，重启后从库里的任务快照读）。"""
+    with _PROGRESS_LOCK:
+        existing = dict(_PROGRESS.get(tid) or {})
+    if not existing:
+        existing = db.task_get(DB_PATH, tid) or {}
+    out = {
+        "ok": True,
+        "pending": existing.get("status") == "running",
+        "task_id": tid,
+        "deduped": True,
+        "note": "同一封邮件的发送请求已存在，未重复提交。",
+    }
+    if "result" in existing:
+        out["result"] = existing["result"]
+    return out
+
+
 @app.post("/api/mail/send")
 def api_mail_send(req: MailSendReq,
                   async_mode: bool = Query(default=False, alias="async"),
@@ -7842,30 +8170,31 @@ def api_mail_send(req: MailSendReq,
         return _mail_send_sync(req, s)
     req_id = str(req.client_request_id or "").strip()[:80]
     if req_id:
+        # 先查进程内缓存（热路径），再落到数据库做**跨进程/重启**的原子认领。
         with _MAIL_REQ_LOCK:
             existing_tid = _MAIL_REQ.get(req_id)
-            if existing_tid:
-                with _PROGRESS_LOCK:
-                    existing = dict(_PROGRESS.get(existing_tid) or {})
-                if existing:
-                    out = {
-                        "ok": True,
-                        "pending": existing.get("status") == "running",
-                        "task_id": existing_tid,
-                        "deduped": True,
-                        "note": "同一封邮件的发送请求已存在，未重复提交。",
-                    }
-                    if "result" in existing:
-                        out["result"] = existing["result"]
-                    return out
-            # 创建任务与登记幂等键必须原子完成，防两个同键请求同时穿透。
-            tid = _progress_new(
-                f"发送邮件：{req.subject or '（无主题）'}", 1, kind="mail",
-                meta={"candidate_id": req.candidate_id,
-                      "application_id": req.application_id,
-                      "to": req.to, "subject": req.subject,
-                      "client_request_id": req_id},
-            )
+        if existing_tid:
+            return _mail_dedup_response(existing_tid)
+        new_tid = uuid.uuid4().hex[:12]
+        try:
+            tid, created = db.mail_request_claim(DB_PATH, req_id, new_tid)
+        except Exception as exc:                     # noqa: BLE001
+            # 幂等表写不进去不该阻断发信；退回进程内去重，并明确记录降级。
+            print(f"[mail] 幂等键落库失败，已降级为进程内去重：{exc}", file=sys.stderr)
+            tid, created = new_tid, True
+        if not created:
+            with _MAIL_REQ_LOCK:
+                _MAIL_REQ[req_id] = tid
+            return _mail_dedup_response(tid)
+        tid = _progress_new(
+            f"发送邮件：{req.subject or '（无主题）'}", 1, kind="mail",
+            task_id=tid,
+            meta={"candidate_id": req.candidate_id,
+                  "application_id": req.application_id,
+                  "to": req.to, "subject": req.subject,
+                  "client_request_id": req_id},
+        )
+        with _MAIL_REQ_LOCK:
             _MAIL_REQ[req_id] = tid
     else:
         tid = _progress_new(

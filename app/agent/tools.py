@@ -168,6 +168,8 @@ class ToolCtx:
     skill_name: str = ""
     #: 本轮上下文用量估算（窗口/已用/各项 token），供右栏展示
     context: dict = field(default_factory=dict)
+    #: 本轮运行指标（工具调用/错误、上下文治理、分轮 token），由 loop 填充
+    metrics: dict = field(default_factory=dict)
 
 
 def _spec(name: str, desc: str, props: dict | None = None, required: list[str] | None = None) -> dict:
@@ -184,8 +186,7 @@ TOOL_SPECS = [
           "keyword=按条件/关键词/技能（默认）；semantic=按自然语言描述找相似经历；"
           "skills=按技能本体精确召回；similar=找和某人相似的人。"
           "返回真实库内数据，找不到就返回空，不要编造。"
-          "**keyword 是字面匹配**：院校请用全称（库里存的是『西安电子科技大学』，"
-          "传『西电』会返回空——遇到简称先展开成全称再搜）。"
+          "**keyword 是字面匹配**：院校请用全称，遇到简称先展开成全称再搜）。"
           "**问『某岗位有哪些候选人』用 job 参数**：它按**归岗关系**筛（只返回已归到该岗位下的人），"
           "不是技能匹配——不要用 skill/keyword 拼一个『岗位人选』出来。",
           {"mode": {"type": "string",
@@ -1545,6 +1546,37 @@ def _candidate_distribution(conn, field: str) -> dict | None:
             "total": total, "items": out}
 
 
+#: 导出类工具：它们不改数据，但把候选人数据带出系统，必须单独受 export 权限约束。
+_EXPORT_TOOLS = {"export_roster", "export_interview_schedule", "export_interview_ics",
+                 "export_resume_bundle", "export_feedback", "export_resumes"}
+
+
+def _permission_error(name: str, ctx: ToolCtx) -> str | None:
+    """工具层的角色闸门。
+
+    网页路由各自有 `require()`，但智能助手是另一个入口：如果只靠路由的
+    `chat` 权限，只读账号就能让助手导出名单、导入简历、生成改动提案。
+    这里按工具类别再挡一道（本机模式 cfg.local 不做限制）。
+    """
+    if (ctx.cfg or {}).get("local"):
+        return None
+    role = str(ctx.role or "")
+    if name in _EXPORT_TOOLS:
+        need = "export"
+    elif name == "ingest_resumes":
+        need = "ingest"
+    elif name in READ_TOOLS or name in COMPUTE_TOOLS:
+        need = "read"
+    else:
+        need = "propose"
+    if auth.can(role, need):
+        return None
+    return _err(
+        f"当前角色（{auth.role_label(role)}）没有「{auth.PERM_LABELS.get(need, need)}」权限，"
+        f"不能执行工具 {name}",
+        hint="只读账号只能检索与查看；导出、导入或改动请使用 HR 账号。")
+
+
 def execute(name: str, args: dict, ctx: ToolCtx) -> str:
     """执行工具，返回 JSON 字符串。任何异常都转成可读错误，绝不让循环崩掉。"""
     args = args or {}
@@ -1552,6 +1584,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
         return _err(
             f"工具 {name} 在本系统中不提供。原因：系统不做对外发送、不做删除、不做淘汰决定。"
             "若确需对外沟通或删除，请由 HR 在系统外人工完成。")
+    _perm_err = _permission_error(name, ctx)
+    if _perm_err:
+        return _perm_err
 
     # 域级写入口：把 action 还原成旧工具名，直接复用原有 handler 的校验、
     # 摘要、风险与提案逻辑。旧工具名仍在 execute() 里可用（兼容旧提示词/脚本）。
@@ -2390,7 +2425,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             for k, v in fields.items():
                 old = _cur.get(k) or ""
                 if str(old) != str(v or ""):
-                    pairs.append(f"{_LABEL[k]}：{old or '（空）'} → {v or '（空）'}")
+                    # 提案 summary 会原样下发给所有能看提案的角色，也会长期留在
+                    # 提案表里；手机/邮箱必须走审计口径打码，不能抄明文。
+                    pairs.append(f"{_LABEL[k]}：{db.audit_field_value(k, old)}"
+                                 f" → {db.audit_field_value(k, v or '')}")
             if not pairs:
                 return _ok({"candidate_id": cid, "changed": [],
                             "note": "字段没有变化。"})

@@ -36,6 +36,7 @@ PERM_LABELS = {
     "set_stage": "改档位 / 推进阶段 / 归档",
     "edit_plan": "维护招聘计划（届别 / 单位名额 / 录用单位）",
     "add_note": "写备注",
+    "edit_candidate": "修改候选人档案字段（姓名/学历/学校/专业/联系方式）",
     "merge": "合并 / 拆分档案",
     "ingest": "导入简历、跑分析任务",
     "export": "导出名单 / 打包下载原件",
@@ -51,8 +52,8 @@ _PERMS = {
     # 管理员 = HR 的全部权限 + 账号管理
     "admin": set(PERM_LABELS),
     "hr": {"read", "view_full_contact", "chat", "propose", "confirm",
-           "set_stage", "edit_plan", "add_note", "merge", "ingest", "export", "archive",
-           "settings"},
+           "set_stage", "edit_plan", "add_note", "edit_candidate", "merge", "ingest",
+           "export", "archive", "settings"},
     # 只读：不含 propose/confirm/set_stage/... —— 连"生成提案"都不给，
     # 因为提案被确认后就是真实改动，只读用户不该在系统里留下待办。
     "viewer": set(_READONLY),
@@ -93,7 +94,9 @@ def ensure_seed_users(conn, default_password: str = "change-me") -> list[str]:
         created = []
         for username, _, display, role in ROLE_DEFAULT_USERS:
             if not db.get_user(conn, username):
-                db.create_user(conn, username, default_password, role, display)
+                # 首次登录强制改密：默认密码只用于完成初始化，不能长期使用。
+                db.create_user(conn, username, default_password, role, display,
+                               must_change=True)
                 created.append(username)
         return created
 
@@ -126,11 +129,18 @@ def authenticate(conn, username: str, password: str) -> dict | None:
     disp = (user.get("display_name") or "").strip()
     if not disp or disp in {v["label"] for v in ROLES.values()}:
         disp = username
+    # 老库没有 must_change_password 列值：密码仍是默认值就补标记。
+    must_change = bool(user.get("must_change_password")) or password == DEFAULT_PASSWORD
+    if password == DEFAULT_PASSWORD and not user.get("must_change_password"):
+        try:
+            db.set_user_must_change(conn, user["username"], True)
+        except Exception:                                # noqa: BLE001
+            pass
     return {"token": token, "username": user["username"], "role": user["role"],
             "role_label": role_label(user["role"]),
             "display_name": disp,
             "permissions": permissions(user["role"]),
-            "must_change_password": (password == DEFAULT_PASSWORD)}
+            "must_change_password": must_change}
 
 
 def resolve(conn, token: str | None) -> dict:
@@ -148,7 +158,8 @@ def resolve(conn, token: str | None) -> dict:
         return {"username": "anonymous", "role": "guest", "display_name": "未登录",
                 "permissions": [], "anonymous": True, "expired": True}
     return {"username": s["username"], "role": s["role"], "display_name": s["username"],
-            "permissions": permissions(s["role"]), "anonymous": False}
+            "permissions": permissions(s["role"]), "anonymous": False,
+            "must_change_password": bool(s.get("must_change_password"))}
 
 
 # ---------------------------------------------------------------- 展示（完整联系方式）

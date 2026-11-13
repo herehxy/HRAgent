@@ -1,0 +1,14 @@
+{
+  "id": "education_cert@1",
+  "name": "学历 / 学位证书",
+  "doc_type": "education_cert",
+  "aliases": ["education_cert", "degree_cert", "education"],
+  "apply": "employee",
+  "fields": [
+    {"key": "name", "labels": ["姓名"], "type": "text"},
+    {"key": "edu_level", "labels": ["学历", "学位", "授予学位"], "type": "level", "values": ["博士", "硕士", "本科", "大专", "专科", "中专", "高中"]},
+    {"key": "school", "labels": ["毕业院校", "学校", "院校"], "type": "text"},
+    {"key": "major", "labels": ["专业", "所学专业"], "type": "text"},
+    {"key": "graduation_date", "labels": ["毕业时间", "毕业日期"], "type": "date"}
+  ]
+}

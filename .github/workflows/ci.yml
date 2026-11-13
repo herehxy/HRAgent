@@ -1,0 +1,19 @@
+name: HRAgent CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 语法检查
+        run: python -m compileall -q app tests
+      - name: 轻量回归测试
+        run: python tests/test_optimizations.py -v

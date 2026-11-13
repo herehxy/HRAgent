@@ -871,7 +871,7 @@ def main(verbose: bool = True) -> int:
         conn.close()
 
         # ============================================================ R3
-        c.section("R3 重复投递口径（v1.8.8）：未归档幂等跳过；已归档按新投递录入")
+        c.section("R3 重复投递口径：未归档幂等跳过；已归档新建投递并移回人才库")
         r3db = os.path.join(work, "reapply.db")
         r3cfg = dict(cfg, archive_dir=os.path.join(work, "archive3"))
         r3src = os.path.join(work, "reapply_src")
@@ -898,7 +898,7 @@ def main(verbose: bool = True) -> int:
              "幂等跳过不新增投递（投递数仍为 1）")
         conn.close()
 
-        # ② 归档之后重新投递 → 作为**新投递**录入，并把档案移回人才库
+        # ② 归档之后重新投递 → **新建一条投递**，并把档案移回人才库
         conn = db.connect(r3db)
         db.set_candidate_archived(conn, _cid3, True, "hr", "hr")
         c.ok(bool(db.get_candidate(conn, _cid3)["archived_at"]), "先把该人归档（前置条件）")
@@ -906,9 +906,10 @@ def main(verbose: bool = True) -> int:
         r_re = ingest.ingest_dir(r3src, JD, TIERS, r3db, cfg=r3cfg,
                                  channel="文件夹", job_id=None)
         conn = db.connect(r3db)
-        c.ok(r_re["added"] == 1,
-             "已归档的人重新投递 → 计为『新增投递』而不是幂等跳过",
-             f"added={r_re['added']} skipped={r_re['skipped_dup']}")
+        c.ok(r_re["added"] == 1 and r_re["merged_versions"] == 0,
+             "已归档的人重新投递 → 新建一条投递，不并入旧投递",
+             f"added={r_re['added']} merged={r_re.get('merged_versions')} "
+             f"skipped={r_re['skipped_dup']}")
         c.ok(not db.get_candidate(conn, _cid3)["archived_at"],
              "重新投递后档案自动移回人才库（取消归档）")
         c.ok(len(db.list_applications(conn, cid=_cid3)) == 2,
@@ -921,7 +922,9 @@ def main(verbose: bool = True) -> int:
         c.ok("unarchive_on_reapply" in _acts, "归档后重新投递写审计（可追溯为什么又出现了）")
         conn.close()
 
-        # ③ 列表排序口径：只看投递时间倒序（最新在前），不看档位、不看分数
+        # ③ 列表排序口径：只看**最近一次收到简历的导入时间**倒序（最新在前），
+        # 不看档位、不看分数。手动造数据时同步写 last_active_at，
+        # 否则 insert_candidate 会把它设成“现在”，三条记录会挤在同一秒。
         odb = os.path.join(work, "order.db")
         conn = db.connect(odb)
         for _nm, _tier, _at, _sc in (("甲", "A", "2026-01-01 09:00:00", 0.9),
@@ -932,10 +935,12 @@ def main(verbose: bool = True) -> int:
                 "INSERT INTO applications (candidate_id, tier_suggested, applied_at, score,"
                 " created_at, updated_at) VALUES (?,?,?,?,?,?)",
                 (_c, _tier, _at, _sc, _at, _at))
+            conn.execute("UPDATE candidates SET last_active_at=? WHERE id=?", (_at, _c))
         conn.commit()
         _order = [x["name"] for x in db.list_candidates(conn) if x["name"] in ("甲", "乙", "丙")]
         c.ok(_order == ["乙", "丙", "甲"],
-             "排序：只按投递时间倒序（最新在前），最差档/分数都不影响顺序", str(_order))
+             "排序：按最新一次收到简历的时间倒序（最新在前），最差档/分数都不影响顺序",
+             str(_order))
         conn.close()
 
         # ============================================================ R2
@@ -4847,9 +4852,17 @@ def main(verbose: bool = True) -> int:
             _cand0, _used = _sm.apply_to_candidate(
                 {"name": "x", "education": "本科", "school": "某学院",
                  "skills": ["钛合金"], "years": 3}, _m)
-            c.ok(_cand0["school"] == "西安交通大学" and _cand0["education"] == "硕士"
-                 and _cand0["name"] == "张三",
-                 "⑩ 标题字段覆盖姓名/学历/学校（投递方按格式填的，比正文准）")
+            c.ok(_cand0["school"] == "某学院" and _cand0["education"] == "本科"
+                 and _cand0["name"] == "x"
+                 and _cand0["major"] == "材料科学与工程"
+                 and _cand0["gender"] == "男"
+                 and set(_used) == {"专业", "性别"},
+                 "⑩ 简历已有的姓名/学历/学校不被标题覆盖；只补缺失的专业/性别",
+                 f"used={_used} cand={ {k: _cand0.get(k) for k in ('name','education','school','major','gender')} }")
+            _cand1, _used1 = _sm.apply_to_candidate({}, _m)
+            c.ok(_cand1.get("name") == "张三" and _cand1.get("education") == "硕士"
+                 and set(_used1) == {"姓名", "学历", "学校", "专业", "性别"},
+                 "⑩a 简历完全缺失时才用标题/文件名补充个人字段", str(_used1))
             # 姓名是"按位置猜"的，位置规则遇到没见过的写法就会猜错；
             # 所以姓名额外过一道证据校验：猜出来的名字在原文里找不到 → 不覆盖。
             _m7 = _sm.parse("博士应聘-材料学-赵敏")

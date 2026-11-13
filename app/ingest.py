@@ -30,7 +30,9 @@ import os
 import re
 import sys
 import threading
+import time
 import traceback
+import uuid
 from datetime import datetime
 
 from . import db
@@ -57,6 +59,11 @@ _PROGRESS_LOCK = threading.Lock()
 #: get_progress 的返回值要能 JSON 序列化（事件对象不能混进去）。
 _STOP_FLAGS: dict[str, threading.Event] = {}
 _STOP_LOCK = threading.Lock()
+
+#: 任务 → 数据库路径 / 上次落库时间（节流用）。任务进度本身仍在内存里，
+#: 数据库只做**重启后可解释**的快照，不能因为写库拖慢每份简历的处理。
+_PROGRESS_DB: dict[str, str] = {}
+_PROGRESS_LAST: dict[str, float] = {}
 
 
 def request_stop(task_id: str) -> bool:
@@ -87,20 +94,70 @@ def stop_requested(task_id: str | None) -> bool:
     return bool(ev and ev.is_set())
 
 
-def register_progress(title: str, total: int, stoppable: bool = False) -> str:
+def _persist_progress(tid: str, *, force: bool = False) -> None:
+    """把任务快照节流写入 background_tasks；失败不影响任务本身。"""
+    with _PROGRESS_LOCK:
+        p = dict(_PROGRESS.get(tid) or {})
+        path = _PROGRESS_DB.get(tid)
+        last = _PROGRESS_LAST.get(tid, 0.0)
+    if not p or not path:
+        return
+    now_t = time.time()
+    if not force and now_t - last < 1.0:
+        return
+    _PROGRESS_LAST[tid] = now_t
+    data = {k: v for k, v in p.items()
+            if k not in ("title", "total", "done", "failed", "status", "message",
+                         "started_at", "kind", "meta")}
+    db.task_upsert(path, {
+        "task_id": tid, "kind": p.get("kind") or "ingest",
+        "title": p.get("title") or "", "total": p.get("total") or 0,
+        "done": p.get("done") or 0, "failed": p.get("failed") or 0,
+        "status": p.get("status") or "running", "message": p.get("message") or "",
+        "meta": p.get("meta") or {}, "data": data,
+        "started_at": p.get("started_at"),
+    })
+
+
+def _prune_progress() -> None:
+    """清掉过期已完成任务的内存记录（数据库快照仍在，按保留期清理）。"""
+    cutoff = time.time() - 1800
+    with _PROGRESS_LOCK:
+        gone = [tid for tid, p in _PROGRESS.items()
+                if p.get("status") in ("done", "error")
+                and (p.get("finished_at") or 0) < cutoff]
+        for tid in gone:
+            _PROGRESS.pop(tid, None)
+            _PROGRESS_DB.pop(tid, None)
+            _PROGRESS_LAST.pop(tid, None)
+    if gone:
+        with _STOP_LOCK:
+            for tid in gone:
+                _STOP_FLAGS.pop(tid, None)
+
+
+def register_progress(title: str, total: int, stoppable: bool = False,
+                      db_path: str | None = None,
+                      meta: dict | None = None) -> str:
     """登记一个后台任务，返回 task_id（自动分析的进度靠它查询）。
 
     `stoppable=True` 时同时登记中断旗（收取/导入用，见 `request_stop`）。
+    `db_path` 给出时把快照写进 `background_tasks`，页面刷新/服务重启后排障用。
     """
     import uuid
+    _prune_progress()
     tid = uuid.uuid4().hex[:12]
     with _PROGRESS_LOCK:
         _PROGRESS[tid] = {"title": title, "total": total, "done": 0,
                           "failed": 0, "status": "running", "message": "",
-                          "started_at": __import__("time").time()}
+                          "started_at": time.time(), "kind": "ingest",
+                          "meta": dict(meta or {})}
+        if db_path:
+            _PROGRESS_DB[tid] = db_path
     if stoppable:
         with _STOP_LOCK:
             _STOP_FLAGS[tid] = threading.Event()
+    _persist_progress(tid, force=True)
     return tid
 
 
@@ -118,12 +175,15 @@ def update_progress(tid: str, *, done: int | None = None,
             p["failed"] = failed
         if status is not None:
             p["status"] = status
+            if status in ("done", "error"):
+                p["finished_at"] = time.time()
         if message is not None:
             p["message"] = message
         if total is not None:          # v1.29.4：收取任务"统计完数量再报总数"
             p["total"] = total
         if extra:
             p.update(extra)
+    _persist_progress(tid, force=status in ("done", "error"))
 
 
 def get_progress(tid: str) -> dict | None:
@@ -150,6 +210,8 @@ def list_running() -> list[dict]:
         out.append({"task_id": tid, "title": p.get("title") or "",
                     "total": p.get("total") or 0, "done": p.get("done") or 0,
                     "message": p.get("message") or "", "stoppable": can_stop,
+                    "kind": p.get("kind") or "ingest",
+                    "meta": p.get("meta") or {},
                     "started_at": p.get("started_at") or 0})
     out.sort(key=lambda x: (not x["stoppable"], -(x["started_at"] or 0)))
     return out
@@ -358,10 +420,19 @@ def ensure_person(conn, cand: dict, channel: str, text: str,
     from .identity import normalize_phone
 
     existing = db.find_candidate_by_identity(conn, key)
+    weak_hit: dict | None = None
     if existing:
-        cid = existing["id"]
-        db.update_candidate(conn, cid, last_active_at=db.now())
-        return cid, False, {}
+        # 只有手机号/邮箱这类**强身份键**才能自动并入已有档案。
+        # `nm:`（姓名）/`ns:`（姓名+院校）是弱键：同名不同人极其常见
+        # （扫描件 OCR 失败、简历没写联系方式时最容易命中），自动并档会把
+        # 两个人的简历混进同一份档案，且后续版本还会覆盖原字段。
+        # 弱键命中时**新建档案**并返回 suspect 提示，交 HR 人工判断。
+        kind = key.split(":", 1)[0]
+        if kind in ("ph", "em"):
+            cid = existing["id"]
+            db.update_candidate(conn, cid, last_active_at=db.now())
+            return cid, False, {}
+        weak_hit = existing
 
     # 键不同但手机/邮箱命中 -> 疑似同一人，沿用已有档（不新建），并提示
     # 注意：**脱敏号码（138****1234）不能作为"这是同一个人"的证据**——
@@ -378,10 +449,16 @@ def ensure_person(conn, cand: dict, channel: str, text: str,
                      existing.get("identity_key") if existing else "",
                      f"新简历身份键 {key} 未命中，但{'手机号' if pidx else '邮箱'}命中本档",
                      "system", "system")
-        return cid, False, {"suspect": True, "reason": "手机号/邮箱命中已有档案"}
+        return cid, False, {"suspect": True, "reason": "手机号/邮箱命中已有档案，已归入已有档案"}
 
+    # `candidates.identity_key` 是 UNIQUE：弱键命中时要另建档，
+    # 但不能再写同一个键。加一个随机后缀把两个人分开；
+    # 后续同名无联系方式的简历依旧会先查到最早那份（weak_hit）并继续提示。
+    insert_key = key
+    if weak_hit:
+        insert_key = f"{key}#{uuid.uuid4().hex[:8]}"
     cid = db.insert_candidate(conn, {
-        "identity_key": key,
+        "identity_key": insert_key,
         "name": cand.get("name"),
         "phone_enc": encrypt(phone),
         "email_enc": encrypt(email),
@@ -416,6 +493,13 @@ def ensure_person(conn, cand: dict, channel: str, text: str,
     })
     db.add_audit(conn, "candidate", str(cid), "create", "", f"新建档案：{cand.get('name')}",
                  "system", "system")
+    if weak_hit:
+        # 弱键同名：已单独建档，但必须让 HR 知道"库里有同名的另一份档案"。
+        return cid, True, {
+            "suspect": True,
+            "reason": (f"按姓名命中了已有档案 #{weak_hit['id']}（{weak_hit.get('name') or ''}），"
+                       "但简历没有手机/邮箱，无法确认是同一人；已单独建档，请人工核实"),
+        }
     return cid, True, {}
 
 
@@ -528,12 +612,13 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
                local_path: str | None, channel: str, applied_at: str,
                source_message_id: str | None, job_id: int | None,
                use_llm: bool = False, llm_conf: dict | None = None,
-               subject_meta: dict | None = None) -> dict:
+               subject_meta: dict | None = None,
+               preparsed: tuple[str, str, bool] | None = None) -> dict:
     """单份简历的完整处理链路，返回一条结果记录。
 
     `subject_meta`：邮件主题/文件名按 `方向+学历+学校+专业+姓名+性别` 解析出的字段
-    （见 `pipeline/subject_meta.py`）。它是**投递方按我们要求填写**的结构化信息，
-    优先于简历正文的抽取结果；解析不出来的字段不会出现在里面，也就不会覆盖正文。
+    （见 `pipeline/subject_meta.py`）。它主要用于**岗位方向**；个人字段只在简历
+    完全缺失时补空，**绝不覆盖**简历正文/模型抽取出的姓名、学历、学校、专业、性别。
     """
     result: dict = {"file": filename, "status": "unknown", "name": None, "tier": None,
                     "score": None, "notes": []}
@@ -549,7 +634,7 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     #
     # 例外（v1.8.8，HR 口径）：**该人已归档后再投同一份简历**时，不能一律幂等跳过——
     # "重新投递"本身就是要记录的事实。此时复用既有原件（磁盘仍只有一份、不重复落盘），
-    # 但按新投递录入，并把档案移回人才库。
+    # 按最新简历新建一条投递，并把档案移回人才库。
     prior_doc: dict | None = None
     if db.exists_hash(conn, digest):
         prior_doc = _find_doc_by_hash(conn, digest)
@@ -562,11 +647,20 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
                 # 重复的这份原件虽然不落盘，但库里已有一份：把它的附件编号带出去，
                 # 界面才能在"逐份明细"里直接预览/下载（否则 HR 只能看到文件名）
                 result["document_id"] = prior_doc["id"]
+                # 同一封邮件里的其他附件要挂到这个已有档案下；否则重复收取时
+                # 补充材料会因为拿不到 candidate_id 而变成"未挂人"。
+                result["candidate_id"] = prior_doc.get("candidate_id")
+                # 即使原件完全相同、没有新建文档，这次投递本身也是"最近一次收到简历"。
+                # 列表按 `last_active_at` 排序，这里必须刷新；否则 HR 刚收到的重复简历
+                # 仍沉在旧位置，看起来像没收进来。
+                if prior_doc.get("candidate_id"):
+                    db.update_candidate(conn, prior_doc["candidate_id"],
+                                        last_active_at=db.now())
             db.add_audit(conn, "document", digest[:16], "duplicate_skipped", "",
                          f"重复投递的附件 {filename} 未重复落盘（原件已在库）",
                          "system", "system")
             return result
-        result["notes"].append("该人此前已归档，本次为重新投递：复用既有原件（不重复落盘），按新投递录入")
+        result["notes"].append("该人此前已归档，本次为重新投递：复用既有原件（不重复落盘），新建投递")
 
     if prior_doc is not None:
         # 归档后重新投递：原件与原文都已在本库，直接复用——
@@ -596,7 +690,14 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
             archived, size = "", 0
 
         # —— 解析（失败不阻断）——
-        text, engine, ok = parse_mod.parse_file_ex(archived)
+        # 邮件路径会先在 `_prepare_attachments()` 里解析一次并传进来，
+        # 避免同一份图片被 OCR 两遍；文件夹导入等旧路径仍在这里解析。
+        if preparsed is not None:
+            text, engine, ok = preparsed
+            text = str(text or "")
+            ok = bool(ok and text.strip())
+        else:
+            text, engine, ok = parse_mod.parse_file_ex(archived)
     if not ok:
         result["notes"].append(f"解析未成功（{engine}），已标『简历读不出』，原件保留")
 
@@ -628,16 +729,17 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     # v1.29 起档位字母来自 config/tiers.json，当前硬门槛档是 C）。
         g = grade(cand, jd, job_confirmed=(job_id is not None))
 
-    # —— 邮件主题 / 文件名里的结构化字段（v1.9）：**优先于正文抽取** ——
-    # 投递方按「方向+学历+学校+专业+姓名+性别」的格式填写，比从正文里猜准得多。
-    # 只覆盖"人的属性"（姓名/学历/学校/专业/性别），技能与年限一律以正文+证据为准。
+    # —— 邮件主题 / 文件名里的结构化字段（v1.9）——
+    # 业务方 2026-11-13：**个人信息以简历为准**。标题/文件名只补简历里缺失的字段，
+    # 已有值一律不覆盖；岗位方向仍按标题归岗（见 `_route_by_open_jobs`）。
+    # 技能与年限一律以正文+证据为准，标题不碰。
     if subject_meta:
         cand, _used = subject_meta_mod.apply_to_candidate(cand, subject_meta, raw_text=text)
         if _used:
-            result["notes"].append("邮件标题/文件名按格式提供了 "
-                                   + "、".join(_used) + "，已作为权威值采用")
-            for _c in (cand.get("title_override_notes") or []):
-                result["notes"].append("字段以标题为准：" + _c)
+            result["notes"].append("邮件标题/文件名补充了简历中缺失的 "
+                                   + "、".join(_used))
+        for _c in (cand.get("title_override_notes") or []):
+            result["notes"].append(_c)
 
     # —— 专业归一（v1.11）：规则归不出来时，让模型在**学科目录**里选 ——
     # 模型只做"归一"（把"材化/材料成型"这类写法归到目录条目），打分仍走规则；
@@ -685,10 +787,11 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     # —— 第三层去重：内容层（人）——
     cid, is_new, hint = ensure_person(conn, cand, channel, text, doc_digest=digest)
     if hint.get("suspect"):
-        result["notes"].append(hint["reason"] + "，已归入已有档案")
+        result["notes"].append(hint["reason"])
 
-    # 该档案此前是否已归档（v1.8.8）：归档后再次投递要**按新投递录入**——
+    # 该档案此前是否已归档（v1.8.8）：归档后再次投递要**新建一条投递**并移回人才库——
     # 归档只表示"上一轮流程结束"，不代表这个人不能再投；重新投递本身是事实。
+    # 未归档的人则始终沿用原投递（2026-11-13 口径）。
     _row = db.get_candidate(conn, cid) or {}
     was_archived = bool(_row.get("archived_at"))
 
@@ -735,10 +838,12 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     if skill_stat["unverified"]:
         result["notes"].append(f"{skill_stat['unverified']} 项技能未能在原文定位证据，未计入命中")
 
-    # —— 投递：同一岗位近期重复投递 -> 作为新版本附件，不新建投递 ——
-    # 但**已归档的人**不套这条：他的重新投递要作为一条新投递出现（见上）。
-    window = int((cfg.get("dedup") or {}).get("same_job_reapply_days", 30) or 0)
-    existing = None if was_archived else _find_recent_application(conn, cid, job_id, window)
+    # —— 投递：同一个人（未归档）始终沿用最近一条投递，不再新建投递 ——
+    # 业务方 2026-11-13：只要身份命中同一个人，不论换了岗位、隔了多久，
+    # 后续简历都作为该投递的新版本附件；个人信息始终按最新简历刷新。
+    # 例外：**已归档的人再次投递**要新建一条投递档案（业务方 2026-11-13 明确），
+    # 旧投递与附件保留，不能直接把旧档案当成这次的新投递。
+    existing = None if was_archived else db.latest_application(conn, cid)
 
     if existing:
         # 既有投递没有岗位（v0.1 迁移数据）时回填，避免同一个人长期挂着"未指定岗位"的投递
@@ -749,6 +854,10 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
             db.add_audit(conn, "application", str(existing["id"]), "job_bound",
                          "岗位未指定", f"按本次投递回填岗位 #{job_id}", "system", "system")
             existing = db.get_application(conn, existing["id"])
+        elif job_id is not None and existing.get("job_id") not in (None, job_id):
+            # 同一人只有一条投递：新简历若带的是另一个岗位，不自动改岗（避免
+            # 悄悄把已有面试/阶段记录挪到别的岗位），只提示 HR 按需在档案里调整。
+            result["notes"].append("本次简历带岗位信息，但同一人沿用原投递岗位；如需改岗请在档案里调整")
 
         # 仍「待指定」的投递：刷新建议岗位（新人新简历可能更匹配别的岗位，
         # 岗位表也可能新增/停用了岗位——建议是"当前在招岗位里的最适者"，本就不是定值）
@@ -773,18 +882,28 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
             "sensitive_found": json.dumps(cand.get("sensitive_found") or {},
                                           ensure_ascii=False),
         })
-        refreshed = _regrade_if_unconfirmed(conn, existing, g)
+        # 让"当前简历"指针始终指向这一份最新版本；否则按岗位重算/导出仍会读旧版。
+        conn.execute("UPDATE applications SET resume_doc_id = ?, updated_at = ? WHERE id = ?",
+                     (doc_id, db.now(), existing["id"]))
+        conn.commit()
+        updated_fields = _apply_resume_fields(conn, cid, cand, text)
+        result["candidate_id"] = cid
+        result["application_id"] = existing["id"]
         result["document_id"] = doc_id
+        if updated_fields:
+            result["notes"].append("已按最新简历刷新档案：" + "、".join(
+                db.AUDIT_FIELD_LABEL.get(k, k) for k in updated_fields))
+        refreshed = _regrade_if_unconfirmed(conn, existing, g)
         _fill_missing_gender(conn, cid, cand.get("gender"))
         if refreshed:
             result["status"] = "merged_version"
-            result["notes"].append("同岗位近期已投递，本次作为新版本附件并刷新系统建议")
+            result["notes"].append("同一人已有投递，本次作为新版本附件并刷新系统建议")
             db.add_audit(conn, "application", str(existing["id"]), "new_version",
                          f"档 {existing.get('tier_suggested')}",
                          f"新简历版本，系统建议更新为 {g['tier_suggested']}", "system", "system")
         else:
             result["status"] = "merged_version"
-            result["notes"].append("同岗位近期已投递，新版本已归档；HR 已确认的档位未被覆盖")
+            result["notes"].append("同一人已有投递，新版本已归档；HR 已确认的档位未被覆盖")
             db.add_audit(conn, "application", str(existing["id"]), "new_version_archived",
                          existing.get("tier_final") or "",
                          "新简历版本已归档，保留 HR 已确认档位", "system", "system")
@@ -817,6 +936,12 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
                                           ensure_ascii=False),
         })
     conn.execute("UPDATE applications SET resume_doc_id = ? WHERE id = ?", (doc_id, app_id))
+    if not is_new:
+        # 历史档案没有投递、或已归档后重新投递时，按最新简历刷新一次主档。
+        _updated = _apply_resume_fields(conn, cid, cand, text)
+        if _updated:
+            result["notes"].append("已按最新简历刷新档案：" + "、".join(
+                db.AUDIT_FIELD_LABEL.get(k, k) for k in _updated))
     if route and route["usable"]:
         conn.execute("UPDATE applications SET suggested_job_id = ?, "
                      "suggested_job_reason = ? WHERE id = ?",
@@ -833,7 +958,8 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         db.set_candidate_archived(conn, cid, False, "system", "system")
         db.add_audit(conn, "candidate", str(cid), "unarchive_on_reapply", "已归档",
                      f"归档后再次投递（投递 #{app_id}），档案移回人才库", "system", "system")
-        result["notes"].append("该人此前已归档，已随本次投递移回人才库（历史投递与审计全部保留）")
+        result["notes"].append("该人此前已归档：本次新建一条投递档案，并把档案移回人才库"
+                               "（原投递与历史附件全部保留）")
         result["unarchived"] = True
 
     result["status"] = "added"
@@ -879,8 +1005,77 @@ def _hr_edited_fields(conn, cid: int) -> set[str]:
                 keys.add(part.split("=", 1)[0].strip())
     # 审计里用的是中文标签，映射回字段名
     label2field = {"姓名": "name", "学历": "edu_level", "学校": "school",
-                   "专业": "major", "电话": "phone_enc", "邮箱": "email_enc"}
+                   "专业": "major", "性别": "gender",
+                   "电话": "phone_enc", "邮箱": "email_enc"}
     return {label2field.get(k, k) for k in keys if k}
+
+
+def _apply_resume_fields(conn, cid: int, cand: dict, text: str) -> list[str]:
+    """把**最新一份简历**的抽取结果写回候选人主档。
+
+    业务口径（2026-11-13）：同一个人后续收到任何简历，都沿用同一条档案/投递，
+    并且始终以最新简历为准刷新个人信息。这里只写有值的字段，避免一份缺字段的
+    新简历把已有信息清空；HR 手工改过的字段仍然保留（`_hr_edited_fields`）。
+
+    返回实际更新的字段名，供明细里如实展示。
+    """
+    hr_touched = _hr_edited_fields(conn, cid)
+    edu_hist = cand.get("education_history") or []
+    _rank = {"大专": 1, "本科": 2, "硕士": 3, "博士": 4}
+    _valid = [x for x in edu_hist if isinstance(x, dict)
+              and x.get("degree") in _rank and x.get("school")]
+    _top = max(_valid, key=lambda x: _rank[x["degree"]]) if _valid else None
+    _bachelor = next((x for x in _valid if x["degree"] == "本科"), None)
+    want = {
+        "name": cand.get("name"),
+        # 模型没给最高学历时，用已通过证据校验的教育经历兜底；不凭空猜。
+        "edu_level": cand.get("education") or (_top.get("degree") if _top else None),
+        "school": cand.get("school") or (_top.get("school") if _top else None),
+        "major": cand.get("major") or (_top.get("major") if _top else None),
+        "years_exp": cand.get("years"),
+        "gender": cand.get("gender"),
+        "grad_date": freshness.find_grad_date(text),
+        "in_school": 1 if freshness.find_in_school(text) else 0,
+        "current_org": cand.get("current_org"),
+        "cet": cand.get("cet"),
+        "first_degree_school": (cand.get("first_degree_school")
+                                or (_bachelor.get("school") if _bachelor else None)),
+        "edu_history": (json.dumps(edu_hist, ensure_ascii=False) if edu_hist else None),
+    }
+    # 联系方式也要随最新简历刷新（v6.0.0 审查 B10）。原白名单漏了
+    # phone_enc/email_enc/phone_bidx/email_bidx：同一人换了手机或邮箱再投，
+    # 档案里仍是旧号码，新号码也不进盲索引，检索/去重都用不上。
+    # 只在**值确实变化**时写（盲索引比对；AES-GCM 每次密文都不同，不能比密文），
+    # HR 手工改过的联系方式继续保留。
+    from .crypto import blind_index, encrypt
+    from .identity import normalize_email, normalize_phone
+    _contact = cand.get("contact") or {}
+    _cur = db.get_candidate(conn, cid) or {}
+    _ph = normalize_phone(_contact.get("phone"))
+    _em = normalize_email(_contact.get("email"))
+    if _ph and not ({"phone", "phone_enc"} & hr_touched):
+        _pidx = blind_index(_ph)
+        if _pidx and _pidx != (_cur.get("phone_bidx") or ""):
+            want["phone_enc"] = encrypt(_ph)
+            want["phone_bidx"] = _pidx
+    if _em and not ({"email", "email_enc"} & hr_touched):
+        _eidx = blind_index(_em)
+        if _eidx and _eidx != (_cur.get("email_bidx") or ""):
+            want["email_enc"] = encrypt(_em)
+            want["email_bidx"] = _eidx
+    upd: dict = {}
+    for k, v in want.items():
+        if v in (None, "", []):
+            continue
+        if k in hr_touched:
+            continue
+        upd[k] = v
+    if upd:
+        db.update_candidate(conn, cid, **upd)
+        labels = "、".join(db.AUDIT_FIELD_LABEL.get(k, k) for k in sorted(upd))
+        db.add_audit(conn, "candidate", str(cid), "resume_refresh", "",
+                     f"最新简历自动刷新档案：{labels}", "system", "system")
+    return sorted(upd)
 
 
 def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id: int, *,
@@ -912,7 +1107,9 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
         d = db.candidate_detail(conn, candidate_id)
         if not d:
             return {"ok": False, "error": "未找到该候选人"}
-        docs = d.get("documents") or []
+        # 只从简历附件里选，不能把成绩单/证书/作品集当成简历重解析。
+        # `resume_documents` 已按 id 倒序（最新在前）；老调用方没有这个键时再退回全量。
+        docs = d.get("resume_documents") or d.get("documents") or []
         apps = d.get("applications") or []
         app_row = apps[0] if apps else {}
         app_id = app_row.get("id") or 0
@@ -1076,6 +1273,50 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
 
 
 
+def _prepare_attachments(atts: list[dict]) -> list[dict]:
+    """先把每份附件解析一次，供“选哪份是简历”和后续入库复用。
+
+    为什么不能只看文件名：`技术研发岗-硕士-西安科技大学-电子信息-淡永康-男.pdf`
+    不含“简历”二字，而 `CD389237_CODE5705....png` 可能是一张身份证照片。
+    只有读内容，才能把真简历和补充材料分开。
+
+    解析结果挂在 `_text / _engine / _ok`：
+    - `ingest_one()` 用 `preparsed=` 复用，避免选中简历后再次 OCR；
+    - `_save_other_attachments()` 直接落库，其他图片也因此“可读取”。
+
+    解析失败不抛出：某一份附件坏了，不能拖垮整封邮件。
+    """
+    import tempfile
+
+    mime_ext = {
+        "application/pdf": ".pdf",
+        "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png",
+        "image/webp": ".webp", "image/bmp": ".bmp", "image/tiff": ".tif",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    }
+    out: list[dict] = []
+    with tempfile.TemporaryDirectory(prefix="hragent-att-") as td:
+        for i, att in enumerate(atts or []):
+            item = dict(att)
+            name = str(item.get("filename") or f"attachment-{i}")
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in parse_mod.SUPPORTED:
+                ext = mime_ext.get(str(item.get("mime") or "").lower(), "")
+            path = os.path.join(td, f"{i}{ext}")
+            data = item.get("data") or b""
+            try:
+                with open(path, "wb") as fh:
+                    fh.write(data)
+                text, engine, ok = parse_mod.parse_file_ex(path)
+            except Exception as exc:                          # noqa: BLE001
+                text, engine, ok = "", f"preparse_failed:{type(exc).__name__}", False
+            item["_text"] = str(text or "")
+            item["_engine"] = str(engine or "")
+            item["_ok"] = bool(ok and item["_text"].strip())
+            out.append(item)
+    return out
+
+
 def _save_other_attachments(conn, cfg: dict, atts: list[dict],
                             candidate_id: int | None, message_id: str | None,
                             received_at: str | None = None) -> int:
@@ -1100,6 +1341,19 @@ def _save_other_attachments(conn, cfg: dict, atts: list[dict],
         try:
             archived, size = archive_file(cfg, name, data)
             digest = sha256_bytes(data)
+            # 邮件路径已经预解析过：图片在这里已经 OCR，文本一并落库。
+            # 没有预解析的旧调用方保持原行为（raw_text 空、parse_ok=None），
+            # 界面仍显示“未解析”，不会把“没尝试”误报成“解析失败”。
+            text = str(att.get("_text") or "")
+            engine = str(att.get("_engine") or "")
+            prepared = "_ok" in att
+            if prepared:
+                ok = bool(att.get("_ok") and text.strip())
+                if not engine:
+                    engine = "ocr_empty" if not ok else "parsed"
+            else:
+                ok = None
+                engine = "非简历附件，未解析"
             db.insert_document(conn, {
                 "file_hash": digest, "candidate_id": candidate_id,
                 "application_id": None,
@@ -1107,10 +1361,8 @@ def _save_other_attachments(conn, cfg: dict, atts: list[dict],
                 "mime": att.get("mime") or parse_mod.mime_of(name), "size": size,
                 "received_at": received_at or db.now(),
                 "source_message_id": message_id,
-                # 不解析：raw_text 空、parse_ok=None（不是 True也不是 False，
-                # 界面据此显示"未解析"而不是"已解析"）
-                "raw_text": "", "parse_engine": "非简历附件，未解析",
-                "parse_ok": None, "kind": "other",
+                "raw_text": text, "parse_engine": engine,
+                "parse_ok": ok, "kind": "other",
             })
             saved += 1
         except Exception:                                    # noqa: BLE001
@@ -1185,6 +1437,14 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
             atts = mail.get("attachments") or []
             if not atts:
                 report["no_attachment"] += 1
+                # 让完成弹窗能列出"哪封邮件没有附件"，而不是只给一个数字。
+                report["details"].append({
+                    "file": mail.get("subject") or "（无附件邮件）",
+                    "status": "no_attachment",
+                    "name": None,
+                    "notes": [f"发件人：{mail.get('from_addr') or '未知'}；"
+                              f"{mail.get('error') or '没有简历附件'}"],
+                })
                 db.update_email(conn, mid, processed=1, processed_at=db.now(),
                                 error=mail.get("error") or "无简历附件")
                 continue
@@ -1194,16 +1454,17 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
             # **不建档、不解析** —— 解析它们只会得到一堆空字段，
             # 然后各自变成一个"解析失败的新人"混进人才库。
             # 它们在下面统一挂到本封邮件**那位投递人**的档案上。
-            _resume_atts = [a for a in atts if (a.get("kind") or "resume") == "resume"]
-            _other_atts = [a for a in atts if (a.get("kind") or "resume") == "other"]
-            # 兜底（v4.0.7）：**一封邮件最多建一个档案**。
-            # `mailbox.extract_attachments` 已经保证每封只有一份 kind=resume，
-            # 但那是"上游的保证"——这里再夹一道，因为 ingest_mails 是公开入口
-            # （测试、脚本、以后新增的收取通道都可能直接喂 mails）。
-            # 多出来的那份按"其他材料"挂到同一个人的档案上，绝不再建一个人。
-            if len(_resume_atts) > 1:
-                _other_atts = _resume_atts[1:] + _other_atts
-                _resume_atts = _resume_atts[:1]
+            # 先解析一遍全部附件，再按**内容**选简历。
+            # 文件名只作线索：`技术研发岗-...-淡永康-男.pdf` 不含“简历”，
+            # 而 `CD389237_....png` 也可能是一张身份证照片。
+            # 一封邮件仍然只选一份简历、只建一个档案，其余作为补充材料归档；
+            # 但补充材料也会 OCR/解析并落 raw_text，不再是“无法读取”。
+            atts = _prepare_attachments(atts)
+            _resume_idx = mb.choose_resume_attachment(atts)
+            for _i, _a in enumerate(atts):
+                _a["kind"] = "resume" if _i == _resume_idx else "other"
+            _resume_atts = [atts[_resume_idx]] if _resume_idx >= 0 else []
+            _other_atts = [a for _i, a in enumerate(atts) if _i != _resume_idx]
             # 本封邮件建出来的人（**局部变量**）。不能回头扫 `report["details"]` ——
             # 那个列表是**整批累积**的，会把上一封邮件的人挂到这封的附件上。
             _mail_cid: int | None = None
@@ -1217,7 +1478,11 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
                                    applied_at=mail.get("received_at") or db.now(),
                                    source_message_id=mid, job_id=eff_job_id,
                                    use_llm=use_llm, llm_conf=llm_conf,
-                                   subject_meta=meta)
+                                   subject_meta=meta,
+                                   preparsed=((att.get("_text") or "",
+                                               att.get("_engine") or "",
+                                               bool(att.get("_ok")))
+                                              if "_ok" in att else None))
                     if r["status"] == "added":
                         added += 1
                     elif r["status"] == "merged_version":
@@ -1450,6 +1715,25 @@ def _cursor_save(db_path: str, folder: str, account: str, uid: str) -> tuple[boo
         return False, str(exc)
 
 
+def _is_transient_imap_error(exc: Exception) -> bool:
+    """连接断开、超时、DNS/代理暂时不可用 → 可以无限重试。
+
+    认证失败、密码没配置这类是永久错误，重试只会刷日志，必须直接报错。
+    """
+    import imaplib
+
+    if isinstance(exc, (OSError, EOFError, TimeoutError)):
+        return True
+    if isinstance(exc, imaplib.IMAP4.abort):
+        return True
+    if isinstance(exc, imaplib.IMAP4.error):
+        text = str(exc).lower()
+        return any(k in text for k in
+                   ("unavailable", "timeout", "try again", "temporarily",
+                    "connection", "eof", "bye"))
+    return False
+
+
 def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                  use_llm: bool = False, llm_conf: dict | None = None,
                  cfg: dict | None = None, progress_tid: str | None = None,
@@ -1488,29 +1772,59 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
         total = 0
         done = 0
         mailbox_total = 0
-        try:
-            for kind, item in mb.iter_imap(cfg, cursor, limit):
-                if kind == "total":
-                    total = item
-                    # v3.1.2：区分"邮箱里一共多少封"与"这次要收多少封"。
-                    # 原来只有前者一个数（其实是后者），界面显示成邮箱总数，
-                    # 于是"第一次 800、第二次 3"看起来像邮件忽多忽少。
-                    if mailbox_total:
-                        msg = (f"邮箱共 {mailbox_total} 封，本次新增 {total} 封，开始收取…"
-                               if total else
-                               f"邮箱共 {mailbox_total} 封，没有新邮件")
-                    else:
-                        msg = (f"已发现 {total} 封新邮件，开始收取…" if total
-                               else "没有新邮件")
-                    update_progress(progress_tid, total=total,
-                                    message=msg)
-                    report["mailbox_total"] = mailbox_total
-                    report["new_mails"] = total
-                    continue
-                if kind == "mailbox_total":
-                    mailbox_total = item
-                    report["mailbox_total"] = mailbox_total
-                    continue
+        # 关键：**先把新邮件全部下载完，再离线入库**。
+        #
+        # 以前是"下载一封 → OCR/模型处理几十秒 → 再下载下一封"：IMAP
+        # 连接在 OCR 期间空闲，企业邮/代理会按空闲超时把它断掉，表现就是
+        # 收了几封后 ConnectionResetError，然后靠重连硬撑。
+        #
+        # 现在先一次性下载（连接一直有数据流动，不会被空闲超时），
+        # 下载完关闭连接，再慢慢入库。下载失败仍按退避无限重试；
+        # 用户停止、服务关闭、全部收完是仅有的三种结束条件。
+        retries = 0
+        mails: list[dict] = []
+        new_cursor = cursor
+        while True:
+            try:
+                update_progress(progress_tid, message="正在连接邮箱并下载新邮件…")
+                mails, new_cursor = mb.fetch_imap(cfg, cursor, limit)
+                break
+            except Exception as exc:
+                if stop_requested(progress_tid):
+                    stopped = True
+                    report.pop("error", None)
+                    break
+                if not _is_transient_imap_error(exc):
+                    report["error"] = str(exc)
+                    break
+                retries += 1
+                report["reconnects"] = retries
+                report.pop("error", None)
+                delay = min(60, 2 ** min(retries, 6))
+                update_progress(
+                    progress_tid,
+                    message=(f"连接中断（{type(exc).__name__}），"
+                             f"{delay} 秒后第 {retries} 次重试；"
+                             f"正在重新下载…"))
+                # 退避期间也响应"停止"，不能睡死。
+                for _ in range(delay):
+                    if stop_requested(progress_tid):
+                        stopped = True
+                        break
+                    time.sleep(1)
+                if stopped:
+                    break
+                continue
+
+        if not report.get("error") and not stopped:
+            total = len(mails)
+            newest = new_cursor or newest
+            report["new_mails"] = total
+            update_progress(
+                progress_tid, total=total,
+                message=(f"已下载 {total} 封新邮件，开始入库…" if total
+                         else "没有新邮件"))
+            for item in mails:
                 if stop_requested(progress_tid):
                     stopped = True
                     update_progress(progress_tid,
@@ -1521,12 +1835,9 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                 newest = item.get("uid") or newest
                 done += 1
                 update_progress(progress_tid, done=done)
-                # v1.29.4：长批次（一次几百封）每 25 封落一次游标 ——
-                # 中途断电/被强杀时，下次从最后落盘的进度继续（去重兜底不丢件）。
+                # 长批次每 25 封落一次游标；被强杀后下次从断点继续。
                 if done % 25 == 0 and newest:
                     _cursor_save(db_path, folder_name, account, newest)
-        except Exception as exc:                      # 连接/登录失败等：如实带回
-            report["error"] = str(exc)
         # 整批结束后挂一次分析（中途停止时分析"已收到的这批"）
         spawn_auto_analysis(db_path, report)
     else:
@@ -1764,7 +2075,10 @@ def spawn_auto_analysis(db_path: str, report: dict, limit: int = 0) -> int:
               f"（串行）", file=sys.stderr)
 
     # 登记进度任务，task_id 写进 report，前端轮询 /api/tasks/{task_id}（v1.24.9）
-    tid = register_progress("入库后自动分析", len(targets))
+    # meta 带上 phase 与上一阶段 report：页面刷新/服务重启后能直接认出
+    # "这是分析阶段"，而不是误当成收取阶段、把统计全显示成 0。
+    tid = register_progress("入库后自动分析", len(targets), db_path=db_path,
+                            meta={"phase": "insight", "report": dict(report)})
     report["insight_task_id"] = tid
 
     # 后台异步跑，不阻断入库结果返回（HR 看到的"新增 N"是真的新增）

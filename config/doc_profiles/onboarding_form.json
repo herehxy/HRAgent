@@ -1,0 +1,104 @@
+{
+  "id": "onboarding_form@1",
+  "name": "入职登记表",
+  "doc_type": "onboarding_form",
+  "aliases": ["onboarding_form", "onboarding", "registration_form"],
+  "apply": "employee",
+  "table": {"enabled": true},
+  "fields": [
+    {"key": "name", "labels": ["姓名"], "type": "text", "required": true},
+    {"key": "former_name", "labels": ["曾用名"], "type": "text"},
+    {"key": "gender", "labels": ["性别"], "type": "enum", "values": ["男", "女"]},
+    {"key": "birth_date", "labels": ["出生日期", "出生"], "type": "date"},
+    {"key": "ethnicity", "labels": ["民族"], "type": "text"},
+    {"key": "political_status", "labels": ["政治面貌"], "type": "text"},
+    {"key": "marital_status", "labels": ["婚姻状况", "婚否"], "type": "text"},
+    {"key": "native_place", "labels": ["籍贯"], "type": "text"},
+    {"key": "phone", "labels": ["手机", "联系电话"], "type": "phone"},
+    {"key": "email", "labels": ["邮箱", "电子邮箱"], "type": "email"},
+    {"key": "id_card", "labels": ["身份证号码", "身份证号", "公民身份号码"], "type": "id_card"},
+    {"key": "address", "labels": ["现居住址", "现住址", "家庭住址", "住址", "地址"], "type": "text", "join_next": true},
+    {"key": "household_address", "labels": ["户籍地址", "户口所在地"], "type": "text"},
+    {"key": "health_status", "labels": ["健康状况"], "type": "text"},
+    {"key": "emergency_contact", "labels": ["紧急联系人"], "type": "text"},
+    {"key": "emergency_relation", "labels": ["与本人关系", "关系"], "type": "text"},
+    {"key": "emergency_phone", "labels": ["紧急联系电话", "紧急电话"], "type": "phone", "regex_fallback": false},
+    {"key": "edu_level", "labels": ["学历/ 学位", "学历", "最高学历", "文化程度"], "type": "level", "values": ["博士", "硕士", "本科", "大专", "专科", "中专", "高中"]},
+    {"key": "school", "labels": ["毕业院校", "学校", "院校"], "type": "text"},
+    {"key": "major", "labels": ["所学专业", "专业"], "type": "text"},
+    {"key": "graduation_date", "labels": ["毕业时间", "毕业日期"], "type": "date"},
+    {"key": "work_start_date", "labels": ["参加工作时间", "工作时间"], "type": "date"},
+    {"key": "professional_title", "labels": ["职称", "专业技术职务"], "type": "text"},
+    {"key": "foreign_language", "labels": ["外语水平", "外语等级"], "type": "text"},
+    {"key": "computer_skill", "labels": ["计算机水平", "计算机能力"], "type": "text"},
+    {"key": "personnel_file_location", "labels": ["档案所在地", "档案存放地"], "type": "text"},
+    {"key": "self_evaluation", "labels": ["自我评价", "个人评价"], "type": "text"},
+    {"key": "unit", "labels": ["工作单位", "录用单位", "单位"], "type": "text"},
+    {"key": "department", "labels": ["所属部门", "部门", "科室"], "type": "text"},
+    {"key": "position", "labels": ["岗位名称", "岗位", "职位", "职务"], "type": "text"},
+    {"key": "job_level", "labels": ["职级"], "type": "text"},
+    {"key": "work_location", "labels": ["工作地点"], "type": "text", "join_next": true},
+    {"key": "employment_type", "labels": ["用工形式"], "type": "text"},
+    {"key": "onboard_date", "labels": ["入职日期", "入职时间", "到岗日期"], "type": "date"},
+    {"key": "contract_no", "labels": ["合同编号", "合同号"], "type": "text"},
+    {"key": "contract_start", "labels": ["合同开始", "起始日期", "开始日期"], "type": "date"},
+    {"key": "contract_end", "labels": ["合同结束", "终止日期", "结束日期"], "type": "date"}
+  ],
+  "table_splits": [
+    {"label": "部门岗位", "delimiter": "/", "fields": ["department", "position"]},
+    {"label": "职责", "fields": ["position"]}
+  ],
+  "stop_markers": ["本人保证", "签字"],
+  "table_singles": [
+    {"markers": ["紧急联系人"],
+     "header_aliases": {"name": ["姓名"], "phone": ["联系电话"], "address": ["地址"]},
+     "fields": {"name": "emergency_contact", "phone": "emergency_phone", "address": "address"}}
+  ],
+  "periods": [
+    {"label": "合同期限", "start": "contract_start", "end": "contract_end"}
+  ],
+  "derive": [
+    {"from_array": "education_json", "last": true, "fields": {"school": "school", "major": "major"}}
+  ],
+  "arrays": [
+    {
+      "key": "education_json",
+      "title": "教育经历",
+      "markers": ["教育经历"],
+      "columns": [["start", "开始"], ["end", "结束"], ["school", "学校"], ["major", "专业"], ["degree", "学历"]],
+      "header_aliases": {
+        "start": ["起止时间"],
+        "school": ["学校名称", "院校"],
+        "degree": ["学历/专业", "学历"],
+        "major": ["毕业专业", "专业"]
+      },
+      "date_columns": {"start": "month", "end": "month"},
+      "split": {"degree": "/"}
+    },
+    {
+      "key": "work_history_json",
+      "title": "工作经历",
+      "markers": ["工作经历"],
+      "columns": [["start", "开始"], ["end", "结束"], ["unit", "单位"], ["position", "岗位"], ["description", "说明"]],
+      "header_aliases": {
+        "start": ["起止时间"],
+        "unit": ["曾就职工作单位", "工作单位"],
+        "position": ["职务", "岗位"],
+        "description": ["工作描述"]
+      },
+      "date_columns": {"start": "month", "end": "month"}
+    },
+    {
+      "key": "family_json",
+      "title": "家庭成员",
+      "markers": ["家庭成员"],
+      "columns": [["name", "姓名"], ["relation", "关系"], ["work_unit", "工作单位"], ["phone", "电话"]],
+      "header_aliases": {
+        "name": ["姓名"],
+        "relation": ["关系"],
+        "work_unit": ["工作单位"],
+        "phone": ["联系电话"]
+      }
+    }
+  ]
+}

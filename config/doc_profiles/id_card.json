@@ -1,0 +1,16 @@
+{
+  "id": "id_card@1",
+  "name": "身份证复印件",
+  "doc_type": "id_card",
+  "aliases": ["id_card", "id_card_front", "id_card_back"],
+  "apply": "employee",
+  "fields": [
+    {"key": "name", "labels": ["姓名"], "type": "text"},
+    {"key": "gender", "labels": ["性别"], "type": "enum", "values": ["男", "女"]},
+    {"key": "birth_date", "labels": ["出生日期", "出生"], "type": "date"},
+    {"key": "ethnicity", "labels": ["民族"], "type": "text"},
+    {"key": "address", "labels": ["住址", "地址"], "type": "text", "join_next": true},
+    {"key": "id_card", "labels": ["公民身份号码", "身份证号码", "身份证号"], "type": "id_card", "required": true}
+  ],
+  "derive_id_card": {"birth_date": "birth_date", "gender": "gender"}
+}

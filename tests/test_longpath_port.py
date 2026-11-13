@@ -26,14 +26,20 @@ import time
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
-# 数据目录放 D 盘（开发机 C 盘可能已满）；必须在 import app 之前定下来
-_TMP_ROOT = os.environ.get("TP_TEST_TMP") or r"D:\hra_test\lp_port"
+# 数据目录放 D 盘（开发机 C 盘可能已满）；必须在 import app 之前定下来。
+# 每次用新的临时子目录：固定路径会留下上一版结构的老库，补列逻辑可能被旧库污染。
+_LP_BASE = r"D:\hra_test"
+os.makedirs(_LP_BASE, exist_ok=True)
+_TMP_ROOT = (os.environ.get("TP_TEST_TMP")
+             or tempfile.mkdtemp(prefix="lp_port_", dir=_LP_BASE))
 os.makedirs(_TMP_ROOT, exist_ok=True)
 # 数据根故意做深：真实场景是"桌面/我的工作资料/HRAgentData/data"这种层级，
 # 加上长附件名就逼近 260。测试要复现的就是这个组合。
 _DEEP = os.path.join("深层数据根", "我的工作资料", "HRAgentData")
 os.environ.setdefault("TP_DATA_DIR", os.path.join(_TMP_ROOT, _DEEP, "data"))
 os.environ.setdefault("TP_CONFIG_DIR", os.path.join(_TMP_ROOT, _DEEP, "config"))
+# 本文件只验证长路径与端口，不验登录；与其他回归脚本一样跑本机模式。
+os.environ["TP_AUTH"] = "0"
 os.makedirs(os.environ["TP_DATA_DIR"], exist_ok=True)
 os.makedirs(os.environ["TP_CONFIG_DIR"], exist_ok=True)
 

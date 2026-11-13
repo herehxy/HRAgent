@@ -22,7 +22,7 @@
     "readonly": true
   },
   "dedup": {
-    "same_job_reapply_days": 30
+    "same_job_reapply_days": 365
   },
   "_说明": "复制为 config/mailbox.json 后填写你自己的邮箱与授权码。留空则系统只能用「上传文件/本地目录」收简历。"
 }
