@@ -681,6 +681,45 @@ def _write_instance_file(data_dir: str, port: int) -> None:
         pass
 
 
+def _instance_lock_path(data_dir: str) -> str:
+    return os.path.join(data_dir, ".webapp.lock")
+
+
+#: 持有实例锁的文件句柄；进程退出时 OS 自动释放，不需要手工解锁。
+_INSTANCE_LOCK_HANDLE = None
+
+
+def _acquire_instance_lock(data_dir: str) -> bool:
+    """O(1) 单实例锁：不再靠扫 110 个端口判断有没有实例。
+
+    Windows 用 msvcrt 字节锁，Linux/macOS 用 flock；锁文件在数据目录，
+    同一数据目录只允许一个进程启动服务。
+    """
+    global _INSTANCE_LOCK_HANDLE
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        fh = open(_instance_lock_path(data_dir), "a+b")
+        fh.seek(0, os.SEEK_END)
+        if fh.tell() == 0:
+            fh.write(b"x")
+            fh.flush()
+        fh.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _INSTANCE_LOCK_HANDLE = fh
+        return True
+    except (OSError, ImportError):
+        try:
+            fh.close()
+        except Exception:                                 # noqa: BLE001
+            pass
+        return False
+
+
 def _find_running_instance(data_dir: str):
     """读 PID 文件：进程还活着就返回 (pid, port)，否则返回 None。
 
@@ -768,37 +807,18 @@ def _bind_test(port: int, reuse: bool):
 def _port_usable(port: int):
     """这个端口能不能拿来监听；返回 (能不能, 原因)。
 
-    判定顺序（依据是实测行为，见 _bind_test 上方的说明）：
-      1. **严格 bind**（不带 SO_REUSEADDR）—— Windows 上这是唯一可靠的
-         "端口是不是真的空着"的判据：有人在听 → 10048；
-      2. 失败且是 10013 → 端口落在**系统保留段**（Hyper-V/WSL 预留），
-         谁也绑不了 → 换端口；
-      3. 失败且是 10048 → 端口拿不到，再试**宽松 bind**：
-         能绑上 → 只剩 TIME_WAIT 残留（可安全复用，uvicorn 自己也设
-         SO_REUSEADDR）；绑不上 → 真的有人在用，跳过。
+    只用**严格 bind**（不带 SO_REUSEADDR）判断：Windows 上这是唯一可靠的
+    “端口是不是真的空着”的判据——有人在听/已 bind 未 listen 都会 10048。
 
-    ⚠️ 这里的结论**只依据 bind**，不依据 connect 探测。原因见下面注释。
+    ⚠️ 2026-11-16 修复：不再在严格 bind 失败后用宽松 bind 证明“只是 TIME_WAIT”。
+    Windows 上已有监听者设了 SO_REUSEADDR 时，第二次 bind 也能成功，
+    会把活实例判成空闲，随后 uvicorn 与旧实例抢同一端口。
     """
     ok, why = _bind_test(port, reuse=False)
     if ok:
         return True, ""
-    if "保留" in why:
-        return False, why
-    # 10048：严格 bind 失败 = 端口确实拿不到（有人在听，或别人已 bind 未 listen）。
-    #
-    # ⚠️ 不要再在这里用 _port_busy 去"确认有没有人监听"——
-    # connect 探测在装有安全/过滤软件的机器上会把**空闲**端口也报成
-    # WSAEWOULDBLOCK(10035)，当成"有人"就把好端端的端口误杀了（见主循环注释）。
-    # 严格 bind 失败本身就是结论，直接试宽松 bind：
-    # 能绑上 → 只是 TIME_WAIT 残留，可安全复用；绑不上 → 真的不可用。
-    ok2, why2 = _bind_test(port, reuse=True)
-    if ok2:
-        return True, "（无监听者，可安全复用）"
-    # 两次 bind 都失败 → 端口确实不可用。
-    # 提示优先用**严格 bind** 的原因（10048"已被占用"是准确结论）；
-    # 宽松 bind 常返回 13(WSAEACCES)，那是"覆盖别人的监听端口被拒"的副作用，
-    # 直接用它会把"被某程序占用"误报成"被系统保留"，误导用户去查 Hyper-V。
-    return False, why if "占用" in why else (why2 or why)
+    # 严格 bind 失败就是不可用（包括系统保留段与 TIME_WAIT；后者换端口即可）。
+    return False, why
 
 
 def _os_pick_port():
@@ -1361,9 +1381,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         args.migrate_from = chosen
 
-    if not args.migrate_from and _open_existing_instance():
-        return 0
-
+    # 不再在准备用户目录前扫 110 个端口（那是启动 19 秒的主因）。
+    # 先走 PID 文件（O(1)），再拿数据目录级实例锁；找不到才回退端口扫描。
     try:
         user_home = _prepare_profile(base, args)
     except Exception as exc:
@@ -1388,8 +1407,7 @@ def main(argv: list[str] | None = None) -> int:
     # 正常冷启动时 8756 是空的，一次探测都不做（不增加启动耗时）。
     # 先看 PID 文件（O(1)）：本程序已经开着就直接把浏览器指过去。
     # 比挨个端口发 HTTP 快几十倍——实测占用端口一多，那条路要等 40 秒。
-    _inst = _find_running_instance(os.environ.get("TP_DATA_DIR") or
-                                   os.path.join(user_home, "data"))
+    _inst = _find_running_instance(data_dir)
     if _inst:
         _pid, _p = _inst
         _url = f"http://127.0.0.1:{_p}"
@@ -1402,8 +1420,27 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    （打开浏览器失败，请手动访问 {_url}）")
         return 0
 
-    if _open_existing_instance():
-        return 0
+    if not _acquire_instance_lock(data_dir):
+        # 实例刚启动时可能还没来得及写 PID 文件；先等它 2 秒，
+        # 避免立刻回退到 110 端口扫描。
+        for _ in range(20):
+            _inst = _find_running_instance(data_dir)
+            if _inst:
+                _pid, _p = _inst
+                _url = f"http://127.0.0.1:{_p}"
+                print(f"[i] 已有实例在运行（PID={_pid}，端口 {_p}），"
+                      "直接打开浏览器，不再启动第二份")
+                if not os.environ.get("TP_NO_BROWSER"):
+                    if not _open_url(_url):
+                        print(f"    （打开浏览器失败，请手动访问 {_url}）")
+                return 0
+            time.sleep(0.1)
+        # 另一个实例占着同一数据目录；优先用端口扫描定位它的地址
+        if _open_existing_instance():
+            return 0
+        _message("另一个 HRAgent 实例正在使用同一数据目录，但未能定位端口。\n"
+                 "请先在系统托盘退出旧实例，再重新打开。")
+        return 1
 
     # 数据目录必须在 import app 之前定下来——app.paths 在**导入时**就根据
     # 环境变量算出 DATA_DIR 并被各模块存成模块级常量，晚一步设就来不及了。
@@ -1556,7 +1593,9 @@ def main(argv: list[str] | None = None) -> int:
     # `webbrowser` 走 `os.startfile` 时被 shell 拒绝但没报错。
     # 所以这里改成**逐级降级**，每一级失败都试下一级，最后一定给出可点的地址。
     if not os.environ.get("TP_NO_BROWSER"):
-        if not _open_url(url):
+        # 先打开过渡页，页面轮询 /api/ping 后再跳到主界面；避免“服务刚起、首屏还没数据”
+        # 时用户看到空白页，或以为程序没启动。
+        if not _open_url(url + "/boot"):
             print(f"    （自动打开浏览器失败，请手动访问 {url}）")
             # v3.1.8：**自动打开失败时必须让人看得见地址**。
             # 只写日志等于没说 —— 用户看不到日志，只会认为"双击没反应"。

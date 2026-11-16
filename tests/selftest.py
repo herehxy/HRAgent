@@ -55,6 +55,9 @@ import zipfile
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
+# 端到端自检覆盖的是业务链路，不包含登录流程；默认按本机模式跑。
+# 登录相关的边界由 tests/test_review_fixes.py 单独覆盖。
+os.environ.setdefault("TP_AUTH", "0")
 
 from app import actions, auth, db, ingest, mailbox as mb, search  # noqa: E402
 from app.agent import loop as agent_loop  # noqa: E402
@@ -871,7 +874,7 @@ def main(verbose: bool = True) -> int:
         conn.close()
 
         # ============================================================ R3
-        c.section("R3 重复投递口径：未归档幂等跳过；已归档新建投递并移回人才库")
+        c.section("R3 重复投递口径：未归档幂等跳过；已归档新建投递但保持归档")
         r3db = os.path.join(work, "reapply.db")
         r3cfg = dict(cfg, archive_dir=os.path.join(work, "archive3"))
         r3src = os.path.join(work, "reapply_src")
@@ -898,7 +901,7 @@ def main(verbose: bool = True) -> int:
              "幂等跳过不新增投递（投递数仍为 1）")
         conn.close()
 
-        # ② 归档之后重新投递 → **新建一条投递**，并把档案移回人才库
+        # ② 归档之后重新投递 → **新建一条投递**，但保持归档状态，等 HR 手动处理
         conn = db.connect(r3db)
         db.set_candidate_archived(conn, _cid3, True, "hr", "hr")
         c.ok(bool(db.get_candidate(conn, _cid3)["archived_at"]), "先把该人归档（前置条件）")
@@ -910,8 +913,8 @@ def main(verbose: bool = True) -> int:
              "已归档的人重新投递 → 新建一条投递，不并入旧投递",
              f"added={r_re['added']} merged={r_re.get('merged_versions')} "
              f"skipped={r_re['skipped_dup']}")
-        c.ok(not db.get_candidate(conn, _cid3)["archived_at"],
-             "重新投递后档案自动移回人才库（取消归档）")
+        c.ok(bool(db.get_candidate(conn, _cid3)["archived_at"]),
+             "重新投递后档案仍保持归档（不自动取消归档，由 HR 手动决定）")
         c.ok(len(db.list_applications(conn, cid=_cid3)) == 2,
              "新投递被记录（共 2 条），历史投递一条都没删",
              f"实际 {len(db.list_applications(conn, cid=_cid3))} 条")
@@ -919,7 +922,8 @@ def main(verbose: bool = True) -> int:
              "同一份文件仍只有 1 条原件台账（不重复落盘）",
              f"实际 {len(db.candidate_detail(conn, _cid3)['documents'])} 份")
         _acts = {a["action"] for a in db.list_audit(conn, limit=200)}
-        c.ok("unarchive_on_reapply" in _acts, "归档后重新投递写审计（可追溯为什么又出现了）")
+        c.ok("reapply_while_archived" in _acts,
+             "归档状态下重新投递写审计（可追溯为什么有新投递）")
         conn.close()
 
         # ③ 列表排序口径：只看**最近一次收到简历的导入时间**倒序（最新在前），
@@ -2493,15 +2497,26 @@ def main(verbose: bool = True) -> int:
             from app import avatar as _av
             from PIL import Image as _PImg
 
-            def _mini_docx(fn, size, color):
+            def _mini_docx(fn, size, color, face=False):
                 buf = io.BytesIO()
-                _PImg.new("RGB", size, color).save(buf, "PNG")
+                im = _PImg.new("RGB", size, color)
+                if face:
+                    from PIL import ImageDraw as _PDraw
+                    draw = _PDraw.Draw(im)
+                    # 造一张“有肤色/有纹理”的证件照；纯色图会被新的 _score 判成 logo
+                    draw.ellipse((size[0] * 0.28, size[1] * 0.15,
+                                  size[0] * 0.72, size[1] * 0.52),
+                                 fill=(230, 180, 150))
+                    draw.rectangle((size[0] * 0.3, size[1] * 0.52,
+                                    size[0] * 0.7, size[1] * 0.92),
+                                   fill=(30, 40, 80))
+                im.save(buf, "PNG")
                 path = os.path.join(work, fn)
                 with zipfile.ZipFile(path, "w") as z:
                     z.writestr("word/media/image1.png", buf.getvalue())
                 return path
 
-            _tall = _mini_docx("av_tall.docx", (300, 400), (200, 210, 230))
+            _tall = _mini_docx("av_tall.docx", (300, 400), (200, 210, 230), face=True)
             _wide = _mini_docx("av_wide.docx", (900, 200), (10, 10, 10))
             _tiny = _mini_docx("av_tiny.docx", (40, 50), (10, 10, 10))
             _txt = os.path.join(work, "av.txt")

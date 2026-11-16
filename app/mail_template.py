@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+from html.parser import HTMLParser
 
 #: 模板里可直接用的内置变量（由系统从候选人/岗位/当前用户自动取）
 BUILTIN_VARS = [
@@ -254,18 +255,153 @@ _JS_URL = re.compile(r"(href|src)\s*=\s*(\"|')?\s*javascript:[^\"'>\s]*(\"|')?",
                      re.IGNORECASE)
 
 
-def sanitize_email_html(html: str) -> str:
-    """给要发出去的 HTML 做最小清洗。
+#: 邮件正文允许的标签/属性（白名单，而不是正则黑名单）。
+_ALLOWED_TAGS = frozenset({
+    "a", "b", "blockquote", "br", "code", "div", "em", "font", "h1", "h2",
+    "h3", "h4", "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre",
+    "s", "span", "strong", "table", "tbody", "td", "tfoot", "th", "thead",
+    "tr", "u", "ul",
+})
+_VOID_TAGS = frozenset({"br", "hr", "img"})
+_DROP_CONTENT = frozenset({
+    "script", "style", "iframe", "object", "embed", "svg", "math",
+    "template", "noscript", "title", "form", "textarea", "select",
+})
+_ALLOWED_ATTRS = frozenset({
+    "style", "class", "title", "align", "valign", "width", "height",
+    "colspan", "rowspan", "border", "cellpadding", "cellspacing",
+    "bgcolor", "color", "size", "face", "alt",
+})
 
-    正文是 HR 自己写/粘贴的，本机单角色使用，风险本来就低；但邮件正文一旦带上
-    `<script>` / `onclick=` / `javascript:` 链接，在别人的客户端里可能被判为可疑邮件
-    甚至被拦截——**发出去的东西收不回来**，所以这两类一律剥掉。
-      （`document.execCommand('bold')` 之类产生的内容不受影响。）
+#: URL 白名单：邮件里只允许可点击/可加载的安全协议。
+_SAFE_HREF = ("http://", "https://", "mailto:", "tel:")
+_SAFE_SRC = ("http://", "https://", "cid:", "data:image/png",
+             "data:image/jpeg", "data:image/gif", "data:image/webp")
+
+
+def _safe_url(value: str, kind: str) -> str | None:
+    v = re.sub(r"[\x00-\x20]+", "", str(value or "")).strip()
+    low = v.lower()
+    allowed = _SAFE_HREF if kind == "href" else _SAFE_SRC
+    return v if low.startswith(allowed) else None
+
+
+def _safe_style(value: str) -> str:
+    v = str(value or "")
+    # 邮件客户端不一定执行脚本，但 CSS 仍可 expression/外链/挂马；直接拒绝危险片段
+    if re.search(r"expression\s*\(|javascript:|behavior:|-moz-binding|@import|url\s*\(",
+                 v, re.I):
+        return ""
+    return v[:2000]
+
+
+class _EmailHtmlSanitizer(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+        self.drop_depth = 0
+
+    def _attrs(self, tag: str, attrs) -> str:
+        chunks: list[str] = []
+        for name, value in attrs:
+            name = str(name or "").lower()
+            if name.startswith("on") or name not in _ALLOWED_ATTRS:
+                # a/img 的专用属性单独处理
+                if not ((tag == "a" and name in ("href", "target", "rel"))
+                        or (tag == "img" and name == "src")):
+                    continue
+            if name in ("href", "src"):
+                safe = _safe_url(value, name)
+                if safe is None:
+                    continue
+                value = safe
+            elif name == "style":
+                value = _safe_style(value)
+                if not value:
+                    continue
+            elif name == "target" and value not in ("_blank",):
+                continue
+            elif value is None:
+                value = ""
+            chunks.append(f' {name}="{_attr_escape(str(value))}"')
+        if tag == "a" and any(c.startswith(' target=') for c in chunks):
+            if not any(c.startswith(' rel=') for c in chunks):
+                chunks.append(' rel="noopener noreferrer"')
+        return "".join(chunks)
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if self.drop_depth:
+            if tag in _DROP_CONTENT:
+                self.drop_depth += 1
+            return
+        if tag in _DROP_CONTENT:
+            self.drop_depth = 1
+            return
+        if tag not in _ALLOWED_TAGS:
+            return
+        self.out.append(f"<{tag}{self._attrs(tag, attrs)}>")
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        self.handle_starttag(tag, attrs)
+        if (not self.drop_depth and tag.lower() in _ALLOWED_TAGS
+                and tag.lower() not in _VOID_TAGS):
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if self.drop_depth:
+            if tag in _DROP_CONTENT:
+                self.drop_depth -= 1
+            return
+        if tag in _ALLOWED_TAGS and tag not in _VOID_TAGS:
+            self.out.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if not self.drop_depth:
+            self.out.append(_escape(data))
+
+    def handle_comment(self, data: str) -> None:
+        return
+
+    def handle_decl(self, decl: str) -> None:
+        return
+
+    def handle_pi(self, data: str) -> None:
+        return
+
+
+def _escape(value: str) -> str:
+    import html as _html
+    return _html.escape(value, quote=False)
+
+
+def _attr_escape(value: str) -> str:
+    import html as _html
+    return _html.escape(value, quote=True)
+
+
+#: `_attrs` 用 quote=True；保留两个别名，避免和正文转义混淆。
+_escape_attr = _attr_escape
+
+
+def sanitize_email_html(html: str) -> str:
+    """用**标签/属性白名单**清洗邮件正文。
+
+    比原来的正则黑名单可靠：script/style/iframe、所有 `on*`、`javascript:`、
+    SVG/MathML、表单标签都不进入输出；表格/加粗/字号等常用排版保留。
     """
-    s = _TAG_STRIP.sub("", html or "")
-    s = _ON_ATTR.sub("", s)
-    s = _JS_URL.sub(r"\1=\"#\"", s)
-    return s
+    raw = str(html or "")
+    if not raw:
+        return ""
+    parser = _EmailHtmlSanitizer()
+    try:
+        parser.feed(raw)
+        parser.close()
+    except Exception:
+        # HTMLParser 对畸形输入通常不抛；真抛了就宁可返回空串，不返回原文
+        return ""
+    return "".join(parser.out)
 
 
 def html_to_text(html: str) -> str:

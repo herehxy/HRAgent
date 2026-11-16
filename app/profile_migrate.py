@@ -278,32 +278,38 @@ def _connect_source_ro(db_path: str) -> tuple[sqlite3.Connection, str | None]:
     （装在 Program Files、或是别人机器上的共享目录、或被安全策略限制），
     于是连"读一下"都失败 —— 迁移在第一步就崩了。
 
-    三级退路，越往后依赖越少：
-      ① `mode=ro&immutable=1` —— 告诉 SQLite"这库不会变"，**完全不加锁**，
-         不碰 -wal/-shm，最干净；
-      ② `mode=ro` —— 只读但仍可能需要 -shm，某些版本/文件系统下能过；
-      ③ **把库文件复制到临时目录再打开** —— 任何情况下都能读。
+    两级退路：
+      ① `mode=ro` —— **会读取 WAL**；只有目录不可写、建不了 -shm 时才失败；
+      ② **把主库和 -wal 一起复制到临时目录再打开** —— 任何情况下都能读，且不丢 WAL。
+
+    ⚠️ 不能用 `immutable=1`：它会忽略 -wal，导致迁移/备份漏掉已提交事务
+    （2026-11-16 数据安全修复）。
     """
     import shutil
     import tempfile
 
     posix = Path(db_path).as_posix()
-    for uri in (f"file:{posix}?mode=ro&immutable=1", f"file:{posix}?mode=ro"):
-        conn = None
-        try:
-            conn = sqlite3.connect(uri, uri=True)
-            conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
-            return conn, None
-        except sqlite3.Error:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:                        # noqa: BLE001
-                    pass
-    # ③ 复制出来再读
+    # ① 普通只读打开：会读取 -wal。
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{posix}?mode=ro", uri=True)
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        return conn, None
+    except sqlite3.Error:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:                        # noqa: BLE001
+                pass
+    # ② 目录不可写时，复制主库和 -wal 到临时目录再读。
+    # 不能只复制主库：未 checkpoint 的已提交事务全在 -wal 里。
+    # 也不要复制 -shm：让 SQLite 在临时目录按 -wal 重建，避免拿到旧进程的共享内存索引。
     tmpdir = tempfile.mkdtemp(prefix="hra_ro_")
     tmp = os.path.join(tmpdir, DB_NAME)
     shutil.copy2(_lp(db_path), _lp(tmp))
+    wal = db_path + "-wal"
+    if os.path.exists(wal):
+        shutil.copy2(_lp(wal), _lp(tmp + "-wal"))
     return sqlite3.connect(tmp), tmp
 
 

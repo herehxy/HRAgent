@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -402,6 +403,20 @@ def _find_recent_application(conn, cid: int, job_id: int | None, days: int) -> d
     return None
 
 
+def _insert_candidate_or_existing(conn, rec: dict, identity_key: str) -> int:
+    """插入新档；若 identity_key 已被“已合并但不可见”的旧档占用，
+    解析到根档复用，避免 UNIQUE 冲突把整封邮件/附件处理打断。"""
+    try:
+        return db.insert_candidate(conn, rec)
+    except sqlite3.IntegrityError as exc:
+        if "identity_key" not in str(exc).lower():
+            raise
+        existing = db.find_candidate_by_identity(conn, identity_key)
+        if existing:
+            return int(existing["id"])
+        raise
+
+
 def ensure_person(conn, cand: dict, channel: str, text: str,
                   doc_digest: str = "") -> tuple[int, bool, dict]:
     """身份归一并建/取人档。返回（candidate_id，是否新建，疑似重复提示）。
@@ -457,7 +472,7 @@ def ensure_person(conn, cand: dict, channel: str, text: str,
     insert_key = key
     if weak_hit:
         insert_key = f"{key}#{uuid.uuid4().hex[:8]}"
-    cid = db.insert_candidate(conn, {
+    cid = _insert_candidate_or_existing(conn, {
         "identity_key": insert_key,
         "name": cand.get("name"),
         "phone_enc": encrypt(phone),
@@ -490,7 +505,7 @@ def ensure_person(conn, cand: dict, channel: str, text: str,
                         if (_edu_hist := cand.get("education_history")) else None),
         "source_first": channel,
         "pii_level": classify_pii(text),
-    })
+    }, insert_key)
     db.add_audit(conn, "candidate", str(cid), "create", "", f"新建档案：{cand.get('name')}",
                  "system", "system")
     if weak_hit:
@@ -608,6 +623,30 @@ def _route_by_open_jobs(conn, text: str, jd_default: dict,
             "why": pick.get("reason") or ""}
 
 
+def _record_submission_event(conn, *, candidate_id, application_id, document_id,
+                             file_hash, file_name, channel, submitted_at,
+                             source_message_id, duplicate: bool, note: str = "") -> None:
+    """记录投递时间线；失败只告警，不能影响入库/去重主流程。"""
+    if not candidate_id:
+        return
+    try:
+        db.record_submission(conn, {
+            "candidate_id": int(candidate_id),
+            "application_id": application_id,
+            "document_id": document_id,
+            "file_hash": file_hash,
+            "file_name": file_name,
+            "channel": channel,
+            "submitted_at": submitted_at,
+            "source_message_id": source_message_id,
+            "duplicate": bool(duplicate),
+            "note": note,
+        })
+    except Exception as exc:                                # noqa: BLE001
+        print(f"[ingest] 投递时间线记录失败（不影响入库）：{type(exc).__name__}: {exc}",
+              file=sys.stderr)
+
+
 def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: bytes | None,
                local_path: str | None, channel: str, applied_at: str,
                source_message_id: str | None, job_id: int | None,
@@ -634,7 +673,7 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     #
     # 例外（v1.8.8，HR 口径）：**该人已归档后再投同一份简历**时，不能一律幂等跳过——
     # "重新投递"本身就是要记录的事实。此时复用既有原件（磁盘仍只有一份、不重复落盘），
-    # 按最新简历新建一条投递，并把档案移回人才库。
+    # 按最新简历新建一条投递；归档状态由 HR 自己决定，不自动改变。
     prior_doc: dict | None = None
     if db.exists_hash(conn, digest):
         prior_doc = _find_doc_by_hash(conn, digest)
@@ -656,6 +695,15 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
                 if prior_doc.get("candidate_id"):
                     db.update_candidate(conn, prior_doc["candidate_id"],
                                         last_active_at=db.now())
+                    # 同一份简历只保留一份原件，但**每一次投递时间**要可追溯
+                    _record_submission_event(
+                        conn, candidate_id=prior_doc.get("candidate_id"),
+                        application_id=prior_doc.get("application_id"),
+                        document_id=prior_doc.get("id"), file_hash=digest,
+                        file_name=filename, channel=channel, submitted_at=applied_at,
+                        source_message_id=source_message_id, duplicate=True,
+                        note="同一份简历重复投递（SHA256 相同），未重复落盘",
+                    )
             db.add_audit(conn, "document", digest[:16], "duplicate_skipped", "",
                          f"重复投递的附件 {filename} 未重复落盘（原件已在库）",
                          "system", "system")
@@ -703,7 +751,10 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
 
     # 一次带模型的抽取作为**默认结果**（v1.23.3：原来这里抽一次、else 分支又抽一次，
     # 白花一次模型调用；且路由失败时会被规则结果覆盖）。
-    cand = extract(text, jd, use_llm=use_llm, llm_conf=llm_conf, filename=filename)
+    # 复用同一份原件（归档后重投）时不再调模型抽取：文本/字段没有变化，
+    # 只需按当前岗位规则重算，避免同一份简历反复消耗模型。
+    cand = extract(text, jd, use_llm=use_llm and not reuse_doc,
+                   llm_conf=llm_conf, filename=filename)
 
     # —— 归岗口径（v1.12）：**没有岗位名就问模型，问不出来就待指定** ——
     # 旧做法（v1.5–v1.11）：把每个在招岗位的 JD 各试算一遍、取分数最高者作「建议岗位」。
@@ -716,7 +767,8 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     route = (_route_by_open_jobs(conn, text, jd, filename=filename,
                                  prefer_text=((subject_meta or {}).get("fields") or {})
                                  .get("direction"),
-                                 use_llm=use_llm, llm_conf=llm_conf)
+                                 use_llm=use_llm and not reuse_doc,
+                                 llm_conf=llm_conf)
              if job_id is None else None)
     if route and route.get("cand") is not None:
         # 画像用"胜出岗位"那一轮抽取的结果：技能清单里会包含该岗位 JD 写的词
@@ -745,7 +797,7 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     # 模型只做"归一"（把"材化/材料成型"这类写法归到目录条目），打分仍走规则；
     # 归一后专业方向判定可能变化，所以**用归一结果重算一次**（纯规则，零成本）。
     # 模型不可用/归不出来时返回空，一切照旧。
-    if use_llm:
+    if use_llm and not reuse_doc:
         cand, major_note = _enrich_major(cand, text)
         if major_note:
             result["notes"].append(major_note)
@@ -789,8 +841,8 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     if hint.get("suspect"):
         result["notes"].append(hint["reason"])
 
-    # 该档案此前是否已归档（v1.8.8）：归档后再次投递要**新建一条投递**并移回人才库——
-    # 归档只表示"上一轮流程结束"，不代表这个人不能再投；重新投递本身是事实。
+    # 该档案此前是否已归档：归档后再次投递要**新建一条投递**，但**不自动**
+    # 归档/取消归档——只提示 HR，状态由人手动决定。
     # 未归档的人则始终沿用原投递（2026-11-13 口径）。
     _row = db.get_candidate(conn, cid) or {}
     was_archived = bool(_row.get("archived_at"))
@@ -889,10 +941,19 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         conn.execute("UPDATE applications SET resume_doc_id = ?, updated_at = ? WHERE id = ?",
                      (doc_id, db.now(), existing["id"]))
         conn.commit()
+        _record_submission_event(
+            conn, candidate_id=cid, application_id=existing["id"], document_id=doc_id,
+            file_hash=digest, file_name=filename, channel=channel,
+            submitted_at=applied_at, source_message_id=source_message_id,
+            duplicate=bool(reuse_doc),
+            note=("归档后重新投递，复用同一份原件" if reuse_doc
+                  else "新版本简历（内容与上一版不同）"),
+        )
         updated_fields = _apply_resume_fields(conn, cid, cand, text)
         result["candidate_id"] = cid
         result["application_id"] = existing["id"]
         result["document_id"] = doc_id
+        result["reused_document"] = bool(reuse_doc)
         if _proj_reset:
             result["notes"].append("新简历原文有变化，项目经历缓存已清空，分析阶段会重新提炼")
         if updated_fields:
@@ -943,6 +1004,13 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
                                           ensure_ascii=False),
         })
     conn.execute("UPDATE applications SET resume_doc_id = ? WHERE id = ?", (doc_id, app_id))
+    _record_submission_event(
+        conn, candidate_id=cid, application_id=app_id, document_id=doc_id,
+        file_hash=digest, file_name=filename, channel=channel,
+        submitted_at=applied_at, source_message_id=source_message_id,
+        duplicate=bool(reuse_doc),
+        note=("归档后重新投递，复用同一份原件" if reuse_doc else "首次投递/新投递"),
+    )
     if not is_new:
         # 历史档案没有投递、或已归档后重新投递时，按最新简历刷新一次主档。
         _updated = _apply_resume_fields(conn, cid, cand, text)
@@ -962,21 +1030,48 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
                     and route.get("usable") else ""),
                  "system", "system")
 
-    # 归档后重新投递：档案回到人才库（原投递、附件、审计全部保留，不删除任何历史）
+    # 归档后重新投递：**只新建投递，不自动改变归档状态**。
+    # 归档/取消归档由 HR 自己决定；导入结果里给出提示即可。
     if was_archived:
-        db.set_candidate_archived(conn, cid, False, "system", "system")
-        db.add_audit(conn, "candidate", str(cid), "unarchive_on_reapply", "已归档",
-                     f"归档后再次投递（投递 #{app_id}），档案移回人才库", "system", "system")
-        result["notes"].append("该人此前已归档：本次新建一条投递档案，并把档案移回人才库"
-                               "（原投递与历史附件全部保留）")
-        result["unarchived"] = True
+        db.add_audit(conn, "candidate", str(cid), "reapply_while_archived", "已归档",
+                     f"归档状态下收到新投递 #{app_id}，已新建投递，档案仍保持归档",
+                     "system", "system")
+        result["notes"].append(
+            "该人此前已归档：本次已新建一条投递，但档案仍保持归档；"
+            "如需回到人才库，请到「归档」页手动取消归档（原投递与历史附件全部保留）")
+        result["archived_remains"] = True
 
     result["status"] = "added"
     result["candidate_id"] = cid
     result["application_id"] = app_id
     # 明细里带上附件编号，界面这一行才能直接「预览 / 下载」原件
     result["document_id"] = doc_id
+    result["reused_document"] = bool(reuse_doc)
     return result
+
+
+def cleanup_stale_temp_dirs(max_age_hours: int = 24) -> int:
+    """清理 6.0.2 遗留的简历临时目录（清理失败时会被留在系统临时目录）。
+
+    只删超过 max_age_hours 的 `hragent-att-*` / `hra_doc_*`，避开正在处理的批次；
+    删除失败（仍被占用）留待下次启动，不抛异常。
+    """
+    import glob
+    import shutil
+    import tempfile
+
+    cutoff = time.time() - max(1, int(max_age_hours)) * 3600
+    removed = 0
+    root = tempfile.gettempdir()
+    for pattern in ("hragent-att-*", "hra_doc_*"):
+        for path in glob.glob(os.path.join(root, pattern)):
+            try:
+                if os.path.isdir(path) and os.path.getmtime(path) < cutoff:
+                    shutil.rmtree(path, ignore_errors=True)
+                    removed += 1
+            except OSError:
+                continue
+    return removed
 
 
 def _hash_path(path: str | None) -> str:
@@ -1583,8 +1678,17 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
             report["failed"] += failed
             report["parse_failed"] += pf
             report["other_saved"] += other_saved
-            db.update_email(conn, mid, processed=1, processed_at=db.now(),
-                            added=added, skipped=skipped, failed=failed)
+            # 简历附件处理失败时保持 processed=0：游标不越过这封，
+            # 下次同步重新拉取重试；成功才标记已处理（P2 数据修复）。
+            _mail_ok = failed == 0
+            db.update_email(
+                conn, mid,
+                processed=1 if _mail_ok else 0,
+                processed_at=db.now() if _mail_ok else None,
+                added=added, skipped=skipped, failed=failed,
+                error=("有简历附件处理失败，等待下次同步重试" if not _mail_ok
+                       else None),
+            )
         # 入库完成 → 后台异步做分析（不阻断本次返回，失败也不影响上面这些计数）。
         # spawn=False 时（逐封调用的批次）由调用方在整批结束后挂一次分析（v1.29.4）。
         if spawn:
@@ -1885,8 +1989,16 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                     update_progress(progress_tid,
                                     message=f"已停止：完成 {done} / {total} 封后按你的要求停下")
                     break
+                _failed_before = int(report.get("failed") or 0)
                 ingest_mails([item], cfg, jd, tiers, db_path, job_id, use_llm, llm_conf,
                              report=report, spawn=False)
+                if int(report.get("failed") or 0) > _failed_before:
+                    # 这封有附件失败：不推进游标，下次从上一封成功处重试
+                    report["retry_pending"] = True
+                    update_progress(
+                        progress_tid,
+                        message=f"第 {done + 1} 封有附件处理失败，已停在上一封，下次重试")
+                    break
                 newest = item.get("uid") or newest
                 done += 1
                 update_progress(progress_tid, done=done)
@@ -1934,6 +2046,7 @@ def _insight_targets(report: dict) -> list[dict]:
     out: list[dict] = []
     for d in report.get("details") or []:
         if (d.get("status") in ("added", "merged_version")
+                and not d.get("reused_document")
                 and d.get("candidate_id") and d.get("application_id")):
             out.append({"candidate_id": int(d["candidate_id"]),
                         "application_id": int(d["application_id"])})

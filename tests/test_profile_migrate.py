@@ -131,5 +131,35 @@ class ProfileMigrationTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(config, "master.key")))
 
 
+class WalSnapshotTest(unittest.TestCase):
+    def test_snapshot_keeps_committed_wal_rows(self):
+        """2026-11-16 数据安全回归：迁移快照不能忽略 -wal 里的已提交事务。"""
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "workbench.db")
+            dst = os.path.join(d, "snapshot.db")
+            conn = sqlite3.connect(src)
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("CREATE TABLE candidates(id INTEGER PRIMARY KEY, name TEXT)")
+                conn.execute("INSERT INTO candidates(name) VALUES ('baseline')")
+                conn.commit()
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.execute("INSERT INTO candidates(name) VALUES ('recent-committed')")
+                conn.commit()
+                self.assertEqual(
+                    profile_migrate._counts(src).get("candidates"), 2,
+                    "源库计数必须包含 WAL 中已提交的行")
+                profile_migrate._sqlite_snapshot(src, dst)
+                out = sqlite3.connect(dst)
+                try:
+                    self.assertEqual(
+                        out.execute("SELECT COUNT(*) FROM candidates").fetchone()[0], 2,
+                        "迁移快照必须保留 WAL 中已提交的行")
+                finally:
+                    out.close()
+            finally:
+                conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

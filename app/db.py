@@ -236,6 +236,26 @@ CREATE INDEX IF NOT EXISTS idx_doc_cand_kind_id
     ON documents(candidate_id, kind, id DESC);
 CREATE INDEX IF NOT EXISTS idx_doc_msg  ON documents(source_message_id);
 
+-- ---------- 投递事件（含重复投递） ----------
+-- 同一份简历（file_hash 相同）重复投递时，documents 只保留一份原件，
+-- 但每次投递的时间/渠道要能展示给 HR。这里逐次记录，不参与去重。
+CREATE TABLE IF NOT EXISTS submission_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id INTEGER,
+    application_id INTEGER,
+    document_id INTEGER,
+    file_hash TEXT,
+    file_name TEXT,
+    channel TEXT,
+    submitted_at TEXT,
+    source_message_id TEXT,
+    duplicate INTEGER NOT NULL DEFAULT 0,
+    note TEXT,
+    created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_submission_cand
+    ON submission_events(candidate_id, submitted_at DESC, id DESC);
+
 -- ---------- 技能本体 ----------
 CREATE TABLE IF NOT EXISTS skills (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1981,23 +2001,52 @@ def insert_candidate(conn: sqlite3.Connection, rec: dict) -> int:
     return cur.lastrowid
 
 
+def _resolve_candidate_root(conn: sqlite3.Connection, row: dict | None) -> dict | None:
+    """沿 merged_into 找到仍然有效的根档；带环保护。
+
+    合并只把投递/附件搬走，源档行仍保留原 identity_key/phone_bidx。
+    如果查重继续排除 merged 行，源档的 UNIQUE identity_key 就永远“查不到但占着键”，
+    后续同一人再投递会在 INSERT 时撞唯一键（2026-11-16 数据安全修复）。
+    """
+    if not row:
+        return None
+    seen: set[int] = set()
+    while row.get("merged_into"):
+        try:
+            nxt_id = int(row["merged_into"])
+            cur_id = int(row.get("id") or 0)
+        except (TypeError, ValueError):
+            break
+        if nxt_id in seen or nxt_id == cur_id:
+            break
+        seen.add(cur_id)
+        nxt = _row(conn.execute("SELECT * FROM candidates WHERE id = ?", (nxt_id,)).fetchone())
+        if not nxt:
+            break
+        row = nxt
+    return row
+
+
 def find_candidate_by_identity(conn: sqlite3.Connection, identity_key: str) -> dict | None:
-    return _row(conn.execute(
-        "SELECT * FROM candidates WHERE identity_key = ? AND merged_into IS NULL",
-        (identity_key,)).fetchone())
+    """按身份键查人；**包含已合并行并解析到根档**。"""
+    row = _row(conn.execute(
+        "SELECT * FROM candidates WHERE identity_key = ?", (identity_key,)).fetchone())
+    return _resolve_candidate_root(conn, row)
 
 
 def find_by_bidx(conn: sqlite3.Connection, phone_bidx: str | None,
                  email_bidx: str | None) -> list[dict]:
-    """用于"疑似重复"提示：手机号或邮箱命中。"""
+    """用于"疑似重复"提示：手机号或邮箱命中；合并档解析到根档后去重。"""
     hits: dict[int, dict] = {}
     for col, val in (("phone_bidx", phone_bidx), ("email_bidx", email_bidx)):
         if not val:
             continue
         for r in conn.execute(
-            f"SELECT * FROM candidates WHERE {col} = ? AND merged_into IS NULL", (val,)
+            f"SELECT * FROM candidates WHERE {col} = ?", (val,)
         ).fetchall():
-            hits[r["id"]] = _row(r)
+            root = _resolve_candidate_root(conn, _row(r))
+            if root:
+                hits[int(root["id"])] = root
     return list(hits.values())
 
 
@@ -2651,6 +2700,8 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         **c,
         "applications": apps,
         "documents": docs,
+        # 每次投递（含同一份简历的重复投递）的时间线；documents 仍只保留一份原件
+        "submissions": list_submissions(conn, cid),
         # v1.27：简历附件 / 其他附件分开。`documents` 保留全量（老消费方不变），
         # 界面用这两个分组渲染两张表。
         "resume_documents": resume_docs,
@@ -2757,6 +2808,15 @@ def merge_candidates(conn: sqlite3.Connection, src_id: int, dst_id: int,
     src, dst = get_candidate(conn, src_id), get_candidate(conn, dst_id)
     if not src or not dst:
         return {"ok": False, "error": "候选人不存在"}
+    if src.get("merged_into") or dst.get("merged_into"):
+        return {"ok": False,
+                "error": "源档或目标档已经处于合并状态；请先拆分，不能形成 A→B→A 的环"}
+    # 先拿写锁，避免两个并发合并各自通过上面的校验
+    begin_immediate(conn)
+    src, dst = get_candidate(conn, src_id), get_candidate(conn, dst_id)
+    if not src or not dst or src.get("merged_into") or dst.get("merged_into"):
+        conn.rollback()
+        return {"ok": False, "error": "合并状态已变化，请刷新后重试"}
     # v1.13.6：搬过去的同时**记下来源**，否则"撤销合并"无法把它们搬回来
     conn.execute("UPDATE applications SET candidate_id = ?, merged_from_candidate = ?, "
                  "updated_at = ? WHERE candidate_id = ?",
@@ -2774,6 +2834,23 @@ def merge_candidates(conn: sqlite3.Connection, src_id: int, dst_id: int,
     conn.execute(
         """INSERT OR IGNORE INTO candidate_tags (candidate_id, tag_id, evidence, source, created_at)
            SELECT ?, tag_id, evidence, source, created_at FROM candidate_tags WHERE candidate_id = ?""",
+        (dst_id, src_id),
+    )
+    # 分析结论与向量也属于档案的一部分；只搬投递/附件会让合并后的档案“少了判断”。
+    conn.execute(
+        """INSERT OR IGNORE INTO candidate_insights
+           (candidate_id, application_id, summary, reasons, risks, evidence,
+            source, model, created_at)
+           SELECT ?, application_id, summary, reasons, risks, evidence,
+                  source, model, created_at
+           FROM candidate_insights WHERE candidate_id = ?""",
+        (dst_id, src_id),
+    )
+    conn.execute(
+        """INSERT OR IGNORE INTO embeddings
+           (owner_type, owner_id, model, dim, vector, text_hash, created_at)
+           SELECT owner_type, ?, model, dim, vector, text_hash, created_at
+           FROM embeddings WHERE owner_type = 'candidate' AND owner_id = ?""",
         (dst_id, src_id),
     )
     conn.execute("UPDATE candidates SET merged_into = ?, pool_status = '已归档', updated_at = ? WHERE id = ?",
@@ -3251,6 +3328,18 @@ def set_candidate_archived(conn: sqlite3.Connection, cid: int, archived: bool,
     cur = get_candidate(conn, cid)
     if not cur:
         return None
+    # 幂等：重复点归档不能刷新 archived_at（它会成为 30 天保留期起算点），
+    # 重复点取消归档也不应重复写审计。
+    if archived and cur.get("archived_at"):
+        out = dict(cur)
+        out["_ended_applications"] = 0
+        out["_unchanged"] = True
+        return out
+    if not archived and not cur.get("archived_at"):
+        out = dict(cur)
+        out["_ended_applications"] = 0
+        out["_unchanged"] = True
+        return out
     ts = now() if archived else None
     conn.execute("UPDATE candidates SET archived_at = ? WHERE id = ?", (ts, cid))
     ended = 0
@@ -3511,11 +3600,21 @@ def insert_document(conn: sqlite3.Connection, rec: dict) -> int:
         conn.commit()
         return cur.lastrowid
     except sqlite3.IntegrityError:
-        # 唯一键冲突：同一份文件（file_hash）已经入过账，返回既有 id
-        row = conn.execute("SELECT id FROM documents WHERE file_hash = ?",
-                           (rec.get("file_hash"),)).fetchone()
+        # 唯一键冲突：同一份文件（file_hash）已经入过账。
+        # **不能直接把它返回给另一个候选人**：并发上传同一份文件时，
+        # 会把 B 的 application.resume_doc_id 指向 A 的文档（跨档污染）。
+        row = conn.execute(
+            "SELECT id, candidate_id FROM documents WHERE file_hash = ?",
+            (rec.get("file_hash"),)).fetchone()
         if row:
-            return int(row["id"] if not isinstance(row, tuple) else row[0])
+            rid = int(row["id"] if not isinstance(row, tuple) else row[0])
+            rcid = (row["candidate_id"] if not isinstance(row, tuple) else row[1])
+            want = rec.get("candidate_id")
+            if want is not None and rcid is not None and int(rcid) != int(want):
+                raise ValueError(
+                    f"同一份文件已归档到候选人 #{rcid}，拒绝挂到 #{want}；"
+                    "请先核对是否重复投递")
+            return rid
         raise
 
 
@@ -3546,6 +3645,30 @@ def list_documents(conn: sqlite3.Connection, candidate_id: int | None = None,
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY id DESC"
     return [_decode(dict(r)) for r in conn.execute(sql, args).fetchall()]
+
+
+def record_submission(conn: sqlite3.Connection, rec: dict) -> int:
+    """记录一次投递（含重复投递）。**不参与去重**，只做时间线展示。"""
+    cur = conn.execute(
+        """INSERT INTO submission_events
+           (candidate_id, application_id, document_id, file_hash, file_name,
+            channel, submitted_at, source_message_id, duplicate, note, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (rec.get("candidate_id"), rec.get("application_id"), rec.get("document_id"),
+         rec.get("file_hash"), rec.get("file_name"), rec.get("channel"),
+         rec.get("submitted_at") or now(), rec.get("source_message_id"),
+         1 if rec.get("duplicate") else 0, rec.get("note"), now()),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def list_submissions(conn: sqlite3.Connection, candidate_id: int,
+                     limit: int = 200) -> list[dict]:
+    return [_decode(dict(r)) for r in conn.execute(
+        """SELECT * FROM submission_events WHERE candidate_id = ?
+           ORDER BY COALESCE(submitted_at,'') DESC, id DESC LIMIT ?""",
+        (candidate_id, int(limit))).fetchall()]
 
 
 # ============================================================
@@ -3858,7 +3981,9 @@ AUDIT_LABEL = {
     "refresh_skills": "系统重建了技能", "backfill_grad_date": "系统回填了毕业时间",
     "ingest": "导入了简历", "set_stage": "推进了阶段", "set_tier": "调整了档位",
     "edit_fields": "更正了字段", "add_tag": "加了标签", "add_note": "加了备注",
-    "archive": "归档了", "unarchive": "取消归档了", "unarchive_on_reapply": "重新投递，自动取消归档",
+    "archive": "归档了", "unarchive": "取消归档了",
+    "unarchive_on_reapply": "重新投递，自动取消归档（历史）",
+    "reapply_while_archived": "归档状态下重新投递",
     "merge": "合并了重复档案", "split": "撤销了合并", "review": "标记为已复核",
     "unreview": "取消了已复核", "reanalyze": "重跑了分析", "reanalyze_full": "完整重新分析",
     "reanalyze_batch": "批量重跑了分析", "regrade": "按岗位 JD 重算了档位",
@@ -4946,14 +5071,27 @@ def conversation_memory(conn: sqlite3.Connection, cid: str, operator: str,
 
 
 def log_agent_run(conn: sqlite3.Connection, rec: dict) -> int:
+    # 运行日志/会话记忆会长期保留并随备份流动；联系方式不在这里存明文副本。
+    from .pipeline import sanitize as _sanitize
+
     _stamp = now()
+    _q = _sanitize.scrub_contacts(rec.get("question") or "")
+    _a = _sanitize.scrub_contacts(rec.get("answer") or "")
+    _th = _sanitize.scrub_contacts(rec.get("thinking") or "")
+    _ctx_json = _sanitize.scrub_contacts(
+        json.dumps(rec.get("context") or {}, ensure_ascii=False))
+    _tools_json = _sanitize.scrub_contacts(
+        json.dumps(rec.get("tool_calls", []), ensure_ascii=False))
+    _alerts_json = _sanitize.scrub_contacts(
+        json.dumps(rec.get("alerts") or [], ensure_ascii=False))
+    _metrics_json = _sanitize.scrub_contacts(
+        json.dumps(rec.get("metrics") or {}, ensure_ascii=False))
     if rec.get("session_id"):
         ensure_conversation(conn, rec["session_id"], rec.get("operator", "HR"),
-                            rec.get("question", ""), _stamp)
+                            _q, _stamp)
     _append_conversation_memory(
         conn, rec.get("session_id"), rec.get("operator", "HR"),
-        rec.get("question", ""), rec.get("answer", ""),
-        rec.get("tool_calls") or [], _stamp)
+        _q, _a, rec.get("tool_calls") or [], _stamp)
     cur = conn.execute(
         """INSERT INTO agent_runs
            (session_id, question, answer, thinking, context_json, model,
@@ -4963,19 +5101,16 @@ def log_agent_run(conn: sqlite3.Connection, rec: dict) -> int:
             alert_level, alerts_json, metrics_json,
             latency_ms, status, mode, operator, ts)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (rec.get("session_id"), rec.get("question"), rec.get("answer"),
-         rec.get("thinking") or "",
-         json.dumps(rec.get("context") or {}, ensure_ascii=False),
-         rec.get("model"),
-         json.dumps(rec.get("tool_calls", []), ensure_ascii=False), rec.get("rounds", 0),
+        (rec.get("session_id"), _q, _a, _th,
+         _ctx_json, rec.get("model"),
+         _tools_json, rec.get("rounds", 0),
          rec.get("tokens_in", 0), rec.get("tokens_out", 0),
          rec.get("cache_hit_tokens", 0), rec.get("cache_reported", 0),
          rec.get("tool_tokens", 0), rec.get("tool_ratio", 0),
          rec.get("tool_calls_count", 0), rec.get("tool_errors", 0),
          rec.get("tool_error_rate", 0), rec.get("context_budget", 0),
          rec.get("context_trimmed", 0), rec.get("alert_level", ""),
-         json.dumps(rec.get("alerts") or [], ensure_ascii=False),
-         json.dumps(rec.get("metrics") or {}, ensure_ascii=False),
+         _alerts_json, _metrics_json,
          rec.get("latency_ms", 0),
          rec.get("status", "ok"), rec.get("mode"), rec.get("operator", "HR"), _stamp),
     )

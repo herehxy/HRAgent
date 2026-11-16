@@ -162,8 +162,8 @@ Write-Host '============================================================' -Foreg
 Write-Host '   [√] 安装完成' -ForegroundColor Green
 Write-Host ''
 Write-Host "   程序位置： $Target"
-Write-Host '   首次登录账号： hr'
-Write-Host '   首次登录取码： change-me'
+Write-Host '   首次登录账号： admin'
+Write-Host '   首次登录密码： change-me'
 Write-Host '   （登录后请立即在「账号管理」里改掉）'
 Write-Host '============================================================' -ForegroundColor Cyan
 Write-Host ''

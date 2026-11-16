@@ -121,6 +121,8 @@ config/mailbox.json   收发信配置     config/imap.secret      IMAP 密码（
 
 接内网大模型只改 `base_url` + `model`，不动代码；也支持 `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` 覆盖。
 
+> **外部端点默认脱敏**：当 `base_url` 不是回环/内网地址时，姓名、手机号、邮箱、完整简历原文不会发给模型（工具返回 `候选人#id`、联系方式为空、原文限 4000 字）。只有在你确认合规、并显式设置 `config/model.json` 的 `allow_external_pii: true` 后才会发送完整 PII。
+
 ---
 
 ## 分级口径（`config/tiers.json`，可改）

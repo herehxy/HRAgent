@@ -42,6 +42,34 @@ MAX_PAGES = 1
 MAX_DECODE = 4
 #: 参与候选的最大像素边长（超过的多半是整页扫描图，不是证件照）
 MAX_SIDE = 2000
+#: docx 里最多检查多少张 embedding（word/media 下可能混着图标/公式/二维码）
+MAX_DOCX_IMAGES = 30
+#: 解码前按像素总数拦截，防止小体积压缩炸弹把内存打满
+MAX_IMAGE_PIXELS = 20_000_000
+#: 可作为头像来源的原件类型（图片型简历也允许直接作为候选，但仍要过 _score）
+AVATAR_SOURCE_EXTS = (".pdf", ".docx", ".jpg", ".jpeg", ".png", ".webp", ".bmp")
+
+
+def _photo_stats(im: Image.Image) -> tuple[float, float, float]:
+    """返回 (皮肤色占比, 灰度标准差, 平均亮度)，用于区分证件照与文档/logo。
+
+    不引入人脸检测模型：部署环境不一定有 FaceDetectorYN 的 onnx。这里只用
+    RGB 肤色规则做“像不像人像”的弱信号；它的作用是**降低误抽**，不是替代人脸检测。
+    """
+    try:
+        import numpy as np
+
+        small = im.convert("RGB").resize((64, 64))
+        a = np.asarray(small).astype(np.int16)
+        r, g, b = a[:, :, 0], a[:, :, 1], a[:, :, 2]
+        mx, mn = a.max(axis=2), a.min(axis=2)
+        skin = ((r > 95) & (g > 40) & (b > 20)
+                & ((mx - mn) > 15) & (np.abs(r - g) > 15)
+                & (r > g) & (r > b))
+        gray = (0.299 * r + 0.587 * g + 0.114 * b)
+        return float(skin.mean()), float(gray.std()), float(gray.mean())
+    except Exception:                                    # noqa: BLE001
+        return 0.0, 0.0, 0.0
 
 
 def _score(im: Image.Image) -> float:
@@ -49,16 +77,33 @@ def _score(im: Image.Image) -> float:
 
     证件照的共同点：**竖构图**（高/宽 1.15~1.5 最常见）、最短边不至于太小。
     排除项：超宽长条（横幅/签名）、很扁的（图标）、很小的（水印/logo）。
+
+    2026-11-16 增补：加入**肤色占比/亮度/对比度**弱信号。
+    整页扫描件和纯文字文档通常“高亮度 + 低方差 + 皮肤色极少”，
+    以前会因为面积大、竖构图而被误抽；现在这类直接判 0。
     """
     w, h = im.size
     if min(w, h) < 60 or max(w, h) < 120:
         return 0.0
+    if w * h > MAX_IMAGE_PIXELS:
+        return 0.0
     ar = h / w
     if not (0.9 <= ar <= 1.8):
+        return 0.0
+    skin, gray_std, bright = _photo_stats(im)
+    # 纯白/近白的文档页、几乎无纹理的 logo
+    if gray_std < 8:
+        return 0.0
+    if skin < 0.01 and bright > 185 and gray_std < 42:
         return 0.0
     s = float(min(w * h, 400 * 400))       # 超过 400x400 不再加分，避免被大图通吃
     if not (1.15 <= ar <= 1.5):
         s *= 0.6                            # 比例不太像证件照，降权但不直接排除
+    # 有肤色像素的图更像人像；没有也不直接判死（黑白证件照），但降权
+    if skin >= 0.02:
+        s *= 1.0 + min(skin, 0.45) * 3.0
+    else:
+        s *= 0.55
     return s
 
 
@@ -115,6 +160,18 @@ def pdf_images(path: str) -> list[bytes]:
                 ar = h / w
                 if not (0.9 <= ar <= 1.8):
                     continue                             # 横构图/长条：不是证件照
+                # 图片在页面上的实际占位：整页扫描/背景图通常 >60%，小图标 <1%。
+                # 证件照一般只占页面的一小块；这个信号能挡住“最大的整页图”。
+                try:
+                    rects = page.get_image_rects(xref)
+                    page_area = max(1.0, page.rect.width * page.rect.height)
+                    area_on_page = max(
+                        (r.width * r.height for r in rects), default=0.0)
+                    ratio = area_on_page / page_area
+                    if ratio > 0.60 or ratio < 0.01:
+                        continue
+                except Exception:                        # noqa: BLE001
+                    continue
                 picked.append((w * h, xref, pno))
 
         picked.sort(reverse=True)                        # 面积大的优先，但**不重复解同一张**
@@ -135,13 +192,30 @@ def pdf_images(path: str) -> list[bytes]:
 
 
 def docx_images(path: str) -> list[bytes]:
-    """docx 里的图片：`word/media/` 下全是，直接取。"""
+    """docx 里的图片：`word/media/` 下全是，直接取；限制数量与总解压体积。"""
     out: list[bytes] = []
+    total = 0
     with zipfile.ZipFile(path) as z:
         for name in z.namelist():
+            if len(out) >= MAX_DOCX_IMAGES or total >= MAX_BYTES:
+                break
             low = name.lower()
-            if name.startswith("word/media/") and low.endswith((".png", ".jpg", ".jpeg", ".bmp")):
+            if not (name.startswith("word/media/")
+                    and low.endswith((".png", ".jpg", ".jpeg", ".bmp"))):
+                continue
+            try:
+                info = z.getinfo(name)
+            except KeyError:
+                continue
+            if info.file_size > 10 * 1024 * 1024:
+                continue
+            total += int(info.file_size or 0)
+            if total > MAX_BYTES:
+                break
+            try:
                 out.append(z.read(name))
+            except Exception:                            # noqa: BLE001
+                continue
     return out
 
 
@@ -153,8 +227,12 @@ def extract(path: str, *, size: int = AVATAR_SIZE) -> bytes | None:
             blobs = pdf_images(path)
         elif ext == ".docx":
             blobs = docx_images(path)
+        elif ext in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+            # 图片型简历本身也可能是证件照；仍要过 _score，整页扫描件会被拒
+            with open(path, "rb") as fh:
+                blobs = [fh.read()]
         else:
-            # .txt / .doc / 图片：没有"嵌入图"这回事（.doc 的 OLE 结构要另找库，先不支持）
+            # .txt / .doc：没有"嵌入图"这回事（.doc 的 OLE 结构要另找库，先不支持）
             return None
     except Exception:                                    # noqa: BLE001 - 抽不出就当没有
         return None
@@ -162,7 +240,10 @@ def extract(path: str, *, size: int = AVATAR_SIZE) -> bytes | None:
     best, best_score = None, 0.0
     for blob in blobs:
         try:
-            im = Image.open(io.BytesIO(blob)).convert("RGB")
+            im = Image.open(io.BytesIO(blob))
+            if im.width * im.height > MAX_IMAGE_PIXELS:
+                continue
+            im = im.convert("RGB")
         except Exception:                                # noqa: BLE001
             continue
         s = _score(im)
@@ -177,12 +258,12 @@ def extract(path: str, *, size: int = AVATAR_SIZE) -> bytes | None:
 
 
 def _resume_doc(conn, cid: int) -> str | None:
-    """这个人**最新一份** PDF/docx 原件的磁盘路径（绝对或相对 BASE 都可）。"""
+    """这个人**最新一份**可作为头像来源的原件（PDF/docx/图片）。"""
     for row in conn.execute(
             "SELECT file_path, archived_path FROM documents WHERE candidate_id = ? "
             "ORDER BY id DESC", (cid,)):
         for p in (row["archived_path"], row["file_path"]):
-            if p and os.path.splitext(p)[1].lower() in (".pdf", ".docx"):
+            if p and os.path.splitext(p)[1].lower() in AVATAR_SOURCE_EXTS:
                 return p
     return None
 

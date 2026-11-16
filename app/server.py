@@ -291,11 +291,12 @@ async def _guard_local_origin(request: Request, call_next):
       据此拒绝（Host 缺失时不拦——真实浏览器必带 Host，缺失只发生在测试/畸形请求）。
     - 本地 CSRF：跨站表单 POST 会带 `Origin: https://evil.com`，据此拒绝。
     """
+    # Host 校验必须覆盖 **所有方法**：本机模式下 GET 也会返回全库 PII，
+    # 只拦非 GET 挡不住 DNS rebinding（2026-11-16 安全修复）。
+    host = request.headers.get("host") or ""
+    if host and not _is_local_host(host):
+        return Response(status_code=403, content="Forbidden: 仅接受本机请求")
     if request.method not in ("GET", "HEAD", "OPTIONS"):
-        host = request.headers.get("host") or ""
-        # Host 存在且非本机 → 拒绝（DNS rebinding）
-        if host and not _is_local_host(host):
-            return Response(status_code=403, content="Forbidden: 仅接受本机请求")
         # 若带了 Origin/Referer，其主机也必须是本机（跨站表单会带外部 Origin）
         origin = request.headers.get("origin")
         if origin:
@@ -315,6 +316,9 @@ async def _guard_local_origin(request: Request, call_next):
 # 前端 `/api/tasks/{task_id}` 轮询，弹窗里画进度条。
 _PROGRESS: dict[str, dict] = {}
 _PROGRESS_LOCK = threading.Lock()
+# 上传入口与 /api/ingest 共用同一套“先查后写”逻辑；上传不登记进度任务，
+# 这里用进程内锁串行化，避免两个上传各自查到“无投递”后各建一条。
+_UPLOAD_INGEST_LOCK = threading.Lock()
 _PROGRESS_LAST: dict[str, float] = {}
 
 
@@ -646,6 +650,48 @@ def _harden_page_headers(resp: Response) -> None:
     resp.headers["X-Frame-Options"] = "DENY"
 
 
+#: 启动过渡页：浏览器先打开这里，轮询 /api/ping 后再跳到主界面。
+#: 这样即使后端/首屏数据还要等一会儿，用户也能立刻看到“正在启动”的反馈。
+_BOOT_PAGE = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>正在启动 · 人才库智能体</title>
+<style>
+html,body{height:100%;margin:0}body{display:flex;align-items:center;justify-content:center;
+background:#f5f6f8;color:#1d2129;font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+.box{text-align:center;padding:32px 40px}.spinner{width:38px;height:38px;margin:0 auto 18px;
+border:4px solid #d9e2ec;border-top-color:#1677ff;border-radius:50%;animation:spin .8s linear infinite}
+.t{font-size:17px;font-weight:600;margin-bottom:6px}.h{color:#6b7785;font-size:13px}
+@keyframes spin{to{transform:rotate(360deg)}}</style></head>
+<body><div class="box"><div class="spinner"></div>
+<div class="t">正在启动人才库工作台…</div>
+<div class="h">首次启动可能需要几秒，请稍候</div></div>
+<script>
+(function(){
+  var n=0;
+  function next(){
+    fetch('/api/ping',{cache:'no-store'}).then(function(r){
+      if(r.ok){ location.replace('/'); return; }
+      throw new Error('not ready');
+    }).catch(function(){
+      n++;
+      if(n<120){ setTimeout(next,500); }
+      else { document.querySelector('.h').textContent='启动超时，请查看运行日志或重启程序'; }
+    });
+  }
+  next();
+})();
+</script></body></html>"""
+
+
+@app.get("/boot", response_class=HTMLResponse)
+def boot_page() -> Response:
+    resp = HTMLResponse(_BOOT_PAGE)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    _harden_page_headers(resp)
+    return resp
+
+
 @app.get("/ui/{name}")
 def ui_asset(name: str) -> Response:
     """带内容 hash 的 UI 静态资源：一年缓存，内容一变 URL 就变。"""
@@ -762,28 +808,23 @@ def api_login_hint(request: Request) -> dict:
         if not users:
             return {"first_run": True, "username": "",
                     "hint": "还没有任何账号。请用管理员账号首次登录以完成初始化。"}
-        # 找出仍是默认密码的启用账号（只能靠 verify 比对，库里不存明文）
+        # 找出仍需首次改密的启用账号。**不再回显密码**：Host 头是客户端
+        # 可控的，任何“仅本机”判断都可能被伪造；首次密码只通过
+        # 部署日志/管理员渠道传递。
         from .crypto import verify_password as _verify
         for u in users:
             if not u.get("active"):
                 continue
             full = db.get_user(conn, u["username"]) or {}
-            if full.get("password_hash") and _verify(
-                    auth.DEFAULT_PASSWORD, full["password_hash"], full["salt"]):
-                # **只对本机访问**回显默认密码：Docker/反代对外时，
-                # 这个未鉴权接口不能把"账号 + 默认密码"直接送给任何访问者。
-                # 登录后服务端会强制改密（require() 拦截），泄露窗口仅限首次登录前。
-                _local = _is_loopback_host(request.headers.get("host") or "")
-                _pw_line = (f"密码：{auth.DEFAULT_PASSWORD}\n" if _local
-                            else "密码：请查看首次部署日志或联系管理员\n")
+            if full.get("must_change_password") or (
+                    full.get("password_hash")
+                    and _verify(auth.DEFAULT_PASSWORD, full["password_hash"], full["salt"])):
                 return {
                     "first_run": True,
                     "username": u["username"],
-                    # 用 \n 分行（前端 `white-space:pre-line` 会保留）：
-                    # 账号、密码、提醒三件事挤在一行读起来很累。
                     "hint": (f"首次使用\n账号：{u['username']}\n"
-                             + _pw_line
-                             + "（登录后必须修改初始密码）"),
+                             "密码：请查看首次部署日志或联系管理员\n"
+                             "（登录后必须修改初始密码）"),
                 }
         return {"first_run": False, "username": "", "hint": ""}
     finally:
@@ -1227,8 +1268,9 @@ def _store_upload_and_ingest(body: bytes, safe: str, jd, tiers,
     try:
         with _paths.lp_open(dest, "wb") as fh:
             fh.write(body)
-        rep = _ing.ingest_dir(upload_dir, jd, tiers, DB_PATH, job_id=None,
-                              use_llm=use_llm, llm_conf=conf)
+        with _UPLOAD_INGEST_LOCK:
+            rep = _ing.ingest_dir(upload_dir, jd, tiers, DB_PATH, job_id=None,
+                                  use_llm=use_llm, llm_conf=conf)
     finally:
         # 原件已在 ingest 内复制到归档区（archived_path），临时上传目录可以删。
         _shutil.rmtree(upload_dir, ignore_errors=True)
@@ -2179,7 +2221,8 @@ def api_avatar_backfill_start(
 def api_avatar_backfill_status(
         x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    _session(x_tp_token, x_tp_role)
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "ingest")
     return {"ok": True, **avatar_mod.backfill_status()}
 
 
@@ -3032,9 +3075,17 @@ def _purge_expired(conn=None, actor: str = "system", role: str = "system",
     try:
         out = db.purge_due_candidates(conn, db.PURGE_AFTER_DAYS, actor, role,
                                       only_ids=only_ids)
-        deleted, failed = [], []
+        deleted, failed, skipped = [], [], []
+        archive_root = os.path.normcase(
+            os.path.realpath(os.path.join(DATA_DIR, "archive")))
         for rel in out["files"]:
             src = _abs_stored(rel)
+            real = os.path.normcase(os.path.realpath(src))
+            # **只删归档区副本**。`file_path` 可能是“本地文件夹导入”的原始来源路径；
+            # 删掉它等于把 HR 的原文件也删了（数据安全 P0，2026-11-16）。
+            if not (real == archive_root or real.startswith(archive_root + os.sep)):
+                skipped.append(rel)
+                continue
             if not _paths.lp_exists(src):
                 failed.append(rel)
                 continue
@@ -3045,6 +3096,7 @@ def _purge_expired(conn=None, actor: str = "system", role: str = "system",
                 failed.append(rel)
         out["files_deleted"] = len(deleted)
         out["files_failed"] = failed
+        out["files_skipped"] = skipped
         return out
     finally:
         if own:
@@ -3231,6 +3283,13 @@ def _startup_purge_task() -> None:
         #   · 正常启动先睡 45 秒（够用户完成"打开→看第一眼→点第一个人"）；
         #   · 用 Event.wait 而不是 sleep，将来要"退出时立刻取消"能直接 set()。
         _REPAIR_DELAY.wait(float(os.environ.get("TP_REPAIR_DELAY") or 45))
+        # 清理解析阶段可能残留的简历临时目录（6.0.2 的 ignore_cleanup_errors）
+        try:
+            _n_temp = ingest_mod.cleanup_stale_temp_dirs()
+            if _n_temp:
+                print(f"[temp] 清理了 {_n_temp} 个过期简历临时目录")
+        except Exception as exc:                           # noqa: BLE001
+            print(f"[temp] 临时目录清理失败（不影响使用）：{exc}", file=sys.stderr)
         # 顺手把库内技能分类对齐到当前本体（v1.6）：专业大类匹配依赖 skills.category，
         # 而 upsert_skill 不会改写已存在技能的分类，所以本体新增技能（如 Java/Spring Boot）后
         # 必须同步一次，否则老条目仍归在「其他」里，大类匹配对软件岗就是失真的。
@@ -4706,14 +4765,16 @@ def api_document_file(did: int, inline: int = 0, ticket: str | None = None,
         raise HTTPException(status_code=404, detail=f"原件不在磁盘上：{path}")
 
     name = d.get("file_name") or os.path.basename(real)
-    disposition = "inline" if inline else "attachment"
-    # v4.0.15：**扩展名优先**。历史数据里有 100+ 条 PDF/图片的 mime 被存成了
-    # `application/octet-stream`，直接按库里的 mime 发，浏览器不会预览，
-    # 只会下载或显示空白 —— 用户看到的就是"在线打开不是简历本身"。
-    # 扩展名能识别时以它为准；只有扩展名不认识时才回退到库里的 mime。
-    _ext_mime = _mime_of(name)
-    _media = (_ext_mime if _ext_mime != "application/octet-stream"
-              else ((d.get("mime") or "").strip() or _ext_mime))
+    # 安全：类型只按扩展名推导，**绝不回退到邮件里声明的 Content-Type**。
+    # 否则“成绩单.xlsx”可以声明 text/html，HR 点在线打开时被内联渲染成脚本。
+    _INLINE_SAFE = {"application/pdf", "text/plain", "text/markdown",
+                    "text/x-markdown", "text/csv",
+                    "image/jpeg", "image/png", "image/gif", "image/webp"}
+    _ext_mime = _mime_of(name).split(";", 1)[0].strip().lower()
+    _inline_ok = bool(inline) and _ext_mime in _INLINE_SAFE
+    _media = (_ext_mime if _ext_mime in _INLINE_SAFE
+              else "application/octet-stream")
+    disposition = "inline" if _inline_ok else "attachment"
     # 发送用带 @@BS@@?@@BS@@ 前缀的路径（超长也能读）；越界检查仍用未加前缀的 real。
     return FileResponse(_paths.long_path(real), filename=name,
                         content_disposition_type=disposition,
@@ -5262,7 +5323,8 @@ def api_index(req: IndexReq | None = Body(default=None),
 @app.get("/api/search/status")
 def api_search_status(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                       x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    _session(x_tp_token, x_tp_role)
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
     return search.status(DB_PATH)
 
 
@@ -5398,7 +5460,8 @@ def api_agent_chat_stream(req: ChatReq,
 @app.get("/api/agent/tools")
 def api_agent_tools(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                     x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    _session(x_tp_token, x_tp_role)
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
     return tool_catalog()
 
 
@@ -5684,7 +5747,8 @@ def api_agent_metrics(days: int = 7,
 @app.get("/api/agent/status")
 def api_agent_status(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                      x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    _session(x_tp_token, x_tp_role)
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
     return {"chat": llm.status(), "embedding": search.status(DB_PATH)}
 
 
@@ -5865,7 +5929,8 @@ def api_import_history(days: int = 30, action: str | None = None, limit: int = 2
 @app.get("/api/ontology")
 def api_ontology(q: str | None = None, x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                  x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    _session(x_tp_token, x_tp_role)
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
     onto = nz.ontology()
     skills = onto.get("skills", [])
     if q:
@@ -5879,7 +5944,8 @@ def api_ontology(q: str | None = None, x_tp_token: str | None = Header(default=N
 @app.get("/api/policy")
 def api_policy(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    _session(x_tp_token, x_tp_role)
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
     conn = db.connect(DB_PATH)
     try:
         return {"access": auth.policy_report(conn), "sensitive_scrub": sanitize.policy(),
@@ -5999,6 +6065,8 @@ class ModelCfgReq(BaseModel):
     model: str | None = None
     api_key: str | None = None
     enabled: bool | None = None      # 启用/关闭模型（None = 不改）
+    # 外部端点默认脱敏；只有显式打开才允许把完整 PII 发给外部模型
+    allow_external_pii: bool | None = None
 
 
 @app.get("/api/model-config")
@@ -6022,12 +6090,17 @@ def api_model_config_get(x_tp_token: str | None = Header(default=None, alias="X-
     else:
         src = "config/model.json" if key else "未配置"
     env_set = [k for k in ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY") if os.environ.get(k)]
+    redacted = llm.pii_must_be_redacted(c)
     return {"base_url": c.get("base_url") or "", "model": c.get("model") or "",
             "enabled": bool(c.get("enabled", True)),
+            "allow_external_pii": bool(c.get("allow_external_pii")),
+            "pii_redacted": bool(redacted),
             "key_masked": llm.mask_key(key), "key_set": bool(key),
             "key_source": src, "env_override": env_set,
             "note": "API Key 只显示掩码；保存写 config/secrets.json（0600，不入库不提交），"
-                    "保存即生效（每次模型调用重新读取配置）。环境变量优先于文件值。"}
+                    "保存即生效（每次模型调用重新读取配置）。环境变量优先于文件值。"
+                    + (" 当前外部端点默认脱敏：姓名/手机/邮箱/完整原文不会发给模型。"
+                       if redacted else "")}
 
 
 @app.post("/api/model-config")
@@ -6044,13 +6117,15 @@ def api_model_config_set(req: ModelCfgReq,
     if req.base_url is not None and req.base_url.strip() and not req.base_url.strip().startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="模型地址要以 http:// 或 https:// 开头")
     r = llm.save_cfg(base_url=req.base_url, model=req.model,
-                     api_key=req.api_key, enabled=req.enabled)
+                     api_key=req.api_key, enabled=req.enabled,
+                     allow_external_pii=req.allow_external_pii)
     if not r["changed"]:
         return {"ok": True, "changed": [], "note": "没有需要保存的修改（API Key 留空 = 不修改）。"}
     conn = db.connect(DB_PATH)
     try:
         # 审计只记字段名：base_url/model 属配置可记，api_key 只记"已更新"
-        _label = {"enabled": "模型启用状态"}
+        _label = {"enabled": "模型启用状态",
+                  "allow_external_pii": "外部 PII 放行开关"}
         fields = "、".join(("api_key（值不记录）" if f == "api_key"
                             else _label.get(f, f)) for f in r["changed"])
         db.add_audit(conn, "settings", "model-config", "update",
@@ -6973,7 +7048,8 @@ MAILBOX_PRESETS = [
 def api_mailbox_presets(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                         x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     """常用邮箱的服务器/端口/SSL 预设。国内邮箱必须用**授权码**，不是登录密码。"""
-    _session(x_tp_token, x_tp_role)
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
     return {"presets": MAILBOX_PRESETS,
             "note": "国内邮箱（QQ/163/企业邮）需在邮箱设置里开启 IMAP 并生成"
                     "「授权码」，密码栏填授权码，不是登录密码。"}
@@ -7506,10 +7582,13 @@ class MailPreviewReq(BaseModel):
 @app.get("/api/mail/templates")
 def api_mail_templates(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    _session(x_tp_token, x_tp_role)
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
     conn = db.connect(DB_PATH)
     try:
-        return {"items": db.list_mail_templates(conn),
+        items = [{**t, "body": mail_template_mod.sanitize_email_html(t.get("body") or "")}
+                 for t in db.list_mail_templates(conn)]
+        return {"items": items,
                 "builtin_vars": mail_template_mod.BUILTIN_VARS,
                 "runtime_vars": mail_template_mod.RUNTIME_VARS,
                 "scenes": mail_template_mod.SCENES,
@@ -7540,8 +7619,9 @@ def api_mail_template_save(req: MailTemplateReq,
         if kind is not None and kind not in ("interview_invite", "offer", "other"):
             raise HTTPException(status_code=400,
                                 detail="模板用途只能是 interview_invite / offer / other")
+        _body = mail_template_mod.sanitize_email_html(req.body or "")
         tid = db.upsert_mail_template(conn, name, (req.scene or "其他通知").strip(),
-                                      req.subject or "", req.body or "", req.id, kind)
+                                      req.subject or "", _body, req.id, kind)
         _kind_txt = {"interview_invite": "（面试邀约，发送后回写面试信息）",
                      "offer": "（录用通知，发送后记录录用函时间并推进阶段）"}.get(kind or "", "")
         db.add_audit(conn, "settings", f"mail_template#{tid}", "update", "",
@@ -7649,7 +7729,8 @@ def api_mail_preview(req: MailPreviewReq,
     刻意**不做变量替换**（那是 `/api/mail/draft` 的活）：这里预览的就是
     "我写了什么、发出去长什么样"，顺手替换一遍变量反而与真实发送不一致。
     """
-    _session(x_tp_token, x_tp_role)
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
     if req.html:
         html = mail_template_mod.sanitize_email_html(req.html)
         return {"ok": True, "html": html, "rich": True,
@@ -7703,6 +7784,7 @@ def api_mail_draft(req: MailDraftReq,
         body_text = bd["text"]
         body_html = (body_text if mail_template_mod.looks_like_html(body_text)
                      else mail_template_mod.to_html(body_text))
+        body_html = mail_template_mod.sanitize_email_html(body_html)
         return {"ok": True, "template_name": tpl_name,
                 "subject": sj["text"], "body": body_text,
                 "body_html": body_html,

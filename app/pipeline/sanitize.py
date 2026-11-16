@@ -97,6 +97,23 @@ def scrub(text: str) -> tuple[str, dict[str, int]]:
     return cleaned, found
 
 
+#: 联系方式/身份证的文本脱敏（与“受保护属性”分开：这些是定位个人的直接标识）。
+#: 外部模型端点默认必须过这一层；本地模型也建议过，避免日志/上下文里出现完整号码。
+_CONTACT_RULES = (
+    (re.compile(r"(?<!\d)1[3-9]\d[\s-]?\d{4}[\s-]?\d{4}(?!\d)"), "【手机号已屏蔽】"),
+    (re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), "【邮箱已屏蔽】"),
+    (re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"), "【身份证号已屏蔽】"),
+)
+
+
+def scrub_contacts(text: str | None) -> str:
+    """屏蔽手机号/邮箱/身份证号，保留可读上下文。"""
+    out = str(text or "")
+    for pattern, replacement in _CONTACT_RULES:
+        out = pattern.sub(replacement, out)
+    return out
+
+
 def strip_forbidden(data: dict) -> tuple[dict, list[str]]:
     """从抽取结果中移除敏感键。返回（清洗后字典，被移除的键）。"""
     removed: list[str] = []

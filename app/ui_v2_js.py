@@ -1749,6 +1749,25 @@ function fullDetail(d){
      HR 判断"要不要推进"时得来回滚动才能对上是谁怎么投的。 */
   var srcMail = d.source_mail || {};
   var srcDocs = d.resume_documents || [];
+  /* 同一份简历重复投递：documents 只有一份原件，但 submission_events 记录了
+     每次投递时间；这里展示时间线，不再重复列出简历文件。 */
+  var subs = d.submissions || [];
+  var subRows = subs.map(function(s){
+    var when = String(s.submitted_at || '').slice(0, 16).replace('T', ' ');
+    return '<span class="srcfile">' +
+      '<span class="srcmeta">' + esc(when) + '</span>' +
+      (s.duplicate
+        ? '<span class="srcmeta" style="color:var(--accent)">重复投递 · 简历相同</span>'
+        : (s.channel ? '<span class="srcmeta">' + esc(s.channel) + '</span>' : '')) +
+      (s.file_name
+        ? '<span class="fn" title="' + esc(s.file_name) + '">' + esc(s.file_name) + '</span>'
+        : '') +
+    '</span>';
+  }).join('');
+  var subRow = subs.length
+    ? '<div class="srcbar" style="margin-top:4px"><span class="srck">投递记录</span>' +
+      '<span class="srcfiles many">' + subRows + '</span></div>'
+    : '';
   var curDocId = (((d.applications || [])[0] || {}).resume_doc_id
                   || (srcDocs[0] || {}).id || null);
   /* 一份邮件可能同时带简历 + 成绩单/作品集，过去这里只显示第一份，
@@ -1926,7 +1945,7 @@ function fullDetail(d){
 
     /* 投递来源一行（见上面 srcRow 的说明）：位置在档位正上方 ——
        HR 的阅读顺序是"这个人是谁 → 材料从哪来 → 怎么判的 → 走到哪一步了"。 */
-    srcRow +
+    srcRow + subRow +
 
     /* ---- 档位（2026-10-21 挪位：从教育经历下方移到「面试与录用」正上方）----
        理由：档位是"这个人的判断结论"，面试与录用是"这个人的过程事实"，

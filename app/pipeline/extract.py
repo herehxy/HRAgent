@@ -412,6 +412,50 @@ def _valid_school_name(name: str | None) -> str:
     return sch
 
 
+#: 联合培养/合作办学的标记：同一学历可能同时出现两个学校，必须区分
+#: 「学位授予/学籍单位」与「联合培养单位」。
+_JOINT_MARK_RE = re.compile(r"联合培养|联合办学|合作培养|联合招生|联合项目")
+_JOINT_SCHOOL_RE = re.compile(
+    r"[一-龥]{2,20}(?:大学|学院|学校|研究院|研究所)")
+
+
+def _joint_school_names(text: str) -> set[str]:
+    """找出原文中与“联合培养”同行的校名（用于防止把联培单位当成 school）。"""
+    out: set[str] = set()
+    for line in (text or "").splitlines():
+        if not _JOINT_MARK_RE.search(line):
+            continue
+        for match in _JOINT_SCHOOL_RE.finditer(line):
+            sch = _valid_school_name(match.group(0))
+            if sch:
+                out.add(sch)
+    return out
+
+
+def _prefer_degree_granting_school(fields: dict, text: str) -> None:
+    """同层次有多所学校时，school 不能选“联合培养单位”。
+
+    例：「西安交通大学（联合培养硕士）」+「西安科技大学（硕士）」。
+    两所学校都真实出现在原文里，逐字证据校验拦不住；这里用“联合培养”
+    这一行做角色区分，优先取**非联培**的学位授予单位。
+    """
+    school = str(fields.get("school") or "").strip()
+    joint = _joint_school_names(text)
+    if not school or school not in joint:
+        return
+    degree = normalize_degree(fields.get("education"))
+    for item in (fields.get("education_history") or []):
+        if not isinstance(item, dict):
+            continue
+        if normalize_degree(item.get("degree")) != degree:
+            continue
+        alt = str(item.get("school") or "").strip()
+        if alt and alt not in joint:
+            fields["school"] = alt
+            fields["school_joint"] = school
+            return
+
+
 def _looks_like_major(token: str) -> bool:
     if len(token) < 2 or _MAJOR_REJECT.search(token):
         return False
@@ -1018,6 +1062,9 @@ _LLM_SYSTEM = (
     # v1.29.2（业务方要求）：学历院校经历要**完整**，不能只给最高那一所 ——
     # HR 看学校水平是从本科一路看到博士的，中间的研究生段丢了就没法判断。
     "education_history(数组，**教育经历里写了几段就给几段**，按时间先后；每项 {degree:大专/本科/硕士/博士, school:院校全名, major:专业}；只写了一段就给一项，简历没写学历经历则输出空数组),\n"
+    "联合培养/合作办学/联合招生：education_history 每项的 school 必须填**学位授予/学籍所在单位**；联合培养单位放到 joint_school（可选）。"
+    "同一学历同时出现「XX大学（联合培养硕士）」和「YY大学（硕士）」时，school 必须填 YY大学这种学位授予单位，"
+    "绝不能因为 XX大学名气大/排名高就把它当 school。school 字段也遵守同一规则。\n"
     "skills(数组，每项 {name:技能名, evidence:该技能在原文中出现的**原样片段**}),\n"
     "certificates(字符串数组),\n"
     # v1.27：**四六级由模型判定**（用户 2026-10-15 要求：不要正则匹配）。
@@ -1337,6 +1384,22 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
     此时按文件名兜底（大多数简历文件以姓名开头），并在 `name_source` 里如实标注。
     """
     safe_text, sensitive_found = sanitize.scrub(text)
+    # 联系方式本地规则提取（不依赖模型）。外部模型端点默认把联系方式从
+    # 送给模型的文本里抹掉，模型只做字段/技能抽取，联系方式由本地补回。
+    _contact = _find_contact(text)
+    _local_name = _find_name(text)
+    _redact_contacts = False
+    if use_llm and llm_conf:
+        from ..agent import llm as _llm_policy
+        _policy_cfg = {**_llm_policy.load_cfg(), **dict(llm_conf)}
+        # 与 extract_llm 的默认 base_url 保持一致：缺省时实际会请求公网默认端点
+        if not _policy_cfg.get("base_url"):
+            _policy_cfg["base_url"] = "https://api.deepseek.com/v1"
+        if _llm_policy.pii_must_be_redacted(_policy_cfg):
+            _redact_contacts = True
+            safe_text = sanitize.scrub_contacts(safe_text)
+            if _local_name:
+                safe_text = safe_text.replace(str(_local_name), "候选人")
 
     if use_llm and llm_conf and llm_conf.get("api_key"):
         try:
@@ -1379,7 +1442,7 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
             # v1.13.7：基本信息先过**证据校验**再采信——模型说姓名/学校/专业，
             # 前提是它们真的写在简历里（原文没有的一律丢掉，退回规则值）。
             _llm_fields = {
-                "name": clean.get("name"),
+                "name": (_local_name if _redact_contacts else clean.get("name")),
                 "education": normalize_degree(clean.get("education")),
                 "years": int(clean["years"]) if str(clean.get("years", "")).strip().isdigit() else None,
                 "school": clean.get("school"),
@@ -1392,7 +1455,8 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
                 "major": clean.get("major"),
                 "current_org": clean.get("current_org"),
                 "certificates": [c for c in (clean.get("certificates") or []) if isinstance(c, str)],
-                "contact": clean.get("contact") or {},
+                # 联系方式只信本地规则提取；外部模型看到的文本已被脱敏
+                "contact": _contact,
                 # 性别**只取本地规则的结果，原文取（不是 safe_text）**：
                 # 模型即便返回了 gender 也已在 strip_forbidden 里被丢掉，这里再明确覆盖一次，
                 # 保证"性别永远不会来自模型"这条约束不依赖上游是否记得过滤。
@@ -1406,6 +1470,8 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
             if clean.get("first_degree_evidence"):
                 _ev.setdefault("first_degree_school", str(clean["first_degree_evidence"]))
             fields, _unverified = verify_profile_against_text(_llm_fields, _ev, text)
+            # 联合培养单位不能冒充学位授予单位（两所学校都真实出现，证据校验拦不住）
+            _prefer_degree_granting_school(fields, text)
             # v5.1.1（业务方）：**模型可用时不再做规则抽取/兜底**。
             # 原文已经完整交给模型，院校/专业/学历等一律以模型结果为准；
             # 规则只在模型不可用时（下面的 except/无 key 分支）才启用。
