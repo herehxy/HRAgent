@@ -8383,14 +8383,11 @@ async function initChat(){
       '<div class="chatwrap">' +
         '<div class="chatlog" id="chatLog"></div>' +
         '<div class="chatinput">' +
-          '<div class="chatattach">' +
-            '<button type="button" class="chatadd" id="chatAttach" ' +
-              'title="上传简历，或直接在输入框粘贴图片/文件">+</button>' +
-            '<span class="hint">上传简历，或直接粘贴图片/文件</span>' +
-          '</div>' +
           '<input type="file" id="chatFile" style="display:none" ' +
             'accept=".pdf,.doc,.docx,.txt,.md,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff,.xlsx,.xls">' +
           '<div class="ciwrap">' +
+          '<button type="button" class="chatadd-inline" id="chatAttach" ' +
+            'title="上传简历，或直接在输入框粘贴图片/文件">+</button>' +
           '<textarea id="chatIn" rows="3" placeholder="输入指令或问题，Enter 发送"></textarea>' +
           '<button class="btn primary" id="chatSend" aria-label="发送" title="发送">' +
             '<svg class="ci-ico ci-enter" viewBox="0 0 24 24" aria-hidden="true">' +
@@ -8400,6 +8397,7 @@ async function initChat(){
               '<rect x="7.5" y="7.5" width="9" height="9" rx="2"></rect></svg>' +
           '</button>' +
         '</div></div>' +
+        '<div class="chatstatus" id="chatStatusBar"></div>' +
       '</div>' +
       '<div class="chatside">' +
         '<div class="sec chat-side-metrics" id="chatMetricsSec" style="margin-top:0">' +
@@ -8457,6 +8455,7 @@ async function initChat(){
     }
     renderTrace(null);
     loadChatMetrics();
+    loadChatStats();
     loadChatContext();
     renderOutputs(null, true);
     syncChatSidebar();
@@ -9049,6 +9048,26 @@ function renderTraceFromMessages(hmsgs){
                latency_ms: last.latency_ms});
 }
 
+/* 底部状态条：只保留模式、对话轮数、整会话缓存命中率（业务方 2026-11-16）。 */
+function renderChatStatus(st, modeHint){
+  var el = document.getElementById('chatStatusBar');
+  if(!el) return;
+  if(!st || !st.turns){ el.textContent = ''; return; }
+  var md = String(modeHint || st.mode || '');
+  var label = md === 'simple' ? '快捷回复' : (md === 'stopped' ? '已停止' : md);
+  var bits = [];
+  if(label) bits.push('模式：' + label);
+  bits.push('对话轮数：' + st.turns);
+  bits.push('缓存命中率：' + (st.cache_rate == null
+    ? '—' : Math.round(st.cache_rate * 100) + '%'));
+  el.textContent = bits.join(' · ');
+}
+async function loadChatStats(modeHint){
+  if(!CHAT_CONV_ID){ renderChatStatus(null); return; }
+  var r = await api('/api/agent/stats?conversation_id=' +
+                    encodeURIComponent(CHAT_CONV_ID));
+  if(r && !r.__err) renderChatStatus(r, modeHint);
+}
 function newChat(){
   var wasBusy = leaveRunningChat();
   CHAT_CONV_ID = newConvId();
@@ -9056,6 +9075,8 @@ function newChat(){
   CHAT = [];
   var log = document.getElementById('chatLog');
   if(log) log.innerHTML = '';
+  var _st = document.getElementById('chatStatusBar');
+  if(_st) _st.textContent = '';
   renderWelcome();
   renderTrace(null);
   renderContext(null);
@@ -9089,18 +9110,6 @@ function renderChatMessages(hmsgs){
     }
     if(m.role === 'assistant'){
       lastAsst = m;
-      var bits = [];
-      if(m.mode) bits.push('模式：' + m.mode);
-      if(m.rounds) bits.push('轮数 ' + m.rounds);
-      if(m.latency_ms) bits.push(m.latency_ms + ' ms');
-      if((m.tools || []).length){
-        bits.push('工具：' + m.tools.map(function(x){ return x.tool; }).join(' → '));
-      }
-      if(bits.length){
-        node.insertAdjacentHTML('beforeend',
-          '<details class="tracebox"><summary>本次调用详情</summary>' +
-          '<div class="trace">' + esc(bits.join(' · ')) + '</div></details>');
-      }
     }
     if((m.drafts || []).length) renderDraftCards(node, m.drafts);
     if((m.proposals || []).length) renderProposalCards(node, m.proposals);
@@ -9134,6 +9143,7 @@ async function openConversation(cid, quiet){
   CHAT_CONV_ID = cid;
   rememberConv(cid);
   var _last = renderChatMessages(h.messages || []);
+  loadChatStats();
   /* 如果切回来的正是仍在生成的那一条：把当前累积的思考/答案重新挂到页面上，
      之后的事件会继续往这个新气泡里写。 */
   if(CHAT_CTRL && RUN_CONV_ID === cid && RUN_STATE){
@@ -9359,23 +9369,6 @@ function renderAgentResult(holder, r, q){
       '<summary>工具调用（' + r.trace.length + ' 次' + (blocked ? ' · 有被拦截的' : '') + '）</summary>' +
       '<div class="trace">' + lines + '</div></details>');
   }
-  if(r.mode){
-    var route = (r.route || []).filter(function(x){ return x && x !== 'core'; });
-    var modeLabel = r.mode === 'simple' ? '快捷回复'
-      : (r.mode === 'stopped' ? '已停止' : r.mode);
-    var mt = r.metrics || {};
-    var metricBits = [];
-    if(mt.prompt_tokens) metricBits.push('输入 ' + fmtTokens(mt.prompt_tokens));
-    if(mt.tool_ratio !== undefined) metricBits.push('工具占比 ' + Math.round((mt.tool_ratio || 0) * 100) + '%');
-    if(mt.tool_calls) metricBits.push('工具错误 ' + (mt.tool_errors || 0) + '/' + mt.tool_calls);
-    if(mt.cache_rate !== null && mt.cache_rate !== undefined) metricBits.push('缓存 ' + Math.round(mt.cache_rate * 100) + '%');
-    holder.insertAdjacentHTML('beforeend',
-      '<div class="trace">模式：' + esc(modeLabel) + ' · 轮数 ' + (r.rounds || 0) +
-      ' · ' + (r.latency_ms || 0) + ' ms' +
-      (metricBits.length ? ' · ' + esc(metricBits.join(' · ')) : '') +
-      (route.length ? ' · 工具组：' + esc(route.join('/')) : '') +
-      (r.skill_name ? ' · SOP：' + esc(r.skill_name) : '') + '</div>');
-  }
   if(q) holder.setAttribute('data-q', q);
   if(r.run_id) holder.setAttribute('data-run-id', r.run_id);
   rememberTurn(q, r.answer || '');
@@ -9385,6 +9378,7 @@ function renderAgentResult(holder, r, q){
   finishLiveMessage(holder, q, r.run_id);
   loadConversations();          /* 首轮回答后，左侧出现这条会话的标题 */
   loadChatMetrics();            /* 运行指标随每次回答刷新 */
+  loadChatStats(r.mode);        /* 底部：模式 / 对话轮数 / 整会话缓存命中率 */
   if(r.context && r.context.window) renderContext(r.context);  /* 上下文用量 */
   if(r.can_continue){
     holder.insertAdjacentHTML('beforeend', continueRowHtml(r.metrics || {}));

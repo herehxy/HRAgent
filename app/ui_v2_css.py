@@ -313,13 +313,6 @@ button{cursor:pointer}
 /* 助手输入框：**三行起步**，随内容长高，**上限 10 行**，再长就内部向上滚动；
    发送键放在框内右下角（不占外面的位置）。 */
 .chatinput{flex:none;padding:12px 24px;border-top:1px solid var(--line);background:var(--surface)}
-.chatattach{display:flex;align-items:center;gap:10px;margin-bottom:8px}
-.chatadd{width:44px;height:44px;border-radius:14px;border:1px solid var(--line-2);
-  background:var(--surface);color:var(--ink);font-size:28px;line-height:1;
-  display:flex;align-items:center;justify-content:center;cursor:pointer;
-  box-shadow:var(--elev);transition:background .15s,border-color .15s}
-.chatadd:hover{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink)}
-.chatattach .hint{font-size:12px;color:var(--ink-3)}
 .ciwrap{position:relative}
 .chatinput textarea{
   width:100%;min-height:calc(3 * 1.72em);max-height:calc(10 * 1.72em);
@@ -3288,4 +3281,14 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   .rp-head h2,.sched-title,#chatView .chatwelcome h2{font-size:26px}
   .loginbox{padding:32px 24px 26px}
 }
+/* 输入框内置“+”上传：一个汉字大小、贴第一行左侧，不独占一行 */
+.chatwrap .chatinput textarea{padding-left:42px}
+.chatadd-inline{position:absolute;left:14px;top:14px;width:24px;height:24px;
+  padding:0;border:0;background:transparent;color:var(--ink-3);
+  font-size:19px;line-height:22px;text-align:center;cursor:pointer;
+  border-radius:8px;z-index:2}
+.chatadd-inline:hover{background:var(--fill-hover);color:var(--ink)}
+/* 输入框下方的会话状态：居中一行（模式 / 对话轮数 / 整会话缓存命中率） */
+.chatstatus{padding:8px 24px 10px;text-align:center;font-size:12px;
+  color:var(--ink-3);line-height:1.5;min-height:20px}
 """

@@ -2391,29 +2391,37 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
         #   ① 轻量模式（light=True）不装配技能，Python 版本会因为 skills 为空而
         #      **静默搜不到技能** —— 迁到 SQL 才能与分页优化共存；
         #   ② 少装配 95% 的行。
-        # 口径与原来完全一致：姓名/学历/院校/专业/岗位名/建议岗位名/技能，任一**包含**即命中。
-        # **对应岗位必须能被搜到**（v1.17）：HR 嘴里的"数字化工程师的人"指的是岗位名，
-        # 不是技能词——搜不到会让模型回答"没有符合的候选人"（误导）。
-        # 注意：这段必须在 `sql` 执行**之前**，否则条件加进的是一个已经用过的列表。
+        # 口径：姓名/学历/院校/专业/岗位名/建议岗位名/技能，任一**包含**即命中。
+        #
+        # 2026-11-16 修正：关键词本身**就是学校名**（以大学/学院/学校/研究院/研究所结尾）
+        # 时只按院校筛。此前搜「清华大学」会把邮件正文/备注里提到清华的人也带出来，
+        # HR 看到华北电力、中国石油大学的候选人与结果混在一起，以为搜索坏了。
         like = "%" + keyword.strip().lower() + "%"
-        where.append(
-            "(LOWER(COALESCE(c.name,'')) LIKE ? OR LOWER(COALESCE(c.edu_level,'')) LIKE ?"
-            " OR LOWER(COALESCE(c.school,'')) LIKE ? OR LOWER(COALESCE(c.major,'')) LIKE ?"
-            " OR LOWER(COALESCE(j.title,'')) LIKE ?"
-            " OR LOWER(COALESCE(sj2.title,'')) LIKE ?"
-            " OR LOWER(COALESCE(c.note,'')) LIKE ?"   # v1.25.7：备注可搜（"内推""谈薪"能找到人）
-            " OR LOWER(COALESCE(c.certificates_json,'')) LIKE ?"
-            " OR EXISTS (SELECT 1 FROM documents dk"
-            "            JOIN email_messages mk ON mk.message_id = dk.source_message_id"
-            "            WHERE dk.candidate_id = c.id"
-            "              AND (LOWER(COALESCE(mk.subject,'')) LIKE ?"
-            "                   OR LOWER(COALESCE(mk.from_addr,'')) LIKE ?"
-            "                   OR LOWER(COALESCE(mk.body_text,'')) LIKE ?"
-            "                   OR LOWER(COALESCE(mk.body_html,'')) LIKE ?))"
-            " OR EXISTS (SELECT 1 FROM candidate_skills cs3 JOIN skills s3 ON s3.id = cs3.skill_id"
-            "            WHERE cs3.candidate_id = c.id"
-            "              AND LOWER(COALESCE(s3.canonical_name,'')) LIKE ?))")
-        args.extend([like] * 13)
+        _kw = keyword.strip()
+        _school_kw = re.fullmatch(
+            r"[一-龥A-Za-z·（）()\-]{2,40}(?:大学|学院|学校|研究院|研究所)", _kw)
+        if _school_kw:
+            where.append("LOWER(COALESCE(c.school,'')) LIKE ?")
+            args.append(like)
+        else:
+            where.append(
+                "(LOWER(COALESCE(c.name,'')) LIKE ? OR LOWER(COALESCE(c.edu_level,'')) LIKE ?"
+                " OR LOWER(COALESCE(c.school,'')) LIKE ? OR LOWER(COALESCE(c.major,'')) LIKE ?"
+                " OR LOWER(COALESCE(j.title,'')) LIKE ?"
+                " OR LOWER(COALESCE(sj2.title,'')) LIKE ?"
+                " OR LOWER(COALESCE(c.note,'')) LIKE ?"   # v1.25.7：备注可搜（"内推""谈薪"能找到人）
+                " OR LOWER(COALESCE(c.certificates_json,'')) LIKE ?"
+                " OR EXISTS (SELECT 1 FROM documents dk"
+                "            JOIN email_messages mk ON mk.message_id = dk.source_message_id"
+                "            WHERE dk.candidate_id = c.id"
+                "              AND (LOWER(COALESCE(mk.subject,'')) LIKE ?"
+                "                   OR LOWER(COALESCE(mk.from_addr,'')) LIKE ?"
+                "                   OR LOWER(COALESCE(mk.body_text,'')) LIKE ?"
+                "                   OR LOWER(COALESCE(mk.body_html,'')) LIKE ?))"
+                " OR EXISTS (SELECT 1 FROM candidate_skills cs3 JOIN skills s3 ON s3.id = cs3.skill_id"
+                "            WHERE cs3.candidate_id = c.id"
+                "              AND LOWER(COALESCE(s3.canonical_name,'')) LIKE ?))")
+            args.extend([like] * 13)
     # 只取指定 id（技能检索命中的那批）：避免 `search_candidates_by_skills`
     # 把全库装配一遍再在 Python 里过滤。空列表直接返回空集。
     if ids is not None:
@@ -5620,6 +5628,40 @@ def chat_history(conn: sqlite3.Connection, limit: int = 300,
 # ============================================================
 # 会话列表（v4.0.17）：Claude 式“新建 / 切换 / 改名 / 删除”
 # ============================================================
+
+def agent_session_stats(conn: sqlite3.Connection, conversation_id: str,
+                        operator: str | None = None) -> dict:
+    """一条会话的汇总指标：**对话轮数**与**整会话缓存命中率**。
+
+    轮数 = 该会话的问答轮数（agent_runs 行数）；缓存命中率按输入 token 加权：
+    `SUM(cache_hit_tokens) / SUM(tokens_in)`。模型端点没上报缓存时返回 None，
+    前端显示「—」，不要拿 0% 冒充“没有命中”。
+    """
+    cid = str(conversation_id or "").strip()[:64]
+    if not cid:
+        return {"turns": 0, "tokens_in": 0, "cache_hit_tokens": 0,
+                "cache_reported": 0, "cache_rate": None, "mode": ""}
+    where = " WHERE session_id = ? AND COALESCE(hidden_at, '') = ''"
+    args: list = [cid]
+    if operator:
+        where += " AND operator = ?"
+        args.append(operator)
+    row = conn.execute(
+        "SELECT COUNT(*) AS turns, COALESCE(SUM(tokens_in), 0) AS tokens_in, "
+        "COALESCE(SUM(cache_hit_tokens), 0) AS cache_hit, "
+        "COALESCE(SUM(cache_reported), 0) AS cache_reported "
+        "FROM agent_runs" + where, args).fetchone()
+    last = conn.execute(
+        "SELECT mode FROM agent_runs" + where + " ORDER BY id DESC LIMIT 1",
+        args).fetchone()
+    tokens = int(row["tokens_in"] or 0)
+    hit = int(row["cache_hit"] or 0)
+    reported = int(row["cache_reported"] or 0)
+    return {"turns": int(row["turns"] or 0), "tokens_in": tokens,
+            "cache_hit_tokens": hit, "cache_reported": reported,
+            "cache_rate": (round(hit / tokens, 4) if tokens and reported else None),
+            "mode": (last["mode"] if last else "") or ""}
+
 
 def list_conversations(conn: sqlite3.Connection, operator: str,
                        limit: int = 80) -> list[dict]:

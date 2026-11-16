@@ -480,6 +480,45 @@ class StageGateTest(unittest.TestCase):
         self.assertEqual(stages.require_hint("初筛通过", "待面试"), "")
 
 
+class SchoolKeywordSearchTest(unittest.TestCase):
+    def test_school_name_keyword_only_matches_school(self):
+        with tempfile.TemporaryDirectory() as d:
+            conn = db.connect(os.path.join(d, "workbench.db"))
+            try:
+                a = db.insert_candidate(conn, {"identity_key": "sk:a", "name": "甲",
+                                               "school": "清华大学"})
+                b = db.insert_candidate(conn, {"identity_key": "sk:b", "name": "乙",
+                                               "school": "华北电力大学",
+                                               "note": "清华大学的联合培养项目"})
+                rows = db.list_candidates(conn, keyword="清华大学")
+                ids = {int(r["id"]) for r in rows}
+                self.assertIn(a, ids)
+                self.assertNotIn(b, ids)
+            finally:
+                _close_physical(conn)
+
+
+class AgentSessionStatsTest(unittest.TestCase):
+    def test_conversation_turns_and_weighted_cache_rate(self):
+        with tempfile.TemporaryDirectory() as d:
+            conn = db.connect(os.path.join(d, "workbench.db"))
+            try:
+                for hit in (40, 60):
+                    rid = db.begin_agent_run(conn, "stats-conv", "HR", "q")
+                    db.log_agent_run(conn, {
+                        "run_id": rid, "session_id": "stats-conv", "operator": "HR",
+                        "question": "q", "answer": "a", "status": "ok",
+                        "mode": "llm", "tokens_in": 100, "cache_hit_tokens": hit,
+                        "cache_reported": 1,
+                    })
+                st = db.agent_session_stats(conn, "stats-conv", "HR")
+                self.assertEqual(st["turns"], 2)
+                self.assertEqual(st["cache_rate"], 0.5)
+                self.assertEqual(st["mode"], "llm")
+            finally:
+                _close_physical(conn)
+
+
 class BulkToolParamsTest(unittest.TestCase):
     def test_bulk_and_single_write_accept_ids_or_names(self):
         from app.agent import tools

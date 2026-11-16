@@ -5605,6 +5605,24 @@ def api_agent_history(limit: int = 300, conversation_id: str | None = None,
         conn.close()
 
 
+@app.get("/api/agent/stats")
+def api_agent_stats(conversation_id: str,
+                    x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                    x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """会话汇总：对话轮数 + 整会话缓存命中率（底部状态条用）。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "chat")
+    conn = db.connect(DB_PATH)
+    try:
+        if not db.get_conversation(conn, conversation_id,
+                                   s.get("username", "HR")):
+            raise HTTPException(status_code=404, detail="未找到该会话")
+        return db.agent_session_stats(conn, conversation_id,
+                                      s.get("username", "HR"))
+    finally:
+        conn.close()
+
+
 @app.get("/api/agent/trace")
 def api_agent_trace(session_id: str,
                     x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
