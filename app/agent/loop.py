@@ -824,6 +824,59 @@ def _result_brief(result: str) -> str:
     return str(result or "")[:160]
 
 
+#: 一句话里出现这些词，基本就是“多步任务”，给足轮次才不会做到一半被截断。
+_MULTI_STEP_RE = re.compile(
+    r"(?:然后|接着|最后|并且|同时|一并|分别|逐个|批量|全部|"
+    r"先[^。；;]{0,24}(?:再|然后)|"
+    r"(?:筛选|找出|查)[^。；;]{0,30}(?:导出|邮件|通知|安排))")
+
+
+def _looks_multi_step(message: str, groups: list[str] | None) -> bool:
+    if _MULTI_STEP_RE.search(str(message or "")):
+        return True
+    domains = {g for g in (groups or [])
+               if g and not str(g).startswith(("skill:", "core"))}
+    return len(domains) >= 3
+
+
+def _round_budget(cfg: dict, message: str, groups: list[str] | None,
+                  skill: dict | None) -> tuple[int, int]:
+    """按任务复杂度分配工具轮次，返回 (本轮轮次, 硬上限)。
+
+    口径（2026-11-16 业务方确认）：
+      · 单步查询（查人/统计/看进度）3 轮；
+      · 多步任务（筛选→导出→发邮件）8 轮；
+      · 命中 SOP 的多步任务 8 轮，「一句话批量」10 轮；
+      · `max_tool_rounds` 是简单任务预算，`max_tool_rounds_cap` 是硬上限（默认 12），
+        防止模型无限跑、费用失控。
+    """
+    base = max(2, int(cfg.get("max_tool_rounds", 5) or 5))
+    cap = max(base, int(cfg.get("max_tool_rounds_cap", 12) or 12))
+    if skill:
+        want = 10 if skill.get("id") == "one_sentence_batch" else 8
+    elif _looks_multi_step(message, groups):
+        want = 8
+    else:
+        want = 3
+    rounds = want if want <= base else min(cap, max(base, want))
+    return max(2, rounds), cap
+
+
+def _calls_signature(calls: list[dict]) -> str:
+    """一组工具调用的规范化指纹：用于识别“两轮都在做同一件事”。"""
+    items = []
+    for tc in (calls or []):
+        fn = str((tc.get("function") or {}).get("name") or "")
+        raw = (tc.get("function") or {}).get("arguments") or "{}"
+        try:
+            args = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            args = str(raw)
+        items.append([fn, args])
+    items.sort(key=lambda x: x[0])
+    return json.dumps(items, sort_keys=True, ensure_ascii=False, default=str)
+
+
 def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None,
               emit=None, should_stop=None) -> dict:
     started = time.time()
@@ -965,11 +1018,15 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
     trace: list[dict] = []
     usage_total: dict = {}
     model_used = cfg.get("model")
-    max_rounds = int(cfg.get("max_tool_rounds", 5))
-    # 一句话批量任务通常包含 3~5 个动作，4 轮很容易做到一半就收尾
-    if _skill and _skill["id"] == "one_sentence_batch":
-        max_rounds = max(max_rounds, 6)
+    max_rounds, _rounds_cap = _round_budget(cfg, user_message, _route_groups, _skill)
     ctx.metrics["max_rounds"] = max_rounds
+    ctx.metrics["max_rounds_cap"] = _rounds_cap
+    # 时间预算与轮次预算同时生效：模型在工具之间打转时，轮次可能还没到，
+    # 但用户已经等太久。到点就收尾，由用户决定是否点「继续」。
+    _wall_budget = int(cfg.get("max_run_seconds") or 120)
+    ctx.metrics["max_run_seconds"] = _wall_budget
+    ctx.metrics["stop_reason"] = "running"
+    _last_call_sig = None
     rounds = 0
     _SPEC_BY_NAME = {s["function"]["name"]: s for s in _allowed_specs}
     # 模型每一轮的 `reasoning_content` 按顺序拼起来。只用于界面展示与回放，
@@ -1226,9 +1283,13 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
     try:
         for _ in range(max_rounds):
             if _cancelled():
+                ctx.metrics["stop_reason"] = "stopped"
                 return _finalize(ctx, user_message, "已停止。", trace, "stopped",
                                  rounds, usage_total, started, model_used,
                                  thinking=_thinking_text())
+            if rounds and time.time() - started > _wall_budget:
+                ctx.metrics["stop_reason"] = "time"
+                break
             rounds += 1
             # 每轮模型调用前都治理一次：上一轮的工具结果可能很长，不能等到
             # 下一次提问才裁；这里只改“给模型看的副本”，trace 不变。
@@ -1290,17 +1351,36 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                 _asst["reasoning_content"] = msg["_reasoning"]
             messages.append(_asst)
             if _cancelled():
+                ctx.metrics["stop_reason"] = "stopped"
                 return _finalize(ctx, user_message, "已停止。", trace, "stopped",
                                  rounds, usage_total, started, model_used,
                                  thinking=_thinking_text())
+            # 连续两轮发出完全相同的工具+参数：模型在原地打转。
+            # **执行前**判断：既省时间，也避免同一批写操作被执行第二次。
+            _sig = _calls_signature(calls)
+            if _sig == _last_call_sig:
+                ctx.metrics["stop_reason"] = "no_progress"
+                break
+            _last_call_sig = _sig
             _c0 = int(ctx.metrics.get("tool_calls") or 0)
             _e0 = int(ctx.metrics.get("tool_errors") or 0)
             _run_calls(calls)
             _detail["tool_calls"] = int(ctx.metrics.get("tool_calls") or 0) - _c0
             _detail["tool_errors"] = int(ctx.metrics.get("tool_errors") or 0) - _e0
-        # 轮次用尽，强制收敛；不再做邮件/口头提案等出口兜底，
-        # 最终答复以模型输出为准。
-        messages.append({"role": "user", "content": "请基于已获取的信息直接给出最终答复。"})
+        # 预算用尽/检测到原地打转，强制收敛；不再做邮件/口头提案等出口兜底，
+        # 最终答复以模型输出为准。提示里说明“还有什么没做”，方便用户点「继续」。
+        _stop = str(ctx.metrics.get("stop_reason") or "")
+        if _stop == "no_progress":
+            _force_msg = ("检测到连续两轮调用了完全相同的工具与参数，没有产生新信息。"
+                          "请基于已获取的信息直接给出结论，并说明还缺什么。")
+        elif _stop == "time":
+            _force_msg = ("本轮时间预算已用完。请先总结已获取的信息，"
+                          "并明确还有哪些步骤没完成，方便用户决定是否继续。")
+        else:
+            ctx.metrics["stop_reason"] = "rounds"
+            _force_msg = ("轮次预算已用完。请基于已获取的信息给出当前能确定的结果，"
+                          "并简要说明还有哪些步骤未完成，方便用户继续。")
+        messages.append({"role": "user", "content": _force_msg})
         rounds += 1
         _gov = _govern_for_turn()
         _detail = {
@@ -1335,6 +1415,7 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         # 模型不可用 → 规则路由兜底（不是罢工）
         st = llm.status()
         reason = st.get("error") or f"{type(exc).__name__}: {exc}"
+        ctx.metrics["stop_reason"] = "rule"
         answer = _rule_answer(user_message, ctx, reason=reason, trace=trace)
         if emit and _stream_answer:
             _replace_answer(answer)
@@ -1947,7 +2028,13 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
         trimmed_tokens=_trimmed_max,
         thresholds=_metrics.get("alert_thresholds") or {})
     _alert_level = cg.alert_level(_alerts)
+    _stop_reason = str(_metrics.get("stop_reason") or "done")
     _metrics_payload = {
+        "stop_reason": _stop_reason,
+        "max_rounds": int(_metrics.get("max_rounds") or 0),
+        "max_rounds_cap": int(_metrics.get("max_rounds_cap") or 0),
+        "max_run_seconds": int(_metrics.get("max_run_seconds") or 0),
+        "rounds": rounds,
         "budget": _budget,
         "window": int(_budget_info.get("window") or (ctx.context or {}).get("window") or 0),
         "prompt_tokens": _tokens_in,
@@ -2156,6 +2243,8 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
         "session_id": ctx.session_id,
         "run_id": _run_id,
         "pending_proposals": briefs,
+        "stop_reason": _stop_reason,
+        "can_continue": _stop_reason in ("rounds", "time", "no_progress"),
         "disclaimer": "系统只给建议，最终档位与招聘决定由 HR 确认。"
                       "写操作一律以『待确认提案』形式提交，不会自动生效。",
     }

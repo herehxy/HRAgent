@@ -8968,11 +8968,11 @@ function renderChatMessages(hmsgs){
   log.innerHTML = '';
   CHAT_OUTPUTS = [];
   var lastAsst = null;
-  (hmsgs || []).forEach(function(m){
+  (hmsgs || []).forEach(function(m, _idx){
     var node = pushMsg(m.role, m.content || '');
     if(m.role === 'user' && (m.status === 'running' || m.status === 'interrupted')){
       node.insertAdjacentHTML('beforeend',
-        '<div class="hint" style="margin-top:4px">' +
+        '<div class="hint run-hint" style="margin-top:4px">' +
         (m.status === 'running' ? '回答仍在生成…'
                                 : '上次回答未完成（已中断）') + '</div>');
     }
@@ -8997,6 +8997,10 @@ function renderChatMessages(hmsgs){
     }
     if((m.drafts || []).length) renderDraftCards(node, m.drafts);
     if((m.proposals || []).length) renderProposalCards(node, m.proposals);
+    if(m.role === 'assistant' && _idx === ((hmsgs || []).length - 1) &&
+       m.metrics && ['rounds','time','no_progress'].indexOf(m.metrics.stop_reason) >= 0){
+      node.insertAdjacentHTML('beforeend', continueRowHtml(m.metrics));
+    }
     if(m.run_id) node.setAttribute('data-run-id', m.run_id);
     addMsgActions(node, m.role);
   });
@@ -9026,7 +9030,14 @@ async function openConversation(cid, quiet){
   /* 如果切回来的正是仍在生成的那一条：把当前累积的思考/答案重新挂到页面上，
      之后的事件会继续往这个新气泡里写。 */
   if(CHAT_CTRL && RUN_CONV_ID === cid && RUN_STATE){
-    pushMsg('user', RUN_Q);
+    /* v6.0.5 起提问会先落库：进行中的这一问已经在历史里了，
+       不能再 push 一次，否则切回来会出现两个相同的提问。 */
+    var _hist = h.messages || [];
+    var _last = _hist[_hist.length - 1] || {};
+    var _already = (_last.role === 'user' &&
+      (_last.status === 'running' ||
+       String(_last.content || '') === String(RUN_Q || '')));
+    if(!_already) pushMsg('user', RUN_Q);
     var ph = pushMsg('assistant', '');
     ph.innerHTML = '<div class="stream-status hint"></div>' +
       (RUN_STATE.liveThink
@@ -9103,6 +9114,17 @@ function syncChatSidebar(){
     var el = document.getElementById(id);
     if(el) el.style.display = has ? '' : 'none';
   });
+}
+/* 记入模型上下文：如果历史里已经有本条提问（v6.0.5 起提问先落库，
+   切换会话后历史会带着进行中的 user 消息），不要重复 push。 */
+function rememberTurn(q, answer){
+  var last = CHAT[CHAT.length - 1] || null;
+  /* 历史里最后一条已经是用户消息 = 这一问已经在上下文里（续跑时服务端记的
+     是那条长指令，文字可能和界面上的「继续」不同），不要再追加一次。 */
+  if(!(last && last.role === 'user')){
+    CHAT.push({role:'user', content:q});
+  }
+  CHAT.push({role:'assistant', content: answer || ''});
 }
 function pushMsg(role, content){
   var log = document.getElementById('chatLog');
@@ -9237,7 +9259,7 @@ function renderAgentResult(holder, r, q){
   }
   if(q) holder.setAttribute('data-q', q);
   if(r.run_id) holder.setAttribute('data-run-id', r.run_id);
-  CHAT.push({role:'user', content:q}, {role:'assistant', content: r.answer || ''});
+  rememberTurn(q, r.answer || '');
   if((r.drafts || []).length) renderDraftCards(holder, r.drafts);
   if((r.pending_proposals || []).length) renderProposalCards(holder, r.pending_proposals);
   if(r.session_id) CHAT_CONV_ID = r.session_id;
@@ -9245,8 +9267,29 @@ function renderAgentResult(holder, r, q){
   loadConversations();          /* 首轮回答后，左侧出现这条会话的标题 */
   loadChatMetrics();            /* 运行指标随每次回答刷新 */
   if(r.context && r.context.window) renderContext(r.context);  /* 上下文用量 */
+  if(r.can_continue){
+    holder.insertAdjacentHTML('beforeend', continueRowHtml(r.metrics || {}));
+  }
   renderOutputs(r);             /* 本次下载/草稿/提案 */
   killAutofill();
+}
+function continueRowHtml(mt){
+  mt = mt || {};
+  var why = mt.stop_reason === 'time' ? '本轮时间预算已用完'
+    : (mt.stop_reason === 'no_progress' ? '检测到重复调用，已提前停止'
+       : '本轮轮次预算已用完');
+  var used = String(mt.rounds || 0) + '/' + String(mt.max_rounds || '—');
+  return '<div class="continue-row" style="display:flex;align-items:center;' +
+    'gap:8px;margin-top:8px">' +
+    '<span class="hint">' + esc(why) + '（' + esc(used) + '），可以继续。</span>' +
+    '<button type="button" class="btn" onclick="continueAgent(this)">继续</button></div>';
+}
+/* 预算到顶后的「继续」：把上一轮的结论当上下文，再跑一段，不重复已完成的查询/写操作。 */
+function continueAgent(btn){
+  if(btn){ btn.disabled = true; var row = btn.parentNode; if(row) row.remove(); }
+  if(CHAT_CTRL){ toast('回答还在生成，请稍候', 'info'); return; }
+  askAgent({display: '继续',
+    send: '继续：基于上一轮已获取的信息，继续完成剩余步骤；已完成的查询和写操作不要重复。'});
 }
 /* 给一条消息补上「编辑重发 / 重新生成」入口。 */
 function addMsgActions(node, role){
@@ -9268,6 +9311,8 @@ function finishLiveMessage(holder, q, runId){
   if(prev && prev.classList.contains('user')){
     if(runId) prev.setAttribute('data-run-id', runId);
     addMsgActions(prev, 'user');
+    var _rh = prev.querySelector('.run-hint');
+    if(_rh) _rh.remove();
   }
   addMsgActions(holder, 'assistant');
 }
@@ -9383,10 +9428,11 @@ async function askAgentNonStream(q, holder, gen){
   }
   renderAgentResult(holder, r, q);
 }
-async function askAgent(){
+async function askAgent(override){
   var inp = document.getElementById('chatIn');
-  var q = (inp.value || '').trim();
-  if(!q) return;
+  var sendQ = override ? String(override.send || '') : (inp.value || '').trim();
+  var q = override ? String(override.display || sendQ) : sendQ;
+  if(!sendQ) return;
   if(CHAT_CTRL){
     toast(RUN_CONV_ID && RUN_CONV_ID !== CHAT_CONV_ID
       ? '另一条会话的回答仍在生成，切回去可停止或等待完成'
@@ -9398,8 +9444,7 @@ async function askAgent(){
   var convId = CHAT_CONV_ID;
   rememberConv(convId);
   ensureConvInList(convId, q);
-  inp.value = '';
-  chatGrow(inp);
+  if(!override){ inp.value = ''; chatGrow(inp); }
   pushMsg('user', q);
   var holder = pushMsg('assistant', '');
   holder.innerHTML = '<div class="stream-status hint">正在思考…</div>' +
@@ -9518,7 +9563,7 @@ async function askAgent(){
   try{
     var resp = await fetch('/api/agent/chat/stream', {method:'POST',
       headers: hdr(),
-      body: JSON.stringify({message: q, history: CHAT, session_id: convId}),
+      body: JSON.stringify({message: sendQ, history: CHAT, session_id: convId}),
       signal: CHAT_CTRL.signal});
     if(resp.status === 401 && AUTH_ENABLED){
       setToken(''); ME = null;
@@ -9556,7 +9601,7 @@ async function askAgent(){
           '<div class="trace">' +
           (timedOut ? '模型长时间无响应，已保留已生成内容。' : '已停止，已保留已生成内容。') +
           '</div>';
-        CHAT.push({role:'user', content:q}, {role:'assistant', content:run.liveAns});
+        rememberTurn(q, run.liveAns);
       } else {
         live.innerHTML = '<span class="hint">' +
           (timedOut ? '模型长时间无响应，已停止。' : '已停止。') + '</span>';
@@ -9570,7 +9615,7 @@ async function askAgent(){
       live.innerHTML = thinkingHtml(run.liveThink, false,
         Math.round((Date.now() - t0) / 1000)) + mdLite(run.liveAns) +
         '<div class="trace">流式连接中断：' + esc(String((e && e.message) || e)) + '</div>';
-      CHAT.push({role:'user', content:q}, {role:'assistant', content:run.liveAns});
+      rememberTurn(q, run.liveAns);
       finishLiveMessage(live, q, null);
       return;
     }
@@ -9583,7 +9628,7 @@ async function askAgent(){
       renderTrace(null);
       return;
     }
-    await askAgentNonStream(q, live, gen);
+    await askAgentNonStream(sendQ, live, gen);
   }
 }
 function renderDraftCards(holder, drafts){

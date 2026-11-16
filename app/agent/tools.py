@@ -1046,8 +1046,7 @@ def _detail_brief(cid: int, d: dict) -> dict:
                     "level": s.get("level"), "verified": s.get("verified"),
                     "evidence": s.get("evidence")} for s in d.get("skills", [])],
         "tags": [t["name"] for t in d.get("tags", [])],
-        "documents": [{"file": (f"附件#{x.get('id')}" if redact
-                                else x.get("file_name")),
+        "documents": [{"file": x.get("file_name"),
                        "engine": x.get("parse_engine"),
                        "parse_ok": x.get("parse_ok"),
                        "source_message_id": x.get("source_message_id"),

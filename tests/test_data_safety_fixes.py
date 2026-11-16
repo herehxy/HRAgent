@@ -403,6 +403,19 @@ class NameExtractionSafetyTest(unittest.TestCase):
             self.assertEqual(extract_mod.name_from_filename(filename), expected,
                              filename)
 
+    def test_detail_brief_with_documents_does_not_raise(self):
+        """回归：回滚脱敏时漏删了 redact 变量，导致所有 get_candidate 工具报错。"""
+        from app.agent import tools
+
+        out = tools._detail_brief(7, {
+            "name": "张三",
+            "documents": [{"id": 3, "file_name": "张三-简历.pdf",
+                            "parse_ok": 1}],
+            "applications": [], "skills": [], "tags": [],
+        })
+        self.assertEqual(out["name"], "张三")
+        self.assertEqual(out["documents"][0]["file"], "张三-简历.pdf")
+
     def test_placeholder_is_treated_as_missing(self):
         self.assertFalse(extract_mod._valid_person_name("候选人"))
         self.assertFalse(extract_mod._valid_person_name("发表"))
@@ -453,6 +466,47 @@ class AgentConversationPersistenceTest(unittest.TestCase):
                 self.assertEqual(rows[0]["id"], rid)
                 self.assertEqual(rows[0]["answer"], "回答")
                 self.assertEqual(rows[0]["status"], "ok")
+            finally:
+                _close_physical(conn)
+
+
+class AgentRoundBudgetTest(unittest.TestCase):
+    """2026-11-16：轮次按任务复杂度自适应，到顶返回可继续标记。"""
+
+    def test_round_budget_adapts_to_task(self):
+        from app.agent import loop
+
+        self.assertEqual(loop._round_budget({}, "帮我查一下张三", [], None)[0], 3)
+        self.assertEqual(loop._round_budget(
+            {}, "筛选出符合条件的人，然后导出名单", [], None)[0], 8)
+        self.assertEqual(loop._round_budget(
+            {}, "批量处理", [], {"id": "one_sentence_batch"})[0], 10)
+        self.assertEqual(loop._round_budget(
+            {"max_tool_rounds": 4, "max_tool_rounds_cap": 6},
+            "筛选，然后导出", [], None)[0], 6)
+
+    def test_finalize_reports_can_continue(self):
+        import time as _time
+        from app.agent import loop
+        from app.agent.tools import ToolCtx
+
+        with tempfile.TemporaryDirectory() as d:
+            dbp = os.path.join(d, "workbench.db")
+            conn = db.connect(dbp)
+            try:
+                rid = db.begin_agent_run(conn, "conv-budget", "HR", "q")
+                ctx = ToolCtx(db_path=dbp, session_id="conv-budget",
+                              operator="HR", role="hr",
+                              metrics={"stop_reason": "rounds",
+                                       "max_rounds": 8,
+                                       "max_rounds_cap": 12,
+                                       "max_run_seconds": 120})
+                ctx.run_id = rid
+                out = loop._finalize(ctx, "q", "已查到的结果", [], "llm",
+                                     8, {}, _time.time())
+                self.assertTrue(out["can_continue"])
+                self.assertEqual(out["stop_reason"], "rounds")
+                self.assertEqual(out["metrics"]["max_rounds"], 8)
             finally:
                 _close_physical(conn)
 
