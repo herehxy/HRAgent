@@ -49,13 +49,9 @@ _FALLBACK: dict = {
                  "已发放offer": ["已签约", "拒签", "毁约"]},
     "actions": {
         "新投递": [{"label": "加入初筛通过", "to": "初筛通过"}],
-        # 面试单位**在进入待面试之前**必填（业务方裁定）。
-        # 它是面试邀请邮件里的单位，也是「待面试按部门分流」那个筛选的数据来源。
-        "初筛通过": [{"label": "加入待面试", "to": "待面试",
-                    "require": ["interview_unit"],
-                    "require_hint": "请先在完整档案的「投递记录 → 面试与录用信息」里"
-                                    "登记面试单位——它由人事手动填写，不随岗位自动变；"
-                                    "填完之后发面试邀请邮件与导出 Excel 都会用这个值。"}],
+        # 2026-11-16 业务方：进入待面试不再强制先填面试单位；
+        # 面试单位仍可在档案里补，发面试邀请/导出时再用。
+        "初筛通过": [{"label": "加入待面试", "to": "待面试"}],
         "待面试": [{"label": "面试完成", "to": "已面试"}],
         # ⚠️ v1.29.2（业务方 2026-10-16 定稿）：「拟录用」**只是人事处打的标签**，
         #   **不自动进入「已发放offer」** —— 拟录用之后还要走"发录用函"这一步，
@@ -290,40 +286,16 @@ REQUIRED_FIELD_LABEL = {
 
 
 def required_fields(from_stage: str, to_stage: str) -> list[str]:
-    """从 `from_stage` 推到 `to_stage` 这一步**必填**哪些字段。
+    """阶段推进的硬性必填字段。
 
-    v1.29：面试单位挂在「初筛通过 → 待面试」这一步。业务方裁定「在变成待面试之前
-    就该让 HR 填」——之前挂在「新投递 → 初筛通过」，等于让人在还没初筛时就填面试单位，
-    那时候多半还不知道由哪个单位面。
-
-    ⚠️ v4.0.6：**按"目标阶段"判定，不再按"动作"判定**。
-    原来只认 `actions` 里配了的那一对（初筛通过 → 待面试），于是界面上的阶段下拉
-    直接跳「新投递 → 已面试」就绕过去了 —— 业务方实测"没填面试单位也能进已面试"。
-    面试单位是面试这件事的前提，凡是从**待面试之前**跨到**待面试及之后**的推进，
-    都必须先有它，无论中间跳过几档、走哪条路径（卡片下拉 / 管道 / 助手提案）。
+    2026-11-16 业务方明确：**取消**「进入待面试必须先填面试单位」的限制。
+    面试单位改为可选信息，未填也能推进；发面试邀请/导出时如果没有会另行提示。
     """
-    to_stage = str(to_stage or "").strip()
-    for a in actions_of(from_stage):
-        if a.get("to") == to_stage:
-            return list(a.get("require") or [])
-    order = all_stages()
-    if "待面试" in order and to_stage in order:
-        i_to, i_iv = order.index(to_stage), order.index("待面试")
-        i_from = order.index(str(from_stage or "").strip()) if from_stage in order else -1
-        if i_to >= i_iv and i_from < i_iv:
-            return ["interview_unit"]
     return []
 
 
 def require_hint(from_stage: str, to_stage: str) -> str:
-    """必填没过时给 HR 看的那句话（说清"去哪填、为什么"）。"""
-    to_stage = str(to_stage or "").strip()
-    for a in actions_of(from_stage):
-        if a.get("to") == to_stage:
-            return str(a.get("require_hint") or "")
-    if required_fields(from_stage, to_stage):
-        return ("请先在完整档案的「面试与录用 → 面试单位」里登记由哪个单位面试；"
-                "登记之后发面试邀请邮件与导出 Excel 都会用这个值。")
+    """保留接口；当前没有阶段硬性必填项，返回空字符串。"""
     return ""
 
 

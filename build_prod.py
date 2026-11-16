@@ -151,7 +151,7 @@ BLANK_CONFIGS = {
         "provider": "openai_compatible",
         "base_url": "",
         "model": "",
-        "max_tool_rounds": 4,
+        "max_tool_rounds": 5,
         "max_tool_rounds_cap": 12,
         "max_run_seconds": 120,
         "temperature": 0,

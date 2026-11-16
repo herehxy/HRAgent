@@ -2801,9 +2801,9 @@ def main(verbose: bool = True) -> int:
                  and _sg.DEFAULT_STAGE in _sg.all_stages(),
                  "初始阶段从配置读、且必须在阶段表里（防又写死一个字面量）",
                  f"DEFAULT_STAGE={_sg.DEFAULT_STAGE!r} 阶段表={_sg.all_stages()}")
-            c.ok(_sg.required_fields("初筛通过", "待面试") == ["interview_unit"]
+            c.ok(_sg.required_fields("初筛通过", "待面试") == []
                  and _sg.required_fields("全部简历", "初筛通过") == [],
-                 "面试单位必填挂在「初筛通过→待面试」这一步（不是最初那步）")
+                 "进入待面试不再强制先填面试单位（2026-11-16 业务方）")
             _rc = db.connect(os.path.join(work, "v129_require.db"))
             _mc = _rc.cursor()
             _mc.execute("INSERT INTO candidates (identity_key,name,created_at,updated_at) "
