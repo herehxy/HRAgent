@@ -15,8 +15,7 @@ from starlette.responses import Response
 import app.pipeline.extract as extract_mod
 import update_agent
 from app import db, ingest, server
-from app.agent import llm, tools
-from app.pipeline import sanitize
+from app.agent import llm
 from app import mail_template
 
 
@@ -112,62 +111,29 @@ class PurgeBoundaryTest(unittest.TestCase):
             self.assertEqual(out["files_deleted"], 1)
 
 
-class ModelPrivacyTest(unittest.TestCase):
-    def test_extract_contacts_not_sent_to_external_model(self):
+class ModelInputTest(unittest.TestCase):
+    """简历不做脱敏：模型拿到的就是完整原文（2026-11-16 业务口径）。"""
+
+    def test_resume_is_sent_to_model_in_full(self):
         captured = {}
 
         def _fake_extract(text, *args, **kwargs):
             captured["text"] = text
-            return {}
+            return {"name": "张三", "contact": {"phone": "13900139000"}}
 
-        with mock.patch.object(extract_mod, "extract_llm", side_effect=_fake_extract):
+        with mock.patch.object(extract_mod, "extract_llm",
+                               side_effect=_fake_extract):
             out = extract_mod.extract(
-                "姓名：张三\n手机：13800138000\n邮箱：zs@example.com",
-                {},
+                "姓名：张三\n手机：13800138000\n邮箱：zs@example.com", {},
                 use_llm=True,
-                llm_conf={"api_key": "x", "base_url": "https://api.example.com/v1",
-                          "model": "m"},
-            )
-        self.assertNotIn("13800138000", captured["text"])
-        self.assertNotIn("zs@example.com", captured["text"])
-        self.assertNotIn("张三", captured["text"])
+                llm_conf={"api_key": "x",
+                          "base_url": "https://api.example.com/v1",
+                          "model": "m"})
+        self.assertIn("张三", captured["text"])
+        self.assertIn("13800138000", captured["text"])
+        self.assertIn("zs@example.com", captured["text"])
+        # 联系方式本地规则优先：模型漏抽/写错也能落库
         self.assertEqual(out["contact"].get("phone"), "13800138000")
-        self.assertEqual(out["contact"].get("email"), "zs@example.com")
-
-    def test_endpoint_classification(self):
-        self.assertTrue(llm.endpoint_is_internal("http://127.0.0.1:11434/v1"))
-        self.assertTrue(llm.endpoint_is_internal("http://10.1.2.3:8000/v1"))
-        self.assertFalse(llm.endpoint_is_internal("http://ollama:11434/v1"))
-        self.assertFalse(llm.endpoint_is_internal("https://api.example.com/v1"))
-
-    def test_external_pii_requires_explicit_opt_in(self):
-        cfg = {"enabled": True, "base_url": "https://api.example.com/v1"}
-        self.assertTrue(llm.pii_must_be_redacted(cfg))
-        self.assertFalse(llm.pii_must_be_redacted({**cfg, "allow_external_pii": True}))
-        self.assertFalse(llm.pii_must_be_redacted(
-            {"enabled": True, "base_url": "http://127.0.0.1:11434/v1"}))
-
-    def test_scrub_contacts(self):
-        text = "电话 138-0013-8000，邮箱 a.b@example.com，身份证 110101199001011234"
-        out = sanitize.scrub_contacts(text)
-        self.assertNotIn("138-0013-8000", out)
-        self.assertNotIn("a.b@example.com", out)
-        self.assertNotIn("110101199001011234", out)
-
-    def test_detail_brief_redacts_for_external_model(self):
-        with mock.patch.object(tools.llm, "pii_must_be_redacted", return_value=True):
-            out = tools._detail_brief(7, {
-                "name": "张三", "gender": "男",
-                "phone_enc": "enc:xxx", "email_enc": "enc:yyy",
-                "raw_text": "手机 13800138000，邮箱 zs@example.com",
-            })
-        self.assertEqual(out["name"], "候选人#7")
-        self.assertTrue(out["contact_redacted"])
-        self.assertEqual(out["phone"], "")
-        self.assertEqual(out["email"], "")
-        self.assertIsNone(out["gender"])
-        self.assertNotIn("13800138000", out["raw_text_excerpt"])
-        self.assertNotIn("zs@example.com", out["raw_text_excerpt"])
 
 
 class SubmissionTimelineTest(unittest.TestCase):
@@ -194,27 +160,6 @@ class SubmissionTimelineTest(unittest.TestCase):
                      "reused_document": True},
                 ]})
                 self.assertEqual(targets, [])
-            finally:
-                _close_physical(conn)
-
-    def test_agent_run_log_redacts_contacts(self):
-        with tempfile.TemporaryDirectory() as d:
-            conn = db.connect(os.path.join(d, "workbench.db"))
-            try:
-                db.log_agent_run(conn, {
-                    "session_id": "redact-test", "operator": "HR",
-                    "question": "电话 13800138000", "answer": "邮箱 a@b.com",
-                    "thinking": "身份证 110101199001011234",
-                    "tool_calls": [{"tool": "get_candidate",
-                                    "args": {"note": "13800138000"}}],
-                    "status": "ok", "mode": "llm",
-                })
-                row = db.list_agent_runs(conn, 1)[0]
-                blob = " ".join(str(row.get(k) or "") for k in
-                                ("question", "answer", "thinking", "tool_calls"))
-                self.assertNotIn("13800138000", blob)
-                self.assertNotIn("a@b.com", blob)
-                self.assertNotIn("110101199001011234", blob)
             finally:
                 _close_physical(conn)
 
@@ -400,6 +345,71 @@ class SecurityBoundaryTest(unittest.TestCase):
         self.assertNotIn("traceback", out)
         self.assertEqual(out["proxy_env"], {"HTTPS_PROXY": "（已设置）"})
         self.assertNotIn("note", out["route"])
+
+
+class NameExtractionSafetyTest(unittest.TestCase):
+    """2026-11-16 回归：模型 402 回退时，脱敏占位符「候选人」绝不能写进档案。"""
+
+    def test_model_failure_uses_real_name_and_contact(self):
+        import urllib.error
+
+        text = ("个人简历—李雷 求职意向：研发\n"
+                "电话：13800138000\n发表 SCI 论文两篇")
+        fname = "科研工艺技术_硕士_某大学_冶金工程_李雷_男.pdf"
+        conf = {"api_key": "x", "base_url": "https://api.example.com/v1",
+                "model": "m"}
+
+        def _boom(*args, **kwargs):
+            raise urllib.error.HTTPError("https://api.example.com", 402,
+                                         "Payment Required", None, None)
+
+        with mock.patch.object(llm, "load_cfg", return_value={}), \
+                mock.patch.object(extract_mod, "extract_llm", side_effect=_boom):
+            out = extract_mod.extract(text, {}, use_llm=True, llm_conf=conf,
+                                      filename=fname)
+        self.assertEqual(out["name"], "李雷")
+        self.assertNotEqual(out["name"], "候选人")
+        self.assertEqual(out["contact"].get("phone"), "13800138000")
+
+    def test_model_sees_real_name_and_placeholder_is_repaired(self):
+        captured = {}
+        text = "姓名：李雷\n电话：13800138000"
+
+        def _fake(t, *args, **kwargs):
+            captured["text"] = t
+            return {"name": "候选人", "education": "硕士"}
+
+        with mock.patch.object(llm, "load_cfg", return_value={}), \
+                mock.patch.object(extract_mod, "extract_llm", side_effect=_fake):
+            out = extract_mod.extract(
+                text, {}, use_llm=True,
+                llm_conf={"api_key": "x",
+                          "base_url": "https://api.example.com/v1",
+                          "model": "m"},
+                filename="李雷-简历.pdf")
+        self.assertIn("李雷", captured["text"])
+        self.assertIn("13800138000", captured["text"])
+        # 即使模型回了占位符，也不能把「候选人」写进档案
+        self.assertEqual(out["name"], "李雷")
+
+    def test_filename_org_naming_convention(self):
+        cases = {
+            "科研工艺技术_硕士_昆明理工大学_冶金工程_杨华成_男.pdf": "杨华成",
+            "科学研究_-_硕士_-_陕西理工大学_-_化学_-_张彤_-_女.pdf": "张彤",
+            "西安电子科技大学_林清皓简历.pdf": "林清皓",
+            "附件2_电子材料研究所科研岗_博士研究生_华南理工大学_化学_赵越_女.pdf": "赵越",
+        }
+        for filename, expected in cases.items():
+            self.assertEqual(extract_mod.name_from_filename(filename), expected,
+                             filename)
+
+    def test_placeholder_is_treated_as_missing(self):
+        self.assertFalse(extract_mod._valid_person_name("候选人"))
+        self.assertFalse(extract_mod._valid_person_name("发表"))
+        out = {"name": "候选人"}
+        extract_mod._fix_name_from_filename(
+            out, "科研工艺技术_硕士_宝鸡文理学院_凝聚态物理_张子涵_男.pdf")
+        self.assertEqual(out["name"], "张子涵")
 
 
 if __name__ == "__main__":

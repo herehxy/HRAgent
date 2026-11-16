@@ -6065,8 +6065,6 @@ class ModelCfgReq(BaseModel):
     model: str | None = None
     api_key: str | None = None
     enabled: bool | None = None      # 启用/关闭模型（None = 不改）
-    # 外部端点默认脱敏；只有显式打开才允许把完整 PII 发给外部模型
-    allow_external_pii: bool | None = None
 
 
 @app.get("/api/model-config")
@@ -6090,17 +6088,12 @@ def api_model_config_get(x_tp_token: str | None = Header(default=None, alias="X-
     else:
         src = "config/model.json" if key else "未配置"
     env_set = [k for k in ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY") if os.environ.get(k)]
-    redacted = llm.pii_must_be_redacted(c)
     return {"base_url": c.get("base_url") or "", "model": c.get("model") or "",
             "enabled": bool(c.get("enabled", True)),
-            "allow_external_pii": bool(c.get("allow_external_pii")),
-            "pii_redacted": bool(redacted),
             "key_masked": llm.mask_key(key), "key_set": bool(key),
             "key_source": src, "env_override": env_set,
             "note": "API Key 只显示掩码；保存写 config/secrets.json（0600，不入库不提交），"
-                    "保存即生效（每次模型调用重新读取配置）。环境变量优先于文件值。"
-                    + (" 当前外部端点默认脱敏：姓名/手机/邮箱/完整原文不会发给模型。"
-                       if redacted else "")}
+                    "保存即生效（每次模型调用重新读取配置）。环境变量优先于文件值。"}
 
 
 @app.post("/api/model-config")
@@ -6117,15 +6110,13 @@ def api_model_config_set(req: ModelCfgReq,
     if req.base_url is not None and req.base_url.strip() and not req.base_url.strip().startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="模型地址要以 http:// 或 https:// 开头")
     r = llm.save_cfg(base_url=req.base_url, model=req.model,
-                     api_key=req.api_key, enabled=req.enabled,
-                     allow_external_pii=req.allow_external_pii)
+                     api_key=req.api_key, enabled=req.enabled)
     if not r["changed"]:
         return {"ok": True, "changed": [], "note": "没有需要保存的修改（API Key 留空 = 不修改）。"}
     conn = db.connect(DB_PATH)
     try:
         # 审计只记字段名：base_url/model 属配置可记，api_key 只记"已更新"
-        _label = {"enabled": "模型启用状态",
-                  "allow_external_pii": "外部 PII 放行开关"}
+        _label = {"enabled": "模型启用状态"}
         fields = "、".join(("api_key（值不记录）" if f == "api_key"
                             else _label.get(f, f)) for f in r["changed"])
         db.add_audit(conn, "settings", "model-config", "update",

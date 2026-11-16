@@ -122,16 +122,9 @@ def _llm_priorities(workload: dict) -> dict | None:
     """让模型判断优先级。模型不可用返回 None（调用方退回规则排序）。"""
     from . import llm
 
-    _redact = llm.pii_must_be_redacted()
-
     def _brief(items: list[dict], keys: list[str], limit: int = 8) -> list[dict]:
-        out = []
-        for it in (items or [])[:limit]:
-            row = {k: it.get(k) for k in keys}
-            if _redact and "name" in row:
-                row["name"] = "候选人"
-            out.append(row)
-        return out
+        return [{k: it.get(k) for k in keys}
+                for it in (items or [])[:limit]]
 
     payload = {
         "日期": f"{datetime.now():%Y-%m-%d}",

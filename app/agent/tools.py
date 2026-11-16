@@ -977,20 +977,12 @@ def _detail_brief(cid: int, d: dict) -> dict:
     """
     from ..crypto import decrypt
 
-    # P0 数据合规：外部模型端点默认不给姓名/联系方式/受保护属性/完整原文。
-    # 需要完整值时必须显式在 config/model.json 设 allow_external_pii=true。
-    redact = llm.pii_must_be_redacted()
     source_mail = d.get("source_mail")
     if source_mail:
         _bt = source_mail.get("body_text") or ""
         _bh = source_mail.get("body_html") or ""
         _subject = source_mail.get("subject") or ""
         _from = source_mail.get("from_addr") or ""
-        if redact:
-            _bt = sanitize.scrub_contacts(_bt)
-            _bh = sanitize.scrub_contacts(_bh)
-            _subject = sanitize.scrub_contacts(_subject)
-            _from = sanitize.scrub_contacts(_from)
         source_mail = {
             **source_mail,
             "body_text": _bt[:6000],
@@ -999,18 +991,16 @@ def _detail_brief(cid: int, d: dict) -> dict:
             "from_addr": _from,
             "body_truncated": len(_bt) > 6000,
         }
-    _raw = sanitize.scrub_contacts(d.get("raw_text") or "")
-    _raw = sanitize.scrub(_raw)[0]
-    _phone = "" if redact else (decrypt(d.get("phone_enc")) or "")
-    _email = "" if redact else (decrypt(d.get("email_enc")) or "")
+    _raw = sanitize.scrub(d.get("raw_text") or "")[0]
+    _phone = decrypt(d.get("phone_enc")) or ""
+    _email = decrypt(d.get("email_enc")) or ""
     return {
         "candidate_id": cid,
-        "name": (f"候选人#{cid}" if redact else d.get("name")),
-        "contact_redacted": bool(redact),
+        "name": d.get("name"),
         "education": d.get("edu_level"), "years": d.get("years_exp"),
         "school": d.get("school"), "major": d.get("major"),
         "current_org": d.get("current_org"),
-        "gender": (None if redact else d.get("gender")), "cet": d.get("cet"),
+        "gender": d.get("gender"), "cet": d.get("cet"),
         "cet_level": d.get("cet_level"), "grad_date": d.get("grad_date"),
         "in_school": d.get("in_school"),
         "first_degree_school": d.get("first_degree_school"),
@@ -1019,8 +1009,8 @@ def _detail_brief(cid: int, d: dict) -> dict:
         "overseas": d.get("overseas"),
         "phone": _phone,
         "email": _email,
-        "note": (sanitize.scrub_contacts(d.get("note") or "") if redact else d.get("note")),
-        "app_note": (sanitize.scrub_contacts(d.get("app_note") or "") if redact else d.get("app_note")),
+        "note": d.get("note"),
+        "app_note": d.get("app_note"),
         "certificates": d.get("certificates") or [],
         "pool_status": d.get("pool_status"), "pii_level": d.get("pii_level"),
         "tier_suggested": d.get("tier_suggested"), "tier_final": d.get("tier_final"),
@@ -1806,15 +1796,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 # 只有 HTML 的邮件给模型一份可读纯文本（不改变入库内容）
                 text = re.sub(r"<[^>]+>", " ", html)
                 text = re.sub(r"\s+", " ", text).strip()
-            redact = llm.pii_must_be_redacted()
             _subject = row["subject"] or ""
             _from = row["from_addr"] or ""
-            if redact:
-                text = sanitize.scrub_contacts(text)
-                html = sanitize.scrub_contacts(html)
-                _subject = sanitize.scrub_contacts(_subject)
-                _from = sanitize.scrub_contacts(_from)
-            full = bool(args.get("full")) and not redact
+            full = bool(args.get("full"))
             limit = int(args.get("max_chars") or 8000)
             if limit <= 0:
                 limit = 8000
@@ -1823,10 +1807,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                         "from": _from, "received_at": row["received_at"] or "",
                         "body_text": out_text, "body_html": html if full else html[:limit],
                         "truncated": (not full and len(text) > limit),
-                        "redacted": redact,
-                        "note": ("外部模型模式：联系方式已脱敏，完整正文已限制。"
-                                 if redact else
-                                 ("" if text else "这封邮件没有入库正文（升级前收的邮件只存了标题/发件人）"))})
+                        "note": ("" if text else
+                                 "这封邮件没有入库正文（升级前收的邮件只存了标题/发件人）")})
 
         if name == "get_document_text":
             import os as _os
@@ -1847,9 +1829,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             # 没指定附件时优先读简历，不拿作品集当简历原文
             resume_docs = [d for d in docs if (d.get("kind") or "resume") != "other"]
             chosen = docs[0] if did is not None else ((resume_docs or docs)[0])
-            redact = llm.pii_must_be_redacted()
             summaries = [{"document_id": d.get("id"),
-                          "file": (f"附件#{d.get('id')}" if redact else d.get("file_name")),
+                          "file": d.get("file_name"),
                           "kind": d.get("kind") or "resume",
                           "parse_engine": d.get("parse_engine"),
                           "parse_ok": d.get("parse_ok"),
@@ -1868,28 +1849,19 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                     if _os.path.isfile(full_path):
                         from ..pipeline import parse as _parse
                         text, engine, ok = _parse.parse_file_ex(full_path)
-            if redact:
-                text = sanitize.scrub_contacts(text)
-            full = bool(args.get("full")) and not redact
+            full = bool(args.get("full"))
             limit = int(args.get("max_chars") or 12000)
             if limit <= 0:
                 limit = 12000
-            if redact:
-                # 外部模型模式：即使 full=true 也只给脱敏摘要，避免整份简历外发
-                limit = min(limit, 4000)
             out_text = text if full else text[:limit]
             return _ok({"document_id": chosen.get("id"),
-                        "file": (f"附件#{chosen.get('id')}" if redact
-                                 else chosen.get("file_name")),
+                        "file": chosen.get("file_name"),
                         "kind": chosen.get("kind") or "resume",
                         "parse_engine": engine, "parse_ok": ok,
                         "text": out_text, "truncated": (not full and len(text) > limit),
-                        "redacted": redact,
                         "documents": summaries,
-                        "note": ("外部模型模式：联系方式已脱敏，原文限制为 4000 字；"
-                                 "如需全文请用内网模型或显式 allow_external_pii=true。"
-                                 if redact else
-                                 ("" if text else "这份附件没有可读取的文本，原件已归档，可在界面预览"))})
+                        "note": ("" if text else
+                                 "这份附件没有可读取的文本，原件已归档，可在界面预览")})
 
         if name == "pool_stats":
             s = db.pool_stats(conn)

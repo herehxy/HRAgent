@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import contextlib
 import io
-import ipaddress
 import json
 import os
 import re
@@ -21,7 +20,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from urllib.parse import urlsplit
 
 from .. import net
 
@@ -45,8 +43,7 @@ def mask_key(key) -> str:
 
 
 def save_cfg(base_url: str | None = None, model: str | None = None,
-             api_key: str | None = None, enabled: bool | None = None,
-             allow_external_pii: bool | None = None) -> dict:
+             api_key: str | None = None, enabled: bool | None = None) -> dict:
     """界面保存模型配置（v1.7.6）。
 
     base_url / model / enabled 写 `config/model.json`（保留 preset / _presets / 超时等其他字段）；
@@ -57,8 +54,7 @@ def save_cfg(base_url: str | None = None, model: str | None = None,
     返回 {"changed": [字段名], "env_override": [会盖过文件值的环境变量名]}。
     """
     changed: list[str] = []
-    if (base_url is not None or model is not None or enabled is not None
-            or allow_external_pii is not None):
+    if base_url is not None or model is not None or enabled is not None:
         cfg: dict = {}
         if os.path.exists(CONFIG_PATH):
             try:
@@ -77,10 +73,6 @@ def save_cfg(base_url: str | None = None, model: str | None = None,
         if enabled is not None and bool(cfg.get("enabled", True)) != bool(enabled):
             cfg["enabled"] = bool(enabled)
             changed.append("enabled")
-        if (allow_external_pii is not None
-                and bool(cfg.get("allow_external_pii", False)) != bool(allow_external_pii)):
-            cfg["allow_external_pii"] = bool(allow_external_pii)
-            changed.append("allow_external_pii")
         if changed:
             tmp = CONFIG_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
@@ -165,44 +157,6 @@ def load_cfg(task: str | None = None) -> dict:
     elif cfg.get("api_key_env"):
         cfg["api_key"] = os.environ.get(cfg["api_key_env"], cfg.get("api_key", ""))
     return cfg
-
-
-def endpoint_is_internal(base_url: str | None = None) -> bool:
-    """模型端点是否在回环/内网。
-
-    只用于“能否把完整候选人 PII 发给模型”的默认策略；不做网络探测。
-    内网域名（无点、.internal/.local/.lan）按内网处理；其余公网域名按外部处理。
-    """
-    url = str(base_url or "")
-    host = (urlsplit(url).hostname or "").strip().lower()
-    if not host:
-        return True          # 未配置端点 = 不会外发
-    if host in ("localhost", "::1"):
-        return True
-    try:
-        ip = ipaddress.ip_address(host.strip("[]"))
-        return bool(ip.is_loopback or ip.is_private or ip.is_link_local)
-    except ValueError:
-        pass
-    # 单标签主机名可能是 Docker service name，也可能是外部短域名；无法判定时
-    # 按外部处理（脱敏优先）。确需完整 PII 时显式 allow_external_pii=true。
-    if "." not in host:
-        return False
-    return host.endswith((".internal", ".local", ".lan", ".localdomain"))
-
-
-def pii_must_be_redacted(cfg: dict | None = None) -> bool:
-    """外部模型端点默认必须脱敏；只有显式 allow_external_pii=true 才放行。
-
-    这是 P0 数据合规闸门：README 承诺“数据不出内网”，不能因为换了个
-    OpenAI 兼容 base_url 就把手机号/邮箱/简历原文发出去。
-    """
-    cfg = cfg if cfg is not None else load_cfg()
-    if not bool(cfg.get("enabled", True)):
-        return False
-    if bool(cfg.get("allow_external_pii")):
-        return False
-    return not endpoint_is_internal(cfg.get("base_url"))
 
 
 def _retryable(exc: Exception) -> bool:

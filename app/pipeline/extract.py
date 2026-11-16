@@ -219,13 +219,22 @@ def _find_years(text: str) -> int | None:
 
 _NAME_REJECT_RE = re.compile(
     r"大学|学院|学校|公司|集团|单位|简历|教育|工作|实习|硕士|本科|博士|在读|"
+    r"大专|研究生|中专|职高|学历|学位|"
     r"荣誉|奖项|科研|项目|技能|评价|经历")
-_NAME_REJECT_LEAD = re.compile(r"^(?:基于|通过|针对|面向|负责|参与|担任|研究|项目|系统|个人|本校|该)")
+_NAME_REJECT_LEAD = re.compile(
+    r"^(?:基于|通过|针对|面向|负责|参与|担任|研究|项目|系统|个人|本校|该|"
+    r"发表|利用|开展|搭建|掌握|熟悉|具备|熟练|参加|获得|完成|进行|从事|"
+    r"撰写|编写|组织|主持|设计|开发|建立|构建|分析|学习|毕业|就读|使用|"
+    r"采用|主导|协助|配合|支持|独立|长期|多次|主要|拥有|具有|能够|可以)")
+
+#: 脱敏/兜底过程中可能出现、但永远不是真实姓名的占位值。
+_NAME_PLACEHOLDERS = {"候选人", "【已屏蔽】", "已屏蔽"}
 
 
 def _valid_person_name(name: str | None) -> bool:
     value = str(name or "").strip()
     return (bool(re.fullmatch(r"[\u4e00-\u9fa5·]{2,4}", value))
+            and value not in _NAME_PLACEHOLDERS
             and not _NAME_REJECT_RE.search(value)
             and not _NAME_REJECT_LEAD.search(value)
             and value not in SECTION_HEADS)
@@ -240,8 +249,12 @@ def _find_name(text: str) -> str | None:
     m = re.search(r"姓名\s*[:：]\s*([\u4e00-\u9fa5·]{2,4})", text)
     if m and _valid_person_name(m.group(1)):
         return m.group(1)
+    # 「姓名 + 空格 + 英文缩写」的写法只在**简历头部**采信：正文里
+    # 「发表 SCI 论文」「利用 TEM 表征」同样符合这个形状，扫全文必然误报
+    # （2026-11-16 实测把「发表/利用/开展/搭建」当成了姓名）。
+    head = "\n".join(text.strip().split("\n")[:8])
     m = re.search(
-        r"(?m)^\s*([\u4e00-\u9fa5·]{2,4})(?=\s*[A-Z][A-Z\s]{2,})", text)
+        r"(?m)^\s*([\u4e00-\u9fa5·]{2,4})(?=\s*[A-Z][A-Z\s]{2,})", head)
     if m and _valid_person_name(m.group(1)):
         return m.group(1)
     first = (text.strip().split("\n") or [""])[0].strip()
@@ -265,7 +278,9 @@ SECTION_HEADS = set(_EDU_HEADS) | set(_OTHER_HEADS) | {
 
 def _fix_name_from_filename(out: dict, filename: str | None) -> None:
     """姓名缺失（或误取了段落标题）时按文件名兜底，并如实标注来源供 HR 核对。"""
-    nm = out.get("name")
+    nm = str(out.get("name") or "").strip()
+    if nm in _NAME_PLACEHOLDERS:
+        nm = ""
     if not nm or nm in SECTION_HEADS:
         guess = name_from_filename(filename)
         if guess:
@@ -298,24 +313,62 @@ _NOT_A_NAME_WORDS = ("在线", "工具", "模板", "表格", "下载", "生成",
                      "制作", "免费", "简易", "通用", "示例", "样本", "demo", "test")
 
 
+#: 文件名里常见、但**不是姓名**的专业/岗位词。像人名的两字专业（化学/物理）
+#: 在这一层必须挡掉，否则「…_化学_张彤_女.pdf」会先命中「化学」。
+_FILENAME_NOT_NAME_WORDS = (
+    "化学", "物理", "材料", "数学", "经济", "金融", "会计", "法学", "机械",
+    "电子", "通信", "计算机", "软件", "人工智能", "自动化", "管理", "英语",
+    "临床", "药学", "护理", "土木", "建筑", "环境", "生物", "食品", "冶金",
+    "地质", "采矿", "教育", "新闻", "设计", "美术", "音乐", "体育", "统计",
+    "工艺", "科研", "科学", "研究", "工程", "技术", "专业", "方向", "岗位",
+    "附件", "材料所", "研究所", "大专", "研究生", "中专", "职高",
+)
+
+
+def _clean_filename_token(token: str) -> str | None:
+    """把文件名的一段清洗成可能的姓名；洗不出/不像人名就返回 None。"""
+    t = re.sub(r"(个人|求职)?简历|resume|cv|报名表|应聘", "", str(token),
+               flags=re.IGNORECASE)
+    for w in _NOT_A_NAME_WORDS:
+        t = t.replace(w, "")
+    t = re.sub(r"[\d（）()【】\[\]]+", "", t).strip()
+    if not _valid_person_name(t):
+        return None
+    if any(w in t for w in _FILENAME_NOT_NAME_WORDS):
+        return None
+    return t
+
+
 def name_from_filename(filename: str | None) -> str | None:
     """从文件名猜姓名（正文识别不出时的兜底）。
 
-    绝大多数简历文件以姓名开头：`张三-简历.pdf`、`张三_数字IC工程师_硕士.pdf`、
-    `李四.pdf`。取扩展名前的第一段，剥掉"简历/resume/CV"字样、数字与括号后，
-    剩下恰好是 2-4 个汉字才采纳——**猜不出就返回 None，绝不硬凑**。
+    两种常见写法都要支持：
+      ① `张三-简历.pdf`、`张三_数字IC工程师_硕士.pdf`（姓名在最前）；
+      ② `科研工艺技术_硕士_昆明理工大学_冶金工程_杨华成_男.pdf`
+         （本单位批量简历：`方向_学历_学校_专业_姓名_性别`，姓名在性别前一段）。
+    清洗后恰好是 2-4 个汉字才采纳——**猜不出就返回 None，绝不硬凑**。
     """
     if not filename:
         return None
     stem = os.path.splitext(os.path.basename(filename))[0]
     stem = re.sub(r"(个人|求职)??简历|resume|cv", "", stem, flags=re.IGNORECASE)
-    # 先剥掉常见的"工具名尾巴"：`在线简历工具-CodeCV简历` 剥完是 `在线工具-CodeCV`
     for w in _NOT_A_NAME_WORDS:
         stem = stem.replace(w, "")
-    stem = re.split(r"[-_—\s·（）()【】\[\],，、.]", stem, maxsplit=1)[0]
-    stem = re.sub(r"[\d（）()【】\[\]]+", "", stem).strip()
-    if re.fullmatch(r"[\u4e00-\u9fa5·]{2,4}", stem) and stem not in SECTION_HEADS:
-        return stem
+    parts = [p for p in re.split(r"[-_—\s·（）()【】\[\],，、.]+", stem) if p.strip()]
+    # ① 性别标记前一段几乎一定是姓名；也接受「姓名男」连写
+    for i, part in enumerate(parts):
+        if part in ("男", "女") and i > 0:
+            guess = _clean_filename_token(parts[i - 1])
+            if guess:
+                return guess
+        m = re.fullmatch(r"([\u4e00-\u9fa5·]{2,4})(?:男|女)", part)
+        if m and _valid_person_name(m.group(1)):
+            return m.group(1)
+    # ② 退回到"逐段找第一个像人名的段"（学校/专业/学历词会被挡掉）
+    for part in parts:
+        guess = _clean_filename_token(part)
+        if guess:
+            return guess
     return None
 
 
@@ -1384,22 +1437,9 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
     此时按文件名兜底（大多数简历文件以姓名开头），并在 `name_source` 里如实标注。
     """
     safe_text, sensitive_found = sanitize.scrub(text)
-    # 联系方式本地规则提取（不依赖模型）。外部模型端点默认把联系方式从
-    # 送给模型的文本里抹掉，模型只做字段/技能抽取，联系方式由本地补回。
+    # 联系方式本地规则提取（不依赖模型）：模型偶发漏抽/编造联系方式时，
+    # 以本地结果为准；本地漏掉、模型抽到的则保留模型结果。
     _contact = _find_contact(text)
-    _local_name = _find_name(text)
-    _redact_contacts = False
-    if use_llm and llm_conf:
-        from ..agent import llm as _llm_policy
-        _policy_cfg = {**_llm_policy.load_cfg(), **dict(llm_conf)}
-        # 与 extract_llm 的默认 base_url 保持一致：缺省时实际会请求公网默认端点
-        if not _policy_cfg.get("base_url"):
-            _policy_cfg["base_url"] = "https://api.deepseek.com/v1"
-        if _llm_policy.pii_must_be_redacted(_policy_cfg):
-            _redact_contacts = True
-            safe_text = sanitize.scrub_contacts(safe_text)
-            if _local_name:
-                safe_text = safe_text.replace(str(_local_name), "候选人")
 
     if use_llm and llm_conf and llm_conf.get("api_key"):
         try:
@@ -1442,7 +1482,7 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
             # v1.13.7：基本信息先过**证据校验**再采信——模型说姓名/学校/专业，
             # 前提是它们真的写在简历里（原文没有的一律丢掉，退回规则值）。
             _llm_fields = {
-                "name": (_local_name if _redact_contacts else clean.get("name")),
+                "name": clean.get("name"),
                 "education": normalize_degree(clean.get("education")),
                 "years": int(clean["years"]) if str(clean.get("years", "")).strip().isdigit() else None,
                 "school": clean.get("school"),
@@ -1455,8 +1495,8 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
                 "major": clean.get("major"),
                 "current_org": clean.get("current_org"),
                 "certificates": [c for c in (clean.get("certificates") or []) if isinstance(c, str)],
-                # 联系方式只信本地规则提取；外部模型看到的文本已被脱敏
-                "contact": _contact,
+                # 联系方式优先用本地规则结果，模型抽到而本地漏掉的保留模型值
+                "contact": (_contact or clean.get("contact") or {}),
                 # 性别**只取本地规则的结果，原文取（不是 safe_text）**：
                 # 模型即便返回了 gender 也已在 strip_forbidden 里被丢掉，这里再明确覆盖一次，
                 # 保证"性别永远不会来自模型"这条约束不依赖上游是否记得过滤。

@@ -5071,21 +5071,14 @@ def conversation_memory(conn: sqlite3.Connection, cid: str, operator: str,
 
 
 def log_agent_run(conn: sqlite3.Connection, rec: dict) -> int:
-    # 运行日志/会话记忆会长期保留并随备份流动；联系方式不在这里存明文副本。
-    from .pipeline import sanitize as _sanitize
-
     _stamp = now()
-    _q = _sanitize.scrub_contacts(rec.get("question") or "")
-    _a = _sanitize.scrub_contacts(rec.get("answer") or "")
-    _th = _sanitize.scrub_contacts(rec.get("thinking") or "")
-    _ctx_json = _sanitize.scrub_contacts(
-        json.dumps(rec.get("context") or {}, ensure_ascii=False))
-    _tools_json = _sanitize.scrub_contacts(
-        json.dumps(rec.get("tool_calls", []), ensure_ascii=False))
-    _alerts_json = _sanitize.scrub_contacts(
-        json.dumps(rec.get("alerts") or [], ensure_ascii=False))
-    _metrics_json = _sanitize.scrub_contacts(
-        json.dumps(rec.get("metrics") or {}, ensure_ascii=False))
+    _q = rec.get("question") or ""
+    _a = rec.get("answer") or ""
+    _th = rec.get("thinking") or ""
+    _ctx_json = json.dumps(rec.get("context") or {}, ensure_ascii=False)
+    _tools_json = json.dumps(rec.get("tool_calls", []), ensure_ascii=False)
+    _alerts_json = json.dumps(rec.get("alerts") or [], ensure_ascii=False)
+    _metrics_json = json.dumps(rec.get("metrics") or {}, ensure_ascii=False)
     if rec.get("session_id"):
         ensure_conversation(conn, rec["session_id"], rec.get("operator", "HR"),
                             _q, _stamp)
