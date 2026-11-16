@@ -6980,18 +6980,20 @@ cfgEdit('cfgFolderDir', '简历目录', mb.folder_dir, 'data/resumes', 'text') +
     var v2 = sp.value;
     if(!v2) return;
     var p2 = v2.split('|');
-    document.getElementById('cfgSmtpHost').value = p2[0] || '';
-    document.getElementById('cfgSmtpPort').value = p2[1] || '';
-    document.getElementById('cfgSmtpSsl').checked = p2[2] === '1';
+    var _h = cfgEl('cfgSmtpHost'), _p = cfgEl('cfgSmtpPort'), _x = cfgEl('cfgSmtpSsl');
+    if(_h) _h.value = p2[0] || '';
+    if(_p) _p.value = p2[1] || '';
+    if(_x) _x.checked = p2[2] === '1';
     toast('已填好发信服务器与端口；记得填授权码（不是登录密码）', 'ok');
   });
   if(ps) ps.addEventListener('change', function(){
     var v = ps.value;
     if(!v) return;
     var parts = v.split('|');
-    document.getElementById('cfgMbHost').value = parts[0] || '';
-    document.getElementById('cfgMbPort').value = parts[1] || '';
-    document.getElementById('cfgMbSsl').checked = parts[2] === '1';
+    var _mh = cfgEl('cfgMbHost'), _mp = cfgEl('cfgMbPort'), _mx = cfgEl('cfgMbSsl');
+    if(_mh) _mh.value = parts[0] || '';
+    if(_mp) _mp.value = parts[1] || '';
+    if(_mx) _mx.checked = parts[2] === '1';
     /* 选了预设却仍留在「收 EML 文件」上，等于"配了没反应"——收的还是本地目录。
        原版选完预设会把方式置成 imap 并 toast 说明（`ui.py:6259-6272`）。 */
     var ms = document.getElementById('cedv_cfgMbMode');
@@ -7024,8 +7026,13 @@ async function loadEnv(){
 }
 /* 把值填进某个配置输入框：**只填不存**，用户仍要自己点「保存」。
    2026-11-02 加，用于「账号同收信 / 接口地址同对话模型」这类少填一遍的按钮。 */
+/* 配置输入框的真实 id 带 cedv_ 前缀（cfgEdit -> cfgEditor），
+   直接按字段名取会拿到 null —— 预设自动填充曾因此静默失效。 */
+function cfgEl(id){
+  return document.getElementById('cedv_' + id) || document.getElementById(id);
+}
 function fillCfg(id, val){
-  var e = document.getElementById(id);
+  var e = cfgEl(id);
   if(!e) return false;
   e.value = (val == null ? '' : String(val));
   try{ e.dispatchEvent(new Event('input', {bubbles:true})); }catch(err){}
@@ -7100,6 +7107,8 @@ async function sysAct(act){
       var b1 = {host: v('cfgSmtpHost'), port: Number(v('cfgSmtpPort') || 465),
                 ssl: v('cfgSmtpSsl') === '1',
                 user: v('cfgSmtpUser'), from_name: v('cfgSmtpFrom')};
+      if(!b1.host){ toast('请先选择 SMTP 预设或填写服务器地址', 'warn'); return; }
+      if(!b1.user){ toast('请填写发信账号', 'warn'); return; }
       if(v('cfgSmtpPwd')) b1.password = v('cfgSmtpPwd');
       var r1 = await api('/api/mail/smtp', {method:'POST',
         headers:{'Content-Type':'application/json'}, body: JSON.stringify(b1)});
@@ -7108,7 +7117,10 @@ async function sysAct(act){
     }
     var t1 = await api('/api/mail/test-smtp', {method:'POST',
       headers:{'Content-Type':'application/json'}, body: '{}'});
-    toast(t1.__err ? ('✗ ' + t1.__err) : ('✓ ' + (t1.message || '发信配置可用')));
+    var _ok1 = !!(t1 && t1.ok && !t1.__err);
+    toast(_ok1 ? ('✓ ' + (t1.note || t1.message || '发信配置可用'))
+               : ('✗ ' + (t1.error || t1.__err || '检查失败')),
+          _ok1 ? 'ok' : 'danger');
     return;
   }
   if(act === 'mbTest'){
@@ -11456,7 +11468,9 @@ async function checkSmtp(){
   if(m) m.textContent = '检查中…';
   var r = await api('/api/mail/test-smtp', {method:'POST',
     headers:{'Content-Type':'application/json'}, body: '{}'});
-  if(m) m.textContent = r.__err ? ('✗ ' + r.__err) : ('✓ ' + (r.message || '发信配置可用'));
+  var ok = !!(r && r.ok && !r.__err);
+  if(m) m.textContent = ok ? ('✓ ' + (r.note || r.message || '发信配置可用'))
+                           : ('✗ ' + (r.error || r.__err || '检查失败'));
 }
 async function sendMail(){
   if(M_SENDING){ toast('邮件正在发送，请勿重复提交', 'warn'); return; }
