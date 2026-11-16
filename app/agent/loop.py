@@ -611,7 +611,7 @@ _LIVE_TRACES: dict[str, dict] = {}
 
 def _live_update(ctx: ToolCtx, trace: list[dict], status: str = "running",
                  mode: str | None = None, rounds: int = 0,
-                 thinking: str = "") -> None:
+                 thinking: str = "", answer: str | None = None) -> None:
     sid = str(ctx.session_id or "").strip()
     if not sid:
         return
@@ -619,6 +619,7 @@ def _live_update(ctx: ToolCtx, trace: list[dict], status: str = "running",
     # 顺手清掉 10 分钟前的残留，避免进程内字典无限增长
     for k in [k for k, v in _LIVE_TRACES.items() if now_ts - float(v.get("ts") or 0) > 600]:
         _LIVE_TRACES.pop(k, None)
+    _prev = _LIVE_TRACES.get(sid) or {}
     _LIVE_TRACES[sid] = {
         "operator": ctx.operator,
         "status": status,
@@ -626,6 +627,10 @@ def _live_update(ctx: ToolCtx, trace: list[dict], status: str = "running",
         "rounds": rounds,
         # 思考过程只用于界面实时展示；最终仍随 /api/agent/chat 返回并落库
         "thinking": thinking or "",
+        # 页面刷新/切走后，SSE 的增量内容已经不在浏览器里；服务端留一份
+        # 半成品答案，重开同一会话时还能把正在生成的回复显示出来。
+        "answer": (str(answer) if answer is not None
+                   else str(_prev.get("answer") or ""))[-20000:],
         "route": list(getattr(ctx, "route", []) or []),
         "ts": now_ts,
         "trace": [{
@@ -638,6 +643,14 @@ def _live_update(ctx: ToolCtx, trace: list[dict], status: str = "running",
     }
 
 
+def set_live_answer(session_id: str, answer: str) -> None:
+    """流式过程中更新半成品答案，供页面刷新/切换后恢复显示。"""
+    sid = str(session_id or "").strip()
+    v = _LIVE_TRACES.get(sid)
+    if v is not None:
+        v["answer"] = str(answer or "")[-20000:]
+
+
 def live_trace(session_id: str, operator: str) -> dict | None:
     """给右侧轨迹面板读的**当前会话**轨迹；只允许会话所属账号。"""
     v = _LIVE_TRACES.get(str(session_id or ""))
@@ -645,6 +658,7 @@ def live_trace(session_id: str, operator: str) -> dict | None:
         return None
     return {"status": v.get("status"), "mode": v.get("mode"),
             "rounds": v.get("rounds"), "thinking": v.get("thinking") or "",
+            "answer": v.get("answer") or "",
             "route": list(v.get("route") or []),
             "trace": list(v.get("trace") or [])}
 
@@ -844,7 +858,7 @@ def _round_budget(cfg: dict, message: str, groups: list[str] | None,
     """按任务复杂度分配工具轮次，返回 (本轮轮次, 硬上限)。
 
     口径（2026-11-16 业务方确认）：
-      · 单步查询（查人/统计/看进度）3 轮；
+      · 单步查询（查人/统计/看进度）沿用 （当前配置 4 轮）；
       · 多步任务（筛选→导出→发邮件）8 轮；
       · 命中 SOP 的多步任务 8 轮，「一句话批量」10 轮；
       · `max_tool_rounds` 是简单任务预算，`max_tool_rounds_cap` 是硬上限（默认 12），
@@ -857,7 +871,7 @@ def _round_budget(cfg: dict, message: str, groups: list[str] | None,
     elif _looks_multi_step(message, groups):
         want = 8
     else:
-        want = 3
+        want = base          # 基本操作不降级：保持配置的 max_tool_rounds（默认 4）
     rounds = want if want <= base else min(cap, max(base, want))
     return max(2, rounds), cap
 

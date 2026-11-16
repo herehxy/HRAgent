@@ -470,13 +470,26 @@ class AgentConversationPersistenceTest(unittest.TestCase):
                 _close_physical(conn)
 
 
+class AgentLiveTraceTest(unittest.TestCase):
+    def test_partial_answer_survives_live_update(self):
+        from app.agent import loop
+        from app.agent.tools import ToolCtx
+
+        ctx = ToolCtx(db_path="x", session_id="live-test", operator="HR")
+        loop._live_update(ctx, [], status="running", thinking="思考中")
+        loop.set_live_answer("live-test", "半成品回复")
+        loop._live_update(ctx, [], status="done", thinking="思考中")
+        out = loop.live_trace("live-test", "HR")
+        self.assertEqual(out["answer"], "半成品回复")
+
+
 class AgentRoundBudgetTest(unittest.TestCase):
     """2026-11-16：轮次按任务复杂度自适应，到顶返回可继续标记。"""
 
     def test_round_budget_adapts_to_task(self):
         from app.agent import loop
 
-        self.assertEqual(loop._round_budget({}, "帮我查一下张三", [], None)[0], 3)
+        self.assertEqual(loop._round_budget({"max_tool_rounds": 4}, "帮我查一下张三", [], None)[0], 4)
         self.assertEqual(loop._round_budget(
             {}, "筛选出符合条件的人，然后导出名单", [], None)[0], 8)
         self.assertEqual(loop._round_budget(

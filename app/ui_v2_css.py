@@ -759,6 +759,8 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
   background:var(--surface)}
 .chatconv-head{padding:16px 14px 10px;display:flex;align-items:center;justify-content:space-between;gap:8px}
 .chatconv-head h3{font-size:14px;margin:0}
+/* 智能助手左侧「新对话」：默认 .btn.sm 只有 26px，实操偏小；单独放大。 */
+#chatNew{height:34px;padding:0 18px;font-size:14px;font-weight:600;border-radius:999px}
 .chatconv-list{flex:1;overflow-y:auto;padding:0 8px 14px;min-height:0}
 .chatconv-item{position:relative;padding:10px 30px 10px 10px;border-radius:6px;cursor:pointer;margin-bottom:3px}
 .chatconv-item:hover{background:var(--surface-2)}
@@ -1055,6 +1057,9 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .dupwarn .btn{flex:none;background:var(--surface);border-color:var(--warn-line);
   color:var(--ink-2)}
 .dupwarn .btn:hover{background:var(--warn);color:#fff;border-color:var(--warn)}
+/* “是同一个人”是合并（不可随手撤销），用红色实心按钮与普通提醒区分。 */
+.dupwarn .btn.dupdanger{background:var(--bad);border-color:var(--bad);color:#fff}
+.dupwarn .btn.dupdanger:hover{background:var(--bad);border-color:var(--bad);color:#fff;filter:brightness(.93)}
 .dupi{display:inline-block;margin-left:10px;color:var(--ink-2)}
 /* 敏感字段剔除明细：绿底＝隐私处理已生效；none 用中性底色，明说"没留痕"≠"没敏感信息" */
 .sensline{background:var(--ok-soft);border:1px solid var(--ok-line);border-radius:var(--r);

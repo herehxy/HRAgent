@@ -95,7 +95,8 @@ from . import avatar as avatar_mod
 from .agent import brief as brief_mod
 from .agent import llm
 from .agent import proactive as proactive_mod
-from .agent.loop import build_context_estimate, live_trace, run_agent
+from .agent.loop import (build_context_estimate, live_trace, run_agent,
+                       set_live_answer)
 from .agent.router import route_tools
 from .agent.tools import ToolCtx, catalog as tool_catalog
 from .pipeline import domains as domains_mod
@@ -5467,7 +5468,19 @@ def api_agent_chat_stream(req: ChatReq,
     q: queue.Queue = queue.Queue()
     cancel = threading.Event()
 
+    _live_answer = {"text": ""}
+
     def _emit(ev: dict) -> None:
+        try:
+            _t = str(ev.get("type") or "")
+            if _t == "answer_delta":
+                _live_answer["text"] += str(ev.get("text") or "")
+            elif _t == "answer_reset":
+                _live_answer["text"] = ""
+            if _t in ("answer_delta", "answer_reset"):
+                set_live_answer(ctx.session_id, _live_answer["text"])
+        except Exception:                                  # noqa: BLE001
+            pass
         q.put(ev)
 
     def _work() -> None:

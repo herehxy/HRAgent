@@ -1663,7 +1663,10 @@ function fullDetail(d){
         '（未自动合并，需你判断）：' +
         d.duplicates.map(function(x){
           return '<span class="dupi">#' + x.id + ' ' + esc(x.name || '') +
-            (x.reason ? '（' + esc(x.reason) + '）' : '') + '</span>';
+            (x.reason ? '（' + esc(x.reason) + '）' : '') +
+            '<button class="btn sm dupdanger" style="margin-left:8px" ' +
+            'onclick="dupMerge(' + d.id + ',' + x.id + ')">是同一个人</button>' +
+            '</span>';
         }).join('') + '</div>' +
       '<button class="btn sm" onclick="dupDismiss(' + d.id + ')">不是同一个人</button>' +
     '</div>';
@@ -2193,6 +2196,27 @@ function dupDismiss(cid){
   var el = document.querySelector('#detail .dupwarn');
   if(el) el.style.display = 'none';
   toast('已记录，之后不再提示这条', 'ok');
+}
+/* 人工确认“是同一个人”：把疑似档案合并到当前档案。
+   合并不自动发生，必须 HR 在确认框里点“合并档案”；失败只提示、不改数据。 */
+async function dupMerge(targetId, sourceId){
+  var ok = await askConfirm({
+    title: '确认是同一人',
+    danger: true,
+    okText: '合并档案',
+    body: '将 #' + sourceId + ' 合并到当前档案 #' + targetId + '？' +
+          '投递、附件、技能、备注会并入当前档案，被合并的档案不再单独显示；' +
+          '此操作会写入审计，可在操作记录中追溯。'
+  });
+  if(!ok) return;
+  var r = await api('/api/candidates/merge', {
+    method: 'POST',
+    body: JSON.stringify({source_id: sourceId, target_id: targetId})
+  });
+  if(r.__err){ toast('合并失败：' + r.__err, 'danger'); return; }
+  toast('已合并 #' + sourceId + ' → #' + targetId, 'ok');
+  await load();
+  if(MODE === 'detail' && CUR === targetId) await pick(targetId);
 }
 
 function bindDetail(d){
@@ -8429,6 +8453,7 @@ function leaveRunningChat(){
   var was = !!CHAT_CTRL;
   CHAT_GEN += 1;
   stopTracePoll();
+  stopHistoryPoll();
   /* 不 abort、不清 CHAT_CTRL/CHAT_STREAMING：后台继续生成。
      发送按钮保持“停止”态，用户随时可以真正中止这一轮。 */
   return was;
@@ -8581,6 +8606,7 @@ function renderWelcome(){
 }
 
 var CHAT_TRACE_TIMER = null;
+var CHAT_HIST_TIMER = null;
 
 function thinkingHtml(text, open, seconds){
   text = String(text || '').trim();
@@ -8919,20 +8945,54 @@ function renderTraceRunning(question){
     '<div class="tp-box"><div class="tp-title">运行中</div><div class="tp-meta">' +
     esc(question || '') + '</div></div></div>';
 }
-function startTracePoll(question, holder){
+function startTracePoll(question, holder, passive){
   stopTracePoll();
   CHAT_TRACE_TIMER = setInterval(async function(){
-    if(!CHAT_CTRL) return;
+    if(!CHAT_CTRL && !passive) return;
     var t = await api('/api/agent/trace?session_id=' + encodeURIComponent(CHAT_CONV_ID));
     if(t && !t.__err){
-      // 思考过程实时显示；工具链照旧更新右侧面板
-      if(t.thinking && !CHAT_STREAMING) renderThinkingLive(holder, t.thinking);
+      if(!CHAT_CTRL){
+        /* 页面刷新/切走后回来：SSE 已经不在了，但服务端留了半成品答案和思考，
+           贴回当前气泡，至少能看到“正在写什么”。 */
+        if(t.answer && holder){
+          var a = holder.querySelector('.stream-answer');
+          if(a) a.innerHTML = mdLite(t.answer);
+        }
+        if(t.thinking) renderThinkingLive(holder, t.thinking);
+        if(t.status && t.status !== 'running') stopTracePoll();
+      } else if(t.thinking && !CHAT_STREAMING){
+        renderThinkingLive(holder, t.thinking);
+      }
       if(t.trace && t.trace.length) renderTraceLive(t, question);
     }
   }, 700);
 }
 function stopTracePoll(){
   if(CHAT_TRACE_TIMER){ clearInterval(CHAT_TRACE_TIMER); CHAT_TRACE_TIMER = null; }
+}
+/* 没有本地流（刷新/换页回来）时，轮询历史等这一轮落库，自动把回复补上。 */
+function startHistoryPoll(cid){
+  stopHistoryPoll();
+  var tries = 0;
+  CHAT_HIST_TIMER = setInterval(async function(){
+    if(CHAT_CONV_ID !== cid){ stopHistoryPoll(); return; }
+    tries += 1;
+    if(tries > 240){ stopHistoryPoll(); return; }   /* 最多约 10 分钟 */
+    var h = await api('/api/agent/history?conversation_id=' + encodeURIComponent(cid));
+    if(h.__err) return;
+    var msgs = h.messages || [];
+    var last = msgs[msgs.length - 1] || {};
+    if(last.role === 'user' && last.status === 'running') return;
+    stopHistoryPoll();
+    if(CHAT_CONV_ID !== cid) return;
+    if(CHAT_CTRL && RUN_CONV_ID === cid) return;
+    stopTracePoll();
+    renderChatMessages(msgs);
+    loadConversations();
+  }, 2500);
+}
+function stopHistoryPoll(){
+  if(CHAT_HIST_TIMER){ clearInterval(CHAT_HIST_TIMER); CHAT_HIST_TIMER = null; }
 }
 function renderTraceFromMessages(hmsgs){
   var last = null;
@@ -9052,6 +9112,18 @@ async function openConversation(cid, quiet){
     renderTraceRunning(RUN_Q);
     startTracePoll(RUN_Q, ph);
     chatAutoScroll();
+  } else {
+    /* 服务端还在跑，但本页没有那一轮的流（刷新/切页回来）：
+       用半成品答案占位，并轮询历史直到该轮流完。 */
+    var _hm = h.messages || [];
+    var _hl = _hm[_hm.length - 1] || {};
+    if(_hl.role === 'user' && _hl.status === 'running'){
+      var ph2 = pushMsg('assistant', '');
+      ph2.innerHTML = '<div class="stream-status hint">回答仍在生成…</div>' +
+        '<div class="stream-answer"></div>';
+      startTracePoll('', ph2, true);
+      startHistoryPoll(cid);
+    }
   }
   if(!_last || !_last.context) loadChatContext();
   renderConvList();
@@ -9555,6 +9627,7 @@ async function askAgent(override){
     RUN_CONV_ID = null; RUN_Q = ''; RUN_HOLDER = null; RUN_STATE = null;
     chatBusy(false);
     stopTracePoll();
+    stopHistoryPoll();
     if(tick){ clearInterval(tick); tick = null; }
     if(answerTimer){ clearTimeout(answerTimer); answerTimer = null; }
     renderConvList();
