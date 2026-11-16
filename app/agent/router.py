@@ -34,6 +34,7 @@ GROUPS: dict[str, list[str]] = {
     "profile": [
         # 读（检索统一走 search_candidates 的 mode，不再暴露 4 个重复工具）
         "analyze_fit", "compare_candidates", "explain_grade",
+        "list_applications", "scan_duplicate_candidates",
         "school_info", "get_interview_dict", "draft_interview_questions",
         # 写（只出提案）
         "set_tier", "add_tag", "add_note", "update_candidate_fields",
@@ -47,6 +48,7 @@ GROUPS: dict[str, list[str]] = {
         "pipeline_overview", "recruit_overview", "list_recruit_plans",
         # 办公：名单下载
         "export_roster",
+        "list_applications", "recruit_analytics",
         # 写（只出提案）
         "set_stage", "set_sign_status", "bulk_initial_pass",
         "bulk_assign_job", "assign_job", "suggest_job", "route_pending",
@@ -63,6 +65,7 @@ GROUPS: dict[str, list[str]] = {
         "list_proposals", "list_audit", "list_import_history", "list_agent_runs",
         "run_proactive_scan", "rebuild_brief", "clear_chat_history",
         "list_removed_files", "restore_source_files", "remove_source_files",
+        "scan_duplicate_candidates",
         "get_feedback_report", "export_feedback", "list_conversations",
         "restore_chat_history", "truncate_chat", "manage_system",
     ],
@@ -123,6 +126,8 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
         "单位缺口", "单位分布", "单位名额", "录用单位", "面试单位", "分布", "人数", "统计", "面试名单",
         "待面试", "offer", "录用", "入职", "归岗", "岗位", "推进", "阶段",
         "初筛", "面试", "上会", "审批", "应招", "转上年度",
+        "一人多投", "多投", "投递明细", "投递记录", "投了几次",
+        "漏斗", "转化率", "招聘周期", "渠道转化", "招聘分析",
     ),
     "mail": (
         "邮件", "发信", "写信", "通知", "邀请", "邀约", "婉拒", "模板",
@@ -132,6 +137,7 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
         "提案", "待确认", "审计", "操作记录", "巡检", "扫描", "待办",
         "跟进", "今天要做", "今天先做什么", "摘要", "周报", "恢复", "清理", "删除会话", "运行记录",
         "导入记录", "导入历史", "重复检测", "重复简历", "被判重复", "被标记为重复",
+        "重复档案", "重复候选人", "同名", "同一人两份",
         "哪些重复", "为什么没入库", "没入库", "偏差", "反馈报告", "对话历史",
         "恢复对话", "截断", "会话",
     ),

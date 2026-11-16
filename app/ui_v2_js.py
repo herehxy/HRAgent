@@ -9782,6 +9782,11 @@ function renderProposalCards(holder, props){
   var batchCount = props.filter(function(p){
     return (p.status || '待确认') === '待确认' && p.current_turn;
   }).length;
+  /* 业务方 2026-11-16：超过 3 条待确认操作时，必须能一键全部执行/拒绝。
+     此时批量范围放到**本卡片里的全部待确认项**（不只是本轮新建的），
+     确认框会明确列出条数；<=3 条仍只批量本轮项，避免误伤旧提案。 */
+  var batchAll = pendingCount > 3;
+  var showBatch = batchAll || batchCount > 1;
   el.innerHTML = '<div class="dcard-t">待确认提案（' + props.length + '）</div>' +
     groupProposalRows(props, function(p){
       /* ⚠️ 助手返回的字段是 `proposal_id`，不是 `id`。
@@ -9808,11 +9813,13 @@ function renderProposalCards(holder, props){
           : '<div class="proprow-a"><span class="proprow-st">' + esc(st) + '</span></div>') +
         '</div>';
     }) +
-    (batchCount > 1
+    (showBatch
       ? '<div class="dcard-a propbatch">' +
-          '<button class="btn primary sm" data-prop-all="approve">' +
-            '全部同意（' + batchCount + '）</button>' +
-          '<button class="btn sm" data-prop-all="reject">全部拒绝</button>' +
+          '<button class="btn primary sm" data-prop-all="approve" ' +
+            'data-scope="' + (batchAll ? 'all' : 'current') + '">' +
+            '全部执行（' + (batchAll ? pendingCount : batchCount) + '）</button>' +
+          '<button class="btn sm" data-prop-all="reject" ' +
+            'data-scope="' + (batchAll ? 'all' : 'current') + '">全部拒绝</button>' +
         '</div>'
       : '') +
     '<div class="dcard-a"><span class="hint">同意后立即执行并写审计；拒绝也留痕。' +
@@ -9828,15 +9835,17 @@ function renderProposalCards(holder, props){
     });
   });
   Array.prototype.forEach.call(el.querySelectorAll('[data-prop-all]'), function(b){
-    b.addEventListener('click', function(){ decideAllCardProps(el, b.dataset.propAll); });
+    b.addEventListener('click', function(){
+      decideAllCardProps(el, b.dataset.propAll, b.dataset.scope || 'current');
+    });
   });
 }
 /* 一句话批量任务：动作已由助手拆好，HR 只需要在这里点一次“全部同意”。 */
-async function decideAllCardProps(el, decision){
+async function decideAllCardProps(el, decision, scope){
   var pids = [];
   Array.prototype.forEach.call(el.querySelectorAll('.proprow[data-pid]'), function(row){
     if(!row.querySelector('[data-prop]')) return;   /* 已处理的行不参与批量 */
-    if(row.getAttribute('data-current') !== '1') return;  /* 旧提案不批量误执行 */
+    if(scope !== 'all' && row.getAttribute('data-current') !== '1') return;
     var pid = Number(row.getAttribute('data-pid'));
     if(pid && !isNaN(pid)) pids.push(pid);
   });

@@ -4328,6 +4328,13 @@ def create_proposal(conn: sqlite3.Connection, session_id: str, tool: str, args: 
                                 (_aid,)).fetchone()
             if _row:
                 args = {**args, "expected_stage": _row["stage"] or ""}
+    # 同一工具+同一参数若已有**待确认**提案，直接复用，不再堆一条重复提案。
+    if dedup_key:
+        _dup = conn.execute(
+            "SELECT id FROM proposals WHERE dedup_key = ? AND status = '待确认' "
+            "ORDER BY id DESC LIMIT 1", (dedup_key,)).fetchone()
+        if _dup:
+            return int(_dup["id"])
     # 敏感值（SMTP 授权码 / 模型 API Key / 候选人电话邮箱）**不能明文落库**：
     # proposals.args 用 json.dumps 原样存、decide_proposal 又不清 args，
     # 明文会永久留存并随库备份流动。这里用 AES-GCM 加密后落库，

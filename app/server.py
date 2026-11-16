@@ -3883,7 +3883,16 @@ def api_export_resume_bundle(job_id: int | None = None, stage: str | None = None
                      s["username"], s["role"])
     finally:
         conn.close()
-    return _zip_response(pairs, f"简历附件-{stamp}.zip")
+    _roster_filters = {k: v for k, v in filters.items() if k != "candidate_ids"}
+    conn = db.connect(DB_PATH)
+    try:
+        _extra = _roster_extra(
+            conn, operator=s["username"], role=s["role"],
+            candidate_ids=filters.get("candidate_ids"),
+            include_archived=False, **_roster_filters)
+    finally:
+        conn.close()
+    return _zip_response(pairs, f"简历附件-{stamp}.zip", extra=_extra)
 
 
 @app.get("/api/bundle/initial-pass/last")
@@ -4879,6 +4888,29 @@ def _unique_name(name: str, used: set[str]) -> str:
     return out
 
 
+def _roster_extra(conn, *, operator: str, role: str,
+                  candidate_ids: list[int] | None = None,
+                  include_archived: bool = False,
+                  **filters) -> list[tuple[str, bytes]]:
+    """随简历 zip 附一份 13 列人员名单（Excel）。失败只告警，不阻断简历下载。"""
+    try:
+        headers, rows, tcols, n = export_mod.build_roster(
+            conn, operator=operator, role=role,
+            include_archived=include_archived,
+            candidate_ids=candidate_ids, **filters)
+        if n <= 0:
+            return []
+        data = xlsx_mod.write_sheet(
+            rows, headers, text_cols=tcols,
+            meta=xlsx_mod.meta_line("简历包名单", "与简历原件同包", n),
+            sheet_title="简历包名单")
+        return [(f"名单-{datetime.now():%Y%m%d-%H%M}.xlsx", data)]
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"[bundle] 名单表生成失败（简历仍可下载）：{type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return []
+
+
 def _zip_response(pairs: list[tuple[str, str]], zip_name: str,
                   extra: list[tuple[str, bytes]] | None = None) -> Response:
     """把若干磁盘文件打成 zip 一次性下发。`pairs` 是 (磁盘路径, 包内文件名)。
@@ -4984,6 +5016,7 @@ def api_sources_bundle(req: BundleReq,
         pairs.append((real, os.path.basename(real)))
 
     ids = [int(i) for i in (req.document_ids or [])][:MAX_BUNDLE_FILES]
+    _bundle_cids: list[int] = []
     if ids:
         conn = db.connect(DB_PATH)
         try:
@@ -5010,6 +5043,9 @@ def api_sources_bundle(req: BundleReq,
                 # 用带前缀的路径入 zip：超长路径 zipfile 也能写进去
                 pairs.append((_paths.long_path(real),
                               d.get("file_name") or os.path.basename(real)))
+                _cid = int(d.get("candidate_id") or 0)
+                if _cid and _cid not in _bundle_cids:
+                    _bundle_cids.append(_cid)
         finally:
             conn.close()
 
@@ -5031,7 +5067,16 @@ def api_sources_bundle(req: BundleReq,
         conn.close()
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
-    resp = _zip_response(pairs, f"简历原件打包_{stamp}.zip")
+    _extra: list[tuple[str, bytes]] = []
+    if _bundle_cids:
+        conn = db.connect(DB_PATH)
+        try:
+            _extra = _roster_extra(
+                conn, operator=s["username"], role=s["role"],
+                candidate_ids=_bundle_cids, include_archived=True)
+        finally:
+            conn.close()
+    resp = _zip_response(pairs, f"简历原件打包_{stamp}.zip", extra=_extra)
     resp.headers["X-Batch-Count"] = str(len(pairs))
     if skipped:
         resp.headers["X-Skipped"] = str(len(skipped))

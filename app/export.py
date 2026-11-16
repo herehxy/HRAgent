@@ -66,7 +66,8 @@ def _phone(c: dict) -> str:
 
 
 def build_roster(conn, *, operator: str = "HR", role: str = "hr",
-                 include_archived: bool = True, **filters) -> tuple[list[str], list[list], set[int], int]:
+                 include_archived: bool = True, candidate_ids: list[int] | None = None,
+                 **filters) -> tuple[list[str], list[list], set[int], int]:
     """候选人名单（固定 13 列）。返回 `(headers, rows, text_cols, n)`。
 
     `include_archived=True`（默认）：**归档的人也在表里**。业务方 2026-10-15 明确要求 ——
@@ -80,6 +81,9 @@ def build_roster(conn, *, operator: str = "HR", role: str = "hr",
 
     items = db_mod.list_candidates(conn, archived=None if include_archived else False,
                                    light=False, **filters)
+    if candidate_ids:
+        wanted = {int(x) for x in candidate_ids}
+        items = [i for i in items if int(i.get("id") or 0) in wanted]
     order = stages_mod.all_stages()
     rank = {s: i for i, s in enumerate(order)}
 

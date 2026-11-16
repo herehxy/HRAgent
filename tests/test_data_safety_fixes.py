@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 import tempfile
@@ -529,6 +530,78 @@ class AgentRoundBudgetTest(unittest.TestCase):
                 self.assertTrue(out["can_continue"])
                 self.assertEqual(out["stop_reason"], "rounds")
                 self.assertEqual(out["metrics"]["max_rounds"], 8)
+            finally:
+                _close_physical(conn)
+
+
+class AssistantCapabilityTest(unittest.TestCase):
+    """2026-11-16：投递明细、重复档案扫描、提案去重、组合包名单。"""
+
+    def _ctx(self, dbp):
+        from app.agent.tools import ToolCtx
+        return ToolCtx(db_path=dbp, session_id="cap", operator="HR", role="hr")
+
+    def test_multi_application_and_duplicate_scan(self):
+        from app.agent import tools
+
+        with tempfile.TemporaryDirectory() as d:
+            dbp = os.path.join(d, "workbench.db")
+            conn = db.connect(dbp)
+            try:
+                a = db.insert_candidate(conn, {"identity_key": "cap:a", "name": "张三",
+                                               "school": "A大学", "edu_level": "硕士"})
+                b = db.insert_candidate(conn, {"identity_key": "cap:b", "name": "张三",
+                                               "school": "B大学", "edu_level": "本科"})
+                for _ in range(2):
+                    db.insert_application(conn, {"candidate_id": a, "channel": "邮箱",
+                                                 "stage": "新投递",
+                                                 "applied_at": "2026-11-01 10:00:00"})
+            finally:
+                _close_physical(conn)
+            ctx = self._ctx(dbp)
+            apps = json.loads(tools.execute("list_applications", {"multi_only": True}, ctx))
+            self.assertEqual(apps["count"], 1)
+            self.assertEqual(apps["groups"][0]["candidate_id"], a)
+            self.assertEqual(apps["groups"][0]["count"], 2)
+            dups = json.loads(tools.execute("scan_duplicate_candidates", {}, ctx))
+            self.assertEqual(dups["count"], 1)
+            self.assertEqual({x["id"] for x in dups["groups"][0]["candidates"]}, {a, b})
+            _close_pool_path(dbp)
+
+    def test_proposal_dedup_same_tool_args(self):
+        from app.agent import tools
+        from app.agent.tools import ToolCtx
+
+        with tempfile.TemporaryDirectory() as d:
+            dbp = os.path.join(d, "workbench.db")
+            conn = db.connect(dbp)
+            try:
+                ctx = ToolCtx(db_path=dbp, session_id="cap", operator="HR", role="hr")
+                one = json.loads(tools._propose(
+                    conn, ctx, "set_stage",
+                    {"application_id": 1, "stage": "待面试"}, "推进"))
+                two = json.loads(tools._propose(
+                    conn, ctx, "set_stage",
+                    {"application_id": 1, "stage": "待面试"}, "推进"))
+                self.assertEqual(one["proposal_id"], two["proposal_id"])
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0], 1)
+            finally:
+                _close_physical(conn)
+
+    def test_roster_can_be_limited_to_candidates(self):
+        from app import export
+
+        with tempfile.TemporaryDirectory() as d:
+            conn = db.connect(os.path.join(d, "workbench.db"))
+            try:
+                a = db.insert_candidate(conn, {"identity_key": "cap:r-a", "name": "甲",
+                                               "school": "A大学", "edu_level": "硕士"})
+                db.insert_candidate(conn, {"identity_key": "cap:r-b", "name": "乙",
+                                           "school": "B大学", "edu_level": "本科"})
+                headers, rows, tcols, n = export.build_roster(
+                    conn, candidate_ids=[a], include_archived=True)
+                self.assertEqual(n, 1)
+                self.assertEqual(rows[0][3], "甲")
             finally:
                 _close_physical(conn)
 

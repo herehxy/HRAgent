@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import urllib.parse
@@ -240,6 +241,32 @@ TOOL_SPECS = [
           {"candidate_ids": {"type": "array", "items": {"type": "string"},
                              "description": "候选人 id 或姓名列表，最多 20 个"}},
            ["candidate_ids"]),
+    _spec("list_applications",
+          "列出投递明细：一次看清某人投了哪些岗位、每次投递时间/阶段/档位。"
+          "multi_only=true 只返回同一人有 2 条及以上投递的分组（回答“谁一人多投”用这个）。",
+          {"candidate_id": {"type": "integer"},
+           "candidate": {"type": "string", "description": "姓名或 id（二选一）"},
+           "job": {"type": "string", "description": "岗位名；留空=全部"},
+           "stage": {"type": "string", "description": "阶段；留空=全部"},
+           "date_from": {"type": "string", "description": "投递开始 YYYY-MM-DD"},
+           "date_to": {"type": "string", "description": "投递结束 YYYY-MM-DD（含当天）"},
+           "multi_only": {"type": "boolean", "description": "只看一人多投"},
+           "limit": {"type": "integer", "description": "最多返回条数，默认 100"}},
+          []),
+    _spec("scan_duplicate_candidates",
+          "扫描全库疑似重复档案：按姓名/手机号/邮箱分组，返回组内候选人及证据。"
+          "**不自动合并**；需要合并时用 merge_candidates 生成待确认提案。",
+          {"by": {"type": "string", "description": "name/phone/email/all，默认 all"},
+           "include_archived": {"type": "boolean", "description": "是否包含已归档档案"},
+           "limit": {"type": "integer", "description": "最多返回多少组，默认 50"}},
+          []),
+    _spec("recruit_analytics",
+          "招聘数据分析：阶段漏斗、相邻阶段转化率、平均招聘周期、渠道转化。"
+          "可按岗位/投递时间筛选。按**当前阶段快照**统计，不是历史流水。",
+          {"job": {"type": "string", "description": "岗位名；留空=全部"},
+           "date_from": {"type": "string", "description": "投递开始 YYYY-MM-DD"},
+           "date_to": {"type": "string", "description": "投递结束 YYYY-MM-DD（含当天）"}},
+          []),
     _spec("get_source_mail",
           "读取候选人的来源邮件：主题、发件人、收信时间、正文。"
           "candidate_id 或 message_id 二选一；正文默认取前 8000 字，full=true 取完整。"
@@ -1074,7 +1101,12 @@ def _err(msg: str, hint: str | None = None) -> str:
 
 
 def _propose(conn, ctx: ToolCtx, tool: str, args: dict, summary: str, risk: str = "中") -> str:
-    pid = db.create_proposal(conn, ctx.session_id, tool, args, summary, risk)
+    # 同一个写操作在重复生成/多轮追问时不能堆出多条一模一样的待确认提案。
+    _fp = hashlib.sha1(
+        (str(tool) + "|" + json.dumps(args, sort_keys=True, ensure_ascii=False,
+                                      default=str)).encode("utf-8")).hexdigest()[:20]
+    pid = db.create_proposal(conn, ctx.session_id, tool, args, summary, risk,
+                             dedup_key=f"agent:{_fp}")
     return _ok({
         "status": "pending_confirmation",
         "proposal_id": pid,
@@ -1762,6 +1794,161 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             return _ok({"count": len(items), "items": items,
                         "errors": errors,
                         "note": "多人档案已批量读取；缺失的人放在 errors 里。"})
+
+        if name == "list_applications":
+            cid = None
+            key = args.get("candidate_id") if args.get("candidate_id") is not None else args.get("candidate")
+            if key not in (None, ""):
+                cid, _cerr = _resolve_cid(conn, key)
+                if _cerr:
+                    return _err(_cerr["error"], _cerr.get("hint"))
+            jid = None
+            job = str(args.get("job") or "").strip()
+            if job:
+                jid, _jerr = _resolve_job_id(conn, job)
+                if _jerr:
+                    return _err(_jerr)
+            rows = db.list_applications(conn, cid=cid, job_id=jid,
+                                        stage=(str(args.get("stage") or "").strip() or None))
+            df = _resolve_date_arg(args.get("date_from"))
+            dt = _resolve_date_arg(args.get("date_to"))
+            def _in_range(r):
+                day = str(r.get("applied_at") or "")[:10]
+                if df and day and day < df:
+                    return False
+                if dt and day and day > dt:
+                    return False
+                return True
+            rows = [r for r in rows if _in_range(r)]
+            def _app_item(r):
+                return {"application_id": r.get("id"), "candidate_id": r.get("candidate_id"),
+                        "name": r.get("candidate_name"), "job": r.get("job_title") or "待指定",
+                        "applied_at": r.get("applied_at"), "stage": r.get("stage"),
+                        "status": r.get("status"), "channel": r.get("channel"),
+                        "tier": r.get("tier_final") or r.get("tier_suggested"),
+                        "outcome": r.get("outcome"), "sign_status": r.get("sign_status")}
+            if bool(args.get("multi_only")):
+                grouped = {}
+                for r in rows:
+                    _cid = int(r.get("candidate_id") or 0)
+                    if _cid:
+                        grouped.setdefault(_cid, []).append(r)
+                groups = [{"candidate_id": _cid,
+                           "name": (v[0].get("candidate_name") or ""),
+                           "count": len(v),
+                           "applications": [_app_item(x) for x in v]}
+                          for _cid, v in grouped.items() if len(v) > 1]
+                groups.sort(key=lambda g: (-g["count"], g["candidate_id"]))
+                limit = max(1, min(200, int(args.get("limit") or 100)))
+                return _ok({"count": len(groups), "groups": groups[:limit],
+                            "note": "只列出当前未归档候选人的投递；同一人多条投递属于正常业务，"
+                                    "不代表重复档案。看某人明细可去掉 multi_only 并传 candidate。"})
+            limit = max(1, min(300, int(args.get("limit") or 100)))
+            return _ok({"count": len(rows), "items": [_app_item(r) for r in rows[:limit]],
+                        "note": "按投递时间倒序；application_id 可用于改阶段等后续操作。"})
+
+        if name == "scan_duplicate_candidates":
+            by = str(args.get("by") or "all").lower()
+            include_archived = bool(args.get("include_archived"))
+            limit = max(1, min(200, int(args.get("limit") or 50)))
+            arch = "" if include_archived else " AND COALESCE(archived_at, '') = ''"
+            groups, seen = [], set()
+            def _add(reason, key, raw_ids):
+                ids = sorted({int(x) for x in raw_ids})
+                if len(ids) < 2 or tuple(ids) in seen:
+                    return
+                seen.add(tuple(ids))
+                ph = ",".join("?" * len(ids))
+                rows2 = conn.execute(
+                    "SELECT id, name, school, major, edu_level FROM candidates "
+                    "WHERE id IN (" + ph + ")", ids).fetchall()
+                groups.append({"reason": reason, "key": str(key),
+                               "count": len(rows2),
+                               "candidates": [{"id": r["id"], "name": r["name"],
+                                               "school": r["school"], "major": r["major"],
+                                               "education": r["edu_level"]} for r in rows2]})
+            if by in ("all", "name"):
+                rows = conn.execute(
+                    "SELECT TRIM(name) AS n, GROUP_CONCAT(id) AS ids FROM candidates "
+                    "WHERE merged_into IS NULL AND TRIM(COALESCE(name,'')) "
+                    "NOT IN ('', '未识别', '未知')" + arch +
+                    " GROUP BY TRIM(name) HAVING COUNT(*) > 1 "
+                    "ORDER BY COUNT(*) DESC LIMIT ?", (limit,)).fetchall()
+                for r in rows:
+                    _add("姓名相同", r["n"], str(r["ids"]).split(","))
+            for col, label, wanted in (("phone_bidx", "手机号相同", "phone"),
+                                       ("email_bidx", "邮箱相同", "email")):
+                if by not in ("all", wanted):
+                    continue
+                rows = conn.execute(
+                    "SELECT " + col + " AS k, GROUP_CONCAT(id) AS ids FROM candidates "
+                    "WHERE merged_into IS NULL AND COALESCE(" + col + ",'') <> ''" +
+                    arch + " GROUP BY " + col + " HAVING COUNT(*) > 1 "
+                    "ORDER BY COUNT(*) DESC LIMIT ?", (limit,)).fetchall()
+                for r in rows:
+                    _add(label, "（已脱敏）", str(r["ids"]).split(","))
+            groups = groups[:limit]
+            return _ok({"count": len(groups), "groups": groups,
+                        "note": "只做疑似提示，**没有自动合并**。同名可能是两个人；"
+                                "确认是同一人后，用 merge_candidates 提交待确认提案。"})
+
+        if name == "recruit_analytics":
+            job = str(args.get("job") or "").strip()
+            jid = None
+            if job:
+                jid, _jerr = _resolve_job_id(conn, job)
+                if _jerr:
+                    return _err(_jerr)
+            df = _resolve_date_arg(args.get("date_from"))
+            dt = _resolve_date_arg(args.get("date_to"))
+            where, qa = ["1=1"], []
+            if jid:
+                where.append("a.job_id = ?")
+                qa.append(jid)
+            if df:
+                where.append("substr(a.applied_at,1,10) >= ?")
+                qa.append(df)
+            if dt:
+                where.append("substr(a.applied_at,1,10) <= ?")
+                qa.append(dt)
+            rows = conn.execute(
+                "SELECT a.*, c.archived_at AS cand_archived FROM applications a "
+                "LEFT JOIN candidates c ON c.id = a.candidate_id WHERE " + " AND ".join(where),
+                qa).fetchall()
+            rows = [r for r in rows if not r["cand_archived"]]
+            total = len(rows)
+            order = stages_mod.all_stages()
+            counts = {s: 0 for s in order}
+            for r in rows:
+                st = stages_mod.normalize_stage(r["stage"])
+                if st in counts:
+                    counts[st] += 1
+            funnel, prev = [], None
+            for st in order:
+                n = counts.get(st, 0)
+                funnel.append({"stage": st, "count": n,
+                               "rate_from_prev": (round(n / prev, 3) if prev else None)})
+                prev = n if n else None
+            days = []
+            for r in rows:
+                ap, sg = str(r["applied_at"] or "")[:10], str(r["signed_at"] or "")[:10]
+                if ap and sg:
+                    try:
+                        days.append((date.fromisoformat(sg) - date.fromisoformat(ap)).days)
+                    except ValueError:
+                        pass
+            by_ch = {}
+            for r in rows:
+                ch = str(r["channel"] or "未知")
+                d = by_ch.setdefault(ch, {"channel": ch, "applications": 0, "signed": 0})
+                d["applications"] += 1
+                if r["sign_status"] == "已签约" or r["outcome"] == "已签约":
+                    d["signed"] += 1
+            chans = sorted(by_ch.values(), key=lambda x: -x["applications"])
+            return _ok({"total_applications": total, "funnel": funnel,
+                        "avg_days_to_sign": (round(sum(days) / len(days), 1) if days else None),
+                        "signed_samples": len(days), "by_channel": chans,
+                        "note": "漏斗按**当前阶段快照**统计；平均招聘周期只算已签约且有投递日期的记录。"})
 
         if name == "get_source_mail":
             mid = str(args.get("message_id") or "").strip()
