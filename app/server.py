@@ -1270,17 +1270,10 @@ def _edu_check(item: dict, jobs_map: dict) -> dict | None:
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
-def _store_upload_and_ingest(body: bytes, safe: str, jd, tiers,
-                             use_llm: bool, conf: dict | None) -> tuple[str, dict]:
-    """落盘 + 解析（**同步、耗时**：含 OCR 与模型调用）。
-
-    放进线程池跑的原因见 `api_upload`——它是整个服务里唯一会在事件循环里
-    长时间阻塞的一段，期间进度轮询和别的上传都会一起卡住。
-    """
+def _save_upload(body: bytes, safe: str) -> tuple[str, str, str]:
+    """只落盘（很快），返回 (上传临时目录, 目标路径, 落盘文件名)。"""
     import os as _os
-    import shutil as _shutil
     import time as _t
-    from . import ingest as _ing
     inbox = _os.path.join(DATA_DIR, "inbox")
     # 每次上传用**独立子目录**：原来所有上传都写进共享 inbox 再重扫整个目录，
     # 于是每次上传都会把历史文件重新 ingest 一遍（磁盘只增不减），
@@ -1295,20 +1288,57 @@ def _store_upload_and_ingest(body: bytes, safe: str, jd, tiers,
     while _paths.lp_exists(dest):
         dest = _os.path.join(upload_dir, _paths.fit_name(upload_dir, f"{stamp}_{i}_{safe}"))
         i += 1
+    with _paths.lp_open(dest, "wb") as fh:
+        fh.write(body)
+    return upload_dir, dest, _os.path.basename(dest)
+
+
+def _ingest_upload(upload_dir: str, jd, tiers, use_llm: bool,
+                   conf: dict | None) -> dict:
+    from . import ingest as _ing
+    with _UPLOAD_INGEST_LOCK:
+        return _ing.ingest_dir(upload_dir, jd, tiers, DB_PATH, job_id=None,
+                               use_llm=use_llm, llm_conf=conf)
+
+
+def _store_upload_and_ingest(body: bytes, safe: str, jd, tiers,
+                             use_llm: bool, conf: dict | None) -> tuple[str, dict]:
+    """落盘 + 解析（**同步、耗时**：含 OCR 与模型调用）。"""
+    import shutil as _shutil
+    upload_dir, _dest, stored = _save_upload(body, safe)
     try:
-        with _paths.lp_open(dest, "wb") as fh:
-            fh.write(body)
-        with _UPLOAD_INGEST_LOCK:
-            rep = _ing.ingest_dir(upload_dir, jd, tiers, DB_PATH, job_id=None,
-                                  use_llm=use_llm, llm_conf=conf)
+        rep = _ingest_upload(upload_dir, jd, tiers, use_llm, conf)
     finally:
-        # 原件已在 ingest 内复制到归档区（archived_path），临时上传目录可以删。
         _shutil.rmtree(upload_dir, ignore_errors=True)
-    return _os.path.basename(dest), rep
+    return stored, rep
+
+
+def _start_upload_task(body: bytes, safe: str, jd, tiers,
+                       use_llm: bool, conf: dict | None) -> tuple[str, str]:
+    """保存后立即返回任务号，OCR/模型解析在后台跑；供聊天上传实时反馈用。"""
+    import shutil as _shutil
+    upload_dir, _dest, stored = _save_upload(body, safe)
+    tid = _progress_new(f"解析简历：{stored}", 1, kind="ingest",
+                        meta={"file": stored})
+
+    def _work() -> None:
+        try:
+            rep = _ingest_upload(upload_dir, jd, tiers, use_llm, conf)
+            _progress_set(tid, done=1, status="done", message="解析完成",
+                          extra={"result": rep})
+        except Exception as exc:                           # noqa: BLE001
+            _progress_set(tid, failed=1, status="error",
+                          message=f"解析失败：{type(exc).__name__}: {exc}")
+        finally:
+            _shutil.rmtree(upload_dir, ignore_errors=True)
+
+    threading.Thread(target=_work, name="upload-ingest", daemon=True).start()
+    return tid, stored
 
 
 @app.post("/api/upload")
 async def api_upload(request: Request, name: str = Query(...),
+                     async_mode: bool = Query(default=False, alias="async"),
                      x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                      x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     """上传一个简历文件（裸字节，文件名放?name=）。
@@ -1355,6 +1385,15 @@ async def api_upload(request: Request, name: str = Query(...),
         _c = llm.load_cfg('extract')
         _conf = {"api_key": _c.get("api_key"), "base_url": _c.get("base_url"),
                  "model": _c.get("model")}
+    if async_mode:
+        try:
+            tid, stored = _start_upload_task(body, safe, jd, tiers, _use_llm, _conf)
+        except Exception as exc:                           # noqa: BLE001
+            raise HTTPException(status_code=500,
+                                detail=f"上传落盘失败：{type(exc).__name__}: {exc}")
+        return {"ok": True, "pending": True, "task_id": tid,
+                "stored": stored, "filename": safe,
+                "hint": "文件已保存，正在后台解析；完成后会更新上传卡片。"}
     stored, rep = await run_in_threadpool(_store_upload_and_ingest, body, safe, jd, tiers,
                                           _use_llm, _conf)
     return {"ok": True, "stored": stored,
@@ -5433,6 +5472,8 @@ class ChatReq(BaseModel):
     history: list[dict] | None = None
     #: 断点续跑：上一轮因预算停止时，服务端保留了工具结果摘要
     resume: bool = False
+    #: 本轮附加上下文（例如用户刚上传的文件），只作为 system 注入，不改用户原话
+    extra_context: str | None = None
     # v4.0.17：一条会话的稳定 id。前端“新对话”生成，后续每轮都带同一个值；
     # 不传时仍按旧行为每次生成随机 id（兼容脚本/旧客户端）。
     session_id: str | None = None
@@ -5458,7 +5499,8 @@ def api_agent_chat(req: ChatReq, x_tp_token: str | None = Header(default=None, a
             ctx.session_id = _cid
     _begin_agent_run(ctx, req.message)
     try:
-        out = run_agent(req.message, ctx, req.history, resume=bool(req.resume))
+        out = run_agent(req.message, ctx, req.history, resume=bool(req.resume),
+                        extra_context=req.extra_context)
     except Exception as exc:                              # noqa: BLE001
         _abort_agent_run(ctx.run_id, f"{type(exc).__name__}: {exc}")
         raise
@@ -5542,7 +5584,8 @@ def api_agent_chat_stream(req: ChatReq,
     def _work() -> None:
         try:
             out = run_agent(req.message, ctx, req.history, emit=_emit,
-                            should_stop=cancel.is_set, resume=bool(req.resume))
+                            should_stop=cancel.is_set, resume=bool(req.resume),
+                            extra_context=req.extra_context)
             out["session"] = {"role": s["role"], "mode": s.get("mode")}
             q.put({"type": "done", **out})
         except Exception as exc:                              # noqa: BLE001

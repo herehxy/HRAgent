@@ -3288,7 +3288,26 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   font-size:19px;line-height:22px;text-align:center;cursor:pointer;
   border-radius:8px;z-index:2}
 .chatadd-inline:hover{background:var(--fill-hover);color:var(--ink)}
+.chatadd-inline{user-select:none}
+.chatwrap .chatinput{padding-bottom:6px}
 /* 输入框下方的会话状态：居中一行（模式 / 对话轮数 / 整会话缓存命中率） */
-.chatstatus{padding:8px 24px 10px;text-align:center;font-size:12px;
-  color:var(--ink-3);line-height:1.5;min-height:20px}
+.chatstatus{padding:2px 24px 6px;text-align:center;font-size:13px;
+  color:var(--ink-3);line-height:1.5;min-height:19px}
+/* 上传卡片：图片即时预览；文档显示文件图标与解析进度 */
+.upload-card{display:flex;align-items:center;gap:10px;max-width:540px;
+  margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:12px;
+  background:var(--surface-2)}
+.upload-thumb{width:56px;height:56px;border-radius:8px;object-fit:cover;flex:none;
+  background:var(--surface)}
+.upload-file{display:flex;align-items:center;justify-content:center;font-size:24px}
+.upload-info{min-width:0;flex:1}
+.upload-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.upload-meta{font-size:12px;color:var(--ink-3);margin-top:2px}
+.upload-bar{height:4px;background:var(--fill-hover);border-radius:2px;
+  margin-top:6px;overflow:hidden}
+.upload-bar i{display:block;height:100%;width:0;background:var(--accent);
+  transition:width .25s}
+.upload-card.done .upload-bar i{background:var(--ok)}
+.upload-card.error .upload-meta{color:var(--bad)}
 """

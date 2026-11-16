@@ -1760,10 +1760,24 @@ function fullDetail(d){
   /* 同一份简历重复投递：documents 只有一份原件，但 submission_events 记录了
      每次投递时间；这里展示时间线，不再重复列出简历文件。 */
   var subs = d.submissions || [];
-  var subRows = subs.map(function(s){
+  var _appsById = {};
+  (d.applications || []).forEach(function(a){ _appsById[a.id] = a; });
+  var _subList = (subs || []).slice();
+  if(!_subList.length && (d.applications || []).length){
+    _subList = (d.applications || []).map(function(a){
+      return {submitted_at: a.applied_at, channel: a.channel,
+              application_id: a.id, file_name: ''};
+    });
+  }
+  var subRows = _subList.map(function(s){
     var when = String(s.submitted_at || '').slice(0, 16).replace('T', ' ');
+    var app = _appsById[s.application_id] || {};
+    var job = app.job_title || (app.job_id ? '' : '待指定');
+    var stage = app.stage || '';
     return '<span class="srcfile">' +
       '<span class="srcmeta">' + esc(when) + '</span>' +
+      (job ? '<span class="srcmeta">' + esc(job) + '</span>' : '') +
+      (stage ? '<span class="srcmeta">' + esc(stage) + '</span>' : '') +
       (s.duplicate
         ? '<span class="srcmeta" style="color:var(--accent)">重复投递 · 简历相同</span>'
         : (s.channel ? '<span class="srcmeta">' + esc(s.channel) + '</span>' : '')) +
@@ -2058,15 +2072,19 @@ function fullDetail(d){
         esc(d.note || '') + '</textarea>' +
     '</div>' +
 
-    /* 流程事实 → 判断结论 → 能力证据 → 原始材料 → 审计，按 HR 的阅读顺序排列。 */
-    '<div class="sec"><h3>投递记录（' + apps.length + '）</h3>' +
-      (apps.length ? apps.map(function(a){
-        return '<div class="doc"><span class="doc-n">#' + a.id + '　' +
-          esc(a.job_title || '待指定') + '　' + esc(a.stage || '—') + '　' +
-          esc(String(a.applied_at || '').slice(0, 16)) + '</span>' +
-          '<span class="doc-a"><span class="chipl gray">' +
-          esc(a.tier_final || a.tier_suggested || '—') + '</span></span></div>';
-      }).join('') : '<div class="hint">无</div>') +
+    /* 业务方 2026-11-16：备注右侧这块改成「邮件发送记录」，
+       投递时间/岗位/阶段已并入上方「投递记录」时间线，不再重复一张卡。 */
+    '<div class="sec"><h3>邮件发送记录（' + ((emailState.items || []).length) + '）</h3>' +
+      ((emailState.items || []).length
+        ? emailState.items.map(function(e){
+            return '<div class="doc"><span class="doc-n">' +
+              esc(String(e.at || '').replace('T', ' ').slice(0, 16)) + '　' +
+              esc(e.subject || '（无主题）') + '</span>' +
+              '<span class="doc-a"><span class="chipl ' +
+              (e.ok ? 'green' : 'gray') + '">' + (e.ok ? '成功' : '失败') +
+              '</span></span></div>';
+          }).join('')
+        : '<div class="hint">还没有发送过邮件</div>') +
     '</div>' +
 
     /* 系统分析与技能属于**证据**，不是**结论**：整页只有档位是"用力"的地方，
@@ -8386,8 +8404,8 @@ async function initChat(){
           '<input type="file" id="chatFile" style="display:none" ' +
             'accept=".pdf,.doc,.docx,.txt,.md,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff,.xlsx,.xls">' +
           '<div class="ciwrap">' +
-          '<button type="button" class="chatadd-inline" id="chatAttach" ' +
-            'title="上传简历，或直接在输入框粘贴图片/文件">+</button>' +
+          '<label class="chatadd-inline" id="chatAttach" for="chatFile" ' +
+            'title="上传简历，或直接在输入框粘贴图片/文件">+</label>' +
           '<textarea id="chatIn" rows="3" placeholder="输入指令或问题，Enter 发送"></textarea>' +
           '<button class="btn primary" id="chatSend" aria-label="发送" title="发送">' +
             '<svg class="ci-ico ci-enter" viewBox="0 0 24 24" aria-hidden="true">' +
@@ -8431,9 +8449,8 @@ async function initChat(){
       else askAgent();
     });
     document.getElementById('chatNew').addEventListener('click', newChat);
-    var _att = document.getElementById('chatAttach'), _cf = document.getElementById('chatFile');
-    if(_att && _cf){
-      _att.addEventListener('click', function(){ _cf.click(); });
+    var _cf = document.getElementById('chatFile');
+    if(_cf){
       _cf.addEventListener('change', function(){
         var f = _cf.files && _cf.files[0]; _cf.value = '';
         if(f) uploadChatFile(f);
@@ -9503,7 +9520,7 @@ function editUserMessage(btn){
   node.querySelector('[data-edit-cancel]').addEventListener('click', cancel);
   node.querySelector('[data-edit-save]').addEventListener('click', save);
 }
-async function askAgentNonStream(q, holder, gen, resumeFlag){
+async function askAgentNonStream(q, holder, gen, resumeFlag, extraCtx){
   if(gen == null) gen = ++CHAT_GEN;
   if(gen !== CHAT_GEN) return;
   var convId = CHAT_CONV_ID;
@@ -9516,7 +9533,7 @@ async function askAgentNonStream(q, holder, gen, resumeFlag){
   var r = await api('/api/agent/chat', {method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({message: q, history: CHAT, session_id: convId,
-                          resume: !!resumeFlag}),
+                          resume: !!resumeFlag, extra_context: extraCtx || ''}),
     signal: ctrl.signal});
   if(CHAT_CTRL === ctrl){
     CHAT_CTRL = null;
@@ -9542,43 +9559,167 @@ async function askAgentNonStream(q, holder, gen, resumeFlag){
   }
   renderAgentResult(holder, r, q);
 }
-/* 聊天内上传：一个文件一个请求（服务端不收 multipart），上传后让助手检查入库结果。 */
+/* 聊天内上传：先渲染预览卡片，再异步解析；**不自动发消息**，等用户下一条指令。 */
+var CHAT_UPLOADING = false;
+var CHAT_PENDING_UPLOADS = [];
+function _uploadDisplayName(file){
+  var n = String(file.name || '').trim();
+  if(!n || /^image\.[A-Za-z0-9]+$/i.test(n) || /^blob$/i.test(n)){
+    return (String(file.type || '').indexOf('image/') === 0) ? '粘贴的图片' : '上传的文件';
+  }
+  return n;
+}
+function _uploadCard(file, name){
+  var log = document.getElementById('chatLog');
+  if(!log) return null;
+  var welcome = document.getElementById('chatWelcome');
+  if(welcome) welcome.remove();
+  var card = document.createElement('div');
+  card.className = 'upload-card';
+  var thumb;
+  if(String(file.type || '').indexOf('image/') === 0){
+    var url = URL.createObjectURL(file);
+    card._objUrl = url;
+    thumb = '<img class="upload-thumb" src="' + url + '" alt="">';
+  } else {
+    thumb = '<div class="upload-thumb upload-file">📄</div>';
+  }
+  card.innerHTML = thumb +
+    '<div class="upload-info"><div class="upload-name">' + esc(name) + '</div>' +
+    '<div class="upload-meta">正在上传…</div>' +
+    '<div class="upload-bar"><i></i></div></div>';
+  log.appendChild(card);
+  log.scrollTop = log.scrollHeight;
+  syncChatSidebar();
+  return card;
+}
+function _uploadSet(card, text, pct, state){
+  if(!card) return;
+  var meta = card.querySelector('.upload-meta');
+  if(meta) meta.textContent = text;
+  var bar = card.querySelector('.upload-bar i');
+  if(bar) bar.style.width = Math.max(0, Math.min(100, Number(pct) || 0)) + '%';
+  card.classList.toggle('done', state === 'done');
+  card.classList.toggle('error', state === 'error');
+}
+function _uploadSummary(rep){
+  try{
+    if(!rep || typeof rep !== 'object') return '';
+    var d = (rep.details || [])[0] || {};
+    return d.name || rep.name || (rep.added ? ('新增 ' + rep.added + ' 人') : '');
+  }catch(e){ return ''; }
+}
+function _uploadRemember(name, stored, status, summary){
+  CHAT_PENDING_UPLOADS.push({name: name, stored: stored || name,
+                             status: status, summary: summary || ''});
+  if(CHAT_PENDING_UPLOADS.length > 8){
+    CHAT_PENDING_UPLOADS = CHAT_PENDING_UPLOADS.slice(-8);
+  }
+}
+function _pendingUploadContext(){
+  if(!CHAT_PENDING_UPLOADS.length) return '';
+  var lines = CHAT_PENDING_UPLOADS.map(function(x){
+    return '- ' + x.name + '（' + (x.status === 'done'
+      ? ('已解析' + (x.summary ? ('：' + x.summary) : '')) : '解析中') + '）';
+  });
+  return '用户刚上传了以下文件：\n' + lines.join('\n') +
+         '\n请结合这些文件回答；不要声称看不到文件。';
+}
 async function uploadChatFile(file){
   if(!file) return;
   if(file.size > 20 * 1024 * 1024){
     toast('文件超过 20MB，请压缩后再上传', 'warn'); return;
   }
-  var name = file.name || '';
-  if(!/\.[A-Za-z0-9]+$/.test(name)){
-    var _ext = (String(file.type || '').split('/')[1] || 'png').replace(/[^A-Za-z0-9]/g, '');
-    name = '粘贴文件-' + Date.now() + '.' + (_ext || 'png');
+  if(CHAT_UPLOADING){
+    toast('正在上传另一个文件，请稍候', 'info'); return;
   }
-  toast('正在上传并解析：' + name + '…', 'info');
+  var display = _uploadDisplayName(file);
+  var sendName = String(file.name || '').trim();
+  if(!/\.[A-Za-z0-9]+$/.test(sendName)){
+    var _ext = (String(file.type || '').split('/')[1] || 'png')
+      .replace(/[^A-Za-z0-9]/g, '');
+    sendName = (sendName || '粘贴文件') + '.' + (_ext || 'png');
+  }
+  var card = _uploadCard(file, display);
+  if(!card) return;
+  var att = document.getElementById('chatAttach');
+  if(att) att.style.pointerEvents = 'none';
+  CHAT_UPLOADING = true;
+  var t0 = Date.now();
+  _uploadSet(card, '正在上传… 0s', 3, 'running');
+  var timer = setInterval(function(){
+    if(card._done) return;
+    _uploadSet(card, '正在上传… ' + Math.round((Date.now() - t0) / 1000) + 's', 5, 'running');
+  }, 1000);
   var resp;
   try{
-    resp = await fetch('/api/upload?name=' + encodeURIComponent(name), {
+    resp = await fetch('/api/upload?async=1&name=' + encodeURIComponent(sendName), {
       method: 'POST', headers: hdr({'Content-Type': 'application/octet-stream'}),
       body: file
     });
   }catch(e){
-    toast('上传失败：' + String(e && e.message || e), 'danger'); return;
+    CHAT_UPLOADING = false;
+    if(timer){ clearInterval(timer); timer = null; }
+    if(att) att.style.pointerEvents = '';
+    card._done = true;
+    var _msg = String(e && e.message || e);
+    _uploadSet(card, '上传失败：' + _msg, 100, 'error');
+    toast('上传失败：' + _msg, 'danger');
+    return;
   }
   var j = {};
   try{ j = await resp.json(); }catch(e){ j = {}; }
   if(!resp.ok || !j.ok){
-    toast('上传失败：' + (j.detail || j.error || ('HTTP ' + resp.status)), 'danger');
+    CHAT_UPLOADING = false;
+    if(timer){ clearInterval(timer); timer = null; }
+    if(att) att.style.pointerEvents = '';
+    card._done = true;
+    var _err = (j.detail || j.error || ('HTTP ' + resp.status));
+    _uploadSet(card, '上传失败：' + _err, 100, 'error');
+    toast('上传失败：' + _err, 'danger');
     return;
   }
-  toast('已上传并解析：' + (j.stored || name), 'ok');
-  askAgent({display: '已上传：' + name,
-    send: '我刚上传了简历「' + name + '」，请检查入库结果并告诉我是否成功；'
-        + '如需要补充信息请提示我。'});
+  CHAT_UPLOADING = false;
+  if(timer){ clearInterval(timer); timer = null; }
+  if(att) att.style.pointerEvents = '';
+  if(!j.pending || !j.task_id){
+    card._done = true;
+    _uploadSet(card, '解析完成', 100, 'done');
+    _uploadRemember(display, j.stored || sendName, 'done', _uploadSummary(j.result));
+    toast('已解析：' + display, 'ok');
+    return;
+  }
+  _uploadSet(card, '已上传，后台解析中…', 8, 'running');
+  var started = Date.now();
+  var poll = setInterval(async function(){
+    var t = await api('/api/tasks/' + encodeURIComponent(j.task_id));
+    if(!t || t.__err) return;
+    var sec = Math.round((Date.now() - started) / 1000);
+    if(t.status === 'running'){
+      _uploadSet(card, (t.message || '正在解析…') + ' ' + sec + 's',
+                 t.percent || 12, 'running');
+      return;
+    }
+    clearInterval(poll);
+    card._done = true;
+    if(t.status === 'done'){
+      var who = _uploadSummary(t.result);
+      _uploadSet(card, '解析完成' + (who ? ('：' + who) : ''), 100, 'done');
+      _uploadRemember(display, j.stored || sendName, 'done', who);
+      toast('已解析：' + display, 'ok');
+    } else {
+      _uploadSet(card, '解析失败：' + (t.message || '未知错误'), 100, 'error');
+      _uploadRemember(display, j.stored || sendName, 'error', t.message || '');
+      toast('解析失败：' + display, 'danger');
+    }
+  }, 1200);
 }
 async function askAgent(override){
   var inp = document.getElementById('chatIn');
   var sendQ = override ? String(override.send || '') : (inp.value || '').trim();
   var q = override ? String(override.display || sendQ) : sendQ;
   var resumeFlag = !!(override && override.resume);
+  var extraCtx = _pendingUploadContext();
   if(!sendQ) return;
   if(CHAT_CTRL){
     toast(RUN_CONV_ID && RUN_CONV_ID !== CHAT_CONV_ID
@@ -9712,8 +9853,9 @@ async function askAgent(override){
     var resp = await fetch('/api/agent/chat/stream', {method:'POST',
       headers: hdr(),
       body: JSON.stringify({message: sendQ, history: CHAT, session_id: convId,
-                            resume: resumeFlag}),
+                            resume: resumeFlag, extra_context: extraCtx}),
       signal: CHAT_CTRL.signal});
+  if(extraCtx) CHAT_PENDING_UPLOADS = [];
     if(resp.status === 401 && AUTH_ENABLED){
       setToken(''); ME = null;
       if(!LOGIN_SHOWN) showLogin('登录已失效，请重新登录');
@@ -9777,7 +9919,7 @@ async function askAgent(override){
       renderTrace(null);
       return;
     }
-    await askAgentNonStream(sendQ, live, gen, resumeFlag);
+    await askAgentNonStream(sendQ, live, gen, resumeFlag, extraCtx);
   }
 }
 function renderDraftCards(holder, drafts){

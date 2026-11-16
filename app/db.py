@@ -4332,17 +4332,24 @@ def candidate_email_state(conn: sqlite3.Connection, cid: int) -> dict:
     rows = conn.execute(
         "SELECT ts, COALESCE(after,'') AS a, COALESCE(before,'') AS b FROM audit_log "
         "WHERE entity='mail' AND action='send' AND entity_id=? "
-        "AND (before='ok' OR instr(COALESCE(after,''),'成功') > 0) "
-        "ORDER BY id DESC LIMIT 20",
+        "ORDER BY id DESC LIMIT 50",
         (str(cid),)).fetchall()
-    if not rows:
-        return {"sent": False, "count": 0, "last_at": "", "last_subject": ""}
-    subject = ""
-    m = re.search(r"主题：([^｜]*)", rows[0]["a"])
-    if m:
-        subject = m.group(1).strip()
-    return {"sent": True, "count": len(rows), "last_at": rows[0]["ts"] or "",
-            "last_subject": subject}
+    items: list[dict] = []
+    for r in rows:
+        after = r["a"] or ""
+        ok = (r["b"] == "ok") or ("成功" in after)
+        subject = ""
+        m = re.search(r"主题：([^｜]*)", after)
+        if m:
+            subject = m.group(1).strip()
+        items.append({"at": r["ts"] or "", "subject": subject, "ok": ok})
+    sent = [x for x in items if x["ok"]]
+    if not sent:
+        return {"sent": False, "count": 0, "last_at": "", "last_subject": "",
+                "items": items[:20]}
+    return {"sent": True, "count": len(sent),
+            "last_at": sent[0]["at"], "last_subject": sent[0]["subject"],
+            "items": items[:20]}
 
 
 # ============================================================
