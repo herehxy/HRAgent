@@ -5070,6 +5070,56 @@ def conversation_memory(conn: sqlite3.Connection, cid: str, operator: str,
     return "\n".join(lines)
 
 
+def begin_agent_run(conn: sqlite3.Connection, session_id: str, operator: str,
+                    question: str) -> int:
+    """提问时就落库：先建会话行 + 一条 running 运行记录，返回记录 id。
+
+    为什么必须提前写：会话列表与历史都从 `agent_runs` 组装。若等整轮跑完
+    才写，用户在生成过程中刷新页面（SSE 断开）时，这条对话在库里根本不存在，
+    界面上就会“未完成的对话突然没了”。提前写之后，刷新/断线至少能看到问题，
+    收尾时再用 `log_agent_run(run_id=...)` 回填答案。
+    """
+    session_id = str(session_id or "").strip()[:64]
+    operator = str(operator or "HR").strip()[:64] or "HR"
+    stamp = now()
+    ensure_conversation(conn, session_id, operator, question, stamp)
+    cur = conn.execute(
+        """INSERT INTO agent_runs
+           (session_id, question, answer, thinking, context_json, model,
+            tool_calls, rounds, tokens_in, tokens_out, cache_hit_tokens,
+            cache_reported, tool_tokens, tool_ratio, tool_calls_count,
+            tool_errors, tool_error_rate, context_budget, context_trimmed,
+            alert_level, alerts_json, metrics_json,
+            latency_ms, status, mode, operator, ts)
+           VALUES (?,?,'','','',NULL,'[]',0,0,0,0,0,0,0,0,0,0,0,0,'','[]','{}',0,'running','',?,?)""",
+        (session_id, question, operator, stamp))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def abort_agent_run(conn: sqlite3.Connection, run_id: int | None,
+                    message: str = "") -> None:
+    """生成过程抛异常时把 running 记录收尾，避免它永远停在“生成中”。"""
+    if not run_id:
+        return
+    note = f"（生成失败：{message}）" if message else "（生成失败）"
+    conn.execute(
+        "UPDATE agent_runs SET status='error', answer=?, ts=? "
+        "WHERE id=? AND status='running'", (note, now(), int(run_id)))
+    conn.commit()
+
+
+def mark_interrupted_agent_runs(conn: sqlite3.Connection) -> int:
+    """启动时把上次进程遗留的 running 记录标成中断（单实例，不可能还在跑）。"""
+    cur = conn.execute(
+        "UPDATE agent_runs SET status='interrupted', "
+        "answer=CASE WHEN COALESCE(answer,'')='' "
+        "THEN '（上次生成被中断，未完成）' ELSE answer END "
+        "WHERE status='running'")
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
 def log_agent_run(conn: sqlite3.Connection, rec: dict) -> int:
     _stamp = now()
     _q = rec.get("question") or ""
@@ -5085,6 +5135,34 @@ def log_agent_run(conn: sqlite3.Connection, rec: dict) -> int:
     _append_conversation_memory(
         conn, rec.get("session_id"), rec.get("operator", "HR"),
         _q, _a, rec.get("tool_calls") or [], _stamp)
+    _values = (rec.get("session_id"), _q, _a, _th,
+               _ctx_json, rec.get("model"),
+               _tools_json, rec.get("rounds", 0),
+               rec.get("tokens_in", 0), rec.get("tokens_out", 0),
+               rec.get("cache_hit_tokens", 0), rec.get("cache_reported", 0),
+               rec.get("tool_tokens", 0), rec.get("tool_ratio", 0),
+               rec.get("tool_calls_count", 0), rec.get("tool_errors", 0),
+               rec.get("tool_error_rate", 0), rec.get("context_budget", 0),
+               rec.get("context_trimmed", 0), rec.get("alert_level", ""),
+               _alerts_json, _metrics_json,
+               rec.get("latency_ms", 0),
+               rec.get("status", "ok"), rec.get("mode"),
+               rec.get("operator", "HR"), _stamp)
+    _run_id = rec.get("run_id")
+    if _run_id:
+        conn.execute(
+            """UPDATE agent_runs SET
+                 session_id=?, question=?, answer=?, thinking=?,
+                 context_json=?, model=?, tool_calls=?, rounds=?,
+                 tokens_in=?, tokens_out=?, cache_hit_tokens=?, cache_reported=?,
+                 tool_tokens=?, tool_ratio=?, tool_calls_count=?, tool_errors=?,
+                 tool_error_rate=?, context_budget=?, context_trimmed=?,
+                 alert_level=?, alerts_json=?, metrics_json=?,
+                 latency_ms=?, status=?, mode=?, operator=?, ts=?
+               WHERE id=?""",
+            (*_values, int(_run_id)))
+        conn.commit()
+        return int(_run_id)
     cur = conn.execute(
         """INSERT INTO agent_runs
            (session_id, question, answer, thinking, context_json, model,
@@ -5094,18 +5172,7 @@ def log_agent_run(conn: sqlite3.Connection, rec: dict) -> int:
             alert_level, alerts_json, metrics_json,
             latency_ms, status, mode, operator, ts)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (rec.get("session_id"), _q, _a, _th,
-         _ctx_json, rec.get("model"),
-         _tools_json, rec.get("rounds", 0),
-         rec.get("tokens_in", 0), rec.get("tokens_out", 0),
-         rec.get("cache_hit_tokens", 0), rec.get("cache_reported", 0),
-         rec.get("tool_tokens", 0), rec.get("tool_ratio", 0),
-         rec.get("tool_calls_count", 0), rec.get("tool_errors", 0),
-         rec.get("tool_error_rate", 0), rec.get("context_budget", 0),
-         rec.get("context_trimmed", 0), rec.get("alert_level", ""),
-         _alerts_json, _metrics_json,
-         rec.get("latency_ms", 0),
-         rec.get("status", "ok"), rec.get("mode"), rec.get("operator", "HR"), _stamp),
+        _values,
     )
     conn.commit()
     return cur.lastrowid
@@ -5433,7 +5500,7 @@ def chat_history(conn: sqlite3.Connection, limit: int = 300,
         if not q:
             continue
         messages.append({"role": "user", "content": q, "at": d.get("ts"),
-                         "run_id": d.get("id")})
+                         "run_id": d.get("id"), "status": d.get("status")})
         if a:
             # v1.25：把本轮产生的**卡片**一并带出去（提案 + 邮件草稿）。
             tcs = d.get("tool_calls") or []

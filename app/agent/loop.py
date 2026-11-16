@@ -2059,6 +2059,7 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
             except (TypeError, ValueError):
                 _b["current_turn"] = False
         _run_id = db.log_agent_run(conn, {
+            "run_id": getattr(ctx, "run_id", None),
             "session_id": ctx.session_id, "question": question, "answer": answer[:4000],
             "thinking": thinking,
             "context": getattr(ctx, "context", {}) or {},

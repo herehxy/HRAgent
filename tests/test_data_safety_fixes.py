@@ -412,5 +412,50 @@ class NameExtractionSafetyTest(unittest.TestCase):
         self.assertEqual(out["name"], "张子涵")
 
 
+class AgentConversationPersistenceTest(unittest.TestCase):
+    """2026-11-16：提问即落库，刷新页面后未完成的对话不能消失。"""
+
+    def test_unfinished_question_is_visible_and_marked_interrupted(self):
+        with tempfile.TemporaryDirectory() as d:
+            conn = db.connect(os.path.join(d, "workbench.db"))
+            try:
+                rid = db.begin_agent_run(conn, "conv-refresh", "HR", "帮我找 Java 人选")
+                self.assertGreater(rid, 0)
+                hist = db.chat_history(conn, conversation_id="conv-refresh",
+                                       operator="HR")
+                self.assertEqual([m["role"] for m in hist["messages"]], ["user"])
+                self.assertEqual(hist["messages"][0]["content"], "帮我找 Java 人选")
+                self.assertEqual(hist["messages"][0]["status"], "running")
+                convs = db.list_conversations(conn, "HR")
+                self.assertTrue(any(c["id"] == "conv-refresh" for c in convs))
+
+                self.assertEqual(db.mark_interrupted_agent_runs(conn), 1)
+                hist = db.chat_history(conn, conversation_id="conv-refresh",
+                                       operator="HR")
+                self.assertEqual(hist["messages"][0]["status"], "interrupted")
+                self.assertIn("中断", hist["messages"][1]["content"])
+            finally:
+                _close_physical(conn)
+
+    def test_finished_run_fills_the_same_row(self):
+        with tempfile.TemporaryDirectory() as d:
+            conn = db.connect(os.path.join(d, "workbench.db"))
+            try:
+                rid = db.begin_agent_run(conn, "conv-done", "HR", "问题")
+                db.log_agent_run(conn, {
+                    "run_id": rid, "session_id": "conv-done", "operator": "HR",
+                    "question": "问题", "answer": "回答", "status": "ok",
+                    "mode": "llm",
+                })
+                rows = conn.execute(
+                    "SELECT id, answer, status FROM agent_runs").fetchall()
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["id"], rid)
+                self.assertEqual(rows[0]["answer"], "回答")
+                self.assertEqual(rows[0]["status"], "ok")
+            finally:
+                _close_physical(conn)
+
+
 if __name__ == "__main__":
     unittest.main()

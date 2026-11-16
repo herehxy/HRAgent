@@ -172,6 +172,8 @@ class ToolCtx:
     context: dict = field(default_factory=dict)
     #: 本轮运行指标（工具调用/错误、上下文治理、分轮 token），由 loop 填充
     metrics: dict = field(default_factory=dict)
+    #: 提问时预写的 agent_runs 行 id；收尾时回填答案，断线也能在历史里看到
+    run_id: int | None = None
 
 
 def _spec(name: str, desc: str, props: dict | None = None, required: list[str] | None = None) -> dict:

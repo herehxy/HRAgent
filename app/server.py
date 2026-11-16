@@ -603,6 +603,35 @@ def _ctx(session: dict, conn=None) -> ToolCtx:
                    cfg={"local": session.get("mode") == "local"})
 
 
+def _begin_agent_run(ctx: ToolCtx, message: str) -> None:
+    """提问即落库：会话行 + running 记录。失败不影响回答（最差回到旧行为）。"""
+    try:
+        if not ctx.session_id:
+            ctx.session_id = uuid.uuid4().hex[:12]
+        conn = db.connect(DB_PATH)
+        try:
+            ctx.run_id = db.begin_agent_run(
+                conn, ctx.session_id, ctx.operator, message)
+        finally:
+            conn.close()
+    except Exception as exc:                               # noqa: BLE001
+        ctx.run_id = None
+        print(f"[agent] 预写运行记录失败（不影响回答）：{exc}", file=sys.stderr)
+
+
+def _abort_agent_run(run_id: int | None, message: str) -> None:
+    if not run_id:
+        return
+    try:
+        conn = db.connect(DB_PATH)
+        try:
+            db.abort_agent_run(conn, run_id, message)
+        finally:
+            conn.close()
+    except Exception as exc:                               # noqa: BLE001
+        print(f"[agent] 运行失败记录写入失败：{exc}", file=sys.stderr)
+
+
 # ============================================================
 # 页面与会话
 # ============================================================
@@ -3185,6 +3214,18 @@ def _startup_purge_task() -> None:
     daemon 线程随进程退出，不留残留。**清理失败只打印、不阻断启动**——
     数据清理是后台维护动作，不该让 HR 打不开工作台。
     """
+    # 上次进程里的 running 智能助手记录不可能还在生成：标成中断，
+    # 否则历史里会永远停在「生成中」，且刷新后看起来像丢了对话。
+    try:
+        _ac = db.connect(DB_PATH)
+        try:
+            _an = db.mark_interrupted_agent_runs(_ac)
+        finally:
+            _ac.close()
+        if _an:
+            print(f"[agent] 启动清理：{_an} 条未完成的助手对话已标记为中断")
+    except Exception as exc:                               # noqa: BLE001
+        print(f"[agent] 标记中断对话失败（不影响使用）：{exc}", file=sys.stderr)
     # 上次进程里的 running 任务不可能还活着：标成中断，避免 UI 永远转圈。
     try:
         _n = db.task_mark_interrupted(
@@ -5358,7 +5399,12 @@ def api_agent_chat(req: ChatReq, x_tp_token: str | None = Header(default=None, a
         _cid = re.sub(r"[^A-Za-z0-9_-]", "", str(req.session_id))[:64]
         if _cid:
             ctx.session_id = _cid
-    out = run_agent(req.message, ctx, req.history)
+    _begin_agent_run(ctx, req.message)
+    try:
+        out = run_agent(req.message, ctx, req.history)
+    except Exception as exc:                              # noqa: BLE001
+        _abort_agent_run(ctx.run_id, f"{type(exc).__name__}: {exc}")
+        raise
     out["session"] = {"role": s["role"], "mode": s.get("mode")}
     return out
 
@@ -5417,6 +5463,7 @@ def api_agent_chat_stream(req: ChatReq,
         _cid = re.sub(r"[^A-Za-z0-9_-]", "", str(req.session_id))[:64]
         if _cid:
             ctx.session_id = _cid
+    _begin_agent_run(ctx, req.message)
     q: queue.Queue = queue.Queue()
     cancel = threading.Event()
 
@@ -5430,6 +5477,8 @@ def api_agent_chat_stream(req: ChatReq,
             out["session"] = {"role": s["role"], "mode": s.get("mode")}
             q.put({"type": "done", **out})
         except Exception as exc:                              # noqa: BLE001
+            _abort_agent_run(getattr(ctx, "run_id", None),
+                             f"{type(exc).__name__}: {exc}")
             q.put({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
 
     threading.Thread(target=_work, name="agent-stream", daemon=True).start()

@@ -8390,16 +8390,34 @@ async function initChat(){
     renderOutputs(null, true);
     syncChatSidebar();
   }
+  await loadConversations();
   if(!CHAT_BOOTED){
     CHAT_BOOTED = true;
-    if(!CHAT_CONV_ID) newChat();
+    /* 刷新后回到上次打开的会话：未完成的对话（提问已落库）也能直接看到，
+       不再默认新开一条把上一轮“冲掉”。 */
+    var _saved = CHAT_CONV_ID || chatSavedConv();
+    if(_saved && !CHAT_CONV_ID){
+      var _ok = await openConversation(_saved, true);
+      if(!_ok) newChat();
+    } else if(!CHAT_CONV_ID){
+      newChat();
+    }
   }
-  await loadConversations();
   killAutofill();
 }
 
 function newConvId(){
   return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+/* 记住当前会话 id：刷新后恢复同一会话，避免“未完成的对话刷新就没了”。 */
+function chatSavedConv(){
+  try{ return localStorage.getItem('tp_chat_conv') || ''; }catch(e){ return ''; }
+}
+function rememberConv(cid){
+  try{
+    if(cid) localStorage.setItem('tp_chat_conv', cid);
+    else localStorage.removeItem('tp_chat_conv');
+  }catch(e){ /* 隐私模式不可写，忽略 */ }
 }
 
 /* 切换/新建对话时，**不结束**正在生成的那一轮：请求继续在后台跑，
@@ -8927,6 +8945,7 @@ function renderTraceFromMessages(hmsgs){
 function newChat(){
   var wasBusy = leaveRunningChat();
   CHAT_CONV_ID = newConvId();
+  rememberConv(CHAT_CONV_ID);
   CHAT = [];
   var log = document.getElementById('chatLog');
   if(log) log.innerHTML = '';
@@ -8951,6 +8970,12 @@ function renderChatMessages(hmsgs){
   var lastAsst = null;
   (hmsgs || []).forEach(function(m){
     var node = pushMsg(m.role, m.content || '');
+    if(m.role === 'user' && (m.status === 'running' || m.status === 'interrupted')){
+      node.insertAdjacentHTML('beforeend',
+        '<div class="hint" style="margin-top:4px">' +
+        (m.status === 'running' ? '回答仍在生成…'
+                                : '上次回答未完成（已中断）') + '</div>');
+    }
     if(m.role === 'assistant' && m.thinking){
       node.insertAdjacentHTML('afterbegin',
         thinkingHtml(m.thinking, false, m.latency_ms ? m.latency_ms / 1000 : 0));
@@ -8987,15 +9012,16 @@ function renderChatMessages(hmsgs){
   return lastAsst;
 }
 
-async function openConversation(cid){
+async function openConversation(cid, quiet){
   /* 允许在回答过程中直接切走：这一轮不 abort，继续在后台生成。
      旧回答的收尾回调靠 CHAT_GEN / RUN_CONV_ID 判断是否还该碰界面。 */
   var wasBusy = leaveRunningChat();
   var gen = CHAT_GEN;
   var h = await api('/api/agent/history?conversation_id=' + encodeURIComponent(cid));
-  if(gen !== CHAT_GEN) return;             /* 期间又点了别的会话 */
-  if(h.__err){ toast('读取会话失败：' + h.__err, 'danger'); return; }
+  if(gen !== CHAT_GEN) return false;       /* 期间又点了别的会话 */
+  if(h.__err){ if(!quiet) toast('读取会话失败：' + h.__err, 'danger'); return false; }
   CHAT_CONV_ID = cid;
+  rememberConv(cid);
   var _last = renderChatMessages(h.messages || []);
   /* 如果切回来的正是仍在生成的那一条：把当前累积的思考/答案重新挂到页面上，
      之后的事件会继续往这个新气泡里写。 */
@@ -9024,6 +9050,7 @@ async function openConversation(cid){
   if(wasBusy && RUN_CONV_ID && RUN_CONV_ID !== cid){
     toast('上一轮回答仍在后台生成', 'info');
   }
+  return true;
 }
 
 async function renameConversation(cid){
@@ -9369,6 +9396,7 @@ async function askAgent(){
   if(!CHAT_CONV_ID) CHAT_CONV_ID = newConvId();
   var gen = ++CHAT_GEN;
   var convId = CHAT_CONV_ID;
+  rememberConv(convId);
   ensureConvInList(convId, q);
   inp.value = '';
   chatGrow(inp);
