@@ -126,6 +126,43 @@ CREATE INDEX IF NOT EXISTS idx_app_cand_applied ON applications(candidate_id, ap
 CREATE INDEX IF NOT EXISTS idx_app_latest
     ON applications(candidate_id, COALESCE(applied_at, '') DESC, id DESC);
 
+-- ---------- 只读查询视图（智能助手 SQL 专用） ----------
+-- 业务方 2026-11-16：业务数据不做字段裁剪——候选人、投递、简历原文、邮件正文都可查。
+-- 仍不暴露 users / sessions / settings 等账号、会话、密钥类表（防止令牌/散列被查出来）。
+-- 手机/邮箱在库里是 AES-GCM 密文；SQL 只能看到密文，明文用 get_candidate 读取。
+DROP VIEW IF EXISTS v_candidates;
+CREATE VIEW v_candidates AS SELECT * FROM candidates;
+
+DROP VIEW IF EXISTS v_applications;
+CREATE VIEW v_applications AS
+SELECT a.*, c.name AS candidate_name, j.title AS job_title, j.dept AS job_dept
+FROM applications a
+LEFT JOIN candidates c ON c.id = a.candidate_id
+LEFT JOIN jobs j ON j.id = a.job_id;
+
+DROP VIEW IF EXISTS v_documents;
+CREATE VIEW v_documents AS SELECT * FROM documents;
+
+DROP VIEW IF EXISTS v_emails;
+CREATE VIEW v_emails AS SELECT * FROM email_messages;
+
+DROP VIEW IF EXISTS v_jobs;
+CREATE VIEW v_jobs AS SELECT * FROM jobs;
+
+DROP VIEW IF EXISTS v_funnel;
+CREATE VIEW v_funnel AS
+SELECT stage, COUNT(*) AS applications, COUNT(DISTINCT candidate_id) AS candidates
+FROM applications
+GROUP BY stage;
+
+DROP VIEW IF EXISTS v_duplicate_candidates;
+CREATE VIEW v_duplicate_candidates AS
+SELECT TRIM(name) AS name, COUNT(*) AS n, GROUP_CONCAT(id) AS candidate_ids
+FROM candidates
+WHERE TRIM(COALESCE(name, '')) NOT IN ('', '未识别', '未知')
+GROUP BY TRIM(name)
+HAVING COUNT(*) > 1;
+
 -- ---------- 在职人员档案（历史表，保留数据） ----------
 -- 在职人员模块已移除：招聘流程不再自动生成 employees 记录。
 -- 表结构保留，只用于兼容旧数据与备份，不再有前端/接口入口。
@@ -5125,6 +5162,22 @@ def mark_interrupted_agent_runs(conn: sqlite3.Connection) -> int:
         "WHERE status='running'")
     conn.commit()
     return int(cur.rowcount or 0)
+
+
+def get_user_memory(conn: sqlite3.Connection, operator: str) -> list[str]:
+    """跨会话的显式长期偏好（HR/助手主动“记住”的事项）。"""
+    try:
+        raw = get_setting(conn, f"user_memory:{str(operator or 'HR')[:64]}", None)
+        items = json.loads(raw) if isinstance(raw, str) and raw else (raw or [])
+    except (ValueError, TypeError):
+        items = []
+    return [str(x).strip() for x in (items or []) if str(x).strip()][-20:]
+
+
+def set_user_memory(conn: sqlite3.Connection, operator: str, items: list[str]) -> None:
+    clean = [str(x).strip() for x in (items or []) if str(x).strip()][-20:]
+    set_setting(conn, f"user_memory:{str(operator or 'HR')[:64]}",
+                json.dumps(clean, ensure_ascii=False))
 
 
 def log_agent_run(conn: sqlite3.Connection, rec: dict) -> int:

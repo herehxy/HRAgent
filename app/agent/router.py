@@ -35,6 +35,7 @@ GROUPS: dict[str, list[str]] = {
         # 读（检索统一走 search_candidates 的 mode，不再暴露 4 个重复工具）
         "analyze_fit", "compare_candidates", "explain_grade",
         "list_applications", "scan_duplicate_candidates",
+        "sql_schema", "sql_query",
         "school_info", "get_interview_dict", "draft_interview_questions",
         # 写（只出提案）
         "set_tier", "add_tag", "add_note", "update_candidate_fields",
@@ -48,7 +49,7 @@ GROUPS: dict[str, list[str]] = {
         "pipeline_overview", "recruit_overview", "list_recruit_plans",
         # 办公：名单下载
         "export_roster",
-        "list_applications", "recruit_analytics",
+        "list_applications", "recruit_analytics", "sql_schema", "sql_query",
         # 写（只出提案）
         "set_stage", "set_sign_status", "bulk_initial_pass",
         "bulk_assign_job", "assign_job", "suggest_job", "route_pending",
@@ -65,7 +66,7 @@ GROUPS: dict[str, list[str]] = {
         "list_proposals", "list_audit", "list_import_history", "list_agent_runs",
         "run_proactive_scan", "rebuild_brief", "clear_chat_history",
         "list_removed_files", "restore_source_files", "remove_source_files",
-        "scan_duplicate_candidates",
+        "scan_duplicate_candidates", "remember_preference",
         "get_feedback_report", "export_feedback", "list_conversations",
         "restore_chat_history", "truncate_chat", "manage_system",
     ],
@@ -128,6 +129,7 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
         "初筛", "面试", "上会", "审批", "应招", "转上年度",
         "一人多投", "多投", "投递明细", "投递记录", "投了几次",
         "漏斗", "转化率", "招聘周期", "渠道转化", "招聘分析",
+        "sql", "自定义查询", "任意统计", "交叉统计", "透视",
     ),
     "mail": (
         "邮件", "发信", "写信", "通知", "邀请", "邀约", "婉拒", "模板",
@@ -138,6 +140,7 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
         "跟进", "今天要做", "今天先做什么", "摘要", "周报", "恢复", "清理", "删除会话", "运行记录",
         "导入记录", "导入历史", "重复检测", "重复简历", "被判重复", "被标记为重复",
         "重复档案", "重复候选人", "同名", "同一人两份",
+        "记住", "以后都", "偏好", "习惯", "长期记忆",
         "哪些重复", "为什么没入库", "没入库", "偏差", "反馈报告", "对话历史",
         "恢复对话", "截断", "会话",
     ),

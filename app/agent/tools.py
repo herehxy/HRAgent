@@ -21,6 +21,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -177,6 +179,54 @@ class ToolCtx:
     run_id: int | None = None
 
 
+#: SQL 能力只允许这些只读视图；与 db.py 的 CREATE VIEW 保持同源。
+SQL_VIEWS = ("v_candidates", "v_applications", "v_documents", "v_emails",
+             "v_jobs", "v_funnel", "v_duplicate_candidates")
+SQL_VIEW_DESC = {
+    "v_candidates": "候选人全字段（含 phone_enc/email_enc 密文、备注等）",
+    "v_applications": "投递全字段（a.* + candidate_name/job_title/job_dept）",
+    "v_documents": "附件与简历原文全字段（含 raw_text/file_path）",
+    "v_emails": "邮件台账全字段（含 body_text/body_html）",
+    "v_jobs": "岗位全字段（含 jd_json）",
+    "v_funnel": "阶段漏斗：stage,applications,candidates",
+    "v_duplicate_candidates": "同名疑似重复：name,n,candidate_ids",
+}
+_SQL_FORBIDDEN = re.compile(
+    r"\b(?:insert|update|delete|replace|drop|alter|create|attach|detach|pragma|"
+    r"vacuum|reindex|analyze|load_extension|readfile|writefile|explain)\b", re.I)
+
+
+def _safe_sql(sql: str) -> str:
+    """只读 SQL 的最低成本护栏。
+
+    不追求完备的 SQL 解析：拒绝明显的写/管理语句、只允许查白名单视图、
+    只读连接 + query_only + 5 秒超时 才是真正的安全边界；这里挡的是误用。
+    """
+    raw = str(sql or "").strip()
+    if not raw:
+        raise ValueError("SQL 为空")
+    clean = re.sub(r"/\*.*?\*/", " ", raw, flags=re.S)
+    clean = re.sub(r"--[^\n]*", " ", clean).strip()
+    clean = clean.rstrip(";").strip()
+    if not clean:
+        raise ValueError("SQL 为空")
+    if ";" in clean:
+        raise ValueError("只允许单条 SQL；不要用分号拼接多条语句")
+    if not re.match(r"(?is)^(select|with)\b", clean):
+        raise ValueError("只允许 SELECT / WITH 查询")
+    if _SQL_FORBIDDEN.search(clean) or re.search(r"(?i)sqlite_", clean):
+        raise ValueError("SQL 含被禁止的关键字（写操作/PRAGMA/系统表）")
+    ctes = set(m.lower() for m in re.findall(
+        r"(?is)(?:\bwith|,)\s*([a-z_][\w]*)\s+as\s*\(", clean))
+    tables = set(m.lower() for m in re.findall(
+        r"(?is)\b(?:from|join)\s+([a-z_][\w]*)", clean))
+    bad = sorted(t for t in tables if t not in SQL_VIEWS and t not in ctes)
+    if bad:
+        raise ValueError("只能查询这些只读视图：" + "、".join(SQL_VIEWS)
+                         + "；不允许：" + "、".join(bad))
+    return clean
+
+
 def _spec(name: str, desc: str, props: dict | None = None, required: list[str] | None = None) -> dict:
     params: dict = {"type": "object", "properties": props or {}}
     if required:
@@ -253,6 +303,24 @@ TOOL_SPECS = [
            "multi_only": {"type": "boolean", "description": "只看一人多投"},
            "limit": {"type": "integer", "description": "最多返回条数，默认 100"}},
           []),
+    _spec("sql_schema",
+          "返回只读查询视图的字段说明（v_candidates / v_applications / v_documents / "
+          "v_emails / v_jobs / v_funnel / v_duplicate_candidates）。写 SQL 前先调这个。",
+          {}, []),
+    _spec("sql_query",
+          "对只读业务视图执行**单条 SELECT**，用于没有现成工具覆盖的任意组合统计。"
+          "业务数据不裁剪：可查候选人全字段、投递全字段、简历原文、邮件正文；"
+          "手机/邮箱在库里是密文，明文仍需用 get_candidate。"
+          "不能查 users/sessions/settings 等账号密钥表；禁止写操作、PRAGMA、ATTACH、"
+          "多语句。返回 columns/rows，自动限行与超时。",
+          {"sql": {"type": "string", "description": "单条 SELECT/WITH 查询"},
+           "limit": {"type": "integer", "description": "最多返回行数，默认 100，最多 200"}},
+          ["sql"]),
+    _spec("remember_preference",
+          "记住一条**跨会话**的长期偏好/约定（如常用岗位、默认单位、输出习惯）。"
+          "只有用户明确说“记住/以后都这样”时才调用。",
+          {"text": {"type": "string", "description": "要记住的一句话"}},
+          ["text"]),
     _spec("scan_duplicate_candidates",
           "扫描全库疑似重复档案：按姓名/手机号/邮箱分组，返回组内候选人及证据。"
           "**不自动合并**；需要合并时用 merge_candidates 生成待确认提案。",
@@ -389,7 +457,8 @@ TOOL_SPECS = [
           ["candidate_id"]),
     _spec("compare_candidates",
           "在给定候选人之间做横向对比（学历/年限/技能命中/评分），输出差异表。纯规则计算。",
-          {"candidate_ids": {"type": "array", "items": {"type": "integer"}}}, ["candidate_ids"]),
+          {"candidate_ids": {"type": "array", "items": {"type": "string"},
+                             "description": "候选人 id 或姓名"}}, ["candidate_ids"]),
     _spec("draft_email",
           "为某候选人**起草**一封邮件（面试邀请 / 跟进 / 婉拒 / offer 沟通 / 其他）。"
           "只起草、不发送——发送必须由 HR 在邮件编辑器里确认后亲自点。"
@@ -440,7 +509,8 @@ TOOL_SPECS = [
           ["candidate_id", "archived"]),
     _spec("archive_batch",
           "批量归档/取消归档。**先用 search_candidates 看清楚要处理谁**，再调用。",
-          {"candidate_ids": {"type": "array", "items": {"type": "integer"}},
+          {"candidate_ids": {"type": "array", "items": {"type": "string"},
+                             "description": "候选人 id 或姓名"},
            "archived": {"type": "boolean", "description": "true=归档，false=取消归档"}},
           ["candidate_ids", "archived"]),
     _spec("split_candidate",
@@ -472,8 +542,8 @@ TOOL_SPECS = [
           ["job_id"]),
     _spec("export_resumes",
           "导出简历原件（打包 zip）或导出人才清单 CSV，返回下载方式。",
-          {"candidate_ids": {"type": "array", "items": {"type": "integer"},
-                             "description": "为空则导出全部在库的人"},
+          {"candidate_ids": {"type": "array", "items": {"type": "string"},
+                             "description": "候选人 id 或姓名；为空则导出全部在库的人"},
            "what": {"type": "string", "description": "resumes=简历原件包（默认）/ csv=人才清单"}},
           []),
     _spec("export_resume_bundle",
@@ -482,8 +552,8 @@ TOOL_SPECS = [
           "用户说“导出名单并下载简历附件”时，名单用 export_roster，附件用这个。",
           {"job": {"type": "string", "description": "岗位名；留空=全部岗位"},
            "stage": {"type": "string", "description": "阶段；留空=全部"},
-           "candidate_ids": {"type": "array", "items": {"type": "integer"},
-                              "description": "指定候选人 id；给定时只打包这些人（用户点名的几个候选人用这个）"},
+           "candidate_ids": {"type": "array", "items": {"type": "string"},
+                              "description": "候选人 id 或姓名；给定时只打包这些人"},
            "education": {"type": "string", "description": "学历精确匹配"},
            "univ": {"type": "string", "description": "985 或 211"},
            "keyword": {"type": "string", "description": "姓名/院校/专业关键词"},
@@ -524,24 +594,25 @@ TOOL_SPECS = [
           []),
     _spec("bulk_initial_pass",
           "【需 HR 确认】批量把候选人推进到「初筛通过」，有建议岗位的会先采纳建议。只生成待确认提案。",
-          {"candidate_ids": {"type": "array", "items": {"type": "integer"},
-                             "description": "候选人 id 列表"}},
+          {"candidate_ids": {"type": "array", "items": {"type": "string"},
+                             "description": "候选人 id 或姓名列表（数字 id 也可）"}},
           ["candidate_ids"]),
     _spec("bulk_assign_job",
           "【需 HR 确认】批量把候选人归到同一个岗位，并按该岗位 JD 重算建议档。只生成待确认提案。",
-          {"candidate_ids": {"type": "array", "items": {"type": "integer"},
-                             "description": "候选人 id 列表"},
+          {"candidate_ids": {"type": "array", "items": {"type": "string"},
+                             "description": "候选人 id 或姓名列表（数字 id 也可）"},
            "job": {"type": "string", "description": "岗位 id 或岗位名（唯一匹配才执行）"}},
           ["candidate_ids", "job"]),
     _spec("set_sign_status",
           "【需 HR 确认】登记/修改签约情况（未签约/已签约/拒签/毁约），可同时填录用单位、"
           "签约日期、入职最后期限。只生成待确认提案。",
-          {"application_id": {"type": "integer", "description": "投递编号"},
+          {"application_id": {"type": "integer", "description": "投递编号（可选）"},
+           "candidate_id": {"type": "string", "description": "候选人 id 或姓名；不传 application_id 时取最新投递"},
            "status": {"type": "string", "description": "未签约/已签约/拒签/毁约"},
            "hire_unit": {"type": "string", "description": "录用单位"},
            "signed_at": {"type": "string", "description": "签约日期 YYYY-MM-DD"},
            "onboard_deadline": {"type": "string", "description": "入职最后期限 YYYY-MM-DD"}},
-          ["application_id", "status"]),
+          ["status"]),
     # ------------------------------ 面试字典 / 来源 / 回收站（v1.25） ------------------------------
     _spec("get_interview_dict",
           "读面试字典：面试单位、会议室、时段、联系人（含电话/部门）。"
@@ -608,8 +679,8 @@ TOOL_SPECS = [
     _spec("reanalyze_batch",
           "【需 HR 确认】批量重跑分析。只生成待确认提案。"
           "不传 candidate_ids 则处理所有「走规则通道」的档案（历史上模型不可用时入库的）。",
-          {"candidate_ids": {"type": "array", "items": {"type": "integer"},
-                             "description": "为空=所有规则通道档案"},
+          {"candidate_ids": {"type": "array", "items": {"type": "string"},
+                             "description": "候选人 id 或姓名；为空=所有规则通道档案"},
            "limit": {"type": "integer", "description": "最多处理几人，默认 50"}}),
     _spec("route_pending",
           "【需 HR 确认】为「待指定岗位」的投递重新建议岗位并按最适岗位重算建议档。"
@@ -677,11 +748,14 @@ TOOL_SPECS = [
           "【需 HR 确认】调整某条投递的档位。本工具只生成待确认提案，不会直接改库。"
           f"注意：学历低于岗位门槛的投递，系统已直接判 {tiers_mod.hard_shortfall_tier()}，"
           "不要为它提出上调档位的提案——学历是硬门槛，模型判断不能越过。",
-          {"application_id": {"type": "integer"}, "tier": {"type": "string", "description": tiers_mod.enum_str("/")},
-           "note": {"type": "string"}}, ["application_id", "tier"]),
+          {"application_id": {"type": "integer", "description": "投递编号（可选）"},
+           "candidate_id": {"type": "string", "description": "候选人 id 或姓名；不传 application_id 时取最新投递"},
+           "tier": {"type": "string", "description": tiers_mod.enum_str("/")},
+           "note": {"type": "string"}}, ["tier"]),
     _spec("add_tag",
           "【需 HR 确认】为候选人添加能力/类型标签。只生成待确认提案。",
-          {"candidate_id": {"type": "integer"}, "tag": {"type": "string"},
+          {"candidate_id": {"type": "string", "description": "候选人 id 或姓名"},
+           "tag": {"type": "string"},
            "category": {"type": "string", "description": "能力/类型/来源，默认能力"},
            "evidence": {"type": "string", "description": "依据（原文片段）"}}, ["candidate_id", "tag"]),
     _spec("merge_candidates",
@@ -692,8 +766,9 @@ TOOL_SPECS = [
            "reason": {"type": "string"}}, ["source_id", "target_id"]),
     _spec("add_note",
           "【需 HR 确认】给某条投递给 HR 备注。只生成待确认提案。",
-          {"application_id": {"type": "integer"}, "note": {"type": "string"}},
-          ["application_id", "note"]),
+          {"application_id": {"type": "integer", "description": "投递编号（可选）"},
+           "candidate_id": {"type": "string", "description": "候选人 id 或姓名；不传 application_id 时取最新投递"},
+           "note": {"type": "string"}}, ["note"]),
     # ---- v2.0.7：学校查询与对外搜索 ----
     _spec("school_info",
           "查一所学校的层次与排名：985/211/强势标签、**软科综合排名名次**、校实力 A/B/C/D 档、是否海外。"
@@ -933,7 +1008,8 @@ TOOL_SPECS = [
           "set_archive / archive_batch / archive_by_year / assign_job / suggest_job / "
           "bulk_initial_pass / bulk_assign_job / set_sign_status / route_pending / "
           "manage_avatar。payload 沿用对应旧工具参数（candidate_id/application_id/"
-          "stage/tier/ids 等）。只生成待确认提案。",
+          "stage/tier/ids 等）；批量 action 用 candidate_ids 或 ids，**id 与姓名都接受**。"
+          "只生成待确认提案。",
           {"action": {"type": "string", "description": "见工具说明"},
            "payload": {"type": "object", "description": "对应 action 的参数对象"}},
           ["action"]),
@@ -1147,7 +1223,8 @@ def _resolve_cid(conn, value, what: str = "候选人") -> tuple[int | None, dict
         return int(rows[0]["id"]), None
     if len(rows) > 1:
         return None, {"error": f"有 {len(rows)} 位候选人叫「{v}」",
-                      "hint": "请先用 search_candidates 确认是哪一位，再带上 id 调用"}
+                      "hint": "请确认是哪一位后带 id 调用",
+                      "candidates": [{"id": r["id"], "name": r["name"]} for r in rows]}
     rows = conn.execute(
         "SELECT id, name FROM candidates WHERE merged_into IS NULL AND name LIKE ? "
         "ORDER BY id LIMIT 6", (f"%{v}%",)).fetchall()
@@ -1159,6 +1236,77 @@ def _resolve_cid(conn, value, what: str = "候选人") -> tuple[int | None, dict
                       "candidates": [{"id": r["id"], "name": r["name"]} for r in rows]}
     return None, {"error": f"库里没有叫「{v}」的候选人",
                   "hint": "先用 search_candidates 按姓名/技能搜一下；确实没有就让用户先导入简历"}
+
+
+def _resolve_candidate_list(conn, args: dict,
+                            keys=("candidate_ids", "ids", "candidates", "names")):
+    """解析批量工具里的候选人列表：id、数字字符串、姓名都可以。
+
+    2026-11-16 实测：模型通过 manage_candidate 调 bulk_initial_pass 时
+    传的是 `ids` 或姓名字符串，旧 handler 只做 `int(x)`，于是全部被跳过，
+    报「请提供至少一位候选人」。这里统一解析并返回逐项错误。
+    """
+    raw = None
+    for k in keys:
+        v = args.get(k)
+        if v not in (None, "", [], ()):
+            raw = v
+            break
+    if raw is None:
+        return [], []
+    if isinstance(raw, (int, str)):
+        if isinstance(raw, str):
+            raw = [x.strip() for x in re.split(r"[,，、;；\s]+", raw) if x.strip()]
+        else:
+            raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return [], [{"input": str(raw), "error": "候选人列表格式不对"}]
+    ids: list[int] = []
+    errors: list[dict] = []
+    for x in raw:
+        cid, err = _resolve_cid(conn, x)
+        if err:
+            errors.append({"input": str(x), **(err or {})})
+        elif cid and cid not in ids:
+            ids.append(cid)
+    return ids, errors
+
+
+def _resolve_application(conn, args: dict):
+    """把 application_id 或 candidate_id/姓名 解析成一条投递记录。
+
+    只给候选人时取**最新一条投递**（与界面“最新投递”同一口径）；
+    没有投递时明确报错，不替 HR 新建。
+    """
+    aid = args.get("application_id")
+    if aid not in (None, ""):
+        try:
+            app = db.get_application(conn, int(aid))
+        except (TypeError, ValueError):
+            return None, {"error": "application_id 必须是投递编号"}
+        if not app:
+            return None, {"error": f"未找到投递 #{aid}"}
+        return app, None
+    key = args.get("candidate_id") if args.get("candidate_id") is not None else args.get("candidate")
+    if key not in (None, ""):
+        cid, err = _resolve_cid(conn, key)
+        if err:
+            return None, err
+        app = db.latest_application(conn, cid)
+        if not app:
+            return None, {"error": f"候选人 #{cid} 还没有投递记录",
+                          "hint": "先入库简历/建投递，或改用 application_id"}
+        return app, None
+    return None, {"error": "请提供 application_id，或 candidate_id/姓名",
+                  "hint": "例如 {\"candidate_id\": \"白梦田\", \"tier\": \"B\"}"}
+
+
+def _candidate_list_error(errors: list[dict]) -> str:
+    first = errors[:5]
+    return _err(
+        f"有 {len(errors)} 位候选人未能解析："
+        + "；".join(f"{e.get('input')}（{e.get('error')}）" for e in first),
+        hint="候选人可以用 id 或姓名；重名时请带上 id 重试。")
 
 
 def _resolve_job_id(conn, key: str) -> tuple[int | None, str | None]:
@@ -1846,6 +1994,71 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             limit = max(1, min(300, int(args.get("limit") or 100)))
             return _ok({"count": len(rows), "items": [_app_item(r) for r in rows[:limit]],
                         "note": "按投递时间倒序；application_id 可用于改阶段等后续操作。"})
+
+        if name == "sql_schema":
+            views: dict = {}
+            for _v in SQL_VIEWS:
+                try:
+                    views[_v] = [r[1] for r in conn.execute(f"PRAGMA table_info({_v})")]
+                except sqlite3.Error:
+                    views[_v] = []
+            return _ok({"views": views, "descriptions": SQL_VIEW_DESC,
+                        "note": "只读业务视图，业务数据不裁剪；手机/邮箱为密文，"
+                                "明文用 get_candidate 读取。账号/会话/密钥表不开放；"
+                                "写操作不能用 SQL，改用对应工具生成待确认提案。"})
+
+        if name == "sql_query":
+            raw_sql = str(args.get("sql") or "").strip()
+            try:
+                sql = _safe_sql(raw_sql)
+                limit = max(1, min(200, int(args.get("limit") or 100)))
+            except ValueError as exc:
+                return _err(str(exc))
+            path = str(ctx.db_path or "")
+            try:
+                _ro = sqlite3.connect("file:" + path.replace("\\", "/") + "?mode=ro",
+                                      uri=True, timeout=5)
+            except sqlite3.Error as exc:
+                return _err(f"只读库连接失败：{exc}")
+            try:
+                _ro.row_factory = sqlite3.Row
+                _ro.execute("PRAGMA query_only = ON")
+                _deadline = time.time() + 5
+                _ro.set_progress_handler(
+                    lambda: 1 if time.time() > _deadline else 0, 10000)
+                wrapped = "SELECT * FROM (" + sql + ") LIMIT ?"
+                cur = _ro.execute(wrapped, (limit + 1,))
+                cols = [d[0] for d in (cur.description or [])]
+                fetched = cur.fetchall()
+            except sqlite3.OperationalError as exc:
+                if "interrupted" in str(exc).lower():
+                    return _err("SQL 执行超过 5 秒，已中止；请加筛选条件或减少连接")
+                return _err(f"SQL 执行失败：{exc}")
+            finally:
+                _ro.close()
+            truncated = len(fetched) > limit
+            rows = [{c: r[c] for c in cols} for r in fetched[:limit]]
+            try:
+                db.add_audit(conn, "sql", "query", "read", "",
+                             (sql[:1000] + f" → {len(rows)} 行"), ctx.operator, ctx.role)
+            except Exception:                                # noqa: BLE001
+                pass
+            return _ok({"sql": sql, "columns": cols, "rows": rows,
+                        "row_count": len(rows), "truncated": truncated,
+                        "note": "只读业务视图的结果；手机/邮箱为密文，明文用 get_candidate。"})
+
+        if name == "remember_preference":
+            text = str(args.get("text") or "").strip()[:500]
+            if not text:
+                return _err("要记住的内容为空")
+            items = db.get_user_memory(conn, ctx.operator)
+            if text not in items:
+                items.append(text)
+            db.set_user_memory(conn, ctx.operator, items)
+            db.add_audit(conn, "settings", f"user_memory:{ctx.operator}", "update",
+                         "", f"助手记住：{text[:200]}", ctx.operator, ctx.role)
+            return _ok({"saved": text, "count": len(items),
+                        "note": "已写入跨会话长期偏好；以后每轮都会带上。"})
 
         if name == "scan_duplicate_candidates":
             by = str(args.get("by") or "all").lower()
@@ -2662,7 +2875,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                             "HR 定的档与人工更正的字段保持不动）", risk="中")
 
         if name == "reanalyze_batch":
-            ids = [int(x) for x in (args.get("candidate_ids") or [])]
+            ids, _errs = _resolve_candidate_list(conn, args)
+            if _errs:
+                return _candidate_list_error(_errs)
             limit = int(args.get("limit") or 50)
             if ids:
                 desc = f"批量重跑分析 {len(ids)} 位指定候选人"
@@ -2884,9 +3099,12 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             })
 
         if name == "compare_candidates":
-            ids = [int(i) for i in (args.get("candidate_ids") or [])][:8]
+            ids, _errs = _resolve_candidate_list(conn, args)
+            if _errs:
+                return _candidate_list_error(_errs)
+            ids = ids[:8]
             if not ids:
-                return _err("请提供至少一个 candidate_id")
+                return _err("请提供至少一位候选人（candidate_ids/ids，id 或姓名都可以）")
             rows = []
             for cid in ids:
                 c = db.get_candidate(conn, cid)
@@ -3059,10 +3277,13 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                                if archived and left == 0 else ""))
 
         if name == "archive_batch":
-            ids = [int(x) for x in (args.get("candidate_ids") or [])][:200]
+            ids, _errs = _resolve_candidate_list(conn, args)
+            if _errs:
+                return _candidate_list_error(_errs)
+            ids = ids[:200]
             if not ids:
-                return _err("candidate_ids 为空",
-                            hint="先用 search_candidates 找到要处理的人，再把 id 传进来")
+                return _err("请提供至少一位候选人（candidate_ids/ids，id 或姓名都可以）",
+                            hint="先用 search_candidates 找到要处理的人")
             archived = bool(args.get("archived"))
             names = []
             due = 0
@@ -3144,7 +3365,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
 
         if name == "export_resumes":
             what = (args.get("what") or "resumes").strip()
-            ids = [int(x) for x in (args.get("candidate_ids") or [])][:500]
+            ids, _errs = _resolve_candidate_list(conn, args)
+            if _errs:
+                return _candidate_list_error(_errs)
+            ids = ids[:500]
             if what == "csv":
                 return _ok({"what": "csv", "count": len(ids) or None,
                             "note": "人才清单 CSV 请在人才库页点「导出 CSV」——"
@@ -3155,7 +3379,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
 
         if name == "export_resume_bundle":
             filters: dict = {}
-            ids_arg = [int(x) for x in (args.get("candidate_ids") or [])][:500]
+            ids_arg, _errs = _resolve_candidate_list(conn, args)
+            if _errs:
+                return _candidate_list_error(_errs)
+            ids_arg = ids_arg[:500]
             if ids_arg:
                 filters["candidate_ids"] = ids_arg
             stage = str(args.get("stage") or "").strip()
@@ -3339,32 +3566,26 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                                 "下载后用 Outlook/企业日历导入即可。"})
 
         if name == "bulk_initial_pass":
-            ids = []
-            for x in (args.get("candidate_ids") or []):
-                try:
-                    n = int(x)
-                except (TypeError, ValueError):
-                    continue
-                if n > 0 and n not in ids:
-                    ids.append(n)
+            ids, _errs = _resolve_candidate_list(conn, args)
+            if _errs:
+                return _candidate_list_error(_errs)
             if not ids:
-                return _err("请提供至少一位候选人")
+                return _err("请提供至少一位候选人（candidate_ids/ids，id 或姓名都可以）",
+                            hint='例如 {"candidate_ids": [977, 16]} 或 '
+                                 '{"candidate_ids": ["白梦田"]}')
             return _propose(conn, ctx, "bulk_initial_pass",
                             {"candidate_ids": ids},
                             f"批量初筛通过：{len(ids)} 人（有建议岗位的会先采纳）",
                             risk="中")
 
         if name == "bulk_assign_job":
-            ids = []
-            for x in (args.get("candidate_ids") or []):
-                try:
-                    n = int(x)
-                except (TypeError, ValueError):
-                    continue
-                if n > 0 and n not in ids:
-                    ids.append(n)
+            ids, _errs = _resolve_candidate_list(conn, args)
+            if _errs:
+                return _candidate_list_error(_errs)
             if not ids:
-                return _err("请提供至少一位候选人")
+                return _err("请提供至少一位候选人（candidate_ids/ids，id 或姓名都可以）",
+                            hint='例如 {"candidate_ids": [977, 16]} 或 '
+                                 '{"candidate_ids": ["白梦田"]}')
             jobs = db.list_jobs(conn, include_inactive=False)
             kw = str(args.get("job") or "").strip()
             j = next((x for x in jobs if str(x["id"]) == kw), None)
@@ -3387,14 +3608,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                             risk="中")
 
         if name == "set_sign_status":
-            aid = args.get("application_id")
-            try:
-                aid = int(aid)
-            except (TypeError, ValueError):
-                return _err("application_id 必须是投递编号")
-            app = db.get_application(conn, aid)
-            if not app:
-                return _err(f"未找到投递 #{aid}")
+            app, _aerr = _resolve_application(conn, args)
+            if _aerr:
+                return _err(_aerr["error"], _aerr.get("hint"))
+            aid = int(app["id"])
             status = str(args.get("status") or "").strip()
             if status not in db.SIGN_STATUSES:
                 return _err("签约情况只能是：" + "/".join(db.SIGN_STATUSES))
@@ -3474,10 +3691,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                             + (f"（理由：{args['reason']}）" if args.get("reason") else ""))
 
         if name == "set_tier":
-            aid = int(args["application_id"])
-            app = db.get_application(conn, aid)
-            if not app:
-                return _err(f"未找到投递 #{aid}")
+            app, _aerr = _resolve_application(conn, args)
+            if _aerr:
+                return _err(_aerr["error"], _aerr.get("hint"))
+            aid = int(app["id"])
             tier = (args.get("tier") or "").strip().upper()
             if tier not in tiers_mod.all_tiers():
                 return _err(f"档位只能是 {tiers_mod.enum_str()}")
@@ -3489,7 +3706,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                             f"#{aid} 档位从「{cur}」改为「{tier}」")
 
         if name == "add_tag":
-            cid = int(args["candidate_id"])
+            cid, _cerr = _resolve_cid(conn, args.get("candidate_id") or args.get("candidate"))
+            if _cerr:
+                return _err(_cerr["error"], _cerr.get("hint"))
             c = db.get_candidate(conn, cid)
             if not c:
                 return _err(f"未找到候选人 #{cid}")
@@ -3511,10 +3730,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                             f"（软合并，可撤销）", risk="高")
 
         if name == "add_note":
-            aid = int(args["application_id"])
-            app = db.get_application(conn, aid)
-            if not app:
-                return _err(f"未找到投递 #{aid}")
+            app, _aerr = _resolve_application(conn, args)
+            if _aerr:
+                return _err(_aerr["error"], _aerr.get("hint"))
+            aid = int(app["id"])
             return _propose(conn, ctx, "add_note",
                             {"application_id": aid, "note": args["note"]},
                             f"给投递 #{aid} 写入备注：{str(args['note'])[:60]}", risk="低")

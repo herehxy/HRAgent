@@ -642,7 +642,7 @@ def bulk_assign_job(conn, candidate_ids: list[int], job_id: int, tiers: dict,
     """批量归岗：把勾选的候选人统一归到指定岗位。
 
     口径与单条「指定岗位」完全一致（都走 `assign_job`），只是逐人调用：
-      · 取每人**最新一条未结束**的投递（多投递候选人是常态）；
+      · 取每人**所有「待指定」的在流程投递**（没有待指定时退回最新一条）；
       · 已归档 / 已结束的跳过，不硬改；
       · 已在该岗位的计为 `unchanged`，不重复写审计；
       · 单人失败不拖垮整批，最后写一条批次审计。
@@ -680,35 +680,46 @@ def bulk_assign_job(conn, candidate_ids: list[int], job_id: int, tiers: dict,
             _rows = [dict(r) for r in rows]
             _inflight = [r for r in _rows
                          if stages_mod.normalize_stage(r.get("stage")) not in terminal]
-            a = _inflight[0] if _inflight else _rows[0]
-            item = {"candidate_id": cid, "application_id": a["id"],
-                    "name": a.get("candidate_name") or "", "status": ""}
-            if a.get("archived_at"):
+            # 2026-11-16：批量归岗要把这个人**所有「待指定」的在流程投递**都归过去，
+            # 不能只取最新一条——多投递候选人很常见，最新一条可能已经归岗，
+            # 更早那条仍停在「待指定」，旧逻辑会把它漏掉。
+            _targets = [r for r in _inflight if not r.get("job_id")]
+            if not _targets:
+                _targets = [_inflight[0]] if _inflight else []
+            if not _targets:
                 out["skipped"] += 1
-                item["status"] = "skipped"
-                item["reason"] = "已归档，未改动"
-                out["items"].append(item)
+                out["items"].append({"candidate_id": cid, "status": "skipped",
+                                     "reason": "没有在流程中的投递"})
                 continue
-            if stages_mod.normalize_stage(a.get("stage")) in terminal:
-                out["skipped"] += 1
-                item["status"] = "skipped"
-                item["reason"] = "投递已结束，未改动"
+            for a in _targets:
+                item = {"candidate_id": cid, "application_id": a["id"],
+                        "name": a.get("candidate_name") or "", "status": ""}
+                if a.get("archived_at"):
+                    out["skipped"] += 1
+                    item["status"] = "skipped"
+                    item["reason"] = "已归档，未改动"
+                    out["items"].append(item)
+                    continue
+                if stages_mod.normalize_stage(a.get("stage")) in terminal:
+                    out["skipped"] += 1
+                    item["status"] = "skipped"
+                    item["reason"] = "投递已结束，未改动"
+                    out["items"].append(item)
+                    continue
+                r = assign_job(conn, int(a["id"]), int(job_id), jd, tiers,
+                               operator, role)
+                if r.get("error"):
+                    out["failed"] += 1
+                    item["status"] = "failed"
+                    item["reason"] = r["error"]
+                elif r.get("unchanged"):
+                    out["unchanged"] += 1
+                    item["status"] = "unchanged"
+                else:
+                    out["assigned"] += 1
+                    item["status"] = "assigned"
+                    item["job_title"] = r.get("job_title") or job.get("title")
                 out["items"].append(item)
-                continue
-            r = assign_job(conn, int(a["id"]), int(job_id), jd, tiers,
-                           operator, role)
-            if r.get("error"):
-                out["failed"] += 1
-                item["status"] = "failed"
-                item["reason"] = r["error"]
-            elif r.get("unchanged"):
-                out["unchanged"] += 1
-                item["status"] = "unchanged"
-            else:
-                out["assigned"] += 1
-                item["status"] = "assigned"
-                item["job_title"] = r.get("job_title") or job.get("title")
-            out["items"].append(item)
         except Exception as exc:                                 # noqa: BLE001
             out["failed"] += 1
             out["items"].append({"candidate_id": cid, "status": "failed",

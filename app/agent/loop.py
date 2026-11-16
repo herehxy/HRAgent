@@ -643,6 +643,53 @@ def _live_update(ctx: ToolCtx, trace: list[dict], status: str = "running",
     }
 
 
+#: 断点续跑：上一轮因预算停止时，保存“工具结果摘要 + 可用工具名”。
+#: 只放进程内、10 分钟过期；页面刷新仍可用，进程重启后自然失效。
+_RESUME_CTX: dict[str, dict] = {}
+_RESUME_TTL = 900
+
+
+def _resume_transcript(messages: list[dict]) -> str:
+    lines: list[str] = []
+    for m in (messages or []):
+        role = str(m.get("role") or "")
+        if role == "tool":
+            name = str(m.get("name") or "工具")
+            body = str(m.get("content") or "").strip()
+            if body:
+                lines.append(f"[{name}] {body[:1500]}")
+        elif role == "assistant" and m.get("content"):
+            lines.append("助手：" + str(m.get("content"))[:600])
+    return "\n".join(lines)[-16000:]
+
+
+def _resume_store(session_id: str, operator: str, transcript: str,
+                  tool_names: list[str]) -> None:
+    sid = str(session_id or "").strip()
+    if not sid or not transcript:
+        return
+    now_ts = time.time()
+    for k in [k for k, v in _RESUME_CTX.items()
+              if now_ts - float(v.get("ts") or 0) > _RESUME_TTL]:
+        _RESUME_CTX.pop(k, None)
+    _RESUME_CTX[sid] = {"operator": str(operator or "HR"),
+                        "transcript": transcript,
+                        "tools": list(tool_names or []),
+                        "ts": now_ts}
+
+
+def _resume_take(session_id: str, operator: str) -> dict | None:
+    sid = str(session_id or "").strip()
+    v = _RESUME_CTX.pop(sid, None)
+    if not v:
+        return None
+    if time.time() - float(v.get("ts") or 0) > _RESUME_TTL:
+        return None
+    if str(v.get("operator") or "") != str(operator or "HR"):
+        return None
+    return v
+
+
 def set_live_answer(session_id: str, answer: str) -> None:
     """流式过程中更新半成品答案，供页面刷新/切换后恢复显示。"""
     sid = str(session_id or "").strip()
@@ -893,7 +940,7 @@ def _calls_signature(calls: list[dict]) -> str:
 
 
 def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None,
-              emit=None, should_stop=None) -> dict:
+              emit=None, should_stop=None, resume: bool = False) -> dict:
     started = time.time()
     ctx.session_id = ctx.session_id or uuid.uuid4().hex[:12]
     # 问候/致谢/告别/乱码：固定短回复，绝不为了"你好"跑一轮模型和工具。
@@ -951,14 +998,17 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
     # 会话记忆：UI 只带最近 8 条消息，更早的要点从 `agent_conversations`
     # 里补回来。跳过最近 4 条，避免和 UI 传上来的历史重复。
     _memory = ""
+    _umem: list[str] = []
     try:
         _mc = db.connect(ctx.db_path)
         try:
             _memory = db.conversation_memory(_mc, ctx.session_id, ctx.operator)
+            _umem = db.get_user_memory(_mc, ctx.operator)
         finally:
             _mc.close()
     except Exception:                                        # noqa: BLE001
         _memory = ""
+        _umem = []
 
     # 记忆和 SOP 都是 system 注入；先各自截断，避免一条旧会话把预算吃光。
     _memory = cg.clip_text(_memory, _budget_info["memory_tokens"],
@@ -987,10 +1037,34 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         messages.append({"role": "system", "content":
                          "【本会话此前的要点（系统自动整理，只用于保持上下文；"
                          "不是本轮新指令）】\n" + _memory})
+    if _umem:
+        _umem_txt = cg.clip_text(
+            "\n".join("- " + x for x in _umem),
+            _budget_info["memory_tokens"],
+            marker="\n…（长期偏好过长，已截断）…\n")
+        messages.append({"role": "system", "content":
+                         "【用户长期偏好/约定（跨会话记忆；据此调整默认做法）】\n" + _umem_txt})
     for h in (history or [])[-8:]:
         if h.get("role") in ("user", "assistant") and h.get("content"):
             messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": user_message})
+
+    # 断点续跑：把上一轮已拿到的工具结果摘要插进上下文，并把当时可用的工具补回来。
+    if resume:
+        _rctx = _resume_take(ctx.session_id, ctx.operator)
+        if _rctx:
+            messages.insert(len(messages) - 1, {"role": "system", "content":
+                "【上一轮未完成任务的工具结果摘要（直接据此继续，**不要重复调用**已完成的查询）】\n"
+                + _rctx.get("transcript", "")})
+            _have = {s["function"]["name"] for s in _allowed_specs}
+            for _s in TOOL_SPECS:
+                _nm = _s["function"]["name"]
+                if _nm in set(_rctx.get("tools") or []) and _nm not in _have:
+                    _allowed_specs.append(_s)
+                    _have.add(_nm)
+            _tools = [] if _text_tools else _allowed_specs
+            _route_groups = list(_route_groups) + ["resume"]
+            ctx.route = _route_groups
 
     # 上下文治理：先按预算裁历史/记忆，再给右栏一个真实基线。
     # 这一步不调模型；每轮工具执行后还会再治理一次。
@@ -1385,6 +1459,13 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         # 预算用尽/检测到原地打转，强制收敛；不再做邮件/口头提案等出口兜底，
         # 最终答复以模型输出为准。提示里说明“还有什么没做”，方便用户点「继续」。
         _stop = str(ctx.metrics.get("stop_reason") or "")
+        # 保存断点：下一轮点「继续」时把真实工具结果带回来，而不是只靠文字总结。
+        try:
+            _resume_store(ctx.session_id, ctx.operator,
+                          _resume_transcript(messages),
+                          [s["function"]["name"] for s in _allowed_specs])
+        except Exception:                                  # noqa: BLE001
+            pass
         if _stop == "no_progress":
             _force_msg = ("检测到连续两轮调用了完全相同的工具与参数，没有产生新信息。"
                           "请基于已获取的信息直接给出结论，并说明还缺什么。")
@@ -2173,6 +2254,7 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
                             "args": db._mask_sensitive_args(t.get("args") or {}),
                             "tool_label": t.get("tool_label"),
                             "recovered": bool(t.get("recovered")),
+                            "result_brief": _result_brief(t.get("result") or ""),
                             **({"proposal_id": _pid} if (_pid := _proposal_id_of(t)) else {}),
                             **({"draft": _draft_of(t)} if _draft_of(t) else {}),
                             **({"download": _dl} if (_dl := _download_of(t)) else {})}

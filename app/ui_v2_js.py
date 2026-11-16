@@ -8382,7 +8382,15 @@ async function initChat(){
       '</div>' +
       '<div class="chatwrap">' +
         '<div class="chatlog" id="chatLog"></div>' +
-        '<div class="chatinput"><div class="ciwrap">' +
+        '<div class="chatinput">' +
+          '<div class="chatattach">' +
+            '<button type="button" class="chatadd" id="chatAttach" ' +
+              'title="上传简历，或直接在输入框粘贴图片/文件">+</button>' +
+            '<span class="hint">上传简历，或直接粘贴图片/文件</span>' +
+          '</div>' +
+          '<input type="file" id="chatFile" style="display:none" ' +
+            'accept=".pdf,.doc,.docx,.txt,.md,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff,.xlsx,.xls">' +
+          '<div class="ciwrap">' +
           '<textarea id="chatIn" rows="3" placeholder="输入指令或问题，Enter 发送"></textarea>' +
           '<button class="btn primary" id="chatSend" aria-label="发送" title="发送">' +
             '<svg class="ci-ico ci-enter" viewBox="0 0 24 24" aria-hidden="true">' +
@@ -8425,6 +8433,28 @@ async function initChat(){
       else askAgent();
     });
     document.getElementById('chatNew').addEventListener('click', newChat);
+    var _att = document.getElementById('chatAttach'), _cf = document.getElementById('chatFile');
+    if(_att && _cf){
+      _att.addEventListener('click', function(){ _cf.click(); });
+      _cf.addEventListener('change', function(){
+        var f = _cf.files && _cf.files[0]; _cf.value = '';
+        if(f) uploadChatFile(f);
+      });
+    }
+    if(!window.__chatPasteBound){
+      window.__chatPasteBound = true;
+      document.addEventListener('paste', function(ev){
+        if(VIEW !== 'chat') return;
+        var cd = ev.clipboardData; if(!cd) return;
+        var files = [];
+        Array.prototype.forEach.call(cd.items || [], function(it){
+          if(it.kind === 'file'){ var f = it.getAsFile(); if(f) files.push(f); }
+        });
+        if(!files.length) return;
+        ev.preventDefault();
+        (async function(){ for(var i=0;i<files.length;i++) await uploadChatFile(files[i]); })();
+      });
+    }
     renderTrace(null);
     loadChatMetrics();
     loadChatContext();
@@ -9377,7 +9407,7 @@ function continueRowHtml(mt){
 function continueAgent(btn){
   if(btn){ btn.disabled = true; var row = btn.parentNode; if(row) row.remove(); }
   if(CHAT_CTRL){ toast('回答还在生成，请稍候', 'info'); return; }
-  askAgent({display: '继续',
+  askAgent({display: '继续', resume: true,
     send: '继续：基于上一轮已获取的信息，继续完成剩余步骤；已完成的查询和写操作不要重复。'});
 }
 /* 给一条消息补上「编辑重发 / 重新生成」入口。 */
@@ -9479,7 +9509,7 @@ function editUserMessage(btn){
   node.querySelector('[data-edit-cancel]').addEventListener('click', cancel);
   node.querySelector('[data-edit-save]').addEventListener('click', save);
 }
-async function askAgentNonStream(q, holder, gen){
+async function askAgentNonStream(q, holder, gen, resumeFlag){
   if(gen == null) gen = ++CHAT_GEN;
   if(gen !== CHAT_GEN) return;
   var convId = CHAT_CONV_ID;
@@ -9491,7 +9521,8 @@ async function askAgentNonStream(q, holder, gen){
   startTracePoll(q, holder);
   var r = await api('/api/agent/chat', {method:'POST',
     headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({message: q, history: CHAT, session_id: convId}),
+    body: JSON.stringify({message: q, history: CHAT, session_id: convId,
+                          resume: !!resumeFlag}),
     signal: ctrl.signal});
   if(CHAT_CTRL === ctrl){
     CHAT_CTRL = null;
@@ -9517,10 +9548,43 @@ async function askAgentNonStream(q, holder, gen){
   }
   renderAgentResult(holder, r, q);
 }
+/* 聊天内上传：一个文件一个请求（服务端不收 multipart），上传后让助手检查入库结果。 */
+async function uploadChatFile(file){
+  if(!file) return;
+  if(file.size > 20 * 1024 * 1024){
+    toast('文件超过 20MB，请压缩后再上传', 'warn'); return;
+  }
+  var name = file.name || '';
+  if(!/\.[A-Za-z0-9]+$/.test(name)){
+    var _ext = (String(file.type || '').split('/')[1] || 'png').replace(/[^A-Za-z0-9]/g, '');
+    name = '粘贴文件-' + Date.now() + '.' + (_ext || 'png');
+  }
+  toast('正在上传并解析：' + name + '…', 'info');
+  var resp;
+  try{
+    resp = await fetch('/api/upload?name=' + encodeURIComponent(name), {
+      method: 'POST', headers: hdr({'Content-Type': 'application/octet-stream'}),
+      body: file
+    });
+  }catch(e){
+    toast('上传失败：' + String(e && e.message || e), 'danger'); return;
+  }
+  var j = {};
+  try{ j = await resp.json(); }catch(e){ j = {}; }
+  if(!resp.ok || !j.ok){
+    toast('上传失败：' + (j.detail || j.error || ('HTTP ' + resp.status)), 'danger');
+    return;
+  }
+  toast('已上传并解析：' + (j.stored || name), 'ok');
+  askAgent({display: '已上传：' + name,
+    send: '我刚上传了简历「' + name + '」，请检查入库结果并告诉我是否成功；'
+        + '如需要补充信息请提示我。'});
+}
 async function askAgent(override){
   var inp = document.getElementById('chatIn');
   var sendQ = override ? String(override.send || '') : (inp.value || '').trim();
   var q = override ? String(override.display || sendQ) : sendQ;
+  var resumeFlag = !!(override && override.resume);
   if(!sendQ) return;
   if(CHAT_CTRL){
     toast(RUN_CONV_ID && RUN_CONV_ID !== CHAT_CONV_ID
@@ -9653,7 +9717,8 @@ async function askAgent(override){
   try{
     var resp = await fetch('/api/agent/chat/stream', {method:'POST',
       headers: hdr(),
-      body: JSON.stringify({message: sendQ, history: CHAT, session_id: convId}),
+      body: JSON.stringify({message: sendQ, history: CHAT, session_id: convId,
+                            resume: resumeFlag}),
       signal: CHAT_CTRL.signal});
     if(resp.status === 401 && AUTH_ENABLED){
       setToken(''); ME = null;
@@ -9718,7 +9783,7 @@ async function askAgent(override){
       renderTrace(null);
       return;
     }
-    await askAgentNonStream(sendQ, live, gen);
+    await askAgentNonStream(sendQ, live, gen, resumeFlag);
   }
 }
 function renderDraftCards(holder, drafts){

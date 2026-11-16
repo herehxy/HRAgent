@@ -313,6 +313,13 @@ button{cursor:pointer}
 /* 助手输入框：**三行起步**，随内容长高，**上限 10 行**，再长就内部向上滚动；
    发送键放在框内右下角（不占外面的位置）。 */
 .chatinput{flex:none;padding:12px 24px;border-top:1px solid var(--line);background:var(--surface)}
+.chatattach{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.chatadd{width:44px;height:44px;border-radius:14px;border:1px solid var(--line-2);
+  background:var(--surface);color:var(--ink);font-size:28px;line-height:1;
+  display:flex;align-items:center;justify-content:center;cursor:pointer;
+  box-shadow:var(--elev);transition:background .15s,border-color .15s}
+.chatadd:hover{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink)}
+.chatattach .hint{font-size:12px;color:var(--ink-3)}
 .ciwrap{position:relative}
 .chatinput textarea{
   width:100%;min-height:calc(3 * 1.72em);max-height:calc(10 * 1.72em);

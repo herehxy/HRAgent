@@ -480,6 +480,122 @@ class StageGateTest(unittest.TestCase):
         self.assertEqual(stages.require_hint("初筛通过", "待面试"), "")
 
 
+class BulkToolParamsTest(unittest.TestCase):
+    def test_bulk_and_single_write_accept_ids_or_names(self):
+        from app.agent import tools
+        from app.agent.tools import ToolCtx
+
+        with tempfile.TemporaryDirectory() as d:
+            dbp = os.path.join(d, "workbench.db")
+            conn = db.connect(dbp)
+            try:
+                a = db.insert_candidate(conn, {"identity_key": "bt:a", "name": "白梦田"})
+                b = db.insert_candidate(conn, {"identity_key": "bt:b", "name": "吴晓敏"})
+                db.insert_application(conn, {"candidate_id": a, "channel": "邮箱",
+                                             "stage": "新投递", "applied_at": "2026-11-01"})
+                db.insert_application(conn, {"candidate_id": b, "channel": "邮箱",
+                                             "stage": "新投递", "applied_at": "2026-11-02"})
+                conn.execute("INSERT INTO jobs(title,active) VALUES('数字化工程师',1)")
+                conn.commit()
+            finally:
+                _close_physical(conn)
+            ctx = ToolCtx(db_path=dbp, session_id="bt", operator="HR", role="hr")
+            for payload in ({"candidate_ids": ["白梦田", "吴晓敏"]},
+                            {"ids": [a, b]}):
+                out = json.loads(tools.execute(
+                    "manage_candidate",
+                    {"action": "bulk_initial_pass", "payload": payload}, ctx))
+                self.assertNotIn("error", out)
+                self.assertTrue(out.get("proposal_id"))
+            out = json.loads(tools.execute(
+                "manage_candidate",
+                {"action": "bulk_assign_job",
+                 "payload": {"candidate_ids": ["白梦田", "吴晓敏"],
+                              "job": "数字化工程师"}}, ctx))
+            self.assertNotIn("error", out)
+            self.assertTrue(out.get("proposal_id"))
+            out = json.loads(tools.execute(
+                "manage_candidate",
+                {"action": "set_tier",
+                 "payload": {"candidate_id": "白梦田", "tier": "B"}}, ctx))
+            self.assertNotIn("error", out)
+            _close_pool_path(dbp)
+
+    def test_ambiguous_name_reports_candidates(self):
+        from app.agent import tools
+        from app.agent.tools import ToolCtx
+
+        with tempfile.TemporaryDirectory() as d:
+            dbp = os.path.join(d, "workbench.db")
+            conn = db.connect(dbp)
+            try:
+                db.insert_candidate(conn, {"identity_key": "bt:dup-1", "name": "吴晓敏"})
+                db.insert_candidate(conn, {"identity_key": "bt:dup-2", "name": "吴晓敏"})
+            finally:
+                _close_physical(conn)
+            ctx = ToolCtx(db_path=dbp, session_id="bt2", operator="HR", role="hr")
+            out = json.loads(tools.execute(
+                "manage_candidate",
+                {"action": "bulk_initial_pass",
+                 "payload": {"candidate_ids": ["吴晓敏"]}}, ctx))
+            self.assertIn("error", out)
+            self.assertIn("吴晓敏", out["error"])
+            _close_pool_path(dbp)
+
+
+class SqlQueryToolTest(unittest.TestCase):
+    def test_readonly_sql_views_and_guardrails(self):
+        from app.agent import tools
+        from app.agent.tools import ToolCtx
+
+        with tempfile.TemporaryDirectory() as d:
+            dbp = os.path.join(d, "workbench.db")
+            conn = db.connect(dbp)
+            try:
+                db.insert_candidate(conn, {"identity_key": "sql:a", "name": "甲",
+                                           "school": "A大学"})
+            finally:
+                _close_physical(conn)
+            ctx = ToolCtx(db_path=dbp, session_id="sql", operator="HR", role="hr")
+            schema = json.loads(tools.execute("sql_schema", {}, ctx))
+            self.assertIn("v_candidates", schema["views"])
+            out = json.loads(tools.execute(
+                "sql_query", {"sql": "SELECT name FROM v_candidates", "limit": 5}, ctx))
+            self.assertEqual(out["rows"], [{"name": "甲"}])
+            for bad in ("DELETE FROM v_candidates", "SELECT * FROM sqlite_master",
+                        "SELECT 1; SELECT 2"):
+                err = json.loads(tools.execute("sql_query", {"sql": bad}, ctx))
+                self.assertIn("error", err)
+            _close_pool_path(dbp)
+
+
+class AgentResumeAndMemoryTest(unittest.TestCase):
+    def test_resume_checkpoint_is_one_shot(self):
+        from app.agent import loop
+
+        loop._resume_store("resume-test", "HR", "[tool] 结果", ["search_candidates"])
+        first = loop._resume_take("resume-test", "HR")
+        self.assertTrue(first)
+        self.assertEqual(first["tools"], ["search_candidates"])
+        self.assertIsNone(loop._resume_take("resume-test", "HR"))
+
+    def test_user_memory_tool_persists(self):
+        from app.agent import tools
+        from app.agent.tools import ToolCtx
+
+        with tempfile.TemporaryDirectory() as d:
+            dbp = os.path.join(d, "workbench.db")
+            conn = db.connect(dbp)
+            try:
+                ctx = ToolCtx(db_path=dbp, session_id="mem", operator="HR", role="hr")
+                out = json.loads(tools.execute(
+                    "remember_preference", {"text": "默认导出用 xlsx"}, ctx))
+                self.assertEqual(out["count"], 1)
+                self.assertEqual(db.get_user_memory(conn, "HR"), ["默认导出用 xlsx"])
+            finally:
+                _close_physical(conn)
+
+
 class AgentLiveTraceTest(unittest.TestCase):
     def test_partial_answer_survives_live_update(self):
         from app.agent import loop

@@ -5431,6 +5431,8 @@ def api_search_status(x_tp_token: str | None = Header(default=None, alias="X-TP-
 class ChatReq(BaseModel):
     message: str
     history: list[dict] | None = None
+    #: 断点续跑：上一轮因预算停止时，服务端保留了工具结果摘要
+    resume: bool = False
     # v4.0.17：一条会话的稳定 id。前端“新对话”生成，后续每轮都带同一个值；
     # 不传时仍按旧行为每次生成随机 id（兼容脚本/旧客户端）。
     session_id: str | None = None
@@ -5456,7 +5458,7 @@ def api_agent_chat(req: ChatReq, x_tp_token: str | None = Header(default=None, a
             ctx.session_id = _cid
     _begin_agent_run(ctx, req.message)
     try:
-        out = run_agent(req.message, ctx, req.history)
+        out = run_agent(req.message, ctx, req.history, resume=bool(req.resume))
     except Exception as exc:                              # noqa: BLE001
         _abort_agent_run(ctx.run_id, f"{type(exc).__name__}: {exc}")
         raise
@@ -5540,7 +5542,7 @@ def api_agent_chat_stream(req: ChatReq,
     def _work() -> None:
         try:
             out = run_agent(req.message, ctx, req.history, emit=_emit,
-                            should_stop=cancel.is_set)
+                            should_stop=cancel.is_set, resume=bool(req.resume))
             out["session"] = {"role": s["role"], "mode": s.get("mode")}
             q.put({"type": "done", **out})
         except Exception as exc:                              # noqa: BLE001
