@@ -470,6 +470,15 @@ class AgentConversationPersistenceTest(unittest.TestCase):
                 _close_physical(conn)
 
 
+class StageGateTest(unittest.TestCase):
+    def test_interview_unit_not_required_for_interview_stage(self):
+        from app import stages
+
+        self.assertEqual(stages.required_fields("初筛通过", "待面试"), [])
+        self.assertEqual(stages.required_fields("新投递", "待面试"), [])
+        self.assertEqual(stages.require_hint("初筛通过", "待面试"), "")
+
+
 class AgentLiveTraceTest(unittest.TestCase):
     def test_partial_answer_survives_live_update(self):
         from app.agent import loop
