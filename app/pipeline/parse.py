@@ -324,7 +324,10 @@ def _parse_doc_with_soffice(path: str) -> str:
                 break
     if not exe:
         raise RuntimeError("未安装 LibreOffice")
-    with tempfile.TemporaryDirectory(prefix="hra_doc_") as td:
+    # 同 ingest._prepare_attachments：LibreOffice/杀毒可能短暂占用临时文件，
+    # 清理失败不应把已解析出的文本丢掉。
+    with tempfile.TemporaryDirectory(prefix="hra_doc_",
+                                     ignore_cleanup_errors=True) as td:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.run([exe, "--headless", "--norestore", "--convert-to",
                         "txt:Text", "--outdir", td, path],

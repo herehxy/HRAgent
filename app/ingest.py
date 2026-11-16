@@ -1334,7 +1334,11 @@ def _prepare_attachments(atts: list[dict]) -> list[dict]:
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     }
     out: list[dict] = []
-    with tempfile.TemporaryDirectory(prefix="hragent-att-") as td:
+    # Windows 上解析器/杀毒/索引器可能还短暂占用临时文件；TemporaryDirectory
+    # 在退出时清理失败会抛 PermissionError，把**整批收取**打断（现场两次）。
+    # 清理失败只留下临时目录，不能影响入库结果。
+    with tempfile.TemporaryDirectory(prefix="hragent-att-",
+                                     ignore_cleanup_errors=True) as td:
         for i, att in enumerate(atts or []):
             item = dict(att)
             name = str(item.get("filename") or f"attachment-{i}")
@@ -1498,7 +1502,19 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
             # 而 `CD389237_....png` 也可能是一张身份证照片。
             # 一封邮件仍然只选一份简历、只建一个档案，其余作为补充材料归档；
             # 但补充材料也会 OCR/解析并落 raw_text，不再是“无法读取”。
-            atts = _prepare_attachments(atts)
+            try:
+                atts = _prepare_attachments(atts)
+            except Exception as exc:                      # noqa: BLE001
+                # 预处理失败只跳过这封邮件，不能让整批收取一起失败。
+                # processed 保持 0：下次同步会重试这封（附件还在邮箱里）。
+                report["failed"] += 1
+                report["details"].append({
+                    "file": mail.get("subject") or mid or "（未知邮件）",
+                    "status": "failed",
+                    "notes": [f"附件预处理失败：{type(exc).__name__}: {exc}"],
+                })
+                db.update_email(conn, mid, error=f"附件预处理失败：{exc}")
+                continue
             _resume_idx = mb.choose_resume_attachment(atts)
             for _i, _a in enumerate(atts):
                 _a["kind"] = "resume" if _i == _resume_idx else "other"
