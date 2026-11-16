@@ -858,13 +858,14 @@ def _round_budget(cfg: dict, message: str, groups: list[str] | None,
     """按任务复杂度分配工具轮次，返回 (本轮轮次, 硬上限)。
 
     口径（2026-11-16 业务方确认）：
-      · 单步查询（查人/统计/看进度）沿用 （当前配置 4 轮）；
+      · 单步查询（查人/统计/看进度）最低 5 轮（沿用 `max_tool_rounds`，不足 5 时按 5）；
       · 多步任务（筛选→导出→发邮件）8 轮；
       · 命中 SOP 的多步任务 8 轮，「一句话批量」10 轮；
       · `max_tool_rounds` 是简单任务预算，`max_tool_rounds_cap` 是硬上限（默认 12），
         防止模型无限跑、费用失控。
     """
-    base = max(2, int(cfg.get("max_tool_rounds", 5) or 5))
+    # 业务方 2026-11-16：最低 5 轮，避免简单操作比原来 4 轮还少
+    base = max(5, int(cfg.get("max_tool_rounds", 5) or 5))
     cap = max(base, int(cfg.get("max_tool_rounds_cap", 12) or 12))
     if skill:
         want = 10 if skill.get("id") == "one_sentence_batch" else 8

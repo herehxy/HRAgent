@@ -172,7 +172,13 @@ def build_resume_bundle(conn, **filters) -> list[tuple[str, str]]:
     from . import db as db_mod
     from . import naming as naming_mod
 
+    ids = filters.pop("candidate_ids", None)
     items = db_mod.list_candidates(conn, archived=False, light=False, **filters)
+    if ids:
+        # 指定了候选人：只留这些人（list_candidates 没有这个筛选维度，
+        # 放在上层过滤；导出的筛选条件与排序仍一致）。
+        wanted = {int(x) for x in ids}
+        items = [it for it in items if int(it["id"]) in wanted]
     pairs: list[tuple[str, str]] = []
     used: set[str] = set()
     for it in items:

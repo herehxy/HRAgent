@@ -121,7 +121,7 @@ config/mailbox.json   收发信配置     config/imap.secret      IMAP 密码（
 
 接内网大模型只改 `base_url` + `model`，不动代码；也支持 `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` 覆盖。
 
-工具轮次按任务自适应：简单查询沿用 `max_tool_rounds`（当前 4 轮），多步任务自动放宽到 8 轮（一句话批量 10 轮），硬上限由 `max_tool_rounds_cap` 控制（默认 12）；`max_run_seconds` 是单轮时间预算（默认 120 秒）。到预算上限时会保留已查到的结果，并在界面给出「继续」按钮。
+工具轮次按任务自适应：简单查询最低 5 轮（`max_tool_rounds` 不足 5 时按 5），多步任务自动放宽到 8 轮（一句话批量 10 轮），硬上限由 `max_tool_rounds_cap` 控制（默认 12）；`max_run_seconds` 是单轮时间预算（默认 120 秒）。到预算上限时会保留已查到的结果，并在界面给出「继续」按钮。
 
 ---
 

@@ -74,15 +74,20 @@ function errText(v){
    这里拦下来用 fetch 带 token 下载，避免点开新标签页只看到 401。 */
 document.addEventListener('click', function(ev){
   var a = ev.target && ev.target.closest
-    ? ev.target.closest('a[href^="/api/export/roster"],a[href^="/api/export/interview-schedule"]')
+    ? ev.target.closest('a[href^="/api/export/"],a[href^="/api/documents/"],' +
+        'a[href^="/api/sources/file"],a[href^="/api/mail/outbox/"]')
     : null;
   if(!a) return;
   ev.preventDefault();
-  toast('正在导出…');
+  toast('正在下载…');
   var href = a.getAttribute('href') || '';
-  var fallback = href.indexOf('interview-schedule') >= 0
-    ? ('面试日程-' + todayStamp() + '.xlsx')
-    : ('候选人名单-' + todayStamp() + '.xlsx');
+  var fallback = '下载文件';
+  if(href.indexOf('resume-bundle') >= 0) fallback = '简历附件-' + todayStamp() + '.zip';
+  else if(href.indexOf('interview-schedule') >= 0) fallback = '面试日程-' + todayStamp() + '.xlsx';
+  else if(href.indexOf('export/roster') >= 0) fallback = '候选人名单-' + todayStamp() + '.xlsx';
+  else if(href.indexOf('/api/documents/') >= 0) fallback = '简历附件';
+  else if(href.indexOf('/api/mail/outbox/') >= 0) fallback = '邮件附件';
+  else if(href.indexOf('/api/sources/file') >= 0) fallback = '来源文件';
   fetch(href, {headers: hdr({})})
     .then(function(r){
       if(!r.ok){ throw new Error('HTTP ' + r.status); }

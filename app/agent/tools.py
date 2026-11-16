@@ -450,10 +450,13 @@ TOOL_SPECS = [
            "what": {"type": "string", "description": "resumes=简历原件包（默认）/ csv=人才清单"}},
           []),
     _spec("export_resume_bundle",
-          "按岗位/阶段/投递时间段/关键词打包**简历原件 zip**，返回下载链接。"
+          "按岗位/阶段/投递时间段/关键词/指定候选人 id 打包**简历原件 zip**，返回下载链接。"
+          "用户一次要多个人的简历时用 candidate_ids 打成一个包，**不要逐个返回单人的下载链接**。"
           "用户说“导出名单并下载简历附件”时，名单用 export_roster，附件用这个。",
           {"job": {"type": "string", "description": "岗位名；留空=全部岗位"},
            "stage": {"type": "string", "description": "阶段；留空=全部"},
+           "candidate_ids": {"type": "array", "items": {"type": "integer"},
+                              "description": "指定候选人 id；给定时只打包这些人（用户点名的几个候选人用这个）"},
            "education": {"type": "string", "description": "学历精确匹配"},
            "univ": {"type": "string", "description": "985 或 211"},
            "keyword": {"type": "string", "description": "姓名/院校/专业关键词"},
@@ -2965,6 +2968,9 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
 
         if name == "export_resume_bundle":
             filters: dict = {}
+            ids_arg = [int(x) for x in (args.get("candidate_ids") or [])][:500]
+            if ids_arg:
+                filters["candidate_ids"] = ids_arg
             stage = str(args.get("stage") or "").strip()
             if stage:
                 filters["stage"] = stage
@@ -3001,6 +3007,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 qs.append("date_from=" + urllib.parse.quote(df))
             if dt:
                 qs.append("date_to=" + urllib.parse.quote(dt))
+            if ids_arg:
+                qs.append("candidate_ids=" + ",".join(str(x) for x in ids_arg))
             url = "/api/export/resume-bundle?" + "&".join(qs)
             label = "简历附件" + (f"（{df or '最早'}至{dt or '最新'}）" if df or dt else "")
             return _ok({"count": len(pairs), "scope": label,

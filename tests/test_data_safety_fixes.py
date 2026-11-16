@@ -489,7 +489,7 @@ class AgentRoundBudgetTest(unittest.TestCase):
     def test_round_budget_adapts_to_task(self):
         from app.agent import loop
 
-        self.assertEqual(loop._round_budget({"max_tool_rounds": 4}, "帮我查一下张三", [], None)[0], 4)
+        self.assertEqual(loop._round_budget({"max_tool_rounds": 4}, "帮我查一下张三", [], None)[0], 5)
         self.assertEqual(loop._round_budget(
             {}, "筛选出符合条件的人，然后导出名单", [], None)[0], 8)
         self.assertEqual(loop._round_budget(

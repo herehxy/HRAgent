@@ -817,7 +817,7 @@ def login_bg():
     for cand in (_os.path.join(BASE, "app", "login_bg.jpg"),
                  _os.path.join(_os.path.dirname(BASE), "app", "login_bg.jpg"),
                  _os.path.join(BASE, "login_bg.jpg")):
-        if __paths.lp_isfile(cand):
+        if _paths.lp_isfile(cand):
             return FileResponse(cand, media_type="image/jpeg",
                                 headers={"Cache-Control": "public, max-age=31536000, immutable"})
     raise HTTPException(status_code=404, detail="背景图未随包分发")
@@ -3832,7 +3832,7 @@ def api_export_interview_schedule(date_from: str | None = None, date_to: str | N
 def api_export_resume_bundle(job_id: int | None = None, stage: str | None = None,
                              date_from: str | None = None, date_to: str | None = None,
                              keyword: str | None = None, education: str | None = None,
-                             univ: str | None = None,
+                             univ: str | None = None, candidate_ids: str | None = None,
                              x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                              x_tp_role: str | None = Header(default=None, alias="X-TP-Role")):
     """按筛选条件打包**最新一份简历原件**（zip）。
@@ -3858,6 +3858,15 @@ def api_export_resume_bundle(job_id: int | None = None, stage: str | None = None
         filters["education"] = education
     if univ:
         filters["univ"] = univ
+    if candidate_ids:
+        _ids: list[int] = []
+        for _part in str(candidate_ids).replace(" ", ",").split(","):
+            try:
+                _ids.append(int(_part))
+            except (TypeError, ValueError):
+                continue
+        if _ids:
+            filters["candidate_ids"] = _ids[:500]
     conn = db.connect(DB_PATH)
     try:
         pairs = export_mod.build_resume_bundle(conn, **filters)
