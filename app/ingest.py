@@ -872,6 +872,9 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
             conn.commit()
             existing = db.get_application(conn, existing["id"])
 
+        # 新版本简历的原文若与上一版不同，先清掉旧项目经历缓存；
+        # 随后的 analyze_one 会按新原文重炼（否则会一直显示旧简历的项目）。
+        _proj_reset = _reset_projects_cache_if_new_text(conn, cid, text)
         doc_id = db.insert_document(conn, {
             "file_hash": digest, "candidate_id": cid, "application_id": existing["id"],
             "file_name": filename, "file_path": local_path or archived, "archived_path": archived,
@@ -890,6 +893,8 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         result["candidate_id"] = cid
         result["application_id"] = existing["id"]
         result["document_id"] = doc_id
+        if _proj_reset:
+            result["notes"].append("新简历原文有变化，项目经历缓存已清空，分析阶段会重新提炼")
         if updated_fields:
             result["notes"].append("已按最新简历刷新档案：" + "、".join(
                 db.AUDIT_FIELD_LABEL.get(k, k) for k in updated_fields))
@@ -919,6 +924,8 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
         "breakdown": g["breakdown"], "extract_mode": cand.get("extract_mode"),
         "confidence": cand.get("confidence"),
     })
+    # 历史档案补投/归档后重新投递：同样要判断项目经历缓存是否过期。
+    _proj_reset = _reset_projects_cache_if_new_text(conn, cid, text)
     if reuse_doc and prior_doc is not None:
         # 复用既有原件：`documents.file_hash` 是 UNIQUE，同一份文件只允许一条台账，
         # 因此不新建 document（磁盘上也确实只有一份文件），把已有附件挂到新投递上。
@@ -939,6 +946,8 @@ def ingest_one(conn, cfg: dict, jd: dict, tiers: dict, *, filename: str, data: b
     if not is_new:
         # 历史档案没有投递、或已归档后重新投递时，按最新简历刷新一次主档。
         _updated = _apply_resume_fields(conn, cid, cand, text)
+        if _proj_reset:
+            result["notes"].append("新简历原文有变化，项目经历缓存已清空，分析阶段会重新提炼")
         if _updated:
             result["notes"].append("已按最新简历刷新档案：" + "、".join(
                 db.AUDIT_FIELD_LABEL.get(k, k) for k in _updated))
@@ -1076,6 +1085,36 @@ def _apply_resume_fields(conn, cid: int, cand: dict, text: str) -> list[str]:
         db.add_audit(conn, "candidate", str(cid), "resume_refresh", "",
                      f"最新简历自动刷新档案：{labels}", "system", "system")
     return sorted(upd)
+
+
+def _reset_projects_cache_if_new_text(conn, cid: int, new_text: str) -> bool:
+    """新简历原文变化时清空项目经历缓存，让后续 `analyze_one` 按新原文重炼。
+
+    为什么需要（v6.0.1）：项目经历从 v5.0.1 起在入库自动分析阶段预提炼并缓存，
+    `analyze_one` 只在 `projects_json IS NULL` 时调模型。但同一人的新版本简历
+    走的是 `merged_version` 分支，原实现从不清理缓存 → HR 看到的一直是旧简历的
+    项目经历，只有点「完整重新分析」才会刷新。
+
+    **必须在插入新 document 之前调用**：本函数用"当前最新一份 document"作为旧原文，
+    插入后它就会变成新原文，比较永远相等。
+    原文为空（解析失败）时不清理，避免把还能用的旧摘要清掉又补不回来。
+    """
+    if not cid or not str(new_text or "").strip():
+        return False
+    row = conn.execute("SELECT projects_json FROM candidates WHERE id = ?", (cid,)).fetchone()
+    if not row or row["projects_json"] is None:
+        return False
+    prev = conn.execute(
+        "SELECT raw_text FROM documents WHERE candidate_id = ? ORDER BY id DESC LIMIT 1",
+        (cid,)).fetchone()
+    prev_text = str(prev["raw_text"] or "") if prev else ""
+    if prev_text == str(new_text):
+        return False
+    db.update_candidate(conn, cid, projects_json=None)
+    db.add_audit(conn, "candidate", str(cid), "projects_cache_reset", "",
+                 "新简历原文有变化，已清空旧项目经历缓存（等待重新提炼）",
+                 "system", "system")
+    return True
 
 
 def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id: int, *,

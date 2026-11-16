@@ -3873,6 +3873,7 @@ AUDIT_LABEL = {
     "import_domain": "导入了领域词表", "send": "发送了邮件",
     "chat_clear": "清空了对话", "chat_restore": "恢复了对话", "chat_purge": "清理了对话记录",
     "context_alert": "触发了上下文告警",
+    "projects_cache_reset": "清空了项目经历缓存",
     "update": "修改了", "edit_settings": "修改了系统设置", "edit_config": "修改了配置",
     # 提案的处置：`db.decide_proposal` 传的 action 就是 decision 本身
     "approve": "确认执行了提案", "reject": "拒绝了提案",

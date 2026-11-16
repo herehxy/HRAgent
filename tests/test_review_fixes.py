@@ -89,6 +89,36 @@ class ReviewFixTests(unittest.TestCase):
         finally:
             conn.close()
 
+    # ---------------------------------------------------------------- 项目经历缓存
+    def test_projects_cache_resets_when_resume_text_changes(self):
+        conn = db.connect(_DB)
+        try:
+            cid = db.insert_candidate(conn, {"identity_key": "test:projects-reset",
+                                             "name": "项目缓存己"})
+            db.insert_document(conn, {
+                "file_hash": "test-projects-doc-1", "candidate_id": cid,
+                "application_id": None, "file_name": "旧简历.pdf",
+                "file_path": "", "archived_path": "", "mime": "application/pdf",
+                "size": 1, "raw_text": "旧简历原文", "parse_engine": "test",
+                "parse_ok": True,
+            })
+            db.update_candidate(conn, cid, projects_json=json.dumps(
+                {"projects": [{"name": "旧项目"}], "direction_summary": "旧方向"},
+                ensure_ascii=False))
+            # 原文没变：保留缓存
+            self.assertFalse(ingest._reset_projects_cache_if_new_text(
+                conn, cid, "旧简历原文"))
+            self.assertIsNotNone(db.get_candidate(conn, cid)["projects_json"])
+            # 原文变了：清空缓存，后续 analyze_one 会重炼
+            self.assertTrue(ingest._reset_projects_cache_if_new_text(
+                conn, cid, "新简历原文"))
+            self.assertIsNone(db.get_candidate(conn, cid)["projects_json"])
+            # 已无缓存：不重复清空
+            self.assertFalse(ingest._reset_projects_cache_if_new_text(
+                conn, cid, "又一份新原文"))
+        finally:
+            conn.close()
+
     # ---------------------------------------------------------------- B11
     def test_audit_email_is_masked(self):
         masked = db.audit_field_value("email_enc", "alice@example.com")
