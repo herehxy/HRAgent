@@ -398,7 +398,8 @@ def main(argv: list[str] | None = None) -> int:
     # 后者每次构建都会被 `prepare_config_template()` 整个删掉重建，
     # 脚本放进去会静默消失（这个坑已经踩过一次）。
     packaging = os.path.join(HERE, "packaging")
-    for name in ("install.ps1", "uninstall.ps1", "安装.cmd", "卸载.cmd"):
+    for name in ("install.ps1", "uninstall.ps1", "安装.cmd", "卸载.cmd",
+                 "重置密码.cmd", "密码找回说明.txt"):
         src_helper = os.path.join(packaging, name)
         if os.path.isfile(src_helper):
             shutil.copy2(src_helper, os.path.join(APP_DIR, name))

@@ -426,18 +426,30 @@ def by_skills(conn, skills: list[str], mode: str = "all", include_tier: str | No
             "count": len(results), "results": results}
 
 
-def status(db_path: str | None = None) -> dict:
+def status(db_path: str | None = None, probe: bool = True,
+           timeout: float = 3.0) -> dict:
+    """向量索引状态。
+
+    `probe=True` 才真的连一次向量服务，且**默认只等 3 秒**（原来 60 秒）。
+    设置页/启动接口只需要配置和索引统计，不该被远程服务的 DNS/连接超时拖住；
+    需要确认服务通不通时，由设置页的「测试连接」显式带 `probe=1` 调用。
+    """
     cfg = load_cfg()
     out = {"enabled": bool(cfg.get("enabled", True)), "base_url": cfg.get("base_url"),
-           "model": cfg.get("model"), "reachable": False, "error": None,
-           "indexed": 0, "index_model": None, "dim": 0}
-    if out["enabled"]:
+           "model": cfg.get("model"), "reachable": None, "probed": False,
+           "error": None, "indexed": 0, "index_model": None, "dim": 0}
+    if out["enabled"] and probe:
+        out["probed"] = True
+        pcfg = dict(cfg)
+        # 探测用短超时；真正建索引/检索仍用配置里的完整超时。
+        pcfg["timeout"] = max(1.0, float(timeout))
         try:
-            vecs, model, err = embed(["连通性测试"], cfg, allow_fallback=False)
+            vecs, model, err = embed(["连通性测试"], pcfg, allow_fallback=False)
             out["reachable"] = True
             out["dim"] = len(vecs[0]) if vecs else 0
             out["error"] = err
         except Exception as exc:
+            out["reachable"] = False
             out["error"] = f"embedding 服务不可达：{exc}（将使用本地哈希向量兜底）"
     if db_path:
         conn = db.connect(db_path)

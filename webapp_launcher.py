@@ -1325,7 +1325,47 @@ def _parse_args(argv: list[str] | None = None):
     parser.add_argument("--no-browser", action="store_true", help="启动时不打开浏览器")
     parser.add_argument("--port-check", action="store_true",
                         help="只做端口体检：列出候选端口的占用/保留情况后退出")
+    parser.add_argument("--reset-password", nargs="?", const="admin", metavar="账号",
+                        help="把指定账号（默认 admin）的密码重置为 change-me 后退出")
     return parser.parse_args(argv)
+
+
+def _reset_password(data_dir: str, username: str) -> int:
+    """命令行找回：把账号密码重置为默认值并踢掉旧会话。
+
+    这是**本机文件级恢复**，不走 HTTP：能运行这个命令的人本来就能读写
+    同一份数据库与密钥，因此不额外扩大攻击面。登录后会强制改密。
+    """
+    os.environ.setdefault("TP_DATA_DIR", data_dir)
+    try:
+        from app import auth, db, paths
+        db_path = os.environ.get("TP_DB_PATH") or os.path.join(
+            paths.DATA_DIR, "workbench.db")
+        conn = db.connect(db_path)
+        try:
+            auth.ensure_seed_users(conn)
+            if not db.get_user(conn, username):
+                names = "、".join(u["username"] for u in db.list_users(conn)) or "（无）"
+                msg = f"账号「{username}」不存在。\n现有账号：{names}"
+                print(msg)
+                _message(msg, error=True)
+                return 1
+            db.set_user_password(conn, username, auth.DEFAULT_PASSWORD)
+            db.delete_user_sessions(conn, username)
+            db.set_user_must_change(conn, username, True)
+            msg = (f"账号「{username}」的密码已重置为 {auth.DEFAULT_PASSWORD}。\n"
+                   "下次登录后必须立即修改。")
+            print(msg)
+            _message(msg)
+            return 0
+        finally:
+            conn.close()
+    except Exception as exc:                              # noqa: BLE001
+        msg = f"重置密码失败：{type(exc).__name__}: {exc}"
+        print(msg)
+        traceback.print_exc()
+        _message(msg, error=True)
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1393,6 +1433,8 @@ def main(argv: list[str] | None = None) -> int:
     data_dir = os.environ.get("TP_DATA_DIR") or os.path.join(user_home, "data")
     config_dir = os.environ.get("TP_CONFIG_DIR") or os.path.join(user_home, "config")
     _redirect_stdio_to_log(data_dir)
+    if args.reset_password is not None:
+        return _reset_password(data_dir, (args.reset_password or "admin").strip())
     if args.show_paths:
         text = (f"程序目录：{base}\n用户数据根：{user_home}\n"
                 f"数据目录：{data_dir}\n配置目录：{config_dir}\n"

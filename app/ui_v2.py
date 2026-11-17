@@ -264,6 +264,8 @@ _PAGE = r"""<!DOCTYPE html>
     <input id="loginUser" class="logininput" autocomplete="username" required>
     <label class="loginlabel" for="loginPass">密码</label>
     <input id="loginPass" class="logininput" type="password" autocomplete="current-password" required>
+    <label class="loginremember"><input type="checkbox" id="loginRemember" checked>
+      记住我（7 天内免登录，期间自动续期）</label>
     <div class="loginerr" id="loginErr"></div>
     <!-- 忙碌/成功图标（v3.2）：同一条 SVG，圆环转 → 对勾画出来。
          平时 display:none，只占 14px，不参与布局计算。 -->
@@ -279,7 +281,7 @@ _PAGE = r"""<!DOCTYPE html>
          输不进去，第一反应是"程序坏了"。首次部署必须把默认账号写出来。
          密码改过之后这行会自动消失（服务端按 must_change_password 决定是否下发）。 -->
     <div class="loginhint" id="loginFirstHint" hidden></div>
-    <div class="loginhint">忘记密码请联系系统管理员重置。</div>
+    <div class="loginhint">忘记密码：请让其他管理员在「设置 → 账号与权限」重置。</div>
   </form>
 </div>
 

@@ -14,8 +14,12 @@ var ITEMS = [], CUR = null, CUR_DETAIL = null;
      · fileUrl() 供**浏览器原生导航**用（`<img>`/window.open/a[href] 带不了
        请求头）：登录模式下先向 /api/files/sign 换一张短时、绑定资源的票据，
        URL 里不再出现长期会话令牌。 */
-var TOKEN = (function(){ try { return localStorage.getItem('tp_token') || ''; }
-                        catch(e){ return ''; } })();
+var TOKEN = (function(){
+  try{
+    return localStorage.getItem('tp_token') ||
+           sessionStorage.getItem('tp_token') || '';
+  }catch(e){ return ''; }
+})();
 /*: 当前登录者（`/api/me` 的结果）。本机模式下保持 null，界面不显示"当前用户"。 */
 var ME = null;
 function hdr(extra){
@@ -133,7 +137,8 @@ async function api(path, opt){
     /* 422 的 detail 是对象数组（Pydantic），归一后 toast/页面才读得懂 */
     if(j.__err) j.__err = errText(j.__err);
     /* 401 = 没登录 / 会话过期 / 被管理员踢下线。统一回到登录页。
-       **不能只靠登录时的判断**：会话 12 小时过期，HR 开着页面过夜就会遇到。 */
+       **不能只靠登录时的判断**：连续 7 天没打开或管理员踢下线时，
+       HR 可能会在正常用着的时候遇到。 */
     if(r.status === 401 && AUTH_ENABLED){
       setToken('');
       ME = null;
@@ -3386,7 +3391,20 @@ function showLogin(msg){
     if(msg){ void e.offsetWidth; e.classList.add('on'); }
   }
   var u = document.getElementById('loginUser');
+  /* 记住上次登录的账号名（只存账号，不存密码）：换人登录时直接改这一格即可。 */
+  if(u && !u.value){
+    try{ u.value = localStorage.getItem('tp_last_user') || ''; }catch(_e){}
+  }
   if(u && !u.value){ try{ u.focus(); }catch(_e){} }
+  else {
+    var p = document.getElementById('loginPass');
+    if(p && !p.value){ try{ p.focus(); }catch(_e){} }
+  }
+  var rm = document.getElementById('loginRemember');
+  if(rm){
+    try{ rm.checked = localStorage.getItem('tp_remember') !== '0'; }
+    catch(_e){ rm.checked = true; }
+  }
   loadLoginHint();
   startLoginNet();
 }
@@ -3450,10 +3468,26 @@ function loginExit(done){
     if(done) done();
   }, 290);
 }
-function setToken(t){
+function setToken(t, remember){
   TOKEN = t || '';
-  try{ if(TOKEN) localStorage.setItem('tp_token', TOKEN); else localStorage.removeItem('tp_token'); }
-  catch(e){ /* 隐私模式下 localStorage 可能不可写，忽略 */ }
+  /* remember=true：写 localStorage，关浏览器再开仍登录；
+     remember=false：只写 sessionStorage，关掉浏览器就退出。
+     清空时两边都清，避免旧令牌在另一处复活。 */
+  var persistent = (remember === undefined) ? true : !!remember;
+  try{
+    if(!TOKEN){
+      localStorage.removeItem('tp_token');
+      sessionStorage.removeItem('tp_token');
+      return;
+    }
+    if(persistent){
+      localStorage.setItem('tp_token', TOKEN);
+      sessionStorage.removeItem('tp_token');
+    } else {
+      sessionStorage.setItem('tp_token', TOKEN);
+      localStorage.removeItem('tp_token');
+    }
+  }catch(e){ /* 隐私模式下存储可能不可写，忽略 */ }
 }
 /* 按钮的三个状态（v3.2）：idle → busy（转环）→ done（对勾）/ 回 idle。
    文字只换一次（"登录"↔"登录中…"），图标在旁边换形状；
@@ -3499,7 +3533,12 @@ async function doLogin(user, pass){
       loginFail(j.detail || ('登录失败（HTTP ' + r.status + '）'));
       return false;
     }
-    setToken(j.token);
+    var _rmEl = document.getElementById('loginRemember');
+    var _remember = _rmEl ? !!_rmEl.checked : true;
+    setToken(j.token, _remember);
+    try{ localStorage.setItem('tp_remember', _remember ? '1' : '0'); }catch(e){}
+    /* 账号名留在本机，下一次打开登录页自动填好；**密码绝不落地**。 */
+    try{ localStorage.setItem('tp_last_user', user || j.username || ''); }catch(e){}
     /* 对勾先画出来（220ms），让人看见"成了"，再退场。这 220ms 不是浪费：
        退场本身要 280ms，两段重叠后总时长仍是 ~300ms，观感却完整得多。 */
     setLoginBtn('done');
@@ -3543,7 +3582,9 @@ async function forcePasswordChange(user, oldPass){
     toast('新密码已设置，但自动登录失败，请用新密码重新登录', 'warn');
     return false;
   }
-  setToken(lj.token);
+  var _rem2 = true;
+  try{ _rem2 = localStorage.getItem('tp_remember') !== '0'; }catch(e){}
+  setToken(lj.token, _rem2);
   ME = null;
   await loadMe();
   toast('密码已更新');
@@ -6851,6 +6892,7 @@ async function initSys(target){
       cfgEdit('embModel', '模型名', em.model, '', 'text') +
       '<div class="crow cfgrow"><label>索引</label><div class="cval">' +
         '<span class="cur">' + esc(embIndexText(emIdx)) + '</span>' +
+        '<button class="btn sm" data-cfg="embTest">测试连接</button>' +
         '<button class="btn sm" data-cfg="reindex">重建索引</button></div></div>' +
     '</div>' +
 
@@ -7105,6 +7147,20 @@ async function sysAct(act){
     toast((re.changed || []).length
       ? '向量模型已保存，点「重建索引」生效'
       : '没有修改', (re.changed || []).length ? 'warn' : 'ok');
+    return;
+  }
+  if(act === 'embTest'){
+    /* 连通性探测**只在用户主动点这里时发生**：设置页打开时不再自动连
+       embedding 服务，否则远程服务不可达会把整页卡到超时。 */
+    toast('正在测试向量服务…', 'info');
+    var et = await api('/api/embedding-config?probe=1');
+    if(et.__err){ toast('测试失败：' + et.__err, 'danger'); return; }
+    var eidx = (et && et.index) || {};
+    if(eidx.reachable === true){
+      toast('向量服务可达' + (eidx.dim ? (' · ' + eidx.dim + ' 维') : ''), 'ok');
+    } else {
+      toast('向量服务不可达：' + (eidx.error || '请检查接口地址和网络'), 'warn');
+    }
     return;
   }
   if(act === 'reindex'){
@@ -8403,6 +8459,8 @@ async function initChat(){
         '<div class="chatinput">' +
           '<input type="file" id="chatFile" style="display:none" ' +
             'accept=".pdf,.doc,.docx,.txt,.md,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff,.xlsx,.xls">' +
+          /* 待发送附件：停在输入框上方，发送后移进用户消息气泡。 */
+          '<div class="chatpending" id="chatPending" hidden></div>' +
           '<div class="ciwrap">' +
           '<label class="chatadd-inline" id="chatAttach" for="chatFile" ' +
             'title="上传简历，或直接在输入框粘贴图片/文件">+</label>' +
@@ -9113,8 +9171,10 @@ function renderChatMessages(hmsgs){
   log.innerHTML = '';
   CHAT_OUTPUTS = [];
   var lastAsst = null;
+  var attQ = _chatAttsQueue(CHAT_CONV_ID);
   (hmsgs || []).forEach(function(m, _idx){
-    var node = pushMsg(m.role, m.content || '');
+    var _atts = (m.role === 'user') ? _chatAttsTake(attQ, m.content || '') : [];
+    var node = pushMsg(m.role, m.content || '', _atts);
     if(m.role === 'user' && (m.status === 'running' || m.status === 'interrupted')){
       node.insertAdjacentHTML('beforeend',
         '<div class="hint run-hint" style="margin-top:4px">' +
@@ -9171,7 +9231,10 @@ async function openConversation(cid, quiet){
     var _already = (_last.role === 'user' &&
       (_last.status === 'running' ||
        String(_last.content || '') === String(RUN_Q || '')));
-    if(!_already) pushMsg('user', RUN_Q);
+    if(!_already){
+      var _rqAtts = _chatAttsTake(_chatAttsQueue(cid), RUN_Q);
+      pushMsg('user', RUN_Q, _rqAtts);
+    }
     var ph = pushMsg('assistant', '');
     ph.innerHTML = '<div class="stream-status hint"></div>' +
       (RUN_STATE.liveThink
@@ -9272,13 +9335,28 @@ function rememberTurn(q, answer){
   }
   CHAT.push({role:'assistant', content: answer || ''});
 }
-function pushMsg(role, content){
+/* 已发送消息里的附件预览：小缩略图 + 文件名，和 Claude Code 一样跟在
+   该条消息气泡内部，而不是在会话顶部单独占一张卡。 */
+function _msgAttsHtml(atts){
+  if(!atts || !atts.length) return '';
+  return '<div class="msg-atts">' + atts.map(function(a){
+    var nm = (a && a.name) ? String(a.name) : '文件';
+    var isImg = !!(a && a.kind === 'image');
+    var thumb = (a && a.thumb)
+      ? '<img src="' + esc(a.thumb) + '" alt="">'
+      : '<span class="favi">' + (isImg ? '🖼️' : '📄') + '</span>';
+    return '<span class="msg-att" title="' + esc(nm) + '">' + thumb +
+      '<span class="nm">' + esc(nm) + '</span></span>';
+  }).join('') + '</div>';
+}
+function pushMsg(role, content, atts){
   var log = document.getElementById('chatLog');
   var welcome = document.getElementById('chatWelcome');
   if(welcome) welcome.remove();
   var el = document.createElement('div');
   el.className = 'msg ' + role;
-  el.innerHTML = role === 'assistant' ? mdLite(content) : esc(content);
+  el.innerHTML = _msgAttsHtml(atts) +
+    (role === 'assistant' ? mdLite(content) : esc(content));
   /* 用户原话单独存一份：编辑重发时不受气泡里追加的按钮文字影响。 */
   if(role === 'user') el.setAttribute('data-q', content);
   log.appendChild(el);
@@ -9559,7 +9637,44 @@ async function askAgentNonStream(q, holder, gen, resumeFlag, extraCtx){
   }
   renderAgentResult(holder, r, q);
 }
-/* 聊天内上传：先渲染预览卡片，再异步解析；**不自动发消息**，等用户下一条指令。 */
+/* 会话附件记录：服务端历史只有 role/content，附件预览由本机按会话保存。
+   只存文件名、状态和压缩后的小缩略图（不存原文件）；换浏览器看不到旧预览，
+   但当前这台机器刷新后仍能显示。 */
+function _chatAttsKey(cid){ return 'hragent.chat_atts.' + cid; }
+function _chatAttsLoad(cid){
+  try{
+    var raw = localStorage.getItem(_chatAttsKey(cid));
+    var list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  }catch(e){ return []; }
+}
+function _chatAttsQueue(cid){
+  return {cid: cid, list: _chatAttsLoad(cid), used: {}};
+}
+function _chatAttsTake(queue, q){
+  if(!queue || !queue.list || !queue.list.length) return [];
+  for(var i = 0; i < queue.list.length; i++){
+    if(queue.used[i]) continue;
+    if(String(queue.list[i].q || '') !== String(q || '')) continue;
+    queue.used[i] = 1;
+    return queue.list[i].atts || [];
+  }
+  return [];
+}
+function _chatAttsSave(cid, q, atts){
+  if(!cid || !atts || !atts.length) return;
+  var clean = atts.map(function(a){
+    return {name: a.name || '', stored: a.stored || '',
+            status: a.status || '', summary: a.summary || '',
+            kind: a.kind || 'file', thumb: a.thumbData || ''};
+  });
+  var list = _chatAttsLoad(cid);
+  list.push({q: String(q || ''), atts: clean});
+  if(list.length > 40) list = list.slice(-40);
+  try{ localStorage.setItem(_chatAttsKey(cid), JSON.stringify(list)); }catch(e){}
+}
+
+/* 聊天内上传：先在输入框上方显示小预览，再异步解析；**不自动发消息**。 */
 var CHAT_UPLOADING = false;
 var CHAT_PENDING_UPLOADS = [];
 function _uploadDisplayName(file){
@@ -9569,28 +9684,77 @@ function _uploadDisplayName(file){
   }
   return n;
 }
+function _uploadTraySync(){
+  var tray = document.getElementById('chatPending');
+  if(tray) tray.hidden = !CHAT_PENDING_UPLOADS.length;
+}
+function _removePendingUpload(att){
+  var i = CHAT_PENDING_UPLOADS.indexOf(att);
+  if(i >= 0) CHAT_PENDING_UPLOADS.splice(i, 1);
+  if(att && att._card) att._card.remove();
+  _uploadTraySync();
+}
+function _clearPendingUploads(){
+  CHAT_PENDING_UPLOADS.forEach(function(a){ if(a && a._card) a._card.remove(); });
+  CHAT_PENDING_UPLOADS = [];
+  var tray = document.getElementById('chatPending');
+  if(tray){ tray.innerHTML = ''; tray.hidden = true; }
+}
+/* 图片缩略图压到 128px 存本地：既能在消息气泡里显示，刷新后也还在。
+   只存预览，不存原文件。 */
+function _uploadThumbData(file, att){
+  if(!att || att.kind !== 'image') return;
+  try{
+    var url = att.thumbUrl || URL.createObjectURL(file);
+    att.thumbUrl = url;
+    var img = new Image();
+    img.onload = function(){
+      try{
+        var max = 128;
+        var w = img.naturalWidth || img.width || max;
+        var h = img.naturalHeight || img.height || max;
+        var k = Math.min(1, max / Math.max(w, h));
+        var c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(w * k));
+        c.height = Math.max(1, Math.round(h * k));
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        att.thumbData = c.toDataURL('image/jpeg', 0.72);
+      }catch(e){}
+    };
+    img.src = url;
+  }catch(e){}
+}
 function _uploadCard(file, name){
-  var log = document.getElementById('chatLog');
-  if(!log) return null;
-  var welcome = document.getElementById('chatWelcome');
-  if(welcome) welcome.remove();
-  var card = document.createElement('div');
-  card.className = 'upload-card';
+  var tray = document.getElementById('chatPending');
+  if(!tray) return null;
+  var isImg = String(file.type || '').indexOf('image/') === 0;
+  var att = {name: name, stored: '', status: 'running', summary: '',
+             kind: isImg ? 'image' : 'file', thumbData: '', thumbUrl: ''};
   var thumb;
-  if(String(file.type || '').indexOf('image/') === 0){
-    var url = URL.createObjectURL(file);
-    card._objUrl = url;
-    thumb = '<img class="upload-thumb" src="' + url + '" alt="">';
+  if(isImg){
+    att.thumbUrl = URL.createObjectURL(file);
+    thumb = '<img class="upload-thumb" src="' + att.thumbUrl + '" alt="">';
   } else {
     thumb = '<div class="upload-thumb upload-file">📄</div>';
   }
+  var card = document.createElement('div');
+  card.className = 'upload-card';
+  card._att = att;
+  att._card = card;
   card.innerHTML = thumb +
     '<div class="upload-info"><div class="upload-name">' + esc(name) + '</div>' +
     '<div class="upload-meta">正在上传…</div>' +
-    '<div class="upload-bar"><i></i></div></div>';
-  log.appendChild(card);
-  log.scrollTop = log.scrollHeight;
-  syncChatSidebar();
+    '<div class="upload-bar"><i></i></div></div>' +
+    '<button class="upload-x" type="button" title="移除" aria-label="移除">×</button>';
+  var x = card.querySelector('.upload-x');
+  if(x) x.addEventListener('click', function(ev){
+    ev.preventDefault(); ev.stopPropagation();
+    _removePendingUpload(att);
+  });
+  tray.appendChild(card);
+  tray.hidden = false;
+  CHAT_PENDING_UPLOADS.push(att);
+  _uploadThumbData(file, att);
   return card;
 }
 function _uploadSet(card, text, pct, state){
@@ -9601,6 +9765,12 @@ function _uploadSet(card, text, pct, state){
   if(bar) bar.style.width = Math.max(0, Math.min(100, Number(pct) || 0)) + '%';
   card.classList.toggle('done', state === 'done');
   card.classList.toggle('error', state === 'error');
+  var att = card._att;
+  if(att){
+    if(state === 'done') att.status = 'done';
+    else if(state === 'error') att.status = 'error';
+    else if(att.status !== 'done') att.status = 'running';
+  }
 }
 function _uploadSummary(rep){
   try{
@@ -9609,21 +9779,32 @@ function _uploadSummary(rep){
     return d.name || rep.name || (rep.added ? ('新增 ' + rep.added + ' 人') : '');
   }catch(e){ return ''; }
 }
-function _uploadRemember(name, stored, status, summary){
-  CHAT_PENDING_UPLOADS.push({name: name, stored: stored || name,
-                             status: status, summary: summary || ''});
-  if(CHAT_PENDING_UPLOADS.length > 8){
-    CHAT_PENDING_UPLOADS = CHAT_PENDING_UPLOADS.slice(-8);
-  }
+function _uploadRemember(att, stored, status, summary){
+  if(!att) return;
+  att.stored = stored || att.stored || att.name;
+  if(status) att.status = status;
+  att.summary = summary || '';
 }
 function _pendingUploadContext(){
   if(!CHAT_PENDING_UPLOADS.length) return '';
   var lines = CHAT_PENDING_UPLOADS.map(function(x){
-    return '- ' + x.name + '（' + (x.status === 'done'
-      ? ('已解析' + (x.summary ? ('：' + x.summary) : '')) : '解析中') + '）';
+    var state = x.status === 'done'
+      ? ('已解析' + (x.summary ? ('：' + x.summary) : ''))
+      : (x.status === 'error'
+          ? ('解析失败' + (x.summary ? ('：' + x.summary) : ''))
+          : '解析中');
+    return '- ' + x.name + '（' + state + '）';
   });
   return '用户刚上传了以下文件：\n' + lines.join('\n') +
          '\n请结合这些文件回答；不要声称看不到文件。';
+}
+function _uploadSnapshot(){
+  return CHAT_PENDING_UPLOADS.map(function(a){
+    return {name: a.name, stored: a.stored, status: a.status,
+            summary: a.summary, kind: a.kind,
+            thumb: a.thumbData || a.thumbUrl || '',
+            thumbData: a.thumbData || ''};
+  });
 }
 async function uploadChatFile(file){
   if(!file) return;
@@ -9685,7 +9866,7 @@ async function uploadChatFile(file){
   if(!j.pending || !j.task_id){
     card._done = true;
     _uploadSet(card, '解析完成', 100, 'done');
-    _uploadRemember(display, j.stored || sendName, 'done', _uploadSummary(j.result));
+    _uploadRemember(card._att, j.stored || sendName, 'done', _uploadSummary(j.result));
     toast('已解析：' + display, 'ok');
     return;
   }
@@ -9705,11 +9886,11 @@ async function uploadChatFile(file){
     if(t.status === 'done'){
       var who = _uploadSummary(t.result);
       _uploadSet(card, '解析完成' + (who ? ('：' + who) : ''), 100, 'done');
-      _uploadRemember(display, j.stored || sendName, 'done', who);
+      _uploadRemember(card._att, j.stored || sendName, 'done', who);
       toast('已解析：' + display, 'ok');
     } else {
       _uploadSet(card, '解析失败：' + (t.message || '未知错误'), 100, 'error');
-      _uploadRemember(display, j.stored || sendName, 'error', t.message || '');
+      _uploadRemember(card._att, j.stored || sendName, 'error', t.message || '');
       toast('解析失败：' + display, 'danger');
     }
   }, 1200);
@@ -9720,6 +9901,9 @@ async function askAgent(override){
   var q = override ? String(override.display || sendQ) : sendQ;
   var resumeFlag = !!(override && override.resume);
   var extraCtx = _pendingUploadContext();
+  var turnAtts = _uploadSnapshot();
+  /* 只上传了文件、没写文字时，点发送也应该把附件发出去。 */
+  if(!sendQ && turnAtts.length){ sendQ = '请查看我上传的文件'; q = sendQ; }
   if(!sendQ) return;
   if(CHAT_CTRL){
     toast(RUN_CONV_ID && RUN_CONV_ID !== CHAT_CONV_ID
@@ -9733,7 +9917,10 @@ async function askAgent(override){
   rememberConv(convId);
   ensureConvInList(convId, q);
   if(!override){ inp.value = ''; chatGrow(inp); }
-  pushMsg('user', q);
+  if(turnAtts.length) _chatAttsSave(convId, sendQ, turnAtts);
+  pushMsg('user', q, turnAtts);
+  /* 附件已进入本条消息气泡，输入框上方的待发送预览可以收了。 */
+  _clearPendingUploads();
   var holder = pushMsg('assistant', '');
   holder.innerHTML = '<div class="stream-status hint">正在思考…</div>' +
     '<div class="stream-answer"></div>';
@@ -9855,7 +10042,6 @@ async function askAgent(override){
       body: JSON.stringify({message: sendQ, history: CHAT, session_id: convId,
                             resume: resumeFlag, extra_context: extraCtx}),
       signal: CHAT_CTRL.signal});
-  if(extraCtx) CHAT_PENDING_UPLOADS = [];
     if(resp.status === 401 && AUTH_ENABLED){
       setToken(''); ME = null;
       if(!LOGIN_SHOWN) showLogin('登录已失效，请重新登录');

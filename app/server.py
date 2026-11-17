@@ -1218,7 +1218,9 @@ def api_meta(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                 "config_dir": "config",
             },
             "model": llm.status(),
-            "search": search.status(DB_PATH),
+            # 启动/元信息接口**不做向量服务连通性探测**：远程服务不可达时
+            # 这一步会把整个启动卡到超时（默认 60s），页面一直转圈。
+            "search": search.status(DB_PATH, probe=False),
             "stages": db.STAGES,
             "tier_labels": db.TIER_LABELS,
         }
@@ -5928,7 +5930,8 @@ def api_agent_status(x_tp_token: str | None = Header(default=None, alias="X-TP-T
                      x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     s = _session(x_tp_token, x_tp_role)
     require(s, "settings")
-    return {"chat": llm.status(), "embedding": search.status(DB_PATH)}
+    return {"chat": llm.status(),
+            "embedding": search.status(DB_PATH, probe=False)}
 
 
 @app.post("/api/candidates/{cid}/analyze")
@@ -6320,17 +6323,22 @@ class EmbeddingCfgReq(BaseModel):
 
 
 @app.get("/api/embedding-config")
-def api_embedding_config_get(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+def api_embedding_config_get(probe: bool = Query(default=False),
+                             x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                              x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
     """向量模型配置（只读）。
 
     API Key **与对话模型共用** `config/secrets.json` 里那一份，不在这里单独收：
     同一个百炼 Key 同时管对话与向量，分两份只会让"改了对话忘了向量"。
+
+    **默认不探测服务连通性**：设置页一次性并发拉 7 个接口，只要这一个去连
+    远程 embedding（默认超时 60s）且那边不可达，整页就卡在「读取配置…」。
+    需要连通性时前端点「测试连接」，显式传 `?probe=1`（后端只等 3 秒）。
     """
     s = _session(x_tp_token, x_tp_role)
     require(s, "read")
     c = search.load_cfg()
-    st = search.status(DB_PATH) or {}
+    st = search.status(DB_PATH, probe=bool(probe)) or {}
     env_set = [k for k in ("TP_EMBED_BASE_URL", "TP_EMBED_MODEL", "TP_EMBED_API_KEY")
                if os.environ.get(k)]
     return {"enabled": bool(c.get("enabled", True)),

@@ -3195,6 +3195,9 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   transition:background-color .2s var(--ease),transform .12s var(--ease)}
 .loginbtn:hover{background:var(--accent-hi)}
 .loginbtn:active{transform:scale(.985)}
+.loginremember{display:flex;align-items:center;gap:8px;margin:-4px 0 14px;
+  font-size:12.5px;color:var(--ink-3);cursor:pointer;user-select:none}
+.loginremember input{width:15px;height:15px;margin:0;accent-color:var(--accent);flex:none}
 .loginhint{font-size:11.5px;color:var(--ink-3);margin-top:16px}
 #loginFirstHint{margin-top:16px}
 :root[data-theme="dark"] .loginbox{background:rgba(28,28,30,.76);
@@ -3310,4 +3313,28 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   transition:width .25s}
 .upload-card.done .upload-bar i{background:var(--ok)}
 .upload-card.error .upload-meta{color:var(--bad)}
+/* 发送前：附件小预览停在输入框上方，不再占用会话记录顶部。 */
+.chatpending{display:flex;flex-wrap:wrap;gap:8px;padding:0 2px 8px}
+.chatpending[hidden]{display:none}
+#chatPending .upload-card{margin:0;max-width:300px;padding:5px 4px 5px 5px;
+  border-radius:10px;gap:8px;background:var(--surface-2)}
+#chatPending .upload-thumb{width:38px;height:38px;border-radius:6px}
+#chatPending .upload-file{font-size:18px}
+#chatPending .upload-name{font-size:12px;max-width:180px}
+#chatPending .upload-meta{font-size:11px;margin-top:1px}
+#chatPending .upload-bar{height:3px;margin-top:3px}
+.upload-x{border:0;background:transparent;color:var(--ink-3);font-size:17px;
+  line-height:1;padding:2px 5px;cursor:pointer;border-radius:6px;flex:none}
+.upload-x:hover{background:var(--fill-hover);color:var(--ink)}
+/* 发送后：附件缩略图跟在用户消息气泡内部，克制、不抢正文。 */
+.msg-atts{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
+.msg-att{display:inline-flex;align-items:center;gap:6px;max-width:240px;
+  padding:3px 8px 3px 3px;border:1px solid var(--line);border-radius:10px;
+  background:var(--surface);font-size:12px;color:var(--ink-2)}
+.msg-att img{width:34px;height:34px;border-radius:7px;object-fit:cover;flex:none}
+.msg-att .favi{width:34px;height:34px;display:flex;align-items:center;
+  justify-content:center;border-radius:7px;background:var(--surface-2);
+  font-size:16px;flex:none}
+.msg-att .nm{max-width:175px;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
 """

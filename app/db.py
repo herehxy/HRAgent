@@ -6136,9 +6136,17 @@ def count_active_admins(conn: sqlite3.Connection) -> int:
     return int(row["n"]) if row else 0
 
 
-def create_session(conn: sqlite3.Connection, username: str, role: str, ttl_hours: int = 12) -> str:
+#: 登录会话有效期：7 天。每次有效使用都会滑动续期（见 `get_session`），
+#: 所以一直在用的人不会被强制下线；连续 7 天没打开才会过期。
+SESSION_TTL_HOURS = 24 * 7
+#: 剩余不足这个时长时才写库续期。避免每个请求都 UPDATE sessions：
+#: 续期一次管一小时，活跃用户实际永远保持在 7 天有效期。
+SESSION_RENEW_WINDOW_HOURS = SESSION_TTL_HOURS - 1
+
+
+def create_session(conn: sqlite3.Connection, username: str, role: str,
+                   ttl_hours: int = SESSION_TTL_HOURS) -> str:
     import secrets
-    from datetime import timedelta
 
     token = secrets.token_urlsafe(32)
     created = datetime.now()
@@ -6160,10 +6168,26 @@ def get_session(conn: sqlite3.Connection, token: str) -> dict | None:
     if not row:
         return None
     d = dict(row)
-    if d.get("expires_at") and d["expires_at"] < now():
+    expires_at = d.get("expires_at") or ""
+    exp = None
+    if expires_at:
+        try:
+            exp = datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            exp = None
+    if exp is not None and exp < datetime.now():
         conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
         conn.commit()
         return None
+    # 自动续期：每次带着有效令牌使用（打开页面、调接口）都把到期时间推回
+    # 7 天后。为控制写库频率，剩余时间超过「7 天 - 1 小时」时不写。
+    if exp is not None and exp - datetime.now() < timedelta(
+            hours=SESSION_RENEW_WINDOW_HOURS):
+        new_exp = datetime.now() + timedelta(hours=SESSION_TTL_HOURS)
+        d["expires_at"] = new_exp.strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("UPDATE sessions SET expires_at = ? WHERE token = ?",
+                     (d["expires_at"], token))
+        conn.commit()
     return d
 
 
