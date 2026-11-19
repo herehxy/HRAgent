@@ -1358,22 +1358,27 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .edu-band{margin-top:12px;padding:11px 0 12px;border-top:1px solid var(--line);
   border-bottom:1px solid var(--line)}
 .edu-band-head{display:flex;align-items:center;justify-content:space-between;gap:10px;
-  margin-bottom:8px}
-.edu-band-head h3{margin:0;font-size:18px;font-weight:600;letter-spacing:-.015em;
-  color:var(--ink)}
+  margin-bottom:0}
+.edu-band-head h3{margin:0 0 16px;font-size:18px;font-weight:600;letter-spacing:-.015em;
+  color:var(--ink);width:100%;border-bottom:1px solid var(--line);padding-bottom:11px}
 .edu-list{display:grid;gap:5px}
 /* 教育经历固定一行：左侧内容不换行（太长时学校/专业省略），右侧时间段独立成列。
    起止时间只在右侧占位，不能把整行撑成两行或撑高。 */
 .edu-line{display:grid;grid-template-columns:minmax(0,1fr) auto;
-  align-items:center;gap:14px;min-height:28px;font-size:16px;padding:1px 0}
+  align-items:center;gap:14px;min-height:28px;font-size:16px;padding:1px 0;
+  container-type:inline-size}
+/* 窄卡片里只保留第一个院校标签（985/211），避免排名标签被裁成半截；
+   宽屏（如两栏布局里的通栏 858px）仍然显示全部标签。 */
+@container (max-width: 600px){
+  .edu-main > .edu-tags > :not(:first-child){display:none}
+}
 .edu-main{display:flex;align-items:center;gap:11px;min-width:0;
   flex-wrap:nowrap;overflow:hidden}
 .edu-main > .edu-degree{flex:none;white-space:nowrap}
-.edu-main > .edu-school{flex:0 1 auto;min-width:56px;white-space:nowrap;
-  overflow:hidden;text-overflow:ellipsis}
-.edu-main > .edu-major{flex:0 1 auto;min-width:48px;white-space:nowrap;
-  overflow:hidden;text-overflow:ellipsis}
-.edu-main > .edu-tags{flex:none;flex-wrap:nowrap;overflow:hidden}
+.edu-main > .edu-school{flex:none;white-space:nowrap}
+.edu-main > .edu-major{flex:none;white-space:nowrap}
+.edu-main > .edu-tags{flex:0 1 auto;min-width:0;flex-wrap:nowrap;overflow:hidden}
+.edu-main > .edu-tags > *{flex:none;white-space:nowrap}
 .edu-line .chipl{font-size:12.5px;padding:2px 8px;line-height:1.5}
 .edu-line .rk{font-size:12.5px;padding:2px 8px;line-height:1.5}
 .edu-period{font-size:16.5px;color:var(--ink);font-weight:500;white-space:nowrap;
@@ -1396,10 +1401,12 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 /* 每条荣誉做成一个浅色块：这篇档案里它是"加分事实"，不该和普通正文一个观感 */
 .honosec .ev{background:var(--surface-2);border-radius:var(--r-s);
   padding:7px 11px;margin-top:6px;line-height:1.7}
-/* 荣誉/论文/专利逐条展示：序号 + 自动换行，条目多时不再挤成一行 */
-.honosec .honor-list{margin:5px 0 0;padding-left:22px;list-style:decimal}
+/* 荣誉/论文/专利逐条展示：序号放在行内，不额外缩进正文，
+   保证内容左右宽度与其他分区一致。 */
+.honosec .honor-list{margin:5px 0 0;padding-left:0;list-style-position:inside}
 .honosec .honor-list li{margin:2px 0;line-height:1.7;overflow-wrap:anywhere;
   word-break:break-word}
+.honosec .honor-list li::marker{color:var(--ink-3);font-weight:500}
 /* 项目经历（v4.0.18）：AI 短摘要，不是简历原文。
    方向总结用强调底高亮，项目本身一条一块；摘要固定两行，避免长文把档案拉得很长。 */
 .projectsec .ai-tag{display:inline-block;margin-left:8px;padding:1px 7px;
@@ -2312,7 +2319,7 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 #chatView .msg ul,#chatView .msg ol{margin:6px 0 10px;line-height:1.75}
 #chatView .msg li{margin:3px 0}
 #chatView .msg strong{font-weight:700;color:var(--ink)}
-#chatView .msg .mdtable{font-size:14px}
+#chatView .msg .mdtable{font-size:15px}
 #chatView .msg blockquote{margin:8px 0;padding:6px 12px}
 .ask{border-radius:999px;border-color:var(--line);font-size:12.5px}
 .ask:hover{background:var(--surface-2);border-color:var(--line-2);color:var(--ink)}
@@ -3078,7 +3085,7 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
 .chatlog{padding:28px 32px}
 /* LLM 回复不套气泡、不限制宽度：像 Claude Code 一样直接铺满正文栏。 */
 .chatlog > *{max-width:none}
-.msg{border-radius:18px;padding:12px 17px;font-size:15px;line-height:1.72;
+.msg{border-radius:18px;padding:12px 17px;font-size:16px;line-height:1.72;
   border:1px solid transparent}
 .msg.assistant{background:transparent;border-color:transparent;
   border-radius:0;box-shadow:none;padding:0 0 2px;margin-bottom:20px;
@@ -3584,7 +3591,9 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
 .sched-sub{font-size:13.5px}
 .sched-ev{font-size:13px}
 .sched-ev .meta{font-size:12px}
-#detail .ev,#detail .sum{max-width:1040px}
+/* 分区正文不再单独限宽：宽窗口下荣誉/备注/面试等 .ev 与项目卡片
+   必须同宽；行长由外层 `.detail > *` 的 1200px 统一兜住。 */
+#detail .ev,#detail .sum{max-width:100%}
 .chatmobhead,.chatconvmask{display:none}
 .chatconv-close{display:none}
 @media (max-width:900px){
@@ -3785,8 +3794,8 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
   font-weight:650;
   line-height:1.45;
 }
-#chatView .msg h3{font-size:17px;letter-spacing:-.02em}
-#chatView .msg h4,#chatView .msg .md-sec{font-size:15.5px;letter-spacing:-.01em}
+#chatView .msg h3{font-size:18px;letter-spacing:-.02em}
+#chatView .msg h4,#chatView .msg .md-sec{font-size:16.5px;letter-spacing:-.01em}
 #chatView .msg h3::before,
 #chatView .msg h4::before,
 #chatView .msg .md-sec::before{
