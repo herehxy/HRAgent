@@ -1343,10 +1343,12 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                              "name": fn, "content": model_result})
 
         runnable = [p for p in prepared if p["result"] is None]
-        # 同一批里全是只读工具 → 并行执行。5 次读取档案串行虽然每次不慢，
-        # 但叠起来 + 模型每轮思考会让用户觉得"卡死"；并行是纯收益。
+        # 同一批里**只读/纯计算**工具才并行。不能用“不在 WRITE_TOOLS”判定：
+        # ingest_resumes/run_proactive_scan/remember_preference 也有副作用，
+        # 却不在 WRITE_TOOLS 里，并行会与读工具抢库、重复建提案/导入。
+        _safe_parallel = tools_write.READ_TOOLS | tools_write.COMPUTE_TOOLS
         parallel = (len(runnable) > 1 and all(
-            p["fn"] not in WRITE_TOOLS and p["fn"] not in DISABLED_TOOLS
+            p["fn"] in _safe_parallel and p["fn"] not in DISABLED_TOOLS
             for p in runnable))
         if parallel:
             for p in prepared:
@@ -2213,12 +2215,10 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
     conn = db.connect(ctx.db_path)
     try:
         _all = db.list_proposals(conn, status="待确认", limit=100)
-        # ① 本轮工具真正创建/引用过的提案
-        # ② 答复正文里用 `#55` 点名的提案
-        # ③ 本会话最近仍待确认的提案（兜底：模型在上一轮建了提案，这一轮只做汇总）
-        # 三种来源取并集，保证"当前这条回答下面"就能点确认，而不是逼 HR 去提案页翻。
-        _mentioned = {int(m.group(1)) for m in re.finditer(r"#(\d{1,9})", answer or "")}
-        _picked = set(_mine) | _mentioned
+        # 只认本轮工具真正创建/引用过的提案。**不要从回答正文里正则抠 `#数字`**：
+        # 那通常是候选人/投递 id，碰巧等于某条无关待确认提案时，会把别人的
+        # 归档/改档/推进提案挂到本轮回答下，甚至被“全部同意”误执行。
+        _picked = set(_mine)
         proposals = [p for p in _all if int(p["id"]) in _picked] if _picked else []
         if not proposals:
             _session_pending = [
@@ -2240,12 +2240,11 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
         # application_id → candidate_id 要查 applications 表，
         # 放到 return 里用已关闭的连接会抛 "Cannot operate on a closed database"。
         briefs = [_proposal_brief(p, conn) for p in proposals]
-        # 只有“本轮创建/正文点名”的提案参与「全部同意」；本会话旧提案
+        # 只有“本轮工具真正创建/引用”的提案参与「全部同意」；本会话旧提案
         # 仍可以单独处理，但不能被一次批量误点执行。
         for _b in briefs:
             try:
-                _b["current_turn"] = int(_b.get("proposal_id")) in _mine \
-                    or int(_b.get("proposal_id")) in _mentioned
+                _b["current_turn"] = int(_b.get("proposal_id")) in _mine
             except (TypeError, ValueError):
                 _b["current_turn"] = False
         _run_id = db.log_agent_run(conn, {

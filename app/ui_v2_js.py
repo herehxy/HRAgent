@@ -1242,6 +1242,9 @@ function openPinnedProfile(cid){
     '<div class="pinned-profile" id="pinnedProfile">' + fullDetail(d) + '</div>';
   multiRenderIvUnit();
   bindDetail(d);
+  /* 对比模式也是 #detail 里的独立滚动容器，必须走同一套头像懒加载；
+     原来漏了这一句，`data-avatar` 图片只带着占位 GIF，头像就全不显示。 */
+  hydrateAvatars(box);
   edInit(document.getElementById('pinnedProfile'));
   loadAudit(d.id);
   CUR_SNAP = formSnapshot(d);
@@ -2499,6 +2502,7 @@ var __progTimer = null;
 var PROG_GEN = 0;
 var __ingestTask = null;   /* {taskId, label, source, phase:'fetch'|'insight'} */
 var __ingesting = false;
+var INGEST_BLOCKED = null;  /* {uid, message_id} */
 
 function ensureDlgClose(){
   var t = document.getElementById('dlgTitle');
@@ -2651,8 +2655,13 @@ function progressModal(taskId, opts){
 async function progressStop(taskId){
   var r = await api('/api/tasks/' + taskId + '/stop', {method:'POST'});
   var sb = document.getElementById('progStopBtn');
+  if(r.__err || !r.ok){
+    if(sb){ sb.disabled = false; }
+    toast(r.__err || r.message || '该任务不支持停止', 'warn');
+    return;
+  }
   if(sb){ sb.disabled = true; sb.textContent = '已请求停止（读完当前文件后停下）'; }
-  toast(r.__err ? ('停止失败：' + r.__err) : '已请求停止');
+  toast(r.message || '已请求停止');
 }
 function setIngestBusy(on, source){
   ['btnIngestMail', 'btnIngestDir'].forEach(function(id){
@@ -2740,8 +2749,19 @@ function ingestFetchDone(label, fr){
   var rep = Object.assign({}, prev, (fr && fr.report) || {});
   if(fr && fr.status === 'error'){
     __ingestTask = null; __ingesting = false;
+    var _body = esc(fr.message || '收取失败');
+    if(rep.blocked_uid || rep.blocked_message_id){
+      INGEST_BLOCKED = {uid: rep.blocked_uid || '', message_id: rep.blocked_message_id || ''};
+      _body += '<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">' +
+        '<div style="color:var(--warn);font-weight:600">卡住的邮件</div>' +
+        '<div class="hint" style="margin-top:4px">已失败 ' +
+          (rep.retry_count == null ? '多' : rep.retry_count) +
+          ' 次，后续邮件暂时收不进来。可以继续重试，或跳过这封。</div>' +
+        '<div style="margin-top:8px"><button class="btn" onclick="skipBlockedMail()">' +
+        '跳过这封并继续</button></div></div>';
+    }
     resultModal({title: label + '导入失败', kind: 'danger', headline: '任务出错',
-                 body: esc(fr.message || '收取失败')});
+                 body: _body});
     return;
   }
   var phase = (__ingestTask && __ingestTask.phase) || 'fetch';
@@ -2769,7 +2789,8 @@ function ingestFinal(label, rep, ar){
      哪份文件、什么原因。details 已由后端逐条带回（live 任务不截断）。 */
   var bad = (rep.details || []).filter(function(d){
     return d && (d.status === 'failed' || d.parse_failed ||
-                 d.status === 'no_attachment' || d.status === 'skipped_dup');
+                 d.status === 'no_attachment' || d.status === 'skipped_dup' ||
+                 d.status === 'dead_letter');
   });
   var badHtml = '';
   if(bad.length){
@@ -2778,8 +2799,9 @@ function ingestFinal(label, rep, ar){
       '<div style="max-height:240px;overflow:auto;margin-top:6px">' +
       bad.map(function(d){
         var label = d.status === 'failed' ? '异常'
+          : (d.status === 'dead_letter' ? '已转死信'
           : (d.parse_failed ? '解析失败（已入库）'
-          : (d.status === 'no_attachment' ? '无附件' : '重复跳过'));
+          : (d.status === 'no_attachment' ? '无附件' : '重复跳过')));
         var who = d.name || d.file || '（未识别）';
         var file = d.name && d.file && d.file !== d.name ? '（' + d.file + '）' : '';
         var why = (d.notes || []).join('；');
@@ -2805,6 +2827,46 @@ function ingestFinal(label, rep, ar){
                headline: num('failed') ? '部分失败' : '收取完成',
                body: summary + badHtml + stopped + extra + ana});
 }
+async function skipBlockedMail(){
+  if(!INGEST_BLOCKED) return;
+  var r = await api('/api/mail/dead-letters/skip', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify(INGEST_BLOCKED)});
+  if(r.__err){ toast('跳过失败：' + r.__err, 'danger'); return; }
+  toast('已跳过这封，正在继续收取', 'warn');
+  INGEST_BLOCKED = null;
+  closeProgDlg();
+  doIngest('mailbox');
+}
+async function retryDeadLetter(mid){
+  if(!mid) return;
+  var r = await api('/api/mail/dead-letters/retry', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({message_id: mid})});
+  if(r.__err){ toast('重试失败：' + r.__err, 'danger'); return; }
+  toast('已放回待处理；下次收取会重新拉取这封', 'ok');
+  showDeadLetters();
+}
+async function showDeadLetters(){
+  var r = await api('/api/mail/dead-letters');
+  if(r.__err){ toast('读取死信失败：' + r.__err, 'danger'); return; }
+  var items = r.items || [];
+  var html = items.length ? items.map(function(x){
+    var mid = String(x.message_id || '');
+    var when = String(x.received_at || '').slice(0, 16).replace('T', ' ');
+    return '<div class="doc"><span class="doc-n">' +
+      esc(x.subject || '（无主题）') + '　' + esc(when) + '</span>' +
+      '<span class="doc-a"><button class="btn sm" data-dead-retry="' +
+      esc(mid) + '">重试</button></span></div>' +
+      (x.error ? '<div class="hint" style="margin:-2px 0 8px">' +
+        esc(x.error) + '</div>' : '');
+  }).join('') : '<div class="hint">没有死信邮件</div>';
+  openProgDlg('死信邮件',
+    '<div style="line-height:1.7">' + html + '</div>' +
+    '<div class="bar" style="margin-top:14px;justify-content:flex-end">' +
+    '<button class="btn primary" onclick="closeProgDlg()">关闭</button></div>');
+  Array.prototype.forEach.call(document.querySelectorAll('[data-dead-retry]'), function(b){
+    b.addEventListener('click', function(){ retryDeadLetter(b.dataset.deadRetry); });
+  });
+}
 async function doIngest(source){
   var label = source === 'mailbox' ? '邮箱' : '本地文件夹';
   /* 已在跑（含"收取中…（点此看进度）"那个状态）：**重新弹出进度窗口**，
@@ -2827,6 +2889,7 @@ async function doIngest(source){
       return;
     }
   }catch(e){ /* 查询失败按"没有任务"处理 */ }
+  INGEST_BLOCKED = null;
   setIngestBusy(true, source);
   var r;
   try{
@@ -4066,6 +4129,7 @@ var MAIL_TPL = [], MAIL_VARS = {builtin: [], runtime: []}, IDICT = {};
 var MAIL_CANDS = [], MAIL_FULL = [];
 var MAIL_BOOTED = false, MAIL_CANDS_LOADED = false, MAIL_CANDS_LOADING = false;
 var M_CID = null, M_AID = null, M_TO = '', M_SMTP = {}, M_CAND = null;
+var DRAFT_SEQ = 0;
 var M_OUTBOX = [];          /* 临时上传的附件 {outbox_id, filename, size} */
 var M_RESULT = null;        /* 发送结果（成功凭据或失败原因） */
 var M_SENDING = false;
@@ -4274,7 +4338,18 @@ function attachMailTask(tid, meta){
   });
 }
 async function resumeMailTask(){
-  if(M_MAIL_ACTIVE_TASK) return true;
+  if(M_MAIL_ACTIVE_TASK){
+    /* 进度窗被用户关掉后再次进入写信页：重新挂回同一个任务，
+       否则按钮会一直停在“发送中…”且永远看不到结果。 */
+    setMailSending(true);
+    progressModal(M_MAIL_ACTIVE_TASK, {
+      title: '发送邮件',
+      desc: '邮件正在后台发送，请勿重复点击。',
+      chain: true,
+      onDone: handleMailTask
+    });
+    return true;
+  }
   var r = await api('/api/tasks/active?kind=mail&include_done=1');
   var tasks = (r && r.tasks) || [];
   var task = tasks.filter(function(t){
@@ -4302,6 +4377,7 @@ async function initMail(){
      首次进入先给一个占位，避免用户看着空白等 /api/candidates（827 人时很慢）。 */
   if(MAIL_BOOTED && document.getElementById('mCandInput')){
     loadMailCandidates(true);     /* 页面已在：立即显示，后台刷新候选人 */
+    resumeMailTask();             /* 进度窗被关过也能重新挂回发送结果 */
     return;
   }
   var mv = document.getElementById('mailView');
@@ -5785,7 +5861,7 @@ function cfgGroup(title, gid, rows, extra, readonly){
     '</h3>' +
     rows + (extra || '') + '</div>';
 }
-function cfgGroupEdit(gid, act){
+async function cfgGroupEdit(gid, act){
   var sec = document.querySelector('.cfgsec[data-g="' + gid + '"]');
   if(!sec) return;
   /* ⚠️ 顺序：**先切 editing 类，再刷新按钮显隐**。
@@ -5799,10 +5875,11 @@ function cfgGroupEdit(gid, act){
     b.style.display = (a === 'edit') ? (editing ? 'none' : '') : (editing ? '' : 'none');
   });
   if(act === 'save'){
-    if(gid === 'settings'){ saveSettings(); }
-    else sysAct(gid);
-    /* 存完重画一次：让只读区显示新值、退出编辑态 */
-    setTimeout(initSys, 400);
+    /* 必须等保存请求真正落库后再重画：固定 400ms 时慢盘/锁等待下
+       会读到旧值，看起来像“保存被回滚”。 */
+    if(gid === 'settings'){ await saveSettings(); }
+    else { await sysAct(gid); }
+    await initSys();
   }
 }
 function cfgInput(id, val, ph, type, w){
@@ -6944,6 +7021,13 @@ cfgEdit('cfgFolderDir', '简历目录', mb.folder_dir, 'data/resumes', 'text') +
       '<div id="mbPvBox" style="display:none;margin-top:8px"></div>' +
     '</div>' +
 
+    '<div class="sec cfgsec" data-g="mb"><h3>死信邮件</h3>' +
+      '<div class="crow"><label>被跳过的邮件</label><div class="cval">' +
+        '<button class="btn sm" data-cfg="deadLetters">查看 / 重试</button>' +
+        '<span class="hint" style="margin-left:8px">连续失败 3 次会自动跳过；' +
+        '台账保留，可从这里重新拉取</span></div></div>' +
+    '</div>' +
+
     '<div class="sec cfgsec" data-g="dict"><h3>面试字典' + '<span class="cfgacts">' + '<button class="btn sm" data-cfg-g="edit">修改</button>' + '<button class="btn primary sm" data-cfg-g="save" style="display:none">保存</button>' + '<button class="btn sm" data-cfg-g="cancel" style="display:none">取消</button>' + '</span></h3>' +
       dictItemsRow('units', '面试单位', dc.units) +
       '<div class="dict-bulk">' + cfgEdit('cfgUnits', '面试单位', dictLines(dc.units), '一行一个', 'textarea') + '</div>' +
@@ -7147,6 +7231,10 @@ async function sysAct(act){
     toast((re.changed || []).length
       ? '向量模型已保存，点「重建索引」生效'
       : '没有修改', (re.changed || []).length ? 'warn' : 'ok');
+    return;
+  }
+  if(act === 'deadLetters'){
+    await showDeadLetters();
     return;
   }
   if(act === 'embTest'){
@@ -9148,6 +9236,8 @@ function newChat(){
   CHAT_CONV_ID = newConvId();
   rememberConv(CHAT_CONV_ID);
   CHAT = [];
+  /* 未发送附件属于当前会话；新建/切换会话时不能把它带到别人的消息里。 */
+  _clearPendingUploads();
   var log = document.getElementById('chatLog');
   if(log) log.innerHTML = '';
   var _st = document.getElementById('chatStatusBar');
@@ -9214,6 +9304,7 @@ async function openConversation(cid, quiet){
      旧回答的收尾回调靠 CHAT_GEN / RUN_CONV_ID 判断是否还该碰界面。 */
   var wasBusy = leaveRunningChat();
   var gen = CHAT_GEN;
+  _clearPendingUploads();
   var h = await api('/api/agent/history?conversation_id=' + encodeURIComponent(cid));
   if(gen !== CHAT_GEN) return false;       /* 期间又点了别的会话 */
   if(h.__err){ if(!quiet) toast('读取会话失败：' + h.__err, 'danger'); return false; }
@@ -9791,12 +9882,12 @@ function _pendingUploadContext(){
     var state = x.status === 'done'
       ? ('已解析' + (x.summary ? ('：' + x.summary) : ''))
       : (x.status === 'error'
-          ? ('解析失败' + (x.summary ? ('：' + x.summary) : ''))
-          : '解析中');
+          ? ('解析失败' + (x.summary ? ('：' + x.summary) : '') + '，不要臆测内容')
+          : '仍在解析中，不要臆测内容');
     return '- ' + x.name + '（' + state + '）';
   });
   return '用户刚上传了以下文件：\n' + lines.join('\n') +
-         '\n请结合这些文件回答；不要声称看不到文件。';
+         '\n已解析的文件请结合回答；解析中/失败的文件不要声称已经看到或编造内容。';
 }
 function _uploadSnapshot(){
   return CHAT_PENDING_UPLOADS.map(function(a){
@@ -10169,10 +10260,9 @@ function renderProposalCards(holder, props){
   var batchCount = props.filter(function(p){
     return (p.status || '待确认') === '待确认' && p.current_turn;
   }).length;
-  /* 业务方 2026-11-16：超过 3 条待确认操作时，必须能一键全部执行/拒绝。
-     此时批量范围放到**本卡片里的全部待确认项**（不只是本轮新建的），
-     确认框会明确列出条数；<=3 条仍只批量本轮项，避免误伤旧提案。 */
-  var batchAll = pendingCount > 3;
+  /* 批量范围**永远只限本轮工具真正产生的提案**。旧提案可能来自别的
+     会话/别的操作，一次“全部执行”绝不能把它们一起改掉。 */
+  var batchAll = false;
   var showBatch = batchAll || batchCount > 1;
   el.innerHTML = '<div class="dcard-t">待确认提案（' + props.length + '）</div>' +
     groupProposalRows(props, function(p){
@@ -10926,7 +11016,9 @@ async function openAssignJob(cid){
 async function avatarRefresh(cid){
   var r = await api('/api/candidates/' + cid + '/avatar', {method:'POST',
     headers:{'Content-Type':'application/json'}, body: '{}'});
-  toast(r.__err ? ('失败：' + r.__err) : '已重新抽取证件照');
+  if(r.__err) toast('失败：' + r.__err, 'danger');
+  else if(r.ok === false) toast('没有抽到可用证件照', 'warn');
+  else toast('已重新抽取证件照');
   if(CUR) pick(CUR);
 }
 async function avatarClear(cid){
@@ -10990,6 +11082,21 @@ async function loadSources(){
     }).catch(function(){});
   }
 }
+function srcResultToast(verb, key, r){
+  if(!r || r.__err){ toast('失败：' + ((r && r.__err) || '请求失败'), 'danger'); return; }
+  var done = (r[key] || []).length;
+  var skipped = r.skipped || [];
+  var msg = done ? ('已' + verb + ' ' + done + ' 个文件')
+                 : ('没有文件被' + verb);
+  if(skipped.length){
+    msg += '；跳过 ' + skipped.length + ' 个：' +
+      skipped.slice(0, 5).map(function(x){ return (x.name || '') + '（' +
+        (x.why || '原因未知') + '）'; }).join('、');
+    toast(msg, 'warn');
+  } else {
+    toast(msg, 'ok');
+  }
+}
 function srcChkInfo(){
   var n = document.querySelectorAll('.srcchk:checked').length;
   var info = document.getElementById('srcChkInfo');
@@ -11001,7 +11108,7 @@ async function srcRemoveOne(name){
   if(!ok) return;
   var r = await api('/api/sources/remove', {method:'POST',
     headers:{'Content-Type':'application/json'}, body: JSON.stringify({names: [name]})});
-  toast(r.__err ? ('失败：' + r.__err) : '已移入回收站');
+  srcResultToast('移除', 'moved', r);
   loadSources();
 }
 async function srcRemoveChecked(){
@@ -11013,13 +11120,13 @@ async function srcRemoveChecked(){
   if(!ok) return;
   var r = await api('/api/sources/remove', {method:'POST',
     headers:{'Content-Type':'application/json'}, body: JSON.stringify({names: names})});
-  toast(r.__err ? ('失败：' + r.__err) : ('已移除 ' + names.length + ' 个'));
+  srcResultToast('移除', 'moved', r);
   loadSources();
 }
 async function srcRestoreOne(name){
   var r = await api('/api/sources/restore', {method:'POST',
     headers:{'Content-Type':'application/json'}, body: JSON.stringify({names: [name]})});
-  toast(r.__err ? ('失败：' + r.__err) : ('已恢复「' + name + '」'));
+  srcResultToast('恢复', 'restored', r);
   loadSources();
 }
 async function openSourceFile(name, inline){
@@ -11073,7 +11180,7 @@ async function srcAct(act){
     if(!ok) return;
     var r2 = await api('/api/sources/restore', {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({names: names})});
-    toast(r2.__err ? ('失败：' + r2.__err) : '已恢复 ' + (r2.restored || names.length) + ' 个文件');
+    srcResultToast('恢复', 'restored', r2);
     loadSources();
     return;
   }
@@ -11087,7 +11194,7 @@ async function srcAct(act){
     var r3 = await api('/api/sources/remove', {method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({names: files.map(function(x){ return x.name || x; })})});
-    toast(r3.__err ? ('失败：' + r3.__err) : '已移入回收站');
+    srcResultToast('移除', 'moved', r3);
     loadSources();
   }
 }
@@ -11327,11 +11434,16 @@ function collectRuntime(){
 }
 async function genDraft(){
   if(!M_CID){ toast('先在第一步选收件人'); return; }
+  var seq = ++DRAFT_SEQ;
+  var cid = M_CID, aid = M_AID;
   var tid = document.getElementById('mTpl').value;
-  var body = {candidate_id: M_CID, application_id: M_AID, runtime: collectRuntime()};
+  var body = {candidate_id: cid, application_id: aid, runtime: collectRuntime()};
   if(tid) body.template_id = Number(tid);
   var r = await api('/api/mail/draft', {method:'POST',
     headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  /* 慢网络下 A 的草稿可能比 B 晚返回：只允许**当前收件人/当前模板**的
+     响应落地，否则会把 A 的正文和邮箱发给 HR 以为的 B。 */
+  if(seq !== DRAFT_SEQ || cid !== M_CID || aid !== M_AID) return;
   if(r.__err){ toast(r.__err); return; }
   if(r.to) M_TO = r.to;
   document.getElementById('mSubject').value = r.subject || '';

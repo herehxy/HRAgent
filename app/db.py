@@ -421,6 +421,11 @@ CREATE TABLE IF NOT EXISTS email_messages (
     attachment_count INTEGER DEFAULT 0,
     processed INTEGER DEFAULT 0,
     added INTEGER DEFAULT 0, skipped INTEGER DEFAULT 0, failed INTEGER DEFAULT 0,
+    -- 同一封邮件连续入库失败的重试次数；达到上限转入死信，避免一封坏邮件
+    -- 永久堵住它后面的所有邮件。dead_letter=1 时 processed 仍为 0，可手动重试。
+    retry_count INTEGER DEFAULT 0,
+    dead_letter INTEGER DEFAULT 0,
+    dead_at TEXT,
     error TEXT,
     fetched_at TEXT, processed_at TEXT
 );
@@ -504,7 +509,8 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT UNIQUE, display_name TEXT,
     role TEXT DEFAULT 'viewer',             -- viewer/recruiter/admin
     password_hash TEXT, salt TEXT,
-    active INTEGER DEFAULT 1, created_at TEXT
+    active INTEGER DEFAULT 1, created_at TEXT,
+    password_changed_at TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY, username TEXT, role TEXT,
@@ -1205,6 +1211,13 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         # 首次登录/管理员重置后强制改密（v6.0.0 审查 O11）。
         "users": {
             "must_change_password": "INTEGER DEFAULT 0",
+            "password_changed_at": "TEXT",
+        },
+        # 毒邮件隔离：连续失败达到上限后转死信，游标越过它，但不丢台账。
+        "email_messages": {
+            "retry_count": "INTEGER DEFAULT 0",
+            "dead_letter": "INTEGER DEFAULT 0",
+            "dead_at": "TEXT",
         },
         "jobs": {
             "dept_id": "INTEGER",
@@ -2862,12 +2875,20 @@ def merge_candidates(conn: sqlite3.Connection, src_id: int, dst_id: int,
     if not src or not dst or src.get("merged_into") or dst.get("merged_into"):
         conn.rollback()
         return {"ok": False, "error": "合并状态已变化，请刷新后重试"}
+    if dst.get("archived_at"):
+        conn.rollback()
+        return {"ok": False,
+                "error": "目标档案在归档区，合并进去会让人从人才库/检索里消失；"
+                         "请先取消归档再合并"}
     # v1.13.6：搬过去的同时**记下来源**，否则"撤销合并"无法把它们搬回来
     conn.execute("UPDATE applications SET candidate_id = ?, merged_from_candidate = ?, "
                  "updated_at = ? WHERE candidate_id = ?",
                  (dst_id, src_id, now(), src_id))
     conn.execute("UPDATE documents SET candidate_id = ?, merged_from_candidate = ? "
                  "WHERE candidate_id = ?", (dst_id, src_id, src_id))
+    # 投递时间线也属于档案；不搬会让合并后看不到源档的投递事件。
+    conn.execute("UPDATE submission_events SET candidate_id = ? WHERE candidate_id = ?",
+                 (dst_id, src_id))
     # 技能：冲突时保留已有，其余迁移
     conn.execute(
         """INSERT OR IGNORE INTO candidate_skills
@@ -2921,10 +2942,14 @@ def split_candidate(conn: sqlite3.Connection, src_id: int, operator: str = "HR",
     技能/标签不搬：它们是派生属性，本档下次分析/刷新时会重新生成。
     """
     # 先看合并记录（拆分要写在同一批里，避免中途失败留下半拆状态）
+    begin_immediate(conn)
     src = get_candidate(conn, src_id)
     dst_id = (src or {}).get("merged_into")
     moved = {"applications": 0, "documents": 0, "legacy_untracked": False}
     if dst_id:
+        _aids = [r["id"] for r in conn.execute(
+            "SELECT id FROM applications WHERE candidate_id = ? "
+            "AND merged_from_candidate = ?", (dst_id, src_id)).fetchall()]
         cur = conn.execute(
             "UPDATE applications SET candidate_id = ?, merged_from_candidate = NULL, "
             "updated_at = ? WHERE candidate_id = ? AND merged_from_candidate = ?",
@@ -2934,6 +2959,17 @@ def split_candidate(conn: sqlite3.Connection, src_id: int, operator: str = "HR",
             "UPDATE documents SET candidate_id = ?, merged_from_candidate = NULL "
             "WHERE candidate_id = ? AND merged_from_candidate = ?", (src_id, dst_id, src_id))
         moved["documents"] = cur.rowcount or 0
+        if _aids:
+            _ph = ",".join("?" for _ in _aids)
+            conn.execute(
+                f"UPDATE submission_events SET candidate_id = ? "
+                f"WHERE candidate_id = ? AND application_id IN ({_ph})",
+                (src_id, dst_id, *_aids))
+            # 合并时复制到目标档的分析结论也跟着投递搬回去，否则拆分后
+            # 目标档会显示属于源档投递的分析。
+            conn.execute(
+                f"DELETE FROM candidate_insights WHERE candidate_id = ? "
+                f"AND application_id IN ({_ph})", (dst_id, *_aids))
         # 合并过、但一条都没标记 → 老数据（加标记之前合的），如实说
         if not moved["applications"] and not moved["documents"]:
             moved["legacy_untracked"] = bool(conn.execute(
@@ -3070,15 +3106,20 @@ def set_application_tier(conn: sqlite3.Connection, aid: int, tier: str,
     if not cur:
         return None
     before = cur.get("tier_final") or cur.get("tier_suggested")
-    note_val = cur.get("note", "") if note is None else note
     # v1.14.1：**不再顺手把复核状态置成"已确认"**。
     # 档位（tier_final）与复核（status）是两件独立的事——HR 可以认同系统给的 A 档
     # 而不改任何值；以前逼着"改档位"才能消掉标签，等于诱导 HR 污染自己的判断。
     # 复核请走独立的 review_mark()。
-    conn.execute(
-        "UPDATE applications SET tier_final = ?, note = ?, updated_at = ? WHERE id = ?",
-        (tier, note_val, now(), aid),
-    )
+    # note=None 表示“不改备注”；不能把读到的旧值再写回去，否则会覆盖
+    # 同时发生的发信记录/另一条备注修改。
+    if note is None:
+        conn.execute(
+            "UPDATE applications SET tier_final = ?, updated_at = ? WHERE id = ?",
+            (tier, now(), aid))
+    else:
+        conn.execute(
+            "UPDATE applications SET tier_final = ?, note = ?, updated_at = ? WHERE id = ?",
+            (tier, note, now(), aid))
     add_audit(conn, "application", str(aid), "set_tier", str(before), str(tier), operator, role)
     conn.commit()
     return get_application(conn, aid)
@@ -3216,7 +3257,8 @@ def set_application_stage(conn: sqlite3.Connection, aid: int, stage: str,
                           outcome: str | None = None,
                           sign_status: str | None = None,
                           operator: str = "HR", role: str = "recruiter",
-                          skip_auto_archive: bool = False) -> dict | None:
+                          skip_auto_archive: bool = False,
+                          expected_stage: str | None = None) -> dict | None:
     """推进投递阶段，可选同时写结论标签，并在**走到「已结束」时**归档。
 
     ⚠️ **归档只有两个入口**（业务方 2026-10-16 明确）：
@@ -3245,6 +3287,10 @@ def set_application_stage(conn: sqlite3.Connection, aid: int, stage: str,
     cur = get_application(conn, aid)
     if not cur:
         return None
+    if expected_stage is not None and str(cur.get("stage") or "") != str(expected_stage):
+        raise ValueError(
+            f"阶段已变化：读取时是「{expected_stage}」，现在已是「{cur.get('stage') or ''}」；"
+            "为避免把人工推进改回去，本次没有执行")
     st = str(stage or "").strip()
     if not st:
         return get_application(conn, aid)
@@ -3319,10 +3365,20 @@ def set_application_stage(conn: sqlite3.Connection, aid: int, stage: str,
     if st == "已面试" and not cur.get("interviewed_at"):
         sets.insert(1, "interviewed_at = ?")
         vals.insert(1, _stamp)
-    conn.execute(f"UPDATE applications SET {', '.join(sets)} WHERE id = ?", (*vals, aid))
+    if expected_stage is not None:
+        _cur_stage = str(expected_stage)
+        _cur = conn.execute(
+            f"UPDATE applications SET {', '.join(sets)} "
+            "WHERE id = ? AND stage = ?", (*vals, aid, _cur_stage))
+        if (_cur.rowcount or 0) != 1:
+            conn.rollback()
+            raise ValueError("阶段已被其他操作改动，本次没有执行；请刷新后重试")
+    else:
+        conn.execute(f"UPDATE applications SET {', '.join(sets)} WHERE id = ?",
+                     (*vals, aid))
     _desc = st + (f"（{oc}）" if oc else "") + (f"｜签约：{ss}" if ss else "")
-    add_audit(conn, "application", str(aid), "set_stage", cur.get("stage"), _desc, operator, role)
-    conn.commit()
+    add_audit(conn, "application", str(aid), "set_stage", cur.get("stage"), _desc,
+              operator, role, commit=False)
 
     # ---- 流程走完 → 自动归档（只在该阶段被标记为 auto_archive_on 时）----
     # ⚠️ **自动归档只有这一处**。原先 `server.api_set_stage` 里还写了一份
@@ -3343,6 +3399,9 @@ def set_application_stage(conn: sqlite3.Connection, aid: int, stage: str,
                                        operator=operator, role=role,
                                        skip_auto_archive=True)
                 auto_archived = True
+    # 阶段变更与审计、以及可能的自动归档在同一个事务里提交；
+    # 避免“阶段已落库、自动归档没落”或反过来的半截状态。
+    conn.commit()
     out = get_application(conn, aid)
     if out is not None:
         # 给调用方（服务端/助手）一个明确的"刚才顺手归档了"信号。
@@ -3370,23 +3429,36 @@ def set_candidate_archived(conn: sqlite3.Connection, cid: int, archived: bool,
     而本函数内部又会把"进行中"的投递置为已结束。两向并存，
     这个参数把潜在的反向环切断（见 `set_application_stage` 的说明）。
     """
+    begin_immediate(conn)
     cur = get_candidate(conn, cid)
     if not cur:
+        conn.rollback()
         return None
     # 幂等：重复点归档不能刷新 archived_at（它会成为 30 天保留期起算点），
     # 重复点取消归档也不应重复写审计。
     if archived and cur.get("archived_at"):
+        conn.rollback()          # 释放 begin_immediate 的写锁
         out = dict(cur)
         out["_ended_applications"] = 0
         out["_unchanged"] = True
         return out
     if not archived and not cur.get("archived_at"):
+        conn.rollback()
         out = dict(cur)
         out["_ended_applications"] = 0
         out["_unchanged"] = True
         return out
     ts = now() if archived else None
-    conn.execute("UPDATE candidates SET archived_at = ? WHERE id = ?", (ts, cid))
+    _cond = "COALESCE(archived_at,'') = ''" if archived else "COALESCE(archived_at,'') != ''"
+    _cur = conn.execute(
+        f"UPDATE candidates SET archived_at = ? WHERE id = ? AND {_cond}",
+        (ts, cid))
+    if (_cur.rowcount or 0) != 1:
+        conn.rollback()
+        out = dict(get_candidate(conn, cid) or cur)
+        out["_ended_applications"] = 0
+        out["_unchanged"] = True
+        return out
     ended = 0
     if archived:
         # 终态表从配置取（v1.29）：不再写死 `(已结束, 已入职)` 两个值——
@@ -3501,6 +3573,9 @@ def purge_due_candidates(conn: sqlite3.Connection, days: int | None = None,
     if days <= 0:
         return {"purged": 0, "days": days, "people": [], "files": [],
                 "skipped_signed": [], "disabled": True}
+    # 归档/签约校验与删除必须在同一个写事务里：否则校验通过后另一请求
+    # 刚登记“已签约”或取消归档，这边仍会把档案不可逆删掉。
+    begin_immediate(conn)
     # 只要求"已归档"（archived_at 非空），**不再要求归档满 30 天**——
     # HR 要求取消冷静期：归档页点"立即彻底删除"就能删。
     # 防误删的两道闸移到别处：① 必须先归档（回收站外的人根本没这个按钮）
@@ -3520,6 +3595,9 @@ def purge_due_candidates(conn: sqlite3.Connection, days: int | None = None,
     files: list[str] = []
     skipped_signed: list[dict] = []
     for r in rows:
+        # add_audit 会在每个候选人末尾 commit；下一个人开始前重新拿写锁，
+        # 保证“重查签约/归档 → 删除”仍是同一个写事务。
+        begin_immediate(conn)
         cid = r["id"]
         _signed = conn.execute(
             "SELECT id FROM applications WHERE candidate_id = ? AND ("
@@ -3547,9 +3625,16 @@ def purge_due_candidates(conn: sqlite3.Connection, days: int | None = None,
         conn.execute("DELETE FROM candidate_insights WHERE candidate_id = ?", (cid,))
         conn.execute("DELETE FROM embeddings WHERE owner_type = 'candidate' AND owner_id = ?",
                      (cid,))
+        conn.execute("DELETE FROM submission_events WHERE candidate_id = ?", (cid,))
         conn.execute("DELETE FROM documents WHERE candidate_id = ?", (cid,))
         conn.execute("DELETE FROM applications WHERE candidate_id = ?", (cid,))
-        conn.execute("DELETE FROM candidates WHERE id = ?", (cid,))
+        _del = conn.execute(
+            "DELETE FROM candidates WHERE id = ? AND COALESCE(archived_at,'') != ''",
+            (cid,))
+        if (_del.rowcount or 0) != 1:
+            # 事务内被取消归档/已经删掉 → 不能继续删附件和投递。
+            conn.rollback()
+            raise ValueError("候选人状态已变化（可能已取消归档），本次彻底删除已取消")
         how = (f"归档 {r['archived_at']} 后由 HR 立即彻底删除" if cutoff is None
               else f"归档满 {days} 天自动清理")
         add_audit(conn, "candidate", str(cid), "purge",
@@ -3973,13 +4058,15 @@ def list_tags(conn: sqlite3.Connection) -> list[dict]:
 
 def add_audit(conn: sqlite3.Connection, entity: str, entity_id: str, action: str,
               before: str = "", after: str = "", operator: str = "system",
-              role: str = "system", ip: str | None = None) -> None:
+              role: str = "system", ip: str | None = None, *,
+              commit: bool = True) -> None:
     conn.execute(
         """INSERT INTO audit_log (entity, entity_id, action, before, after, operator, role, ip, ts)
            VALUES (?,?,?,?,?,?,?,?,?)""",
         (entity, str(entity_id), action, str(before), str(after), operator, role, ip, now()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 # ============================================================
@@ -4380,12 +4467,20 @@ def create_proposal(conn: sqlite3.Connection, session_id: str, tool: str, args: 
                                 (_aid,)).fetchone()
             if _row:
                 args = {**args, "expected_stage": _row["stage"] or ""}
+    # 查重与插入必须在同一个写事务里，否则两个并发请求会同时看到“没有”
+    # 然后各插一条完全相同的待确认提案，HR 批量确认时同一操作执行两次。
+    begin_immediate(conn)
     # 同一工具+同一参数若已有**待确认**提案，直接复用，不再堆一条重复提案。
+    # 限定在同一会话内：不同会话/账号不应拿到别人创建的待确认提案。
     if dedup_key:
         _dup = conn.execute(
             "SELECT id FROM proposals WHERE dedup_key = ? AND status = '待确认' "
-            "ORDER BY id DESC LIMIT 1", (dedup_key,)).fetchone()
+            "AND session_id = ? ORDER BY id DESC LIMIT 1",
+            (dedup_key, session_id)).fetchone()
         if _dup:
+            # 读事务也占着写锁。commit（而不是 rollback）释放锁的同时
+            # 不会撤销调用方在同一连接上已有的写入。
+            conn.commit()
             return int(_dup["id"])
     # 敏感值（SMTP 授权码 / 模型 API Key / 候选人电话邮箱）**不能明文落库**：
     # proposals.args 用 json.dumps 原样存、decide_proposal 又不清 args，
@@ -4967,24 +5062,42 @@ def release_stale_proposals(conn: sqlite3.Connection, stale_minutes: int = 60) -
 # ============================================================
 
 def record_email(conn: sqlite3.Connection, rec: dict) -> int:
-    row = conn.execute("SELECT id, body_text, body_html FROM email_messages "
-                       "WHERE message_id = ?", (rec.get("message_id"),)).fetchone()
-    if row:
-        # 老库里的邮件可能只有主题/发件人；拿到正文时补上（不覆盖已有正文）。
-        if rec.get("body_text") or rec.get("body_html"):
-            conn.execute(
-                "UPDATE email_messages SET body_text = COALESCE(NULLIF(body_text,''), ?),"
-                " body_html = COALESCE(NULLIF(body_html,''), ?) WHERE id = ?",
-                (rec.get("body_text") or "", rec.get("body_html") or "", row["id"]))
+    mid = rec.get("message_id")
+    # 先 INSERT OR IGNORE，再统一 SELECT：两个并发收取可能同时看到“没有”，
+    # 旧写法会让后到者抛 UNIQUE 冲突并中断这封邮件。
+    if mid:
+        conn.execute(
+            """INSERT OR IGNORE INTO email_messages
+               (message_id, uid, mailbox, from_addr, subject, body_text, body_html,
+                received_at, has_attachment, attachment_count, processed, added, skipped,
+                failed, error, fetched_at, processed_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (mid, rec.get("uid"), rec.get("mailbox"), rec.get("from_addr"),
+             rec.get("subject"), rec.get("body_text") or "", rec.get("body_html") or "",
+             rec.get("received_at"),
+             1 if rec.get("has_attachment") else 0, rec.get("attachment_count", 0),
+             1 if rec.get("processed") else 0, rec.get("added", 0), rec.get("skipped", 0),
+             rec.get("failed", 0), rec.get("error"), rec.get("fetched_at", now()),
+             rec.get("processed_at")),
+        )
+        row = conn.execute("SELECT id FROM email_messages WHERE message_id = ?",
+                           (mid,)).fetchone()
+        if row:
+            # 老库里的邮件可能只有主题/发件人；拿到正文时补上（不覆盖已有正文）。
+            if rec.get("body_text") or rec.get("body_html"):
+                conn.execute(
+                    "UPDATE email_messages SET body_text = COALESCE(NULLIF(body_text,''), ?),"
+                    " body_html = COALESCE(NULLIF(body_html,''), ?) WHERE id = ?",
+                    (rec.get("body_text") or "", rec.get("body_html") or "", row["id"]))
             conn.commit()
-        return row["id"]
+            return int(row["id"])
     cur = conn.execute(
         """INSERT INTO email_messages
            (message_id, uid, mailbox, from_addr, subject, body_text, body_html,
             received_at, has_attachment, attachment_count, processed, added, skipped,
             failed, error, fetched_at, processed_at)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (rec.get("message_id"), rec.get("uid"), rec.get("mailbox"), rec.get("from_addr"),
+        (mid, rec.get("uid"), rec.get("mailbox"), rec.get("from_addr"),
          rec.get("subject"), rec.get("body_text") or "", rec.get("body_html") or "",
          rec.get("received_at"),
          1 if rec.get("has_attachment") else 0, rec.get("attachment_count", 0),
@@ -5003,6 +5116,53 @@ def update_email(conn: sqlite3.Connection, message_id: str, **fields) -> None:
     sets = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(f"UPDATE email_messages SET {sets} WHERE message_id = ?", (*fields.values(), message_id))
     conn.commit()
+
+
+def bump_email_retry(conn: sqlite3.Connection, message_id: str, error: str = "") -> int:
+    """记录一次入库失败，返回累计失败次数；同一封不会无限重试。"""
+    if not message_id:
+        return 0
+    conn.execute(
+        "UPDATE email_messages SET retry_count=COALESCE(retry_count,0)+1, "
+        "error=COALESCE(?, error) WHERE message_id=?", (error or "", message_id))
+    conn.commit()
+    row = conn.execute("SELECT retry_count FROM email_messages WHERE message_id=?",
+                       (message_id,)).fetchone()
+    return int(row["retry_count"] or 0) if row else 0
+
+
+def get_email_retry(conn: sqlite3.Connection, message_id: str) -> int:
+    row = conn.execute("SELECT retry_count FROM email_messages WHERE message_id=?",
+                       (message_id,)).fetchone()
+    return int(row["retry_count"] or 0) if row else 0
+
+
+def mark_email_dead(conn: sqlite3.Connection, message_id: str, error: str = "") -> bool:
+    """把一封反复失败的邮件转入死信：保留台账、游标可以越过，之后可手动重试。"""
+    if not message_id:
+        return False
+    cur = conn.execute(
+        "UPDATE email_messages SET dead_letter=1, dead_at=?, processed=0, "
+        "error=COALESCE(?, error) WHERE message_id=?",
+        (now(), error or "", message_id))
+    conn.commit()
+    return bool(cur.rowcount)
+
+
+def revive_email(conn: sqlite3.Connection, message_id: str) -> bool:
+    """把死信重新放回待处理：清空失败计数，下一次收取重试。"""
+    cur = conn.execute(
+        "UPDATE email_messages SET dead_letter=0, dead_at=NULL, retry_count=0, "
+        "processed=0, error=NULL WHERE message_id=?", (message_id,))
+    conn.commit()
+    return bool(cur.rowcount)
+
+
+def list_dead_letters(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
+    return [_decode(dict(r)) for r in conn.execute(
+        "SELECT id,message_id,uid,mailbox,from_addr,subject,received_at,"
+        "attachment_count,retry_count,error,dead_at FROM email_messages "
+        "WHERE dead_letter=1 ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()]
 
 
 def list_emails(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
@@ -5561,10 +5721,14 @@ def chat_history(conn: sqlite3.Connection, limit: int = 300,
             where = (where + " AND " if where else " WHERE ") + "operator = ?"
             base_args.append(operator)
 
-    sql = ("SELECT id, question, answer, thinking, context_json, mode, rounds, "
+    # 取**最近** N 条，再按正序返回；直接 ORDER BY id ASC LIMIT 300
+    # 在超过 300 轮的长会话里会永远只显示最早的 300 条，最近回答看不到。
+    sql = ("SELECT * FROM ("
+           "SELECT id, question, answer, thinking, context_json, mode, rounds, "
            "tool_calls, status, ts, tokens_in, tokens_out, latency_ms, "
            "metrics_json, alerts_json "
-           "FROM agent_runs" + where + " ORDER BY id ASC LIMIT ?")
+           "FROM agent_runs" + where + " ORDER BY id DESC LIMIT ?"
+           ") ORDER BY id ASC")
     query_args = list(base_args) + [int(limit)]
 
     messages: list[dict] = []
@@ -6083,8 +6247,8 @@ def set_user_password(conn: sqlite3.Connection, username: str, password: str) ->
         return False
     pw, salt = hash_password(password)
     conn.execute("UPDATE users SET password_hash = ?, salt = ?, "
-                 "must_change_password = 0 WHERE username = ?",
-                 (pw, salt, username))
+                 "must_change_password = 0, password_changed_at = ? WHERE username = ?",
+                 (pw, salt, now(), username))
     conn.commit()
     return True
 
@@ -6160,14 +6324,29 @@ def create_session(conn: sqlite3.Connection, username: str, role: str,
 
 
 def get_session(conn: sqlite3.Connection, token: str) -> dict | None:
-    # 带上 users.must_change_password：登录态下也要知道是否必须先改初始密码。
+    # 带上用户当前角色/启用状态：只信 sessions.role 会让“停用/降级后旧 token
+    # 仍按旧权限使用”持续到会话过期。改密时间用于兜底踢掉改密前的旧会话
+    # （即使 delete_user_sessions 那一步因锁失败没执行）。
     row = conn.execute(
-        "SELECT s.*, COALESCE(u.must_change_password, 0) AS must_change_password "
+        "SELECT s.*, COALESCE(u.must_change_password, 0) AS must_change_password, "
+        "COALESCE(u.role, s.role) AS current_role, u.active AS user_active, "
+        "COALESCE(u.password_changed_at, '') AS password_changed_at "
         "FROM sessions s LEFT JOIN users u ON u.username = s.username "
         "WHERE s.token = ?", (token,)).fetchone()
     if not row:
         return None
     d = dict(row)
+    if d.get("user_active") in (0, None):
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.commit()
+        return None
+    if d.get("current_role"):
+        d["role"] = d["current_role"]
+    _pw_changed = str(d.get("password_changed_at") or "")
+    if _pw_changed and str(d.get("created_at") or "") < _pw_changed:
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.commit()
+        return None
     expires_at = d.get("expires_at") or ""
     exp = None
     if expires_at:

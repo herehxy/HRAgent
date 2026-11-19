@@ -31,6 +31,7 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
                    operator: str = "HR", role: str = "recruiter") -> dict:
     """执行或拒绝一条提案。decision: approve / reject。"""
     conn = db.connect(db_path)
+    claimed = False
     try:
         p = db.get_proposal(conn, proposal_id)
         if not p:
@@ -42,6 +43,7 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
         if not db.claim_proposal(conn, proposal_id, operator):
             return {"ok": False,
                     "error": f"提案 #{proposal_id} 正被处理或已处理，请刷新后查看结果"}
+        claimed = True
 
         if decision != "approve":
             db.decide_proposal(conn, proposal_id, "reject", operator, role, "已拒绝")
@@ -80,10 +82,13 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             # 位置传参会让「同意提案」执行阶段变更时把用户名当成签约情况。
             try:
                 r = db.set_application_stage(conn, aid, _actual_stage, args.get("outcome"),
-                                             operator=operator, role=role)
+                                             operator=operator, role=role,
+                                             expected_stage=_cur_stage)
             except ValueError as exc:
                 # 必填字段缺失 / 非法结论：把原因原样交给 HR，不要冒成 500。
                 return {"ok": False, "error": str(exc)}
+            if not r:
+                return {"ok": False, "error": "投递已不存在，提案未执行"}
             _archived = bool((r or {}).pop("_auto_archived", False))
             result["after"] = {"application_id": aid, "stage": r.get("stage") if r else None,
                                "advanced_to": (_actual_stage
@@ -99,7 +104,9 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
                 return _denied(conn, p, operator, role, "confirm")
             aid, tier = int(args["application_id"]), args["tier"]
             r = db.set_application_tier(conn, aid, tier, args.get("note"), operator, role)
-            result["after"] = {"application_id": aid, "tier_final": r.get("tier_final") if r else None}
+            if not r:
+                return {"ok": False, "error": "投递已不存在，提案未执行"}
+            result["after"] = {"application_id": aid, "tier_final": r.get("tier_final")}
 
         elif tool == "add_tag":
             if not auth.can(role, "propose"):
@@ -114,7 +121,8 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             if not auth.can(role, "add_note"):
                 return _denied(conn, p, operator, role, "add_note")
             aid = int(args["application_id"])
-            db.add_note(conn, aid, args["note"], operator, role)
+            if not db.add_note(conn, aid, args["note"], operator, role):
+                return {"ok": False, "error": "投递已不存在，提案未执行"}
             result["after"] = {"application_id": aid, "note": args["note"]}
 
         elif tool == "assign_job":
@@ -459,7 +467,8 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
                 if target != cur_stage:
                     db.set_application_stage(conn, aid, target, outcome=outcome,
                                              operator=operator, role=role,
-                                             skip_auto_archive=True)
+                                             skip_auto_archive=True,
+                                             expected_stage=cur_stage)
                 else:
                     db.update_application_fields(conn, aid, operator=operator,
                                                  role=role, outcome=outcome)
@@ -863,8 +872,11 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             # 先回滚未提交的零散写入：某条工具校验失败提前返回时，
             # 不能让 finally 里的 release/查询把半截改动顺手提交掉。
             conn.rollback()
+            # ⚠️ 只有**本次真正 claim 成功**的请求才能释放。否则一个并发
+            # 双击的第二个请求 claim 失败，却会把第一个请求正在执行的提案
+            # 放回「待确认」，第三个请求又能 claim 进来，副作用被执行两次。
             _cur = db.get_proposal(conn, proposal_id)
-            if _cur and _cur.get("status") == "执行中":
+            if claimed and _cur and _cur.get("status") == "执行中":
                 db.release_proposal(conn, proposal_id)
         except Exception:                                    # noqa: BLE001
             pass

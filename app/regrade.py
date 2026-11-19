@@ -296,11 +296,11 @@ def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
                 # 不静默吞：技能没刷新会让档案自相矛盾，必须留痕（缺陷 #40 的教训）
                 print(f"[route_pending] 技能刷新失败（归位结论不受影响）："
                       f"{type(exc).__name__}: {exc}", file=sys.stderr)
-        conn.execute(
+        cur = conn.execute(
             """UPDATE applications SET suggested_job_id = ?, suggested_job_reason = ?,
                score = ?, tier_suggested = ?,
                reasons = ?, risks = ?, hits = ?, miss = ?, preferred_hit = ?, breakdown = ?,
-               updated_at = ? WHERE id = ?""",
+               updated_at = ? WHERE id = ? AND job_id IS NULL""",
             ((j["id"] if usable else None),
              ((pick or {}).get("reason") or None) if usable else None,
              g["score"], g["tier_suggested"],
@@ -311,6 +311,9 @@ def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
              json.dumps(g["preferred_hit"], ensure_ascii=False),
              json.dumps(g["breakdown"], ensure_ascii=False),
              db.now(), r["id"]))
+        if (cur.rowcount or 0) != 1:
+            # HR 在模型思考期间已经手动归岗：不要再用旧建议覆盖。
+            continue
         if moved:
             _why = ((f"模型从 {len(jobs)} 个在招岗位中判断最像「{j['title']}」#{j['id']}"
                      + (f"（依据：{pick['reason']}）" if (pick or {}).get("reason") else ""))
@@ -367,9 +370,12 @@ def suggest_job_for_application(conn: sqlite3.Connection, candidate_id: int,
               if (x.get("title") or "").strip() == (pick or {}).get("title")), None)
     jid = j["id"] if j else None
     reason = ((pick or {}).get("reason") or "") if jid else ""
-    conn.execute(
+    _cur = conn.execute(
         "UPDATE applications SET suggested_job_id = ?, suggested_job_reason = ?, updated_at = ? "
-        "WHERE id = ?", (jid, reason or None, db.now(), row["id"]))
+        "WHERE id = ? AND job_id IS NULL", (jid, reason or None, db.now(), row["id"]))
+    if (_cur.rowcount or 0) != 1:
+        conn.rollback()
+        return {"ok": False, "error": "该候选人已在判断期间被归岗，本次建议未写入"}
     db.add_audit(conn, "application", str(row["id"]), "suggest_job",
                  "（原建议已清空）" if not jid else f"建议岗位 {jid}",
                  (f"模型判断最像「{j['title']}」：{reason}" if jid

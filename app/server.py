@@ -320,6 +320,9 @@ _PROGRESS_LOCK = threading.Lock()
 # 上传入口与 /api/ingest 共用同一套“先查后写”逻辑；上传不登记进度任务，
 # 这里用进程内锁串行化，避免两个上传各自查到“无投递”后各建一条。
 _UPLOAD_INGEST_LOCK = threading.Lock()
+#: `/api/ingest` 的“查有没有在跑 + 登记新任务”必须原子，否则两个并发
+#: 请求会同时通过检查，两个任务抢同一份邮件游标。
+_INGEST_TASK_LOCK = threading.Lock()
 _PROGRESS_LAST: dict[str, float] = {}
 
 
@@ -1320,7 +1323,9 @@ def _start_upload_task(body: bytes, safe: str, jd, tiers,
     """保存后立即返回任务号，OCR/模型解析在后台跑；供聊天上传实时反馈用。"""
     import shutil as _shutil
     upload_dir, _dest, stored = _save_upload(body, safe)
-    tid = _progress_new(f"解析简历：{stored}", 1, kind="ingest",
+    # 独立 kind：聊天上传不是“收取/导入”任务，不能被 /api/tasks/active
+    # 当成正在收取而挡住真正的导入，也不能显示一个点了没用的停止按钮。
+    tid = _progress_new(f"解析简历：{stored}", 1, kind="upload",
                         meta={"file": stored})
 
     def _work() -> None:
@@ -3271,7 +3276,8 @@ def _startup_purge_task() -> None:
     # 上次进程里的 running 任务不可能还活着：标成中断，避免 UI 永远转圈。
     try:
         _n = db.task_mark_interrupted(
-            DB_PATH, "服务重启，任务已中断；已处理的文件/邮件会保留，可重新发起")
+            DB_PATH, "服务重启，任务已中断；已处理的文件/邮件会保留，可重新发起",
+            stale_seconds=0)
         if _n:
             print(f"[tasks] 启动清理：{_n} 个未完成后台任务标记为中断")
     except Exception as exc:                               # noqa: BLE001
@@ -3645,7 +3651,8 @@ def api_set_stage(aid: int, req: StageReq, x_tp_token: str | None = Header(defau
             # ⚠️ 必须用关键字传 operator/role：`sign_status` 插在它们之前，
             # 位置传参会把用户名当成签约情况（→ 422「签约情况只能是…」）。
             r = db.set_application_stage(conn, aid, _actual_stage, req.outcome,
-                                         operator=s["username"], role=s["role"])
+                                         operator=s["username"], role=s["role"],
+                                         expected_stage=str(_before.get("stage") or ""))
         except ValueError as exc:
             # 非法阶段/非法结论：如实回 400 并说清可用取值，别让它变成 500
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4364,7 +4371,8 @@ def api_interview_info(aid: int, req: dict,
                 _promoted = True
         if _promoted:
             db.set_application_stage(conn, aid, "待面试", operator=s["username"],
-                                     role=s["role"], skip_auto_archive=True)
+                                     role=s["role"], skip_auto_archive=True,
+                                     expected_stage=str(_ap_now.get("stage") or ""))
         _changed = sorted(patch) + (["stage", "outcome"] if advanced else [])
         if _promoted:
             _changed = sorted(set(_changed) | {"stage"})
@@ -4491,14 +4499,7 @@ def api_ingest(req: IngestReq | None = Body(default=None),
 
     # 同一时间只允许一个收取/导入任务：两个任务同时扫同一个来源目录
     # 会互相抢文件、重复计数，而且前端进度弹窗也只有一个。
-    try:
-        _running = [t for t in ingest_mod.list_running() if t.get("stoppable")]
-    except Exception:                                      # noqa: BLE001
-        _running = []
-    if _running:
-        raise HTTPException(
-            status_code=409,
-            detail="已有导入/收取任务在进行中，请等待完成或先停止再发起新的任务")
+    # 检查与登记必须在同一把锁内完成，否则两个并发请求会同时看到“没有任务”。
 
     # 路径类校验留在这里同步做：目录错/建不出来当场 4xx，不进任务排队
     cfg = mb.load_config()
@@ -4513,7 +4514,19 @@ def api_ingest(req: IngestReq | None = Body(default=None),
                 raise HTTPException(status_code=400,
                                     detail=f"导入文件夹不存在且无法创建：{folder}（{exc}）")
     title = "收取邮箱简历" if req.source != "folder" else "导入本地文件夹"
-    tid = ingest_mod.register_progress(title, 0, stoppable=True, db_path=DB_PATH)
+    with _INGEST_TASK_LOCK:
+        try:
+            _running = [t for t in ingest_mod.list_running() if t.get("stoppable")]
+        except Exception:                                  # noqa: BLE001
+            _running = []
+        if _running:
+            raise HTTPException(
+                status_code=409,
+                detail="已有导入/收取任务在进行中，请等待完成或先停止再发起新的任务")
+        # EML 演练路径是整批解析，没有逐封停止点；别显示一个点了没用的停止按钮。
+        _stoppable = (req.source == "folder") or (cfg.get("mode") == "imap")
+        tid = ingest_mod.register_progress(title, 0, stoppable=_stoppable,
+                                           db_path=DB_PATH)
     threading.Thread(target=_run_ingest_task, name="ingest-fetch", daemon=True,
                      args=(tid, req.source, folder, s.get("username") or "hr",
                            req.use_llm)).start()
@@ -5485,6 +5498,27 @@ class FocusReq(BaseModel):
     focus: str | None = ""
 
 
+#: 同一会话只允许一个 run。流式请求失败后前端会自动改发非流式请求，
+#: 若服务端不互斥，同一个问题会跑两遍模型/工具，历史出现两份回答。
+_CHAT_RUN_LOCK = threading.Lock()
+_CHAT_RUN_ACTIVE: set[str] = set()
+
+
+def _chat_acquire(session_id: str) -> None:
+    sid = str(session_id or "")
+    with _CHAT_RUN_LOCK:
+        if sid in _CHAT_RUN_ACTIVE:
+            raise HTTPException(
+                status_code=409,
+                detail="同一会话正在生成回答，请等待完成或先停止；不要重复提交")
+        _CHAT_RUN_ACTIVE.add(sid)
+
+
+def _chat_release(session_id: str) -> None:
+    with _CHAT_RUN_LOCK:
+        _CHAT_RUN_ACTIVE.discard(str(session_id or ""))
+
+
 @app.post("/api/agent/chat")
 def api_agent_chat(req: ChatReq, x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                    x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
@@ -5499,13 +5533,17 @@ def api_agent_chat(req: ChatReq, x_tp_token: str | None = Header(default=None, a
         _cid = re.sub(r"[^A-Za-z0-9_-]", "", str(req.session_id))[:64]
         if _cid:
             ctx.session_id = _cid
-    _begin_agent_run(ctx, req.message)
+    _chat_acquire(ctx.session_id)
     try:
-        out = run_agent(req.message, ctx, req.history, resume=bool(req.resume),
-                        extra_context=req.extra_context)
-    except Exception as exc:                              # noqa: BLE001
-        _abort_agent_run(ctx.run_id, f"{type(exc).__name__}: {exc}")
-        raise
+        _begin_agent_run(ctx, req.message)
+        try:
+            out = run_agent(req.message, ctx, req.history, resume=bool(req.resume),
+                            extra_context=req.extra_context)
+        except Exception as exc:                          # noqa: BLE001
+            _abort_agent_run(ctx.run_id, f"{type(exc).__name__}: {exc}")
+            raise
+    finally:
+        _chat_release(ctx.session_id)
     out["session"] = {"role": s["role"], "mode": s.get("mode")}
     return out
 
@@ -5564,7 +5602,12 @@ def api_agent_chat_stream(req: ChatReq,
         _cid = re.sub(r"[^A-Za-z0-9_-]", "", str(req.session_id))[:64]
         if _cid:
             ctx.session_id = _cid
-    _begin_agent_run(ctx, req.message)
+    _chat_acquire(ctx.session_id)
+    try:
+        _begin_agent_run(ctx, req.message)
+    except Exception:
+        _chat_release(ctx.session_id)
+        raise
     q: queue.Queue = queue.Queue()
     cancel = threading.Event()
 
@@ -5594,8 +5637,14 @@ def api_agent_chat_stream(req: ChatReq,
             _abort_agent_run(getattr(ctx, "run_id", None),
                              f"{type(exc).__name__}: {exc}")
             q.put({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+        finally:
+            _chat_release(ctx.session_id)
 
-    threading.Thread(target=_work, name="agent-stream", daemon=True).start()
+    try:
+        threading.Thread(target=_work, name="agent-stream", daemon=True).start()
+    except Exception:
+        _chat_release(ctx.session_id)
+        raise
 
     def _gen():
         try:
@@ -7757,6 +7806,110 @@ class MailPreviewReq(BaseModel):
     html: str | None = None
 
 
+class MailDeadLetterReq(BaseModel):
+    uid: str | None = None
+    message_id: str | None = None
+
+
+def _imap_cursor_target(conn, folder: str, account: str, target_uid: str,
+                        *, reset_before: bool = False) -> None:
+    """把收信游标推到指定 UID（或它前一封），保留账号/UIDVALIDITY。"""
+    try:
+        target = int(str(target_uid or "").strip())
+    except (TypeError, ValueError):
+        return
+    raw = db.email_cursor(conn, folder)
+    payload = dict(raw) if isinstance(raw, dict) else {"account": account}
+    if not payload.get("account"):
+        payload["account"] = account
+    cur = int(str(payload.get("uid") or "0").strip() or "0") if str(
+        payload.get("uid") or "").strip().isdigit() else 0
+    if reset_before:
+        # 重试只允许把游标往回拉，绝不能因为它比当前游标大而跳过中间邮件。
+        payload["uid"] = str(min(cur, max(0, target - 1)))
+    else:
+        payload["uid"] = str(max(cur, target))
+    db.set_email_cursor(conn, folder, payload)
+
+
+@app.get("/api/mail/dead-letters")
+def api_mail_dead_letters(limit: int = 100,
+                          x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                          x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """反复失败、已被跳过的邮件（可手动重试）。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "ingest")
+    conn = db.connect(DB_PATH)
+    try:
+        return {"ok": True, "items": db.list_dead_letters(conn, limit=limit)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/mail/dead-letters/skip")
+def api_mail_dead_letter_skip(req: MailDeadLetterReq,
+                              x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                              x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """手动跳过当前卡住的一封：标记死信，并把游标推到它之后。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "ingest")
+    mid = (req.message_id or "").strip()
+    uid = (req.uid or "").strip()
+    cfg = mb.load_config()
+    ic = cfg.get("imap") or {}
+    folder = ic.get("folder", "INBOX")
+    account = f"{ic.get('user') or ''}@{ic.get('host') or ''}"
+    conn = db.connect(DB_PATH)
+    try:
+        row = None
+        if mid:
+            row = conn.execute("SELECT message_id,uid FROM email_messages WHERE message_id=?",
+                               (mid,)).fetchone()
+        if row is None and uid:
+            row = conn.execute("SELECT message_id,uid FROM email_messages WHERE uid=? AND mailbox=?",
+                               (uid, folder)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="没有找到这封邮件的台账")
+        db.mark_email_dead(conn, row["message_id"], "用户手动跳过（死信）")
+        if row["uid"]:
+            _imap_cursor_target(conn, folder, account, row["uid"])
+        db.add_audit(conn, "mail", row["message_id"], "dead_letter_skip", "",
+                     f"手动跳过邮件 UID {row['uid'] or '?'}", s["username"], s["role"])
+        return {"ok": True, "message": "已跳过这封，下次收取会从它之后继续"}
+    finally:
+        conn.close()
+
+
+@app.post("/api/mail/dead-letters/retry")
+def api_mail_dead_letter_retry(req: MailDeadLetterReq,
+                               x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                               x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """把死信放回待处理；下一次收取从它的 UID 重新拉取。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "ingest")
+    message_id = (req.message_id or "").strip()
+    cfg = mb.load_config()
+    ic = cfg.get("imap") or {}
+    folder = ic.get("folder", "INBOX")
+    account = f"{ic.get('user') or ''}@{ic.get('host') or ''}"
+    conn = db.connect(DB_PATH)
+    try:
+        row = conn.execute("SELECT uid FROM email_messages WHERE message_id=?",
+                           (message_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="没有找到这封邮件的台账")
+        # 先回退游标，再解除死信标记：中途崩溃时游标已经指回这封，
+        # 下次收取会重新拉取；成功入库会顺带清掉死信标记。
+        if row["uid"]:
+            _imap_cursor_target(conn, folder, account, row["uid"], reset_before=True)
+        db.revive_email(conn, message_id)
+        db.add_audit(conn, "mail", message_id, "dead_letter_retry", "",
+                     "从死信队列重试", s["username"], s["role"])
+        return {"ok": True, "message": "已放回待处理；下次收取会重新拉取这封"}
+    finally:
+        conn.close()
+
+
 @app.get("/api/mail/templates")
 def api_mail_templates(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
@@ -8275,10 +8428,14 @@ def _mail_send_sync(req: MailSendReq, s: dict) -> dict:
                          f"｜{'成功' if r.get('ok') else '失败'}",
                      s["username"], s["role"])
         if r.get("ok") and req.application_id:
+            # 发信记录**追加**到备注，不能覆盖 HR 手写的沟通内容。
+            _app = db.get_application(conn, int(req.application_id)) or {}
+            _old_note = str(_app.get("note") or "").rstrip()
+            _line = (f"已发送邮件：{req.subject}"
+                     f"（模板：{req.template_name or '无'}"
+                     + (f"，附件 {'、'.join(_att_names)}" if _att_names else "") + "）")
             db.add_note(conn, int(req.application_id),
-                        f"已发送邮件：{req.subject}"
-                        f"（模板：{req.template_name or '无'}"
-                        + (f"，附件 {'、'.join(_att_names)}" if _att_names else "") + "）",
+                        ((_old_note + "\n") if _old_note else "") + _line,
                         s["username"], s["role"])
         # ---- v1.29：发信成功后按**模板用途**回写投递档案 ----
         # 省掉"HR 再去档案里手工录一遍面试时间/单位/方式"这一步（漏录的下游：
@@ -8319,6 +8476,7 @@ def _mail_send_sync(req: MailSendReq, s: dict) -> dict:
                             conn, int(req.application_id), "待面试",
                             operator=s["username"], role=s["role"],
                             skip_auto_archive=True,
+                            expected_stage=str(_cur.get("stage") or ""),
                         )
                         _written["stage"] = "待面试"
                 elif _kind == "offer":
@@ -8333,7 +8491,8 @@ def _mail_send_sync(req: MailSendReq, s: dict) -> dict:
                     if _cur.get("stage") in ("待面试", "已面试"):
                         db.set_application_stage(conn, int(req.application_id),
                                                  "已发放offer", operator=s["username"],
-                                                 role=s["role"])
+                                                 role=s["role"],
+                                                 expected_stage=str(_cur.get("stage") or ""))
             except Exception as _e:                       # noqa: BLE001
                 # ⚠️ **邮件已经发出去了**，回写失败只能记警告，不能反过来报错 ——
                 # 让 HR 以为"发送失败"会促使他重发一封（重复打扰候选人）。
@@ -8426,6 +8585,17 @@ def api_mail_send(req: MailSendReq,
     """发信入口。`?async=1` 时立即返回任务号，SMTP 在后台继续执行。"""
     s = _session(x_tp_token, x_tp_role)
     require(s, "confirm")
+    # 候选人/投递必须对得上：防止前端竞态下把 A 的正文发出去、却把
+    # B 的投递回写成“已发面试邀请”。
+    if req.application_id and req.candidate_id:
+        _c = db.connect(DB_PATH)
+        try:
+            _app = db.get_application(_c, int(req.application_id))
+        finally:
+            _c.close()
+        if not _app or int(_app.get("candidate_id") or 0) != int(req.candidate_id):
+            raise HTTPException(status_code=400,
+                                detail="收件人与投递档案不一致，已拒绝发送；请重新选择候选人")
     if not async_mode:
         return _mail_send_sync(req, s)
     req_id = str(req.client_request_id or "").strip()[:80]

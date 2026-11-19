@@ -226,10 +226,12 @@ def test_imap(host: str, port: int, ssl_on: bool, user: str, password: str,
         return {"ok": False, "error": "未填写授权码/密码"}
     try:
         ctx = ssl.create_default_context()
+        _timeout = max(3, int(timeout or 15))
         if ssl_on:
-            conn = imaplib.IMAP4_SSL(host, int(port or 993), ssl_context=ctx)
+            conn = imaplib.IMAP4_SSL(host, int(port or 993), ssl_context=ctx,
+                                     timeout=_timeout)
         else:
-            conn = imaplib.IMAP4(host, int(port or 143))
+            conn = imaplib.IMAP4(host, int(port or 143), timeout=_timeout)
     except Exception as exc:
         return {"ok": False, "error": f"连接失败：{type(exc).__name__}: {exc}"}
     try:
@@ -285,10 +287,13 @@ def preview_imap(host: str, port: int, ssl_on: bool, user: str, password: str,
     if not password:
         return {"ok": False, "error": "未填写授权码/密码"}
     try:
+        _timeout = max(3, int(timeout or 20))
         if ssl_on:
-            conn = imaplib.IMAP4_SSL(host, int(port or 993), ssl_context=ssl.create_default_context())
+            conn = imaplib.IMAP4_SSL(host, int(port or 993),
+                                     ssl_context=ssl.create_default_context(),
+                                     timeout=_timeout)
         else:
-            conn = imaplib.IMAP4(host, int(port or 143))
+            conn = imaplib.IMAP4(host, int(port or 143), timeout=_timeout)
     except Exception as exc:
         return {"ok": False, "error": f"连接失败：{type(exc).__name__}: {exc}"}
     try:
@@ -790,13 +795,18 @@ def _imap_password(imap_cfg: dict) -> str | None:
     return read_secret()
 
 
-def iter_imap(cfg: dict, cursor: str | None = None, limit: int = 200):
+def iter_imap(cfg: dict, cursor: str | None = None, limit: int = 200,
+              should_stop=None):
     """IMAP 只读增量拉取（**生成器版**，v1.29.4）。
 
     为什么拆成生成器：收取进度要"先报总数、再实时报每一封"（业务方要求），
     并且要支持"读完当前这封就停"。原 `fetch_imap` 一次性循环完才返回，
     中途既报不了进度、也没法停。连接持有在生成器生命周期内，
     调用方停止迭代 / close 时 finally 里正常 logout。
+
+    `should_stop` 是可选回调：每下载一封前检查一次，返回 True 就停止，
+    已下载的部分由调用方决定是否入库；**不推进游标**（游标只由调用方
+    在处理成功后推进），所以中途停止不会跳过未处理的邮件。
 
     产出：
       ("total", N)   —— 先给总数（随后开始逐封下载）
@@ -816,14 +826,32 @@ def iter_imap(cfg: dict, cursor: str | None = None, limit: int = 200):
             f"或把授权码写入 {secret_path}（该文件不应提交到版本库）")
 
     ctx = ssl.create_default_context()
+    imap_timeout = max(5, int(ic.get("timeout") or 30))
     if ic.get("ssl", True):
-        conn = imaplib.IMAP4_SSL(ic["host"], int(ic.get("port", 993)), ssl_context=ctx)
+        conn = imaplib.IMAP4_SSL(ic["host"], int(ic.get("port", 993)),
+                                 ssl_context=ctx, timeout=imap_timeout)
     else:
-        conn = imaplib.IMAP4(ic["host"], int(ic.get("port", 143)))
+        conn = imaplib.IMAP4(ic["host"], int(ic.get("port", 143)),
+                             timeout=imap_timeout)
     try:
         conn.login(ic.get("user", ""), password)
         folder = ic.get("folder", "INBOX")
         conn.select(folder, readonly=bool(ic.get("readonly", True)))
+        # UID 只在同一个 UIDVALIDITY 命名空间内有效。邮箱被重建/迁移后
+        # UID 可能从头开始；如果还拿旧游标去比，会把新邮件全部跳过。
+        # 把当前值报给调用方，由它决定是否把游标清零重扫。
+        uidvalidity = ""
+        try:
+            _uv_typ, _uv_data = conn.response("UIDVALIDITY")
+            if _uv_typ == "UIDVALIDITY" and _uv_data:
+                _uv = _uv_data[0]
+                if isinstance(_uv, bytes):
+                    _uv = _uv.decode("ascii", "ignore")
+                if _uv:
+                    uidvalidity = str(_uv)
+                    yield ("uidvalidity", uidvalidity)
+        except Exception:                                    # noqa: BLE001
+            pass
         # ---- 邮箱里一共有多少封（用于界面显示，与"这次要拉几封"是两件事）----
         # v3.1.2：原来只发一个 `total`，值是**本次待拉数**，界面却当"邮箱总数"
         # 显示。于是"第一次收 800 封、第二次收 3 封"看起来像邮箱里的邮件
@@ -836,6 +864,9 @@ def iter_imap(cfg: dict, cursor: str | None = None, limit: int = 200):
             mailbox_total = 0
 
         start = (int(cursor) + 1) if (cursor or "").isdigit() else 1
+        # 用户可能在连接/搜索阶段就点了停止：不再继续下载。
+        if should_stop and should_stop():
+            return
         # **先报总数，再报本次待拉数** —— 顺序不能反：
         # 调用方收到 `total` 时要能立刻拼出"邮箱共 N 封，本次新增 M 封"，
         # 否则消息里只有一个数字，又回到"看起来忽多忽少"的老问题。
@@ -861,11 +892,28 @@ def iter_imap(cfg: dict, cursor: str | None = None, limit: int = 200):
         uids = uids if int(limit) <= 0 else uids[:int(limit)]   # v1.29.4：limit<=0 = 不限量（"一次收完"用）
         yield ("total", len(uids))
         for uid in uids:
+            if should_stop and should_stop():
+                return
             uid_str = uid.decode()
             typ, payload = conn.uid("fetch", uid, "(BODY.PEEK[])")
             if typ != "OK" or not payload or not isinstance(payload[0], tuple):
-                continue
-            mail = parse_eml_bytes(payload[0][1], cfg, fallback_id=f"imap:{folder}:{uid_str}")
+                # 不能 continue：这一封没下载成功却继续往后走，调用方会把
+                # 游标推到最后成功的一封，这封就永久漏收。交给调用方停在
+                # 它之前并报错/重试。
+                yield ("fetch_error", {"uid": uid_str,
+                                       "reason": f"FETCH 返回 {typ}"})
+                return
+            try:
+                # 兜底 message_id 带上 UIDVALIDITY：邮箱重建后 UID 可能复用，
+                # 不带命名空间会让新邮件撞上旧记录而被去重逻辑跳过。
+                _fb = (f"imap:{folder}:{uidvalidity}:{uid_str}"
+                       if uidvalidity else f"imap:{folder}:{uid_str}")
+                mail = parse_eml_bytes(payload[0][1], cfg, fallback_id=_fb)
+            except Exception as exc:                         # noqa: BLE001
+                # 单封 MIME 解析异常不能炸掉整批连接；同样停在它之前。
+                yield ("fetch_error", {"uid": uid_str,
+                                       "reason": f"{type(exc).__name__}: {exc}"})
+                return
             mail["uid"] = uid_str
             mail["mailbox"] = folder
             yield ("mail", mail)
@@ -889,23 +937,40 @@ def fetch_imap_body(cfg: dict, uid: str, folder: str | None = None) -> dict | No
     if not password:
         return None
     ctx = ssl.create_default_context()
+    imap_timeout = max(5, int(ic.get("timeout") or 30))
     conn = None
     try:
         if ic.get("ssl", True):
-            conn = imaplib.IMAP4_SSL(ic["host"], int(ic.get("port", 993)), ssl_context=ctx)
+            conn = imaplib.IMAP4_SSL(ic["host"], int(ic.get("port", 993)),
+                                     ssl_context=ctx, timeout=imap_timeout)
         else:
-            conn = imaplib.IMAP4(ic["host"], int(ic.get("port", 143)))
+            conn = imaplib.IMAP4(ic["host"], int(ic.get("port", 143)),
+                                 timeout=imap_timeout)
         conn.login(ic.get("user", ""), password)
         conn.select(folder or ic.get("folder", "INBOX"), readonly=True)
+        uidvalidity = ""
+        try:
+            _uv_typ, _uv_data = conn.response("UIDVALIDITY")
+            if _uv_typ == "UIDVALIDITY" and _uv_data:
+                _uv = _uv_data[0].decode("ascii", "ignore") \
+                    if isinstance(_uv_data[0], bytes) else str(_uv_data[0])
+                uidvalidity = str(_uv or "")
+        except Exception:                                    # noqa: BLE001
+            pass
         typ, payload = conn.uid("fetch", str(uid), "(BODY.PEEK[])")
         if typ != "OK" or not payload or not isinstance(payload[0], tuple):
             return None
-        mail = parse_eml_bytes(payload[0][1], cfg, fallback_id=f"imap:{folder or 'INBOX'}:{uid}")
+        _folder = folder or "INBOX"
+        _fb = (f"imap:{_folder}:{uidvalidity}:{uid}"
+               if uidvalidity else f"imap:{_folder}:{uid}")
+        mail = parse_eml_bytes(payload[0][1], cfg, fallback_id=_fb)
         return {"body_text": mail.get("body_text") or "",
                 "body_html": mail.get("body_html") or "",
                 "subject": mail.get("subject") or "",
                 "from_addr": mail.get("from_addr") or "",
-                "received_at": mail.get("received_at") or ""}
+                "received_at": mail.get("received_at") or "",
+                "message_id": mail.get("message_id") or "",
+                "uidvalidity": uidvalidity}
     except Exception:                                          # noqa: BLE001
         return None
     finally:
@@ -916,15 +981,29 @@ def fetch_imap_body(cfg: dict, uid: str, folder: str | None = None) -> dict | No
             pass
 
 
-def fetch_imap(cfg: dict, cursor: str | None = None, limit: int = 200) -> tuple[list[dict], str]:
-    """IMAP 只读增量拉取（一次性版）。返回（邮件列表，新游标）。
+def fetch_imap(cfg: dict, cursor: str | None = None, limit: int = 200,
+               should_stop=None, meta: dict | None = None) -> tuple[list[dict], str]:
+    """IMAP 只读增量拉取（一次性版）。返回（邮件列表，下载到的最大 UID）。
 
-    现在只是 `iter_imap` 的薄封装 —— 拉取逻辑**只有一份**，
-    "生成器版"与"一次性版"不可能分叉（游标口径随之自动一致）。
+    注意第二个返回值只是"这次下载到哪"，**不是"处理完到哪"**：
+    调用方必须按实际入库成功的最后一封推进游标，不能直接拿它存游标；
+    否则用户中途点停止时，下载了但还没入库的邮件会被永久跳过。
+
+    `meta` 可选：会把本次连接的 UIDVALIDITY 写进 `meta["uidvalidity"]`，
+    供调用方判断邮箱命名空间是否被重置。
     """
     mails: list[dict] = []
     newest = cursor or ""
-    for kind, item in iter_imap(cfg, cursor, limit):
+    for kind, item in iter_imap(cfg, cursor, limit, should_stop=should_stop):
+        if kind == "uidvalidity":
+            if meta is not None:
+                meta["uidvalidity"] = str(item)
+            continue
+        if kind == "fetch_error":
+            if meta is not None:
+                meta["fetch_error"] = item if isinstance(item, dict) else {"reason": str(item)}
+            # 已经下载好的邮件由调用方先入库，游标停在这封之前。
+            break
         if kind == "mail":
             mails.append(item)
             newest = item.get("uid") or newest

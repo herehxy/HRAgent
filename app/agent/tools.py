@@ -2190,7 +2190,10 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                     _cfg = _mb.load_config()
                     if _cfg.get("mode") == "imap":
                         _got = _mb.fetch_imap_body(_cfg, row["uid"], row["mailbox"])
-                        if _got:
+                        # UIDVALIDITY 变化后同一 UID 可能是另一个人的邮件：
+                        # 取回邮件的 Message-ID 必须与台账里这条一致才写回。
+                        _got_mid = (_got or {}).get("message_id") or ""
+                        if _got and _got_mid == mid:
                             text = _got.get("body_text") or ""
                             html = _got.get("body_html") or ""
                             db.update_email(conn, mid, body_text=text, body_html=html)

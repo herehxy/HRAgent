@@ -1585,6 +1585,7 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
                 })
                 db.update_email(conn, mid, processed=1, processed_at=db.now(),
                                 error=mail.get("error") or "无简历附件")
+                db.update_email(conn, mid, dead_letter=0, dead_at=None)
                 continue
 
             added = mm = skipped = failed = pf = other_saved = 0
@@ -1608,6 +1609,8 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
                     "status": "failed",
                     "notes": [f"附件预处理失败：{type(exc).__name__}: {exc}"],
                 })
+                db.bump_email_retry(
+                    conn, mid, f"附件预处理失败：{type(exc).__name__}: {exc}")
                 db.update_email(conn, mid, error=f"附件预处理失败：{exc}")
                 continue
             _resume_idx = mb.choose_resume_attachment(atts)
@@ -1681,6 +1684,9 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
             # 简历附件处理失败时保持 processed=0：游标不越过这封，
             # 下次同步重新拉取重试；成功才标记已处理（P2 数据修复）。
             _mail_ok = failed == 0
+            if not _mail_ok:
+                db.bump_email_retry(
+                    conn, mid, f"有 {failed} 份简历附件处理失败，等待下次同步重试")
             db.update_email(
                 conn, mid,
                 processed=1 if _mail_ok else 0,
@@ -1689,6 +1695,9 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
                 error=("有简历附件处理失败，等待下次同步重试" if not _mail_ok
                        else None),
             )
+            if _mail_ok:
+                # 手动重试死信或游标回退后重新入库成功 → 清掉死信标记。
+                db.update_email(conn, mid, dead_letter=0, dead_at=None)
         # 入库完成 → 后台异步做分析（不阻断本次返回，失败也不影响上面这些计数）。
         # spawn=False 时（逐封调用的批次）由调用方在整批结束后挂一次分析（v1.29.4）。
         if spawn:
@@ -1849,11 +1858,13 @@ def _cursor_load(raw, account: str) -> str:
     """
     if isinstance(raw, dict):
         return str(raw.get("uid") or "") if str(raw.get("account") or "") == account else ""
-    s = str(raw or "").strip()
-    return s if s.isdigit() else ""
+    # 历史纯数字游标没有账号信息，无法确认是不是当前账号的 UID；跨账号
+    # 沿用会静默跳邮件。老格式一律当作"没有游标"，重扫一遍（按内容去重）。
+    return ""
 
 
-def _cursor_save(db_path: str, folder: str, account: str, uid: str) -> tuple[bool, str]:
+def _cursor_save(db_path: str, folder: str, account: str, uid: str,
+                 uidvalidity: str = "") -> tuple[bool, str]:
     """写收信游标（best-effort）。返回 (是否成功, 错误文本)。
 
     游标只是"上次收到哪"的备忘，**写不进去不该让整条收取报错**：
@@ -1865,7 +1876,10 @@ def _cursor_save(db_path: str, folder: str, account: str, uid: str) -> tuple[boo
     try:
         conn = db.connect(db_path)
         try:
-            db.set_email_cursor(conn, folder, {"account": account, "uid": str(uid)})
+            payload = {"account": account, "uid": str(uid)}
+            if uidvalidity:
+                payload["uidvalidity"] = str(uidvalidity)
+            db.set_email_cursor(conn, folder, payload)
         finally:
             conn.close()
         return True, ""
@@ -1875,12 +1889,19 @@ def _cursor_save(db_path: str, folder: str, account: str, uid: str) -> tuple[boo
 
 
 def _is_transient_imap_error(exc: Exception) -> bool:
-    """连接断开、超时、DNS/代理暂时不可用 → 可以无限重试。
+    """连接断开、超时、代理暂时不可用 → 可以重试。
 
-    认证失败、密码没配置这类是永久错误，重试只会刷日志，必须直接报错。
+    认证失败、密码没配置、域名解析失败、端口拒绝、证书错误这类是永久
+    错误，重试只会刷日志并把收取任务一直挂住，必须直接报错。
     """
     import imaplib
+    import socket
+    import ssl
 
+    # 这些 OSError 子类不是"网络暂时抖动"，重试不会自己好。
+    if isinstance(exc, (socket.gaierror, ConnectionRefusedError,
+                        ssl.SSLCertVerificationError)):
+        return False
     if isinstance(exc, (OSError, EOFError, TimeoutError)):
         return True
     if isinstance(exc, imaplib.IMAP4.abort):
@@ -1891,6 +1912,24 @@ def _is_transient_imap_error(exc: Exception) -> bool:
                    ("unavailable", "timeout", "try again", "temporarily",
                     "connection", "eof", "bye"))
     return False
+
+
+#: 同一封邮件连续失败多少次后转死信。达到上限后游标越过它，后续邮件继续收；
+#: 死信保留在 email_messages（dead_letter=1），可从「邮件记录」里手动重试。
+MAX_EMAIL_RETRIES = 3
+
+
+def _email_retry_count(db_path: str, message_id: str) -> int:
+    if not message_id:
+        return 0
+    try:
+        conn = db.connect(db_path)
+        try:
+            return db.get_email_retry(conn, message_id)
+        finally:
+            conn.close()
+    except Exception:                                    # noqa: BLE001
+        return 0
 
 
 def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
@@ -1916,7 +1955,12 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
     # v1.29.4：游标按账号隔离（换收信账号不再共享同一个 UID 游标）
     account = f"{ic.get('user') or ''}@{ic.get('host') or ''}"
     conn = db.connect(db_path)
-    cursor = _cursor_load(db.email_cursor(conn, folder_name), account)
+    cursor_raw = db.email_cursor(conn, folder_name)
+    cursor = _cursor_load(cursor_raw, account)
+    # UIDVALIDITY 是 UID 的命名空间；邮箱重建/迁移后它会变，旧 UID 游标失效。
+    old_uidvalidity = (str(cursor_raw.get("uidvalidity") or "")
+                       if isinstance(cursor_raw, dict) else "")
+    cursor_uidvalidity = old_uidvalidity
     conn.close()
 
     newest = cursor or ""
@@ -1942,11 +1986,34 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
         # 用户停止、服务关闭、全部收完是仅有的三种结束条件。
         retries = 0
         mails: list[dict] = []
-        new_cursor = cursor
+        uv_reset_done = False
+        fetch_error: dict = {}
         while True:
             try:
                 update_progress(progress_tid, message="正在连接邮箱并下载新邮件…")
-                mails, new_cursor = mb.fetch_imap(cfg, cursor, limit)
+                _meta: dict = {}
+                mails, _downloaded_upto = mb.fetch_imap(
+                    cfg, cursor, limit,
+                    should_stop=lambda: stop_requested(progress_tid),
+                    meta=_meta)
+                _uv = str(_meta.get("uidvalidity") or "")
+                fetch_error = _meta.get("fetch_error") or {}
+                # 旧格式游标没有 uidvalidity，无法判断邮箱是否重建过：
+                # 安全起见做一次全量重扫（已入库的按 message_id 去重）。
+                _legacy_no_uv = bool(cursor) and not old_uidvalidity
+                if (_uv and not uv_reset_done
+                        and not stop_requested(progress_tid)
+                        and ((old_uidvalidity and _uv != old_uidvalidity)
+                             or _legacy_no_uv)):
+                    # 邮箱 UID 命名空间已重置：旧游标不能再用，从第一封重扫。
+                    uv_reset_done = True
+                    cursor = ""
+                    newest = ""
+                    cursor_uidvalidity = _uv
+                    report["uidvalidity_reset"] = True
+                    continue
+                if _uv:
+                    cursor_uidvalidity = _uv
                 break
             except Exception as exc:
                 if stop_requested(progress_tid):
@@ -1975,9 +2042,16 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                     break
                 continue
 
+        # 下载阶段用户就点了停止：不把下载到的最新 UID 当游标。
+        if stop_requested(progress_tid):
+            stopped = True
         if not report.get("error") and not stopped:
             total = len(mails)
-            newest = new_cursor or newest
+            # ⚠️ **不要在这里把 newest 推到下载到的最新 UID**。
+            # `fetch_imap` 会先把新邮件全部下载完再返回；若用户在此期间
+            # 点停止，邮件还没入库，游标却已推到最大 UID —— 下次就从
+            # 最大 UID 之后开始，这批邮件永久漏收。游标只跟"成功入库的
+            # 最后一封"走（下面的 newest = item["uid"]）。
             report["new_mails"] = total
             update_progress(
                 progress_tid, total=total,
@@ -1990,21 +2064,172 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                                     message=f"已停止：完成 {done} / {total} 封后按你的要求停下")
                     break
                 _failed_before = int(report.get("failed") or 0)
-                ingest_mails([item], cfg, jd, tiers, db_path, job_id, use_llm, llm_conf,
-                             report=report, spawn=False)
-                if int(report.get("failed") or 0) > _failed_before:
-                    # 这封有附件失败：不推进游标，下次从上一封成功处重试
+                try:
+                    ingest_mails([item], cfg, jd, tiers, db_path, job_id,
+                                 use_llm, llm_conf, report=report, spawn=False)
+                except Exception as exc:                     # noqa: BLE001
+                    # 单封入库异常不能把整批后续分析和最终游标保存一起炸掉；
+                    # 游标停在这封之前，下次重试（已写入的按 message_id 去重）。
+                    report["failed"] = int(report.get("failed") or 0) + 1
+                    _mid = item.get("message_id") or ""
+                    if _mid:
+                        try:
+                            _c = db.connect(db_path)
+                            try:
+                                db.bump_email_retry(
+                                    _c, _mid,
+                                    f"入库异常：{type(exc).__name__}: {exc}")
+                            finally:
+                                _c.close()
+                        except Exception:                    # noqa: BLE001
+                            pass
+                    _retry = _email_retry_count(db_path, _mid)
+                    _marked = False
+                    if _mid and _retry >= MAX_EMAIL_RETRIES:
+                        try:
+                            _c = db.connect(db_path)
+                            try:
+                                _marked = bool(db.mark_email_dead(
+                                    _c, _mid,
+                                    f"连续 {_retry} 次入库异常，已转入死信"))
+                            finally:
+                                _c.close()
+                        except Exception:                    # noqa: BLE001
+                            _marked = False
+                    if _marked:
+                        report["dead_lettered"] = int(
+                            report.get("dead_lettered") or 0) + 1
+                        report["details"].append({
+                            "file": item.get("subject") or f"UID {item.get('uid')}",
+                            "status": "dead_letter",
+                            "uid": item.get("uid"),
+                            "message_id": _mid,
+                            "notes": [f"连续 {_retry} 次入库异常，已跳过并保留为死信；"
+                                      "可在邮件记录里手动重试"],
+                        })
+                        newest = item.get("uid") or newest
+                        done += 1
+                        update_progress(
+                            progress_tid, done=done,
+                            message=f"第 {done} 封连续异常，已转入死信并继续")
+                        continue
+                    report["error"] = (f"第 {done + 1} 封入库异常："
+                                       f"{type(exc).__name__}: {exc}")
                     report["retry_pending"] = True
+                    report["blocked_uid"] = item.get("uid") or ""
+                    report["blocked_message_id"] = _mid
+                    report["retry_count"] = _retry
+                    break
+                if int(report.get("failed") or 0) > _failed_before:
+                    # 这封有附件失败：先看是不是同一封反复失败。连续失败达到
+                    # 上限就转死信、越过它继续收后面的邮件；否则停在它之前重试。
+                    _mid = item.get("message_id") or ""
+                    _retry = _email_retry_count(db_path, _mid)
+                    _marked = False
+                    if _mid and _retry >= MAX_EMAIL_RETRIES:
+                        try:
+                            _c = db.connect(db_path)
+                            try:
+                                _marked = bool(db.mark_email_dead(
+                                    _c, _mid,
+                                    f"连续 {_retry} 次入库失败，已转入死信"))
+                            finally:
+                                _c.close()
+                        except Exception:                    # noqa: BLE001
+                            _marked = False
+                    if _marked:
+                        report["dead_lettered"] = int(
+                            report.get("dead_lettered") or 0) + 1
+                        report["details"].append({
+                            "file": item.get("subject") or f"UID {item.get('uid')}",
+                            "status": "dead_letter",
+                            "uid": item.get("uid"),
+                            "message_id": _mid,
+                            "notes": [f"连续 {_retry} 次失败，已跳过并保留为死信；"
+                                      "可在邮件记录里手动重试"],
+                        })
+                        newest = item.get("uid") or newest
+                        done += 1
+                        update_progress(
+                            progress_tid, done=done,
+                            message=f"第 {done} 封连续失败，已转入死信并继续")
+                        continue
+                    report["retry_pending"] = True
+                    report["blocked_uid"] = item.get("uid") or ""
+                    report["blocked_message_id"] = _mid
+                    report["retry_count"] = _retry
                     update_progress(
                         progress_tid,
-                        message=f"第 {done + 1} 封有附件处理失败，已停在上一封，下次重试")
+                        message=(f"第 {done + 1} 封处理失败，已停在上一封"
+                                 f"（第 {_retry} 次；连续 {MAX_EMAIL_RETRIES} 次后自动跳过）"))
                     break
                 newest = item.get("uid") or newest
                 done += 1
                 update_progress(progress_tid, done=done)
                 # 长批次每 25 封落一次游标；被强杀后下次从断点继续。
                 if done % 25 == 0 and newest:
-                    _cursor_save(db_path, folder_name, account, newest)
+                    _cursor_save(db_path, folder_name, account, newest,
+                                 cursor_uidvalidity)
+        # 单封 FETCH/解析失败：已下载并在它之前的邮件已经入库，游标停在
+        # 最后一封成功处；这一封及之后的邮件下次重试，不能静默越过。
+        if fetch_error and not stopped and not report.get("error"):
+            _eu = str(fetch_error.get("uid") or "?")
+            _er = str(fetch_error.get("reason") or "未知原因")
+            _fmid = (f"imap:{folder_name}:{cursor_uidvalidity}:{_eu}"
+                     if cursor_uidvalidity
+                     else f"imap:{folder_name}:{_eu}")
+            _fretry = 0
+            if _eu.isdigit():
+                try:
+                    _c = db.connect(db_path)
+                    try:
+                        if not _c.execute(
+                                "SELECT 1 FROM email_messages WHERE message_id=?",
+                                (_fmid,)).fetchone():
+                            db.record_email(_c, {
+                                "message_id": _fmid, "uid": _eu,
+                                "mailbox": folder_name,
+                                "from_addr": "", "subject": "（无法下载/解析的邮件）",
+                                "received_at": db.now(), "has_attachment": False,
+                                "attachment_count": 0, "error": _er,
+                            })
+                        _fretry = db.bump_email_retry(_c, _fmid, _er)
+                    finally:
+                        _c.close()
+                except Exception:                            # noqa: BLE001
+                    _fretry = 0
+            report["blocked_uid"] = _eu
+            report["blocked_message_id"] = _fmid
+            report["retry_count"] = _fretry
+            _marked = False
+            if _fretry >= MAX_EMAIL_RETRIES and _eu.isdigit():
+                try:
+                    _c = db.connect(db_path)
+                    try:
+                        _marked = bool(db.mark_email_dead(
+                            _c, _fmid,
+                            f"连续 {_fretry} 次下载/解析失败，已转入死信"))
+                    finally:
+                        _c.close()
+                except Exception:                            # noqa: BLE001
+                    _marked = False
+            if _marked:
+                # 越过这封继续拉后面的；下次收取从它的下一封开始。
+                # 注意：不能同时改 cursor，否则函数末尾的
+                # `newest != cursor` 会认为“没有变化”而不落盘。
+                newest = _eu
+                report["dead_lettered"] = int(report.get("dead_lettered") or 0) + 1
+                report["details"].append({
+                    "file": f"UID {_eu}", "status": "dead_letter",
+                    "uid": _eu, "message_id": _fmid,
+                    "notes": [f"连续 {_fretry} 次下载/解析失败，已跳过并保留为死信；"
+                              "可在邮件记录里手动重试"],
+                })
+                report["retry_pending"] = True
+            else:
+                report["error"] = (f"邮件 UID {_eu} 下载/解析失败：{_er}；"
+                                   "已停在它之前，下次会重试")
+                report["retry_pending"] = True
         # 整批结束后挂一次分析（中途停止时分析"已收到的这批"）
         spawn_auto_analysis(db_path, report)
     else:
@@ -2017,7 +2242,13 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
             update_progress(progress_tid, total=len(mails),
                             message=f"已发现 {len(mails)} 封邮件，开始收取…")
         report = ingest_mails(mails, cfg, jd, tiers, db_path, job_id, use_llm, llm_conf)
-        newest = new_cursor or newest
+        # 旧路径（CLI / 助手收信工具，没有逐封进度）也要遵守同一条规则：
+        # 这一批里只要有附件失败，游标就停在原处，下次整批重扫；已入库的
+        # 邮件按 message_id 去重，不会重复建档。否则失败的那封会被游标越过。
+        if not report.get("failed"):
+            newest = new_cursor or newest
+        else:
+            report["retry_pending"] = True
         if progress_tid:
             update_progress(progress_tid, done=len(mails))
 
@@ -2027,7 +2258,8 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
     # ⚠️ 中途停止/报错也走这里：游标停在"最后成功处理的那封"，下次继续。
     # 写失败只降级为警告（v1.24.11 口径不变），报告里带 cursor_saved=False。
     if cfg.get("mode") == "imap" and newest and newest != (cursor or ""):
-        _ok, _err = _cursor_save(db_path, folder_name, account, newest)
+        _ok, _err = _cursor_save(db_path, folder_name, account, newest,
+                                 cursor_uidvalidity)
         if not _ok:
             report["cursor_saved"] = False
             report["cursor_error"] = _err
