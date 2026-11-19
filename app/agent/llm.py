@@ -417,7 +417,8 @@ _CTX_KEYS = (
 _MODEL_META_CACHE: dict[tuple[str, str], tuple[dict | None, float]] = {}
 #: 常见模型的厂商默认上下文窗口（tokens）。只在 `config/model.json` 与
 #: 端点 `/models` 都拿不到时使用；顺序从上到下，先匹配到的生效。
-#: 宁可保守也不要一律按 1M——把 32k 模型按 1M 塞会直接报超长。
+#: 参数量**不能**决定窗口（同为 9B：GLM-4-9B 是 128k，Gemma-2-9B 是 8k），
+#: 所以这里按模型家族/版本写，不按 7B/9B/30B 这类规格猜。
 _MODEL_CTX_DEFAULTS: tuple[tuple[str, int], ...] = (
     (r"claude", 200_000),
     (r"gpt-4\.1", 1_000_000),
@@ -430,18 +431,31 @@ _MODEL_CTX_DEFAULTS: tuple[tuple[str, int], ...] = (
     # 更早的 MiMo-7B 是 32K，不能一起按 1M 处理。
     (r"mimo-v2\.(?:5|6)|mimo-v2-pro", 1_048_576),
     (r"mimo", 32_768),
+    # Qwen3 / Qwen2.5：原生 32K，YaRN 可扩到 128K；Ollama 分发的 GGUF
+    # 常按 32K 服务。实际部署若开了 YaRN，用 context_window 明确覆盖。
     (r"qwen|tongyi|qwq|通义", 32_768),
-    (r"glm-4|chatglm", 128_000),
-    (r"llama-?[34]", 128_000),
+    (r"glm-4|chatglm", 131_072),
+    # Llama 3.1/3.2/3.3 与 Llama 4 是 128K；Llama 3.0 只有 8K。
+    (r"llama-?3\.[123]|llama-?4", 131_072),
+    (r"llama-?3(?:$|[-_:])", 8_192),
     (r"llama", 8_192),
-    (r"mistral|mixtral|magistral", 32_768),
+    # Mistral Small / Magistral 128K；Mixtral 与 Mistral 7B 是 32K。
+    (r"mistral-(?:small|large)|magistral", 131_072),
+    (r"mistral|mixtral", 32_768),
     (r"yi-", 200_000),
     (r"moonshot|kimi", 128_000),
     (r"ernie|文心|hunyuan|混元", 128_000),
     (r"internlm", 32_768),
     (r"baichuan", 32_768),
-    (r"phi-?[34]", 128_000),
+    # Phi-4-mini 128K；Phi-4 14B 是 16K；Phi-3 是 128K。
+    (r"phi-?4-mini", 131_072),
+    (r"phi-?4", 16_384),
+    (r"phi-?3", 131_072),
+    # Gemma 3（1B/4B/12B/27B）128K；Gemma 2 及更早是 8K。
+    (r"gemma-?3", 131_072),
     (r"gemma", 8_192),
+    (r"minicpm", 32_768),
+    (r"command-r", 131_072),
 )
 _PARAM_KEYS = (
     "parameter_count", "parameters", "num_parameters", "param_count",
@@ -468,7 +482,10 @@ def _parse_ctx(value) -> int | None:
 def _extract_ctx(obj) -> int | None:
     if isinstance(obj, dict):
         for k, v in obj.items():
-            if str(k).lower() in _CTX_KEYS:
+            # 兼容 Ollama / GGUF 的命名空间键（如 `qwen2.context_length`）：
+            # 只看最后一段，否则本地模型的真实窗口永远读不到。
+            kl = str(k).lower()
+            if kl in _CTX_KEYS or kl.rsplit(".", 1)[-1] in _CTX_KEYS:
                 n = _parse_ctx(v)
                 if n:
                     return n
@@ -577,6 +594,23 @@ def _probe_model_meta(cfg: dict) -> dict | None:
                     hit = body
             except Exception:                                # noqa: BLE001
                 hit = None
+        if hit is None and ("11434" in base or "ollama" in base.lower()
+                            or "127.0.0.1" in base or "localhost" in base):
+            # Ollama 的 OpenAI 兼容 `/v1/models` 不带窗口信息，但 `/api/show`
+            # 会返回 GGUF 元数据（`qwen2.context_length` 等）。本地 7B/9B/30B
+            # 到底按 32k 还是 128k，以实际加载的模型为准，不靠参数量猜。
+            try:
+                root = base[:-3] if base.endswith("/v1") else base
+                payload = json.dumps({"name": model, "model": model}).encode("utf-8")
+                req = urllib.request.Request(
+                    root + "/api/show", data=payload, method="POST",
+                    headers={**headers, "Content-Type": "application/json"})
+                with net.urlopen(req, timeout=4) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                if isinstance(body, dict):
+                    hit = body
+            except Exception:                                # noqa: BLE001
+                hit = None
     _MODEL_META_CACHE[key] = (hit, now)
     return hit
 
@@ -616,7 +650,7 @@ def model_context_window(cfg: dict | None = None) -> tuple[int, str]:
 
     顺序：`config/model.json` 的 `context_window`（人工确认值）→ 端点
     `/models` 元数据里的 context_length 等字段 → 按模型名推断厂商默认
-    → 保守默认 32k。返回 `(tokens, source)`，source 为
+    → 128k 保守默认。返回 `(tokens, source)`，source 为
     config/provider/model/fallback。
     """
     cfg = cfg or load_cfg()

@@ -2732,7 +2732,7 @@ def api_candidate_rename(cid: int, req: dict,
 def api_candidate_edu_history(cid: int, req: dict,
                               x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                               x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    """改**某一段**教育经历的学校/专业（业务方 2026-10-21）。
+    """改**某一段**教育经历的学历/学校/专业/起止时间（业务方 2026-10-21 / 2026-11-19）。
 
     为什么单独开一个口子：档案上方会列出本科/硕士/博士多段，但原来只能改
     「第一学历」和「最高学历」两个字段 —— 中间那段（比如硕士学校解析错了）
@@ -2740,7 +2740,10 @@ def api_candidate_edu_history(cid: int, req: dict,
 
     约定：
       · `index` 是 `edu_history` 里的下标（前端渲染顺序，与库内顺序一致）；
-      · 只改 `school` / `major`，`degree` / 起止时间不动（那是抽取的核心结论）；
+      · 传了哪些字段就改哪些：`degree` / `school` / `major` / `start` / `end`；
+      · 档案里「最高学历 / 第一学历」补出来的展示条不在 `edu_history` 里：
+        传 `new: true` + `degree` / `school` / `major` 把它落成真实的一段，
+        这样右侧时间段也能补、能改；
       · **若这一段就是最高学历**（degree 与 `edu_level` 相同），同步更新主字段
         `school` / `major` —— 档位、院校层次、排名都读主字段，不改会导致
         "上面显示改了、档位还按旧学校判"。
@@ -2748,6 +2751,14 @@ def api_candidate_edu_history(cid: int, req: dict,
     s = _session(x_tp_token, x_tp_role)
     require(s, "edit_candidate")
     req = req or {}
+
+    def _date(v) -> str:
+        """起止时间只做轻量清洗：统一斜杠、把"现在/今"写成"至今"。"""
+        t = str(v or "").strip().replace("/", ".").replace("\\", ".")
+        t = t[:20]
+        return "至今" if t in ("现在", "今", "目前") else t
+
+    creating = bool(req.get("new"))
     try:
         k = int(req.get("index", -1))
     except (TypeError, ValueError):
@@ -2763,14 +2774,42 @@ def api_candidate_edu_history(cid: int, req: dict,
             hist = json.loads(row["edu_history"]) if row["edu_history"] else []
         except (ValueError, TypeError):
             hist = []
-        if not isinstance(hist, list) or not hist:
+        if not isinstance(hist, list):
+            hist = []
+        if creating:
+            deg_v = str(req.get("degree") or "").strip()
+            if deg_v and deg_v not in db.EDU_RANK:
+                raise HTTPException(status_code=422,
+                                    detail="学历只能填：大专 / 本科 / 硕士 / 博士")
+            sch_v = str(req.get("school") or "").strip()[:80]
+            if not sch_v:
+                raise HTTPException(status_code=422,
+                                    detail="补起止时间需要学校名")
+            seg = {"degree": deg_v or None,
+                   "school": sch_v,
+                   "major": str(req.get("major") or "").strip()[:60] or None,
+                   "start": _date(req.get("start")) or None,
+                   "end": _date(req.get("end")) or None}
+            hist.append(seg)
+            conn.execute("UPDATE candidates SET edu_history = ? WHERE id = ?",
+                         (json.dumps(hist, ensure_ascii=False), cid))
+            db.add_audit(conn, "candidate", str(cid), "add_edu_segment", "",
+                         f"新增教育经历：学历={deg_v}，学校={sch_v}，"
+                         f"专业={seg['major'] or ''}，"
+                         f"时间={seg['start'] or ''}–{seg['end'] or ''}",
+                         s["username"], s["role"])
+            conn.commit()
+            return {"ok": True, "id": cid, "changed": ["new"],
+                    "note": "已补一段教育经历，并保存起止时间。"}
+        if not hist:
             raise HTTPException(status_code=422,
                                 detail="这个人没有分段的教育经历（可改「第一学历 / 最高学历」）")
         if k < 0 or k >= len(hist):
             raise HTTPException(status_code=422, detail="教育经历段编号超出范围")
         seg = dict(hist[k]) if isinstance(hist[k], dict) else {}
         old = {"degree": seg.get("degree") or "",
-               "school": seg.get("school") or "", "major": seg.get("major") or ""}
+               "school": seg.get("school") or "", "major": seg.get("major") or "",
+               "start": str(seg.get("start") or ""), "end": str(seg.get("end") or "")}
         new = dict(old)
         if "degree" in req:
             deg_v = str(req.get("degree") or "").strip()
@@ -2782,12 +2821,18 @@ def api_candidate_edu_history(cid: int, req: dict,
             new["school"] = str(req.get("school") or "").strip()[:80]
         if "major" in req:
             new["major"] = str(req.get("major") or "").strip()[:60]
+        if "start" in req:
+            new["start"] = _date(req.get("start"))
+        if "end" in req:
+            new["end"] = _date(req.get("end"))
         if old == new:
             return {"ok": True, "id": cid, "changed": [],
-                    "note": "这一段的学历/学校/专业没有变化。"}
+                    "note": "这一段的学历/学校/专业/起止时间没有变化。"}
         seg["degree"] = new["degree"] or seg.get("degree")
         seg["school"] = new["school"] or None
         seg["major"] = new["major"] or None
+        seg["start"] = new["start"] or None
+        seg["end"] = new["end"] or None
         hist[k] = seg
         conn.execute("UPDATE candidates SET edu_history = ? WHERE id = ?",
                      (json.dumps(hist, ensure_ascii=False), cid))
@@ -2815,13 +2860,15 @@ def api_candidate_edu_history(cid: int, req: dict,
                 args.append(cid)
                 conn.execute(f"UPDATE candidates SET {', '.join(sets)} WHERE id = ?", args)
         before = (f"第{k + 1}段（{old['degree'] or '学历'}）学校={old['school']}，"
-                  f"专业={old['major']}")
+                  f"专业={old['major']}，时间={old['start']}–{old['end']}")
         after = (f"第{k + 1}段（{new['degree'] or '学历'}）学校={new['school']}，"
-                 f"专业={new['major']}")
+                 f"专业={new['major']}，时间={new['start']}–{new['end']}")
         db.add_audit(conn, "candidate", str(cid), "edit_edu_segment", before, after,
                      s["username"], s["role"])
         conn.commit()
-        return {"ok": True, "id": cid, "changed": ["school", "major"],
+        changed = [f for f in ("degree", "school", "major", "start", "end")
+                   if old[f] != new[f]]
+        return {"ok": True, "id": cid, "changed": changed,
                 "synced_top": sync,
                 "note": "已更正第 " + str(k + 1) + " 段教育经历"
                         + ("（同时更新了最高学历院校）" if sync else "") + "。"}

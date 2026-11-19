@@ -4078,10 +4078,50 @@ def record_submission(conn: sqlite3.Connection, rec: dict) -> int:
 
 def list_submissions(conn: sqlite3.Connection, candidate_id: int,
                      limit: int = 200) -> list[dict]:
-    return [_decode(dict(r)) for r in conn.execute(
+    """投递时间线：submission_events 为主，历史简历原件补齐。
+
+    投递事件表是后加的；更早入库的简历只有 `documents`，没有事件行。
+    只读事件会出现「投递来源有 2 份原件、投递记录只有 1 条」——看起来像丢记录。
+    这里把**没有被任何事件引用过**的原件补进时间线（`_from_document=True`），
+    不重复插入、不改库；有事件的原件仍以事件为准。
+    """
+    rows = [_decode(dict(r)) for r in conn.execute(
         """SELECT * FROM submission_events WHERE candidate_id = ?
            ORDER BY COALESCE(submitted_at,'') DESC, id DESC LIMIT ?""",
         (candidate_id, int(limit))).fetchall()]
+    seen_doc = {r.get("document_id") for r in rows if r.get("document_id") is not None}
+    seen_hash = {r.get("file_hash") for r in rows if r.get("file_hash")}
+    try:
+        docs = conn.execute(
+            """SELECT id, application_id, file_hash, file_name,
+                      COALESCE(received_at, created_at) AS received_at,
+                      source_message_id
+               FROM documents WHERE candidate_id = ?
+                 AND COALESCE(kind, 'resume') != 'other'
+               ORDER BY COALESCE(received_at,'') DESC, id DESC LIMIT ?""",
+            (candidate_id, int(limit))).fetchall()
+    except sqlite3.Error:
+        docs = []
+    for d in docs:
+        if d["id"] in seen_doc:
+            continue
+        if d["file_hash"] and d["file_hash"] in seen_hash:
+            continue
+        rows.append({
+            "candidate_id": candidate_id,
+            "application_id": d["application_id"],
+            "document_id": d["id"],
+            "file_hash": d["file_hash"],
+            "file_name": d["file_name"],
+            "channel": "",
+            "submitted_at": d["received_at"],
+            "source_message_id": d["source_message_id"],
+            "duplicate": 0,
+            "note": "历史简历原件（当时未记录投递事件）",
+            "_from_document": True,
+        })
+    rows.sort(key=lambda r: str(r.get("submitted_at") or ""), reverse=True)
+    return rows[:int(limit)]
 
 
 # ============================================================

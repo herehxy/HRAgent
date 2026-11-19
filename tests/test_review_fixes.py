@@ -421,6 +421,87 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(db.task_mark_interrupted(_DB, "重启"), 0,
                          "刚更新过的任务不能被另一个实例误伤")
 
+    # ---------------------------------------------------------------- 投递时间线
+    def test_submission_timeline_includes_historical_documents(self):
+        """投递事件功能上线前入库的简历没有事件行，时间线要用原件补齐。"""
+        conn = db.connect(_DB)
+        try:
+            cid, _new, _hint = ingest.ensure_person(
+                conn, {"name": "时间线测试甲", "contact": {}}, "测试", "时间线甲 简历")
+            conn.execute(
+                "INSERT INTO documents (file_hash, candidate_id, file_name, "
+                "received_at, kind) VALUES (?,?,?,?, 'resume')",
+                ("timeline-old-hash", cid, "旧版简历.pdf", "2026-10-28 13:03:00"))
+            conn.execute(
+                "INSERT INTO documents (file_hash, candidate_id, file_name, "
+                "received_at, kind) VALUES (?,?,?,?, 'resume')",
+                ("timeline-new-hash", cid, "新版简历.pdf", "2026-11-17 15:49:00"))
+            conn.execute(
+                "INSERT INTO documents (file_hash, candidate_id, file_name, "
+                "received_at, kind) VALUES (?,?,?,?, 'other')",
+                ("timeline-other-hash", cid, "成绩单.pdf", "2026-11-17 15:49:30"))
+            conn.commit()
+            new_doc = conn.execute(
+                "SELECT id FROM documents WHERE file_hash='timeline-new-hash'").fetchone()
+            db.record_submission(conn, {
+                "candidate_id": cid, "document_id": new_doc["id"],
+                "file_hash": "timeline-new-hash", "file_name": "新版简历.pdf",
+                "channel": "邮箱", "submitted_at": "2026-11-17 15:49:00",
+            })
+            subs = db.list_submissions(conn, cid)
+            self.assertEqual(len(subs), 2, "两份原件都应出现在投递时间线")
+            self.assertEqual(subs[0]["file_name"], "新版简历.pdf")
+            old = [x for x in subs if x.get("_from_document")]
+            self.assertEqual(len(old), 1)
+            self.assertEqual(old[0]["file_name"], "旧版简历.pdf")
+        finally:
+            conn.close()
+
+    # ---------------------------------------------------------------- 教育经历时间
+    def test_edu_segment_period_edit_and_append(self):
+        conn = db.connect(_DB)
+        try:
+            cid, _new, _hint = ingest.ensure_person(
+                conn, {"name": "教育时间测试乙", "contact": {}}, "测试", "乙 简历")
+            conn.execute(
+                "UPDATE candidates SET edu_history=?, edu_level='硕士', "
+                "school='测试大学', major='计算机' WHERE id=?",
+                (json.dumps([{"degree": "本科", "school": "测试学院",
+                              "major": "软件", "start": "2016.09",
+                              "end": "2020.06"}], ensure_ascii=False), cid))
+            conn.commit()
+        finally:
+            conn.close()
+        headers = {"Content-Type": "application/json"}
+        st, _ = _asgi(server.app, "POST", f"/api/candidates/{cid}/edu-history",
+                      headers, json.dumps({"index": 0, "start": "2016.09",
+                                           "end": "2020.07"}).encode())
+        self.assertEqual(st, 200, "应支持直接改某一段的起止时间")
+        conn = db.connect(_DB)
+        try:
+            hist = json.loads(conn.execute(
+                "SELECT edu_history FROM candidates WHERE id=?", (cid,)
+            ).fetchone()["edu_history"])
+            self.assertEqual(hist[0]["end"], "2020.07")
+        finally:
+            conn.close()
+        st, _ = _asgi(server.app, "POST", f"/api/candidates/{cid}/edu-history",
+                      headers, json.dumps({"new": True, "degree": "硕士",
+                                           "school": "测试大学", "major": "计算机",
+                                           "start": "2020.09",
+                                           "end": "2023.06"}).encode())
+        self.assertEqual(st, 200, "最高学历补出来的条目也要能补时间段")
+        conn = db.connect(_DB)
+        try:
+            hist = json.loads(conn.execute(
+                "SELECT edu_history FROM candidates WHERE id=?", (cid,)
+            ).fetchone()["edu_history"])
+            self.assertEqual(len(hist), 2)
+            self.assertEqual(hist[1]["start"], "2020.09")
+            self.assertEqual(hist[1]["end"], "2023.06")
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

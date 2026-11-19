@@ -1618,10 +1618,6 @@ function fullDetail(d){
     return ai - bi;
   });
   var eduRows = segs.map(function(h){
-    var period = ('');
-    if(h.start || h.end){
-      period = esc(h.start || '') + (h.end ? (' – ' + esc(h.end)) : '');
-    }
     /* 排名标签：国内院校看**软科**，境外院校看 **QS**（两把尺子互不覆盖）。
        境外校在软科主榜里查不到，只写软科会让所有海归显示"无排名"；
        国内校则没有 QS 数据。所以按"有哪个显示哪个"，两个都有就都显示
@@ -1651,12 +1647,22 @@ function fullDetail(d){
         'onclick="editEduSeg(' + arg + ',\'' + field + '\')">' +
         esc(txt || ph) + '</span>';
     };
+    /* 时间段放右侧，像简历的版式；没有时给一个可点的「补起止时间」。
+       以前时间段在左侧、且只能看不能改，HR 想纠正起止时间只能整份重导。 */
+    var periodTxt = (h.start || h.end)
+      ? (esc(h.start || '') + (h.end ? (' – ' + esc(h.end)) : ''))
+      : '补时间';
     return '<div class="edu-line">' +
-      (period ? '<span class="edu-period">' + period + '</span>' : '') +
-      edit('edu-degree', 'degree', h.degree, '点击修改学历', '补学历') +
-      edit('edu-school', 'school', h.school, '点击修改学校', '补学校') +
-      edit('edu-major', 'major', h.major, '点击修改专业', '补专业') +
-      (tags ? '<span class="edu-tags">' + tags + '</span>' : '') +
+      '<div class="edu-main">' +
+        edit('edu-degree', 'degree', h.degree, '点击修改学历', '补学历') +
+        edit('edu-school', 'school', h.school, '点击修改学校', '补学校') +
+        edit('edu-major', 'major', h.major, '点击修改专业', '补专业') +
+        (tags ? '<span class="edu-tags">' + tags + '</span>' : '') +
+      '</div>' +
+      '<span class="edu-period edu-click' + ((h.start || h.end) ? '' : ' missing') + '" ' +
+        'title="点击修改起止时间" onclick="editEduPeriod(' + arg + ')">' +
+        periodTxt +
+      '</span>' +
       '</div>';
   }).join('');
   var firstUnder = segs.filter(function(h){
@@ -1668,7 +1674,7 @@ function fullDetail(d){
   }).join('');
   var eduBlock =
     '<div class="edu-band">' +
-      '<div class="edu-band-head"><h4>教育经历</h4></div>' +
+      '<div class="edu-band-head"><h3>教育经历</h3></div>' +
       '<div class="edu-list">' + (eduRows || '<div class="hint">未识别到教育经历</div>') + '</div>' +
       /* 这一排常驻修改框已移除（业务方 2026-10-21）：
          上面每一段的学历/学校/专业都能直接点开来改，
@@ -1839,14 +1845,17 @@ function fullDetail(d){
       (stage ? '<span class="srcmeta">' + esc(stage) + '</span>' : '') +
       (s.duplicate
         ? '<span class="srcmeta" style="color:var(--accent)">重复投递 · 简历相同</span>'
-        : (s.channel ? '<span class="srcmeta">' + esc(s.channel) + '</span>' : '')) +
+        : s._from_document
+          ? '<span class="srcmeta">历史简历</span>'
+          : (s.channel ? '<span class="srcmeta">' + esc(s.channel) + '</span>' : '')) +
       (s.file_name
         ? '<span class="fn" title="' + esc(s.file_name) + '">' + esc(s.file_name) + '</span>'
         : '') +
     '</span>';
   }).join('');
-  var subRow = subs.length
-    ? '<div class="srcbar" style="margin-top:4px"><span class="srck">投递记录</span>' +
+  var subRow = _subList.length
+    ? '<div class="srcbar" style="margin-top:4px"><span class="srck">投递记录' +
+      '<span class="subcount">投递 ' + _subList.length + ' 次</span></span>' +
       '<span class="srcfiles many">' + subRows + '</span></div>'
     : '';
   var curDocId = (((d.applications || [])[0] || {}).resume_doc_id
@@ -2266,6 +2275,86 @@ async function editEduSeg(which, field){
   load(); if(CUR) pick(CUR);
 }
 
+/* 修改某一段教育经历的起止时间（业务方 2026-11-19）。
+   右侧时间段点开是双输入框；「最高学历 / 第一学历」补出来的展示条不在
+   edu_history 里，保存时把它落成真实的一段，避免"看得见、改不了"。 */
+function _normEduDate(v){
+  v = String(v || '').trim().replace(/[／/]/g, '.').replace(/[－—–~～]/g, '-');
+  if(v === '现在' || v === '今' || v === '目前') v = '至今';
+  return v.slice(0, 20);
+}
+function askEduPeriod(start, end){
+  return new Promise(function(resolve){
+    document.getElementById('dlgTitle').textContent = '修改起止时间';
+    var editorBody = document.getElementById('edDlgBody');
+    if(editorBody){ editorBody.style.display = 'none'; editorBody.innerHTML = ''; }
+    document.getElementById('dlgBody').style.display = '';
+    document.getElementById('dlgBody').innerHTML =
+      '<div class="edu-period-edit">' +
+        '<input id="dlgEduStart" placeholder="开始，如 2020.09" value="' +
+          esc(start || '') + '">' +
+        '<span class="dash">–</span>' +
+        '<input id="dlgEduEnd" placeholder="结束，如 2024.06 / 至今" value="' +
+          esc(end || '') + '">' +
+      '</div>' +
+      '<span class="hint" style="display:block;margin-top:8px">' +
+        '在读可以填「至今」；两个都留空 = 清除时间段。回车确定，Esc 取消</span>';
+    document.getElementById('dlgNo').textContent = '取消';
+    var yes = document.getElementById('dlgYes');
+    yes.textContent = '确定'; yes.className = 'btn primary';
+    function done(v){ closeDlg(v); }
+    function submit(){
+      done({start: _normEduDate(document.getElementById('dlgEduStart').value),
+            end: _normEduDate(document.getElementById('dlgEduEnd').value)});
+    }
+    yes.onclick = submit;
+    document.getElementById('dlgNo').onclick = function(){ done(null); };
+    var a = document.getElementById('dlgEduStart');
+    var b = document.getElementById('dlgEduEnd');
+    [a, b].forEach(function(inp){
+      inp.addEventListener('keydown', function(ev){
+        if(ev.key === 'Enter') submit();
+        if(ev.key === 'Escape') done(null);
+      });
+    });
+    document.getElementById('mask').onclick = function(ev){
+      if(ev.target === ev.currentTarget) done(null);
+    };
+    window.__dlgResolve = resolve;
+    document.getElementById('mask').classList.add('on');
+    setTimeout(function(){ a.focus(); a.select(); }, 30);
+  });
+}
+async function editEduPeriod(which){
+  var d = CUR_DETAIL || {};
+  var isTop = (which === 'top'), isBach = (which === 'bachelor');
+  var seg = (isTop || isBach) ? null : (d.edu_history || [])[which];
+  if(!isTop && !isBach && !seg){ toast('这一段不在可编辑范围内', 'warn'); return; }
+  var curStart = seg ? (seg.start || '') : '';
+  var curEnd = seg ? (seg.end || '') : '';
+  var v = await askEduPeriod(curStart, curEnd);
+  if(!v) return;
+  if(v.start === curStart && v.end === curEnd) return;
+  var r;
+  if(isTop || isBach){
+    var school = isTop ? (d.school || '') : (d.first_degree_school || '');
+    if(!school){ toast('这条没有学校名，无法保存起止时间', 'warn'); return; }
+    r = await api('/api/candidates/' + d.id + '/edu-history', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({new: true,
+        degree: isTop ? (d.edu_level || '') : '本科',
+        school: school,
+        major: isTop ? (d.major || '') : '',
+        start: v.start, end: v.end})});
+  }else{
+    r = await api('/api/candidates/' + d.id + '/edu-history', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({index: which, start: v.start, end: v.end})});
+  }
+  if(r.__err){ toast(r.__err, 'danger'); return; }
+  toast(r.note || '已更新起止时间', 'ok');
+  load(); if(CUR) pick(CUR);
+}
 /* 「疑似重复」已确认：按候选人 id 记在本地，之后不再提示这一条。
    只存在浏览器里（不动库、不写审计）—— 它是提醒不是数据，HR 自己心里有数即可；
    换台机器会再提示一次，这个代价可以接受（比误合并两个人便宜得多）。 */
@@ -7135,7 +7224,7 @@ async function initSys(target){
       cfgEdit('mcBaseUrl', '接口地址', m.base_url, 'https://…/compatible-mode/v1', 'text') +
       cfgEdit('mcModel', '模型名', m.model, '', 'text') +
       cfgEdit('mcCtx', '上下文窗口', m.context_window || '',
-              '留空 = 自动探测（可写 32000 / 32k / 1M）', 'text') +
+              '留空 = 自动探测（可写 32000 / 128k / 1M）', 'text') +
       cfgEdit('mcKey', 'API Key', m.key_set ? ('已配置（' + m.key_masked + '）') : '未配置',
               m.key_set ? '留空 = 不修改' : '', 'password', true) +
     '</div>' +
@@ -9236,8 +9325,8 @@ function renderContext(c){
   var box = document.getElementById('chatContext');
   if(!box) return;
   var _st = document.getElementById('ctxState');
-  if(_st) _st.title = '窗口优先取系统配置里的人工值；没有则读模型端点 /models 的 context_length；再按模型官方默认；都取不到按 32k 保守默认。可在「系统配置 → 模型与密钥 → 上下文窗口」修改。token 为估算值。';
-  box.title = '窗口优先取系统配置里的人工值；没有则读模型端点 /models 的 context_length；再按模型官方默认；都取不到按 32k 保守默认。可在「系统配置 → 模型与密钥 → 上下文窗口」修改。参数量取不到时显示 —，可在 config/model.json 的 parameter_count 指定。';
+  if(_st) _st.title = '窗口优先取系统配置里的人工值；没有则读模型端点 /models 的 context_length；再按模型官方默认；都取不到按 128k 保守默认。可在「系统配置 → 模型与密钥 → 上下文窗口」修改。token 为估算值。';
+  box.title = '窗口优先取系统配置里的人工值；没有则读模型端点 /models 的 context_length；再按模型官方默认；都取不到按 128k 保守默认。可在「系统配置 → 模型与密钥 → 上下文窗口」修改。参数量取不到时显示 —，可在 config/model.json 的 parameter_count 指定。';
   if(!c || !c.window){
     box.innerHTML = '<div class="hint">提问后显示</div>';
     return;
@@ -9276,7 +9365,7 @@ function renderContext(c){
   var _ws = String(c.window_source || '');
   if(_ws === 'fallback'){
     rows += '<div class="ctxrow"><span class="ctxname">窗口来源</span>' +
-      '<span class="ctxnum">未探测到，按 32k 保守估算 · 可在系统配置修改</span></div>';
+      '<span class="ctxnum">未探测到，按 128k 保守估算 · 可在系统配置修改</span></div>';
   }else if(_ws === 'model'){
     rows += '<div class="ctxrow"><span class="ctxname">窗口来源</span>' +
       '<span class="ctxnum">模型官方默认 · 可在系统配置修改</span></div>';

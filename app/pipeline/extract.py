@@ -659,19 +659,37 @@ def _edu_history_heuristic(text: str) -> list[dict]:
     return out
 
 
+def _norm_edu_date(v) -> str:
+    """模型给的起止时间 → `YYYY.MM` / `YYYY` / `至今`；认不出返回空串。"""
+    s = str(v or "").strip()
+    if not s:
+        return ""
+    if s in ("现在", "目前", "今", "迄今"):
+        return "至今"
+    m = re.search(r"((?:19|20)\d{2})(?:[.\-/年]\s*(\d{1,2}))?", s)
+    if not m:
+        return ""
+    year, month = m.group(1), m.group(2)
+    if month and 1 <= int(month) <= 12:
+        return f"{year}.{int(month):02d}"
+    return year
+
+
 def _edu_history_from_llm(raw, text: str) -> list[dict]:
     """模型给的 `education_history` → 可入库的列表（每段都必须在原文里）。
 
     三道闸门，缺一不可：
-      ① **结构**：`{degree, school, major}`，缺 `degree`/`school` 的整项丢掉；
+      ① **结构**：`{degree, school, major, start, end}`，缺 `degree`/`school` 的整项丢掉；
          `degree` 必须在 `DEGREE_RANGES` 的白名单里（模型自造"研究生"这类词不算）。
       ② **校名在原文里**（与基本信息同一道关）：原文没有的院校直接丢。
          宁可少一段，也不要一个编出来的学校 —— HR 会拿它做取舍。
+         起止时间同理：年份不在原文里就留空，不让模型编时间段。
       ③ **去重**：同一所学校重复出现只留一条（模型偶尔会把同一段输出两遍）。
 
     返回空列表 = 抽不到（界面显示「教育经历未识别」，**不编**）。
     """
     src = str(text or "")
+    src_norm = _norm_for_search(src)
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for item in (raw if isinstance(raw, list) else []):
@@ -691,8 +709,15 @@ def _edu_history_from_llm(raw, text: str) -> list[dict]:
             continue
         seen.add(key)
         major = str(item.get("major") or "").strip()[:40]
-        start = str(item.get("start") or "").strip()[:10]
-        end = str(item.get("end") or "").strip()[:10]
+        start = _norm_edu_date(item.get("start"))
+        end = _norm_edu_date(item.get("end"))
+        if start and start != "至今" and start[:4] not in src_norm:
+            start = ""
+        if end == "至今":
+            if not any(w in src_norm for w in ("至今", "现在", "目前", "迄今")):
+                end = ""
+        elif end and end[:4] not in src_norm:
+            end = ""
         out.append({"degree": deg, "school": sch,
                     "major": major, "start": start, "end": end})
     return out
@@ -1114,7 +1139,7 @@ _LLM_SYSTEM = (
     "first_degree_evidence(first_degree_school 对应的**原文原样片段**，逐字照抄),\n"
     # v1.29.2（业务方要求）：学历院校经历要**完整**，不能只给最高那一所 ——
     # HR 看学校水平是从本科一路看到博士的，中间的研究生段丢了就没法判断。
-    "education_history(数组，**教育经历里写了几段就给几段**，按时间先后；每项 {degree:大专/本科/硕士/博士, school:院校全名, major:专业}；只写了一段就给一项，简历没写学历经历则输出空数组),\n"
+    "education_history(数组，**教育经历里写了几段就给几段**，按时间先后；每项 {degree:大专/本科/硕士/博士, school:院校全名, major:专业, start:开始时间, end:结束时间}；start/end 统一写成 YYYY.MM，在读的结束时间写\"至今\"；简历原文没写起止时间就留空字符串，**不要按学制或推测补时间**；只写了一段就给一项，简历没写学历经历则输出空数组),\n"
     "联合培养/合作办学/联合招生：education_history 每项的 school 必须填**学位授予/学籍所在单位**；联合培养单位放到 joint_school（可选）。"
     "同一学历同时出现「XX大学（联合培养硕士）」和「YY大学（硕士）」时，school 必须填 YY大学这种学位授予单位，"
     "绝不能因为 XX大学名气大/排名高就把它当 school。school 字段也遵守同一规则。\n"

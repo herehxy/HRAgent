@@ -1235,6 +1235,9 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .srcbar > .srcfiles.many{flex:1 1 100%;border-left:0;padding-left:0;margin-top:1px;
   padding-top:7px;border-top:1px solid #d3e2d0}
 .srcbar > .srcfiles .srccount{max-width:none;color:#4b7a51;font-weight:600}
+.srcbar > .srck .subcount{margin-left:8px;padding:1px 8px;border-radius:999px;
+  font-weight:650;font-size:13px;color:var(--accent);background:var(--accent-soft);
+  white-space:nowrap;opacity:1}
 .srcbar .srcfile{display:flex;align-items:center;gap:6px;min-width:0}
 .srcbar .srcfile .fn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   color:#3c6b41;max-width:20ch}
@@ -1355,14 +1358,38 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .edu-band{margin-top:12px;padding:11px 0 12px;border-top:1px solid var(--line);
   border-bottom:1px solid var(--line)}
 .edu-band-head{display:flex;align-items:center;justify-content:space-between;gap:10px;
-  margin-bottom:7px}
-.edu-band-head h4{margin:0;font-size:13px;font-weight:600;color:var(--ink-2)}
-.edu-list{display:grid;gap:4px}
-.edu-line{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;
-  min-height:22px;font-size:14px;padding:1px 0}
-.edu-period{font-size:12px;color:var(--ink-3);white-space:nowrap;
-  font-variant-numeric:tabular-nums;min-width:88px}
-.edu-degree{font-size:13px;color:var(--ink-3)}
+  margin-bottom:8px}
+.edu-band-head h3{margin:0;font-size:18px;font-weight:600;letter-spacing:-.015em;
+  color:var(--ink)}
+.edu-list{display:grid;gap:5px}
+/* 教育经历固定一行：左侧内容不换行（太长时学校/专业省略），右侧时间段独立成列。
+   起止时间只在右侧占位，不能把整行撑成两行或撑高。 */
+.edu-line{display:grid;grid-template-columns:minmax(0,1fr) auto;
+  align-items:center;gap:14px;min-height:28px;font-size:16px;padding:1px 0}
+.edu-main{display:flex;align-items:center;gap:11px;min-width:0;
+  flex-wrap:nowrap;overflow:hidden}
+.edu-main > .edu-degree{flex:none;white-space:nowrap}
+.edu-main > .edu-school{flex:0 1 auto;min-width:56px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.edu-main > .edu-major{flex:0 1 auto;min-width:48px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.edu-main > .edu-tags{flex:none;flex-wrap:nowrap;overflow:hidden}
+.edu-line .chipl{font-size:12.5px;padding:2px 8px;line-height:1.5}
+.edu-line .rk{font-size:12.5px;padding:2px 8px;line-height:1.5}
+.edu-period{font-size:16.5px;color:var(--ink);font-weight:500;white-space:nowrap;
+  font-variant-numeric:tabular-nums;line-height:1.5;flex:none;padding:1px 4px;
+  margin-right:1em}
+.edu-period.missing{font-size:12.5px;color:var(--ink);font-weight:400;opacity:1;
+  border-bottom:1px dashed var(--line-2)}
+.edu-period-edit{display:grid;grid-template-columns:1fr auto 1fr;
+  align-items:center;gap:8px}
+.edu-period-edit input{width:100%;min-width:0;height:34px;padding:0 10px;
+  border:1px solid var(--line-2);border-radius:var(--r-s);
+  background:var(--surface);font:inherit;outline:none}
+.edu-period-edit input:focus{border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-soft)}
+.edu-period-edit .dash{color:var(--ink-3)}
+.edu-degree{font-size:15px;color:var(--ink);font-weight:500}
 /* 荣誉/论文/专利：分类名用强调色加粗，条目名也加粗，出处保持常规 ——
    原来整行一个灰度，扫一眼分不出"是什么"和"凭什么"（业务方 2026-10-21）。 */
 #detail .sec .ev b{color:var(--accent-ink);font-weight:650}
@@ -1408,7 +1435,7 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .edu-click:hover{background:var(--accent-soft);border-bottom-color:var(--accent-line);
   color:var(--accent-ink)}
 .edu-school{font-weight:600;color:var(--ink);overflow-wrap:anywhere}
-.edu-major{font-size:13px;color:var(--ink-2);overflow-wrap:anywhere}
+.edu-major{font-size:15.5px;color:var(--ink);overflow-wrap:anywhere}
 .edu-tags{display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap}
 .edu-edit{display:grid;grid-template-columns:minmax(170px,1.25fr) 112px minmax(150px,1fr) minmax(140px,1fr);
   gap:10px;align-items:start;margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)}
@@ -2140,7 +2167,10 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .profile-layout{font-size:14px;gap:0 28px}
 .profile-layout .ev,#detail .ev{font-size:14px;line-height:1.75}
 .profile-layout .sum,#detail .sum{font-size:15px;line-height:1.75}
-.profile-layout .edu-line{font-size:14px}
+.profile-layout .edu-line{font-size:16px}
+.profile-layout .edu-school{font-size:16.5px}
+.profile-layout .edu-major{font-size:15.5px}
+.profile-layout .edu-degree{font-size:15px}
 .profile-layout .hint{font-size:12.5px}
 .honosec .ev{background:var(--surface-2);border-radius:7px}
 .chipl,.jchip,.rk,.stg,.ochip{border-radius:999px;font-weight:500}

@@ -22,7 +22,7 @@ class ContextGovernanceTest(unittest.TestCase):
     def test_missing_window_uses_conservative_default_not_one_million(self):
         b = cg.resolve_budget(None, max_output_tokens=4_096)
         self.assertEqual(b["window"], cg.DEFAULT_CONTEXT_WINDOW)
-        self.assertEqual(cg.DEFAULT_CONTEXT_WINDOW, 32_768)
+        self.assertEqual(cg.DEFAULT_CONTEXT_WINDOW, 131_072)
 
     def test_model_window_falls_back_by_model_default(self):
         from app.agent import llm
@@ -40,6 +40,61 @@ class ContextGovernanceTest(unittest.TestCase):
         win, src = llm.model_context_window(
             dict(base, model="x", context_window="256k"))
         self.assertEqual((win, src), (256_000, "config"))
+
+    def test_model_window_is_not_inferred_from_parameter_size(self):
+        """9B/30B 这类规格不能决定窗口：同是 9B，GLM-4 是 128k，Gemma-2 是 8k。"""
+        from app.agent import llm
+        self.assertEqual(llm.model_default_context_window("glm-4-9b-chat"), 131_072)
+        self.assertEqual(llm.model_default_context_window("gemma-2-9b"), 8_192)
+        self.assertEqual(llm.model_default_context_window("gemma-3-27b"), 131_072)
+        self.assertEqual(llm.model_default_context_window("llama-3.1-8b"), 131_072)
+        self.assertEqual(llm.model_default_context_window("llama-3-8b"), 8_192)
+        self.assertEqual(llm.model_default_context_window("qwen3-30b-a3b"), 32_768)
+        self.assertEqual(llm.model_default_context_window("phi-4-14b"), 16_384)
+        self.assertEqual(llm.model_default_context_window("phi-4-mini"), 131_072)
+
+    def test_extract_ctx_reads_ollama_namespaced_keys(self):
+        """Ollama /api/show 的键是 `qwen2.context_length`，不能只认裸键名。"""
+        from app.agent import llm
+        hit = {"model_info": {"qwen2.context_length": 32_768,
+                              "qwen2.embedding_length": 4_096}}
+        self.assertEqual(llm._extract_ctx(hit), 32_768)
+
+    def test_probe_reads_ollama_show_metadata(self):
+        """本地 30B/9B 的窗口以 Ollama 实际加载的模型元数据为准。"""
+        from unittest import mock
+        from app.agent import llm
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "model_info": {"qwen2.context_length": 32_768}
+                }).encode("utf-8")
+
+        calls = []
+
+        def fake_urlopen(req, timeout=0):
+            url = req.full_url
+            calls.append(url)
+            if "/api/show" in url:
+                return FakeResp()
+            raise OSError("not available")
+
+        llm._MODEL_META_CACHE.clear()
+        with mock.patch.object(llm.net, "urlopen", side_effect=fake_urlopen):
+            hit = llm._probe_model_meta({
+                "base_url": "http://127.0.0.1:11434/v1",
+                "model": "qwen2.5:7b", "api_key": "",
+            })
+        self.assertEqual(llm._extract_ctx(hit), 32_768)
+        self.assertTrue(any("/api/show" in u for u in calls),
+                        "OpenAI /models 不带窗口时应回退到 Ollama /api/show")
 
     def test_compact_tool_result_keeps_actionable_fields(self):
         raw = json.dumps({

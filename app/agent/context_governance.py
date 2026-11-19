@@ -27,9 +27,11 @@ from typing import Any
 DEFAULT_BUDGET_CAP = 120_000
 DEFAULT_MAX_OUTPUT = 4_096
 #: 配置、端点元数据和模型名推断都拿不到窗口时的保守默认。
-#: 不能一律按 1M：小窗口模型会被直接塞爆；32k 是常见本地/中小模型的下限，
-#: 大窗口模型可在 config/model.json 明确写 context_window 覆盖。
-DEFAULT_CONTEXT_WINDOW = 32_768
+#: 2026-11-19 从 32k 提到 128k：现在主流模型（含 7B/9B/30B 级别）多数
+#: 至少 128k，按 32k 会给对话无谓地砍掉大量上下文。真正的小窗口模型
+#: （llama 3.0、gemma 2、internlm 等）仍由 `_MODEL_CTX_DEFAULTS` 按名字兜住；
+#: 本地部署的实际窗口可在 config/model.json 写 context_window 覆盖。
+DEFAULT_CONTEXT_WINDOW = 131_072
 #: 单条工具结果默认上限；真正的总预算由 `govern_messages()` 再兜一次。
 DEFAULT_TOOL_RESULT_TOKENS = 6_000
 #: 历史消息单条上限；更早的整轮会被丢弃。
