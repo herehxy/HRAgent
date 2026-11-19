@@ -553,8 +553,16 @@ def attachment_resume_score(filename: str, text: str = "") -> float:
     return score
 
 
+#: 能当“简历”解析的格式。xlsx/xls 在白名单里（成绩单/证书常是表格），
+#: 但解析器不读表格，不能因为“只有一份”就把它建成一个空候选人。
+_RESUME_PARSE_EXTS = (
+    ".pdf", ".doc", ".docx", ".rtf", ".txt", ".md",
+    ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff",
+)
+
+
 def choose_resume_attachment(atts: list[dict]) -> int:
-    """从一封邮件的附件里选出最像简历的那份，返回下标；没有附件返回 -1。
+    """从一封邮件的附件里选出最像简历的那份，返回下标；没有可解析附件返回 -1。
 
     `atts` 里的 `_text` / `_ok` 由 `ingest._prepare_attachments()` 填好。
     规则分两段：
@@ -564,6 +572,14 @@ def choose_resume_attachment(atts: list[dict]) -> int:
          其次体积最大的图片 —— 保住“扫描件 OCR 失败也要建档”的旧行为。
     """
     if not atts:
+        return -1
+
+    def _is_parseable(i: int) -> bool:
+        ext = os.path.splitext(str(atts[i].get("filename") or "").lower())[1]
+        return ext in _RESUME_PARSE_EXTS
+
+    parseable = [i for i in range(len(atts)) if _is_parseable(i)]
+    if not parseable:
         return -1
     if len(atts) == 1:
         return 0
@@ -586,26 +602,34 @@ def choose_resume_attachment(atts: list[dict]) -> int:
 
     scored = [attachment_resume_score(atts[i].get("filename"), _text(i))
               for i in range(len(atts))]
-    readable = [i for i in range(len(atts))
+    readable = [i for i in parseable
                 if _ok(i) and _text(i).strip() and scored[i] >= RESUME_SCORE_MIN]
     if readable:
         return max(readable, key=lambda i: (scored[i], 1 if _is_doc(i) else 0,
                                             len(atts[i].get("data") or b""), -i))
     # 内容都不可用时：文件名明确不是简历的（证书/成绩单）尽量不选。
-    candidates = [i for i in range(len(atts))
+    candidates = [i for i in parseable
                   if not any(h in str(atts[i].get("filename") or "").lower()
                              for h in _OTHER_HINTS)]
-    pool = candidates or list(range(len(atts)))
+    pool = candidates or parseable
     return max(pool, key=lambda i: (1 if _is_doc(i) else 0,
                                     scored[i],
                                     len(atts[i].get("data") or b""), -i))
 
 
-def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:
-    """抽取白名单内的附件。返回 [{filename, mime, data, kind}]。
+def extract_attachments_ex(msg: email.message.Message,
+                           cfg: dict) -> tuple[list[dict], list[dict]]:
+    """抽取附件，返回 `(白名单内的附件, 被跳过的附件及原因)`。
 
-    v1.27：每条带 `kind`（resume / other），由 `classify_attachment` 判定。
-    上层 `ingest.ingest_mails` 据此分流：resume 走完整入库，other 只归档。
+    白名单内：`[{filename, mime, data, kind}]`；`kind` 由 `classify_attachment` 判定。
+    被跳过：`[{filename, mime, size, reason, data?}]`。`reason`：
+      - `extension_not_allowed`：格式不在 `attachment_ext`，**带原始字节**，
+        上层会原样归档为 `kind='other'`，不解析也不丢件；
+      - `oversize`：超过 `max_attachment_mb`，不保留字节（避免内存/磁盘失控）；
+      - `empty` / `decode_failed`：空附件或解码失败。
+
+    以前这些情况直接 `continue`，HR 只看到“无附件/附件少了几份”，
+    不知道是哪份、为什么。现在每一种都带回原因。
     """
     exts = tuple(e.lower() for e in cfg.get("attachment_ext", []))
     limit = int(cfg.get("max_attachment_mb", 20)) * 1024 * 1024
@@ -617,6 +641,8 @@ def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:
                      "image/png": ".png", "image/webp": ".webp",
                      "image/bmp": ".bmp", "image/tiff": ".tif"}
     out: list[dict] = []
+    skipped: list[dict] = []
+    inline_small: list[dict] = []
     for part in msg.walk():
         if part.get_content_maintype() == "multipart":
             continue
@@ -638,22 +664,53 @@ def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:
                 filename = "照片" + _image_suffix[ctype]
             else:
                 filename = "attachment" + guess.get(ctype, "")
-        if not filename.lower().endswith(exts):
-            continue
         try:
             data = part.get_payload(decode=True) or b""
         except Exception:
+            skipped.append({"filename": safe_filename(filename), "mime": ctype,
+                            "size": 0, "reason": "decode_failed"})
             continue
-        if not data or len(data) > limit:
+        if not data:
+            skipped.append({"filename": safe_filename(filename), "mime": ctype,
+                            "size": 0, "reason": "empty"})
             continue
         if (ctype.startswith("image/") and len(data) < _inline_min
                 and ("inline" in disp or part.get("Content-ID"))):
+            # 小图先不立即丢弃：有些客户端给真实证件照/照片简历也带
+            # Content-ID，甚至 disposition=attachment。整封没有任何其它附件时
+            # 会挑最大的一张当简历；有其它附件时才按“签名/图标”记录跳过。
+            inline_small.append({
+                "filename": safe_filename(filename), "mime": ctype,
+                "size": len(data), "data": data,
+            })
+            continue
+        if len(data) > limit:
+            skipped.append({"filename": safe_filename(filename), "mime": ctype,
+                            "size": len(data), "reason": "oversize"})
+            continue
+        if not filename.lower().endswith(exts):
+            # 不在解析白名单，但**原件仍然有价值**（作品集/证书/压缩包）。
+            # 带上字节交给上层归档，避免“收到了但没存”。
+            skipped.append({"filename": safe_filename(filename), "mime": ctype,
+                            "size": len(data), "reason": "extension_not_allowed",
+                            "data": data})
             continue
         out.append({
             "filename": safe_filename(filename),
             "mime": ctype,
             "data": data,
         })
+    if inline_small:
+        if not out and not skipped:
+            # 整封只有这些小图：最大的那张很可能就是手机拍的简历/证件照，
+            # 不能因为它小于 16KB 就把它静默丢掉。
+            pick = max(inline_small, key=lambda a: len(a.get("data") or b""))
+            out.append({"filename": pick["filename"], "mime": pick["mime"],
+                        "data": pick["data"]})
+            inline_small = [a for a in inline_small if a is not pick]
+        for a in inline_small:
+            skipped.append({"filename": a["filename"], "mime": a["mime"],
+                            "size": a["size"], "reason": "inline_image_ignored"})
     # 先抽完再定 kind：`classify_attachment` 需要知道本封邮件共有几个附件。
     #
     # ⚠️ v3.1.1：**一封邮件最多只认一份简历**。
@@ -688,7 +745,12 @@ def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:
         pool = docs or candidates or out
         pick = max(pool, key=lambda a: len(a.get("data") or b""))
         pick["kind"] = "resume"
-    return out
+    return out, skipped
+
+
+def extract_attachments(msg: email.message.Message, cfg: dict) -> list[dict]:
+    """兼容旧调用方：只要白名单内的附件列表（被跳过的用 `extract_attachments_ex`）。"""
+    return extract_attachments_ex(msg, cfg)[0]
 
 
 def _extract_body(msg: email.message.Message) -> tuple[str, str]:
@@ -729,6 +791,7 @@ def parse_eml_bytes(raw: bytes, cfg: dict, fallback_id: str = "") -> dict:
     msg = email.message_from_bytes(raw, policy=email.policy.default)
     message_id = (msg.get("Message-ID") or "").strip() or fallback_id
     body_text, body_html = _extract_body(msg)
+    attachments, skipped = extract_attachments_ex(msg, cfg)
     return {
         "message_id": message_id,
         "uid": fallback_id,
@@ -736,7 +799,8 @@ def parse_eml_bytes(raw: bytes, cfg: dict, fallback_id: str = "") -> dict:
         "from_addr": email.utils.parseaddr(_decode_header(msg.get("From")))[1] or "",
         "subject": _decode_header(msg.get("Subject")),
         "received_at": _dt(msg.get("Date")),
-        "attachments": extract_attachments(msg, cfg),
+        "attachments": attachments,
+        "attachments_skipped": skipped,
         "body_text": body_text,
         "body_html": body_html,
     }
@@ -766,7 +830,8 @@ def fetch_eml(cfg: dict) -> list[dict]:
                 "message_id": f"eml-error:{name}", "uid": f"eml:{name}", "mailbox": "eml",
                 "from_addr": "", "subject": name,
                 "received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "attachments": [], "error": f"邮件解析失败：{exc}",
+                "attachments": [], "attachments_skipped": [],
+                "error": f"邮件解析失败：{exc}",
             })
     return mails
 
@@ -982,7 +1047,8 @@ def fetch_imap_body(cfg: dict, uid: str, folder: str | None = None) -> dict | No
 
 
 def fetch_imap(cfg: dict, cursor: str | None = None, limit: int = 200,
-               should_stop=None, meta: dict | None = None) -> tuple[list[dict], str]:
+               should_stop=None, meta: dict | None = None,
+               max_bytes: int | None = 256 * 1024 * 1024) -> tuple[list[dict], str]:
     """IMAP 只读增量拉取（一次性版）。返回（邮件列表，下载到的最大 UID）。
 
     注意第二个返回值只是"这次下载到哪"，**不是"处理完到哪"**：
@@ -994,6 +1060,7 @@ def fetch_imap(cfg: dict, cursor: str | None = None, limit: int = 200,
     """
     mails: list[dict] = []
     newest = cursor or ""
+    total_bytes = 0
     for kind, item in iter_imap(cfg, cursor, limit, should_stop=should_stop):
         if kind == "uidvalidity":
             if meta is not None:
@@ -1005,7 +1072,17 @@ def fetch_imap(cfg: dict, cursor: str | None = None, limit: int = 200,
             # 已经下载好的邮件由调用方先入库，游标停在这封之前。
             break
         if kind == "mail":
+            # 单批内存上限：首次接入大邮箱时，200 封 × 20MB 同时驻留会 OOM。
+            # 达到上限就停在这一封之前，已下载的先入库并保存游标，下次继续。
+            _mb = (sum(len(a.get("data") or b"") for a in item.get("attachments") or [])
+                   + len(str(item.get("body_text") or ""))
+                   + len(str(item.get("body_html") or "")))
+            if max_bytes and mails and total_bytes + _mb > max_bytes:
+                if meta is not None:
+                    meta["batch_limit_hit"] = True
+                break
             mails.append(item)
+            total_bytes += _mb
             newest = item.get("uid") or newest
         # "total" / "mailbox_total" 是给逐封进度模式用的统计事件，
         # 一次性版只关心邮件本身，忽略即可（v3.1.2 新增了后者）。

@@ -126,12 +126,13 @@ _PAGE = r"""<!DOCTYPE html>
           aria-label="打开候选人名单">名单</button>
   <div class="brand" style="display:none"><i></i>人才库</div>
   <input id="kw" class="search" placeholder="搜索姓名 / 院校 / 专业 / 技能"
+         aria-label="搜索候选人" role="searchbox"
          onkeydown="if(event.key==='Enter'){doSearch()}">
   <!-- 搜索就是**一个输入框 + 一个按钮**，与原版一致（`ui.py:1787-1793`）：
        原来这里有个「关键词 / 按技能 / 语义」下拉，还有一个「具备其一/全部具备」下拉 —
        三个控件在管同一件事，业务方 2026-10-21 明确要求换成一个搜索按钮。
        关键词本身就能命中姓名/院校/专业/技能，够用。 -->
-  <button class="btn primary" onclick="doSearch()" style="height:34px;padding:0 20px">搜索</button>
+  <button class="btn primary" onclick="doSearch()" style="height:38px;padding:0 20px">搜索</button>
   <!-- 学历/四六级用**勾选式下拉**（业务方 2026-10-21：原生 multiple 太丑，要"都是下拉框"）。
        外观与旁边的单选框一致，点开是带复选框的浮层，仍支持多选。 -->
   <div class="msel" id="msEdu">
@@ -185,16 +186,19 @@ _PAGE = r"""<!DOCTYPE html>
 
 <div class="top2">
   <button class="btn btn-primary btn-lg" id="btnIngestMail" onclick="doIngest('mailbox')">收取邮箱简历</button>
-  <button class="btn btn-primary btn-lg" id="btnIngestDir" onclick="doIngest('folder')">导入本地文件夹</button>
+  <button class="btn btn-primary btn-lg" id="btnIngestDir" onclick="document.getElementById('upFolder').click()"
+          title="每次点击都可以自己选择一个文件夹，批量导入里面的简历">导入本地文件夹</button>
   <button class="btn btn-primary btn-lg" id="btnUpload" onclick="document.getElementById('upFile').click()"
           title="手机拍的纸质简历照片、扫描件，直接选文件上传入库（不用先改配置目录）">上传简历照片/文件</button>
   <input id="upFile" type="file" multiple hidden
          accept=".jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,.pdf,.docx,.doc,.txt" onchange="doUpload(this.files)">
+  <input id="upFolder" type="file" webkitdirectory directory multiple hidden
+         accept=".jpg,.jpeg,.png,.bmp,.webp,.tif,.tiff,.pdf,.docx,.doc,.txt" onchange="doUploadFolder(this.files)">
   <span class="vdiv"></span>
-  <button class="btn btn-green btn-lg" onclick="doExport()">导出名单</button>
-  <button class="btn btn-green btn-lg" onclick="doBundle()">下载初筛简历</button>
+  <button class="btn btn-green btn-lg" id="btnExportRoster" onclick="doExport()">导出名单</button>
+  <button class="btn btn-green btn-lg" id="btnBundle" onclick="doBundle()">下载初筛简历</button>
   <span class="vdiv"></span>
-  <label class="allbox" title="勾选当前筛选条件下的全部人（含其他页）"><input type="checkbox" id="chkAll"> 全选筛选结果</label>
+  <label class="allbox" id="top2AllBox" title="勾选当前筛选条件下的全部人（含其他页）"><input type="checkbox" id="chkAll"> 全选筛选结果</label>
   <!-- v4.3.0：批量初筛通过 + 批量归岗收进「批量操作」菜单 -->
   <div class="more" id="moreBatchOps">
     <button class="btn btn-primary btn-lg" id="btnBatchOps" onclick="toggleBatchOpsMenu()">批量操作 ▾</button>
@@ -216,6 +220,12 @@ _PAGE = r"""<!DOCTYPE html>
        放在工具栏里既占位置、也让人以为它管的是别的东西。 -->
   <span class="vdiv"></span>
   <button class="btn btn-primary btn-lg" id="btnProp" onclick="toggleProps()">待确认提案</button>
+  <div class="more top2-more" id="moreTop2">
+    <button class="btn btn-lg" id="btnTop2More" onclick="toggleTop2More()"
+            aria-haspopup="true" aria-controls="top2MorePanel"
+            aria-expanded="false">更多操作 ▾</button>
+    <div class="morePanel top2MorePanel" id="top2MorePanel"></div>
+  </div>
 </div>
 <div class="tabbar"><div class="tabs" id="tabs"></div></div>
 

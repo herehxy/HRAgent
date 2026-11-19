@@ -23,6 +23,8 @@ import urllib.request
 
 from .. import net
 
+from . import context_governance as cg
+
 from ..paths import cfg as _cfg_path
 CONFIG_PATH = _cfg_path("model.json")
 SECRETS_PATH = _cfg_path("secrets.json")
@@ -43,18 +45,23 @@ def mask_key(key) -> str:
 
 
 def save_cfg(base_url: str | None = None, model: str | None = None,
-             api_key: str | None = None, enabled: bool | None = None) -> dict:
+             api_key: str | None = None, enabled: bool | None = None,
+             context_window: str | int | None = None) -> dict:
     """界面保存模型配置（v1.7.6）。
 
-    base_url / model / enabled 写 `config/model.json`（保留 preset / _presets / 超时等其他字段）；
+    base_url / model / enabled / context_window 写 `config/model.json`
+    （保留 preset / _presets / 超时等其他字段）；
     api_key 写 `config/secrets.json`（0600，已 gitignore）——**不进 SQLite**：
     settings 表随库备份流动，密钥混进去等于把秘密带进每次备份。
     api_key 传 None 或空串 = 不修改（界面"留空不改"语义）。
 
+    `context_window` 传空串 = 清除人工值、回到自动探测；None = 不修改。
+
     返回 {"changed": [字段名], "env_override": [会盖过文件值的环境变量名]}。
     """
     changed: list[str] = []
-    if base_url is not None or model is not None or enabled is not None:
+    if (base_url is not None or model is not None or enabled is not None
+            or context_window is not None):
         cfg: dict = {}
         if os.path.exists(CONFIG_PATH):
             try:
@@ -73,6 +80,18 @@ def save_cfg(base_url: str | None = None, model: str | None = None,
         if enabled is not None and bool(cfg.get("enabled", True)) != bool(enabled):
             cfg["enabled"] = bool(enabled)
             changed.append("enabled")
+        if context_window is not None:
+            raw = str(context_window).strip()
+            want = _parse_ctx(raw) if raw else None
+            if raw and not want:
+                raise ValueError("上下文窗口要写成 32000 / 32k / 1M 这样的数字")
+            have = _parse_ctx(cfg.get("context_window"))
+            if want != have:
+                if want:
+                    cfg["context_window"] = want
+                else:
+                    cfg.pop("context_window", None)
+                changed.append("context_window")
         if changed:
             tmp = CONFIG_PATH + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
@@ -396,6 +415,34 @@ _CTX_KEYS = (
     "context_size", "n_ctx",
 )
 _MODEL_META_CACHE: dict[tuple[str, str], tuple[dict | None, float]] = {}
+#: 常见模型的厂商默认上下文窗口（tokens）。只在 `config/model.json` 与
+#: 端点 `/models` 都拿不到时使用；顺序从上到下，先匹配到的生效。
+#: 宁可保守也不要一律按 1M——把 32k 模型按 1M 塞会直接报超长。
+_MODEL_CTX_DEFAULTS: tuple[tuple[str, int], ...] = (
+    (r"claude", 200_000),
+    (r"gpt-4\.1", 1_000_000),
+    (r"gpt-4o|gpt-4-turbo|gpt-4\.5", 128_000),
+    (r"gpt-3\.5", 16_385),
+    (r"(?:^|[-_])o[134](?:[-_]|$)", 200_000),
+    (r"gemini", 1_000_000),
+    (r"deepseek", 128_000),
+    # 小米 MiMo v2.5/v2.6（含 pro / flash / ultraspeed）官方标称 1M；
+    # 更早的 MiMo-7B 是 32K，不能一起按 1M 处理。
+    (r"mimo-v2\.(?:5|6)|mimo-v2-pro", 1_048_576),
+    (r"mimo", 32_768),
+    (r"qwen|tongyi|qwq|通义", 32_768),
+    (r"glm-4|chatglm", 128_000),
+    (r"llama-?[34]", 128_000),
+    (r"llama", 8_192),
+    (r"mistral|mixtral|magistral", 32_768),
+    (r"yi-", 200_000),
+    (r"moonshot|kimi", 128_000),
+    (r"ernie|文心|hunyuan|混元", 128_000),
+    (r"internlm", 32_768),
+    (r"baichuan", 32_768),
+    (r"phi-?[34]", 128_000),
+    (r"gemma", 8_192),
+)
 _PARAM_KEYS = (
     "parameter_count", "parameters", "num_parameters", "param_count",
     "total_params", "model_size", "parameter_size", "params", "size",
@@ -553,12 +600,24 @@ def model_parameter_count(cfg: dict | None = None) -> str:
     return ""
 
 
-def model_context_window(cfg: dict | None = None) -> tuple[int | None, str]:
+def model_default_context_window(model: str) -> int | None:
+    """按模型名推断厂商默认窗口；只用于配置与端点元数据都缺失时。"""
+    s = str(model or "").strip().lower()
+    if not s:
+        return None
+    for pat, win in _MODEL_CTX_DEFAULTS:
+        if re.search(pat, s):
+            return win
+    return None
+
+
+def model_context_window(cfg: dict | None = None) -> tuple[int, str]:
     """获取模型实际上下文窗口。
 
     顺序：`config/model.json` 的 `context_window`（人工确认值）→ 端点
-    `/models` 元数据里的 context_length 等字段 → `/models/{model}` → 未知。
-    返回 `(tokens, source)`，source 为 config/provider/unknown。
+    `/models` 元数据里的 context_length 等字段 → 按模型名推断厂商默认
+    → 保守默认 32k。返回 `(tokens, source)`，source 为
+    config/provider/model/fallback。
     """
     cfg = cfg or load_cfg()
     explicit = _parse_ctx(cfg.get("context_window"))
@@ -566,7 +625,12 @@ def model_context_window(cfg: dict | None = None) -> tuple[int | None, str]:
         return explicit, "config"
     hit = _probe_model_meta(cfg)
     ctx = _extract_ctx(hit) if hit else None
-    return ctx, ("provider" if ctx else "unknown")
+    if ctx:
+        return ctx, "provider"
+    guess = model_default_context_window(str(cfg.get("model") or ""))
+    if guess:
+        return guess, "model"
+    return cg.DEFAULT_CONTEXT_WINDOW, "fallback"
 
 
 def status() -> dict:

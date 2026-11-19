@@ -20,7 +20,9 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
@@ -181,12 +183,82 @@ class ReviewFixTests(unittest.TestCase):
 
     # ---------------------------------------------------------------- B07
     def test_mail_idempotency_is_persistent(self):
-        tid, created = db.mail_request_claim(_DB, "review-req-1", "task-a")
-        self.assertTrue(created)
-        self.assertEqual(tid, "task-a")
-        tid2, created2 = db.mail_request_claim(_DB, "review-req-1", "task-b")
-        self.assertFalse(created2, "同一 client_request_id 不能再次认领")
-        self.assertEqual(tid2, "task-a", "重试必须回到原任务号")
+        rec = db.mail_request_begin(_DB, "review-req-1", "task-a", status="queued")
+        self.assertTrue(rec["created"])
+        self.assertEqual(rec["task_id"], "task-a")
+        # 后台任务还没建出来时进程崩溃 → queued 可安全接管（SMTP 一定没开始）
+        rec2 = db.mail_request_begin(_DB, "review-req-1", "task-b", status="queued")
+        self.assertTrue(rec2["created"])
+        self.assertTrue(rec2.get("takeover"))
+        # 一旦进入 sending，后来者不能再接管，也不能再发。
+        self.assertTrue(db.mail_request_mark_sending(_DB, "review-req-1", "task-b"))
+        rec3 = db.mail_request_begin(_DB, "review-req-1", "task-c", status="queued")
+        self.assertFalse(rec3["created"])
+        self.assertEqual(rec3["status"], "sending")
+        # 成功结果跨进程可回放。
+        self.assertTrue(db.mail_request_finish(
+            _DB, "review-req-1", "task-b", "sent", result={"ok": True, "n": 1}))
+        rec4 = db.mail_request_begin(_DB, "review-req-1", "task-d", status="queued")
+        self.assertFalse(rec4["created"])
+        self.assertEqual(rec4["status"], "sent")
+        self.assertEqual((rec4.get("result") or {}).get("n"), 1)
+
+    def test_sync_mail_send_deduplicates_same_request(self):
+        """同步发信也要认 client_request_id：网络重试不能发第二封。"""
+        calls = []
+
+        def fake_send(req, _session):
+            calls.append(req.client_request_id)
+            return {"ok": True, "to": req.to, "subject": req.subject,
+                    "n": len(calls)}
+
+        body = {"client_request_id": "sync-req-1",
+                "to": "candidate@example.com", "subject": "测试", "body": "正文"}
+        raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        with mock.patch.object(server, "_mail_send_sync", side_effect=fake_send):
+            st1, txt1 = _asgi(server.app, "POST", "/api/mail/send",
+                              {"Content-Type": "application/json"}, raw)
+            st2, txt2 = _asgi(server.app, "POST", "/api/mail/send",
+                              {"Content-Type": "application/json"}, raw)
+        self.assertEqual((st1, st2), (200, 200))
+        self.assertEqual(len(calls), 1, "同一个请求键只能真正发一次")
+        j2 = json.loads(txt2)
+        self.assertTrue(j2.get("deduped"))
+        self.assertEqual(j2.get("n"), 1)
+
+    def test_uncertain_smtp_is_not_treated_as_safe_failure(self):
+        """sendmail 阶段断线：必须标成 unknown，不能当 failed 诱导重发。"""
+        req = server.MailSendReq(to="x@example.com", subject="测试", body="正文")
+        with mock.patch.object(
+                server.mail_send_mod, "send_mail",
+                return_value={"ok": False, "uncertain": True,
+                              "error": "发送过程中连接中断", "hint": "先查已发送"}):
+            with self.assertRaises(server._MailSendUncertain) as ctx:
+                server._mail_send_sync(req, {"username": "hr", "role": "hr"})
+        self.assertTrue(getattr(ctx.exception, "uncertain", False))
+
+    def test_async_mail_fallback_still_sends_if_idempotency_db_fails(self):
+        """幂等表写不进去时，后台线程不能因为 0 行 mark_sending 而整封不发。"""
+        ev = threading.Event()
+        calls = []
+
+        def fake_send(req, _session, *args, **kwargs):
+            calls.append(req.client_request_id)
+            ev.set()
+            return {"ok": True, "to": req.to, "subject": req.subject}
+
+        body = {"client_request_id": "fallback-req-1",
+                "to": "fallback@example.com", "subject": "降级发送", "body": "正文"}
+        raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        with mock.patch.object(server.db, "mail_request_begin",
+                               side_effect=RuntimeError("db down")), \
+             mock.patch.object(server, "_mail_send_sync", side_effect=fake_send):
+            st, _txt = _asgi(server.app, "POST", "/api/mail/send?async=1",
+                             {"Content-Type": "application/json"}, raw)
+            # 在 mock 生效期间等后台线程，避免补丁撤销后才真正调 SMTP。
+            self.assertTrue(ev.wait(3), "降级路径也必须真的进入发信函数")
+        self.assertEqual(st, 200)
+        self.assertEqual(calls, ["fallback-req-1"])
 
     # ---------------------------------------------------------------- B02/B03/B05
     def _make_session(self, role: str, username: str) -> str:

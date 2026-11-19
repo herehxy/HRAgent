@@ -26,6 +26,10 @@ from typing import Any
 #: 1M 窗口也不把整轮 prompt 堆到 1M；这是成本保险丝。
 DEFAULT_BUDGET_CAP = 120_000
 DEFAULT_MAX_OUTPUT = 4_096
+#: 配置、端点元数据和模型名推断都拿不到窗口时的保守默认。
+#: 不能一律按 1M：小窗口模型会被直接塞爆；32k 是常见本地/中小模型的下限，
+#: 大窗口模型可在 config/model.json 明确写 context_window 覆盖。
+DEFAULT_CONTEXT_WINDOW = 32_768
 #: 单条工具结果默认上限；真正的总预算由 `govern_messages()` 再兜一次。
 DEFAULT_TOOL_RESULT_TOKENS = 6_000
 #: 历史消息单条上限；更早的整轮会被丢弃。
@@ -82,7 +86,7 @@ def resolve_budget(window: int | None = None, *, max_output_tokens: Any = None,
     返回的 `budget` 是**输入**预算，不包含输出；`window` 仍然用于界面展示
     真实窗口。32k 模型会自动降低工具数量，避免系统提示词+工具说明就吃掉一半。
     """
-    win = max(4_096, _positive_int(window, 1_000_000))
+    win = max(4_096, _positive_int(window, DEFAULT_CONTEXT_WINDOW))
     out = _positive_int(max_output_tokens, DEFAULT_MAX_OUTPUT)
     # 输出上限不能超过窗口的一半，否则输入预算会被挤成负数
     out = max(512, min(out, max(1_024, win // 2)))

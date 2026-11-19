@@ -19,6 +19,28 @@ class ContextGovernanceTest(unittest.TestCase):
         self.assertLess(small["budget"], large["budget"])
         self.assertGreaterEqual(small["budget"], 2_048)
 
+    def test_missing_window_uses_conservative_default_not_one_million(self):
+        b = cg.resolve_budget(None, max_output_tokens=4_096)
+        self.assertEqual(b["window"], cg.DEFAULT_CONTEXT_WINDOW)
+        self.assertEqual(cg.DEFAULT_CONTEXT_WINDOW, 32_768)
+
+    def test_model_window_falls_back_by_model_default(self):
+        from app.agent import llm
+        self.assertEqual(llm.model_default_context_window("qwen2.5-7b"), 32_768)
+        self.assertEqual(llm.model_default_context_window("deepseek-chat"), 128_000)
+        self.assertIsNone(llm.model_default_context_window("totally-unknown"))
+        base = {"base_url": "", "api_key": ""}
+        win, src = llm.model_context_window(dict(base, model="totally-unknown"))
+        self.assertEqual((win, src), (cg.DEFAULT_CONTEXT_WINDOW, "fallback"))
+        win, src = llm.model_context_window(dict(base, model="mimo-v2.6-pro"))
+        self.assertEqual((win, src), (1_048_576, "model"))
+        win, src = llm.model_context_window(dict(base, model="mimo-7b"))
+        self.assertEqual((win, src), (32_768, "model"))
+        # config/model.json 的人工确认值永远优先
+        win, src = llm.model_context_window(
+            dict(base, model="x", context_window="256k"))
+        self.assertEqual((win, src), (256_000, "config"))
+
     def test_compact_tool_result_keeps_actionable_fields(self):
         raw = json.dumps({
             "summary": "查询成功",

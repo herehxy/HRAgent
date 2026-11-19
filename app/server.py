@@ -352,6 +352,12 @@ def _persist_progress(tid: str, *, force: bool = False) -> None:
 #: 后端返回原任务，而不是再发一封。
 _MAIL_REQ: dict[str, str] = {}
 _MAIL_REQ_LOCK = threading.Lock()
+#: 初筛简历包下载确认：token -> {date_from,date_to,files,roster,ts}。
+#: 只有客户端拿到 blob 并主动 ack 后才写「上次下载到哪」；普通 Response
+#: 的 BackgroundTask 在 uvicorn 客户端断开时仍会执行，不能作为送达凭据。
+_BUNDLE_ACK: dict[str, dict] = {}
+_BUNDLE_ACK_LOCK = threading.Lock()
+_BUNDLE_ACK_TTL = 30 * 60
 
 
 #: 已完成任务在内存里保留多久（秒）。到期后只留数据库快照，
@@ -1341,6 +1347,184 @@ def _start_upload_task(body: bytes, safe: str, jd, tiers,
 
     threading.Thread(target=_work, name="upload-ingest", daemon=True).start()
     return tid, stored
+
+
+CHAT_UPLOAD_DIRNAME = "chat_uploads"
+#: 聊天附件不是人才库资料：只临时保存给对话解析/查看，默认 7 天后清理。
+#: 用户点「入库」批准后才会走 ingest，且成功即删除临时目录。
+CHAT_UPLOAD_RETENTION_DAYS = 7
+
+
+def _chat_upload_root() -> str:
+    root = os.path.join(DATA_DIR, CHAT_UPLOAD_DIRNAME)
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _chat_upload_dir(token: str) -> str | None:
+    tok = str(token or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{16,32}", tok):
+        return None
+    p = os.path.join(_chat_upload_root(), tok)
+    if os.path.commonpath([os.path.abspath(p), os.path.abspath(_chat_upload_root())]) \
+            != os.path.abspath(_chat_upload_root()):
+        return None
+    return p
+
+
+def _save_chat_upload(body: bytes, safe: str) -> tuple[str, str, str, str]:
+    """聊天附件只落临时目录，返回 (token, 临时目录, 文件路径, 文件名)。"""
+    token = uuid.uuid4().hex
+    folder = os.path.join(_chat_upload_root(), token)
+    os.makedirs(folder, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    dest = os.path.join(folder, _paths.fit_name(folder, f"{stamp}_{safe}"))
+    i = 1
+    while _paths.lp_exists(dest):
+        dest = os.path.join(folder, _paths.fit_name(folder, f"{stamp}_{i}_{safe}"))
+        i += 1
+    with _paths.lp_open(dest, "wb") as fh:
+        fh.write(body)
+    return token, folder, dest, os.path.basename(dest)
+
+
+def _start_chat_parse_task(token: str, folder: str, path: str,
+                           stored: str) -> str:
+    """只解析文本，**不写任何候选人/投递/附件台账**。"""
+    tid = _progress_new(f"解析文件：{stored}", 1, kind="chatparse",
+                        meta={"token": token, "file": stored})
+
+    def _work() -> None:
+        try:
+            text, engine, ok = parse_mod.parse_file_ex(path)
+            text = str(text or "")[:60000]
+            result = {
+                "token": token, "filename": stored, "text": text,
+                "engine": str(engine or ""),
+                "parse_ok": bool(ok and text.strip()),
+                "chars": len(text),
+                "truncated": len(str(text or "")) >= 60000,
+            }
+            _progress_set(tid, done=1, status="done", message="解析完成",
+                          extra={"result": result})
+        except Exception as exc:                           # noqa: BLE001
+            _progress_set(tid, failed=1, status="error",
+                          message=f"解析失败：{type(exc).__name__}: {exc}")
+
+    threading.Thread(target=_work, name="chat-parse", daemon=True).start()
+    return tid
+
+
+def _cleanup_chat_uploads(days: int = CHAT_UPLOAD_RETENTION_DAYS) -> int:
+    """清理过期的聊天临时附件。"""
+    root = _chat_upload_root()
+    cutoff = time.time() - max(1, int(days)) * 24 * 3600
+    removed = 0
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return 0
+    for name in names:
+        p = os.path.join(root, name)
+        try:
+            if os.path.getmtime(p) >= cutoff or not os.path.isdir(p):
+                continue
+            shutil.rmtree(p, ignore_errors=True)
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+@app.post("/api/chat/upload")
+async def api_chat_upload(request: Request, name: str = Query(...),
+                          x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                          x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """聊天附件：**只解析，不入库**。是否加入人才库由 HR 点「入库」决定。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    declared = (request.headers.get("content-length") or "").strip()
+    if declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"文件超过 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB 上限：{name}")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="文件是空的")
+    if len(body) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"文件超过 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB 上限：{name}")
+    safe = os.path.basename(name or "attachment").strip() or "attachment"
+    for ch in ("\\", "/", ":", "*", "?", "\"", "<", ">", "|"):
+        safe = safe.replace(ch, "_")
+    if not safe.lower().endswith(tuple(parse_mod.SUPPORTED)):
+        raise HTTPException(status_code=415,
+                            detail=f"不支持的文件类型：{safe}（只收 {'/'.join(parse_mod.SUPPORTED)}）")
+    try:
+        token, folder, path, stored = _save_chat_upload(body, safe)
+        tid = _start_chat_parse_task(token, folder, path, stored)
+    except Exception as exc:                               # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail=f"附件落盘失败：{type(exc).__name__}: {exc}")
+    return {"ok": True, "pending": True, "task_id": tid,
+            "token": token, "stored": stored, "filename": safe,
+            "hint": "文件只用于本次对话解析，尚未加入人才库；需要时再点「入库」。"}
+
+
+@app.post("/api/chat/attachments/{token}/approve")
+def api_chat_attachment_approve(token: str,
+                                x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                                x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """HR 明确批准后，才把聊天临时附件送入正常入库流程。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "ingest")
+    folder = _chat_upload_dir(token)
+    if not folder or not os.path.isdir(folder):
+        raise HTTPException(status_code=404, detail="附件不存在或已过期，请重新上传")
+    files = [n for n in os.listdir(folder) if not n.startswith(".")]
+    if not files:
+        raise HTTPException(status_code=404, detail="附件不存在或已过期，请重新上传")
+    jd, tiers = _jd_tiers()
+    _use_llm = _llm_enabled()
+    _conf = None
+    if _use_llm:
+        _c = llm.load_cfg('extract')
+        _conf = {"api_key": _c.get("api_key"), "base_url": _c.get("base_url"),
+                 "model": _c.get("model")}
+    try:
+        rep = _ingest_upload(folder, jd, tiers, _use_llm, _conf)
+    except Exception as exc:                               # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail=f"入库失败：{type(exc).__name__}: {exc}")
+    # 成功（或全部被去重）后临时文件使命结束；失败保留，允许重试。
+    if not rep.get("failed"):
+        shutil.rmtree(folder, ignore_errors=True)
+    conn = db.connect(DB_PATH)
+    try:
+        db.add_audit(conn, "chat_attachment", str(token), "approve",
+                     files[0], f"HR 批准聊天附件加入人才库：{files[0]}",
+                     s["username"], s["role"])
+    finally:
+        conn.close()
+    return {"ok": True, "token": str(token), "result": rep,
+            "summary": f"新增 {rep.get('added', 0)}，新版本 {rep.get('merged_versions', 0)}"}
+
+
+@app.delete("/api/chat/attachments/{token}")
+def api_chat_attachment_delete(token: str,
+                               x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                               x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    folder = _chat_upload_dir(token)
+    if folder and os.path.isdir(folder):
+        shutil.rmtree(folder, ignore_errors=True)
+    conn = db.connect(DB_PATH)
+    try:
+        db.add_audit(conn, "chat_attachment", str(token), "delete", "",
+                     "HR 移除了聊天临时附件", s["username"], s["role"])
+    finally:
+        conn.close()
+    return {"ok": True}
 
 
 @app.post("/api/upload")
@@ -3122,7 +3306,16 @@ def api_candidates_archive_batch(req: ArchiveBatchReq,
         if req.before_year is None and not ids:
             raise HTTPException(status_code=400,
                                 detail="没有指定要归档的人（ids 与 before_year 至少给一个）")
-        out = db.set_candidates_archived(conn, sorted(ids), req.archived, s["username"], s["role"])
+        try:
+            out = db.set_candidates_archived(
+                conn, sorted(ids), req.archived, s["username"], s["role"],
+                before_year=req.before_year)
+        except Exception as exc:                           # noqa: BLE001
+            # 批量归档已改成整批一个事务：失败必须明确告诉 HR“全部没生效”，
+            # 不能返回一个看似成功、实际只改了一半的结果。
+            raise HTTPException(
+                status_code=500,
+                detail=f"批量归档失败，已全部回滚：{type(exc).__name__}: {exc}")
         out["picked_by_year"] = picked_by_year
         out["purge_after_days"] = db.PURGE_AFTER_DAYS
         _ended = int(out.get("ended_applications") or 0)
@@ -3282,6 +3475,20 @@ def _startup_purge_task() -> None:
             print(f"[tasks] 启动清理：{_n} 个未完成后台任务标记为中断")
     except Exception as exc:                               # noqa: BLE001
         print(f"[tasks] 启动标记中断任务失败（不影响使用）：{exc}", file=sys.stderr)
+    # 发信请求状态收口：queued 一定没开始 SMTP，可安全重发；
+    # sending/旧版空状态可能已经发出，标成 unknown，绝不自动重发。
+    try:
+        _mn = db.mail_requests_mark_stale(DB_PATH)
+        if _mn:
+            print(f"[mail] 启动收口：{_mn} 条未完成的发信请求已标记")
+    except Exception as exc:                               # noqa: BLE001
+        print(f"[mail] 启动收口发信请求失败（不影响使用）：{exc}", file=sys.stderr)
+    try:
+        _rn = db.reconcile_mail_tasks(DB_PATH)
+        if _rn:
+            print(f"[mail] 启动对账：{_rn} 条发信任务快照已按幂等表纠正")
+    except Exception as exc:                               # noqa: BLE001
+        print(f"[mail] 启动对账任务快照失败（不影响使用）：{exc}", file=sys.stderr)
     # 上次进程崩溃时可能留下「执行中」的提案；超过 60 分钟没人推进就放回待确认。
     try:
         _conn = db.connect(DB_PATH)
@@ -3319,6 +3526,18 @@ def _startup_purge_task() -> None:
                     print(f"[purge] 定时清理：删除 {_tn} 条 30 天前的后台任务快照")
             except Exception as exc:                       # noqa: BLE001
                 print(f"[purge] 任务快照清理失败：{exc}", file=sys.stderr)
+            try:
+                _on = _cleanup_outbox_retention()
+                if _on:
+                    print(f"[purge] 定时清理：删除 {_on} 个过期临时附件")
+            except Exception as exc:                       # noqa: BLE001
+                print(f"[purge] 临时附件清理失败：{exc}", file=sys.stderr)
+            try:
+                _cn = _cleanup_chat_uploads()
+                if _cn:
+                    print(f"[purge] 定时清理：删除 {_cn} 个过期聊天临时目录")
+            except Exception as exc:                       # noqa: BLE001
+                print(f"[purge] 聊天临时附件清理失败：{exc}", file=sys.stderr)
 
     try:
         out = _purge_expired()
@@ -3340,6 +3559,7 @@ def _startup_purge_task() -> None:
             print(f"[purge] 启动清理：删除 {_tn} 条 30 天前的后台任务快照")
     except Exception as exc:                               # noqa: BLE001
         print(f"[purge] 任务快照启动清理失败（不影响使用）：{exc}", file=sys.stderr)
+    # 临时附件清理放到下面的 `_repair` 后台线程，绝不能在启动钩子里扫目录。
     # ---- v3.0.2（关键性能修复）：**启动钩子必须立刻返回** ----
     # uvicorn 的 `startup()` 是 `await self.lifespan.startup()` **之后**才
     # `loop.create_server(...)` 绑端口（见 uvicorn/server.py:116 与 182）。
@@ -3379,6 +3599,18 @@ def _startup_purge_task() -> None:
                 print(f"[temp] 清理了 {_n_temp} 个过期简历临时目录")
         except Exception as exc:                           # noqa: BLE001
             print(f"[temp] 临时目录清理失败（不影响使用）：{exc}", file=sys.stderr)
+        try:
+            _on = _cleanup_outbox_retention()
+            if _on:
+                print(f"[purge] 启动清理：删除 {_on} 个过期临时附件")
+        except Exception as exc:                           # noqa: BLE001
+            print(f"[purge] 临时附件清理失败（不影响使用）：{exc}", file=sys.stderr)
+        try:
+            _cn = _cleanup_chat_uploads()
+            if _cn:
+                print(f"[purge] 启动清理：删除 {_cn} 个过期聊天临时目录")
+        except Exception as exc:                           # noqa: BLE001
+            print(f"[purge] 聊天临时附件清理失败（不影响使用）：{exc}", file=sys.stderr)
         # 顺手把库内技能分类对齐到当前本体（v1.6）：专业大类匹配依赖 skills.category，
         # 而 upsert_skill 不会改写已存在技能的分类，所以本体新增技能（如 Java/Spring Boot）后
         # 必须同步一次，否则老条目仍归在「其他」里，大类匹配对软件岗就是失真的。
@@ -3773,7 +4005,8 @@ def api_export_roster(scope: str = "候选人名单",
                               interview_date, job_id))
     finally:
         conn.close()
-    meta = xlsx_mod.meta_line(scope, "（含已归档；未加其它筛选）", n)
+    meta = xlsx_mod.meta_line(
+        scope, "（含已归档；多投递人员优先展示拟录用/offer/签约）", n)
     # `fmt` 与 `format` 两个名字都收：HR/脚本两种写法都会用，
     # 而"传了 format=csv 却拿到 xlsx"是那种**看起来成功**的错。
     return _export_response(headers, rows, tcols, meta, scope, n, format or fmt,
@@ -3924,13 +4157,6 @@ def api_export_resume_bundle(job_id: int | None = None, stage: str | None = None
         raise HTTPException(status_code=404,
                             detail="该筛选条件下没有可打包的简历原件（可能未上传原件或已归档）")
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
-    conn = db.connect(DB_PATH)
-    try:
-        db.add_audit(conn, "export", "resume-bundle", "bundle_download",
-                     f"{len(pairs)} 份", f"打包简历附件 {len(pairs)} 份｜{filters}",
-                     s["username"], s["role"])
-    finally:
-        conn.close()
     _roster_filters = {k: v for k, v in filters.items() if k != "candidate_ids"}
     conn = db.connect(DB_PATH)
     try:
@@ -3940,7 +4166,22 @@ def api_export_resume_bundle(job_id: int | None = None, stage: str | None = None
             include_archived=False, **_roster_filters)
     finally:
         conn.close()
-    return _zip_response(pairs, f"简历附件-{stamp}.zip", extra=_extra)
+    # 先真正构造 zip（超 200 份/500MB 会在这里抛 400），成功后再写审计。
+    resp, actual = _zip_response(pairs, f"简历附件-{stamp}.zip",
+                                 extra=_extra, return_count=True)
+    if actual <= 0:
+        raise HTTPException(status_code=404,
+                            detail="所选简历原件都已不在磁盘上，未生成压缩包")
+    conn = db.connect(DB_PATH)
+    try:
+        db.add_audit(conn, "export", "resume-bundle", "bundle_download",
+                     f"{actual} 份", f"打包简历附件 {actual} 份"
+                     + (f"（计划 {len(pairs)} 份，有缺失）" if actual != len(pairs) else "")
+                     + f"｜{filters}",
+                     s["username"], s["role"])
+    finally:
+        conn.close()
+    return resp
 
 
 @app.get("/api/bundle/initial-pass/last")
@@ -4019,24 +4260,53 @@ def api_bundle_initial_pass(date_from: str | None = Query(default=None),
                 detail=f"{_span} 没有可打包的简历（只有在该时间段投递、"
                        f"当前处于初筛通过且留了原件的人）")
         # 先真的把 zip 构造出来（超 200 份 / 超 500MB / 文件消失都会在这里报错）。
-        # 只有构造成功才写「上次下载」与审计——否则失败的下载会被记成成功。
-        resp = _zip_response(pairs, zname,
-                             extra=[(roster["filename"], roster["data"])])
-        db.set_setting(conn, "bundle_initial_last", {
-            "date_from": d_from,
-            "date_to": d_to,
-            "downloaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "files": len(pairs),
-            "roster": roster["n"],
-            "operator": s["username"],
-        })
-        db.add_audit(conn, "bundle", "initial-pass", "bundle_download", "",
-                     f"下载初筛通过简历（{_span}）{len(pairs)} 份，"
-                     f"附名单表 {roster['n']} 条",
-                     s["username"], s["role"])
+        # 只有构造成功才发 token；「上次下载」由客户端真正拿到文件后 ack 才写。
+        resp, actual = _zip_response(
+            pairs, zname, extra=[(roster["filename"], roster["data"])],
+            return_count=True)
+        if actual <= 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"{_span} 的简历原件都已不在磁盘上，未生成压缩包")
+        token = uuid.uuid4().hex
+        _now = time.time()
+        with _BUNDLE_ACK_LOCK:
+            for _t in [k for k, v in _BUNDLE_ACK.items()
+                       if _now - float(v.get("ts") or 0) > _BUNDLE_ACK_TTL]:
+                _BUNDLE_ACK.pop(_t, None)
+            _BUNDLE_ACK[token] = {
+                "date_from": d_from or "", "date_to": d_to or "",
+                "files": actual, "roster": roster["n"],
+                "operator": s["username"], "role": s["role"], "ts": _now,
+            }
+        resp.headers["X-Bundle-Ack"] = token
         return resp
     finally:
         conn.close()
+
+
+@app.post("/api/bundle/initial-pass/ack")
+def api_bundle_initial_ack(token: str = Query(default=""),
+                           x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                           x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """客户端真正拿到 zip 后的确认：只有这一步才写「上次下载到哪」。
+
+    普通 Response 的 BackgroundTask 在 uvicorn 客户端断开时也会执行，
+    不能当作“文件已送达”。token 由下载响应头下发，30 分钟内有效。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "export")
+    with _BUNDLE_ACK_LOCK:
+        payload = _BUNDLE_ACK.pop(str(token or ""), None)
+    if not payload:
+        raise HTTPException(status_code=404,
+                            detail="下载确认已过期或不存在；本次不记「上次下载」")
+    _bundle_initial_record(
+        payload.get("date_from") or "", payload.get("date_to") or "",
+        int(payload.get("files") or 0), int(payload.get("roster") or 0),
+        str(payload.get("operator") or s["username"]),
+        str(payload.get("role") or s["role"]))
+    return {"ok": True, "note": "已记录本次下载区间"}
 
 
 @app.get("/api/interviews/calendar")
@@ -4965,8 +5235,40 @@ def _roster_extra(conn, *, operator: str, role: str,
         return []
 
 
+def _bundle_initial_record(date_from: str, date_to: str, files: int, roster_n: int,
+                           operator: str, role: str) -> None:
+    """客户端 ack 后才记「上次下载到哪」。
+
+    以前在 return 之前就写 setting：浏览器取消/网络断了也会记成“已下载”，
+    下次 HR 看到“上次已下到 11-05”就会跳过这段，实际没拿到文件。
+    现在由 `/api/bundle/initial-pass/ack` 在浏览器真正拿到 blob 后调用。
+    """
+    span = f"{date_from or '最早'} 至 {date_to or '最新'}"
+    try:
+        conn = db.connect(DB_PATH)
+        try:
+            db.set_setting(conn, "bundle_initial_last", {
+                "date_from": date_from or "",
+                "date_to": date_to or "",
+                "downloaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "files": int(files or 0),
+                "roster": int(roster_n or 0),
+                "operator": operator,
+            })
+            db.add_audit(conn, "bundle", "initial-pass", "bundle_download", "",
+                         f"下载初筛通过简历（{span}）{files} 份，"
+                         f"附名单表 {roster_n} 条",
+                         operator, role)
+        finally:
+            conn.close()
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"[bundle] 记录上次下载失败（文件已下发）：{type(exc).__name__}: {exc}",
+              file=sys.stderr)
+
+
 def _zip_response(pairs: list[tuple[str, str]], zip_name: str,
-                  extra: list[tuple[str, bytes]] | None = None) -> Response:
+                  extra: list[tuple[str, bytes]] | None = None,
+                  *, return_count: bool = False):
     """把若干磁盘文件打成 zip 一次性下发。`pairs` 是 (磁盘路径, 包内文件名)。
 
     `extra`（v2.0.1）：**内存里现算、不落磁盘**的附加条目 `[(包内文件名, 字节)]`。
@@ -4982,6 +5284,7 @@ def _zip_response(pairs: list[tuple[str, str]], zip_name: str,
     buf = io.BytesIO()
     used: set[str] = set()
     total = 0
+    written = 0
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for path, name in pairs:
             if not _paths.lp_isfile(path):
@@ -4991,6 +5294,7 @@ def _zip_response(pairs: list[tuple[str, str]], zip_name: str,
                 raise HTTPException(status_code=400,
                                     detail="所选文件合计超过 500MB，请分批下载")
             z.write(path, _unique_name(os.path.basename(name), used))
+            written += 1
         # 内存生成的条目（名单表等）：同一条去重规则，中文名由 zipfile 自动打 UTF-8 flag
         for name, data in (extra or []):
             z.writestr(_unique_name(os.path.basename(name), used), data)
@@ -5002,11 +5306,12 @@ def _zip_response(pairs: list[tuple[str, str]], zip_name: str,
                          else "_" for ch in zip_name) or "bundle.zip"
     if not ascii_name.lower().endswith(".zip"):
         ascii_name += ".zip"
-    return Response(content=data, media_type="application/zip", headers={
+    resp = Response(content=data, media_type="application/zip", headers={
         "Content-Disposition":
             f'attachment; filename="{ascii_name}"; '
             f"filename*=UTF-8''{urllib.parse.quote(zip_name)}",
     })
+    return (resp, written) if return_count else resp
 
 
 @app.get("/api/sources/file")
@@ -5930,12 +6235,6 @@ def api_agent_context(session_id: str | None = None,
         _params["max_tokens"] = cfg.get("max_tokens")
     _win, _win_source = llm.model_context_window(cfg)
     _model_params = llm.model_parameter_count(cfg)
-    if not _win:
-        try:
-            _win = int(cfg.get("context_window") or 1_000_000)
-            _win_source = "config" if cfg.get("context_window") else "default"
-        except (TypeError, ValueError):
-            _win, _win_source = 1_000_000, "default"
     return build_context_estimate(
         window=_win, messages_text=text, allowed_specs=specs, memory=memory,
         model=str(cfg.get("model") or ""), params=_params,
@@ -6296,6 +6595,8 @@ class ModelCfgReq(BaseModel):
     model: str | None = None
     api_key: str | None = None
     enabled: bool | None = None      # 启用/关闭模型（None = 不改）
+    # 上下文窗口：空串 = 清除人工值回到自动探测；None = 不改。
+    context_window: str | None = None
 
 
 @app.get("/api/model-config")
@@ -6321,6 +6622,7 @@ def api_model_config_get(x_tp_token: str | None = Header(default=None, alias="X-
     env_set = [k for k in ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY") if os.environ.get(k)]
     return {"base_url": c.get("base_url") or "", "model": c.get("model") or "",
             "enabled": bool(c.get("enabled", True)),
+            "context_window": c.get("context_window") or "",
             "key_masked": llm.mask_key(key), "key_set": bool(key),
             "key_source": src, "env_override": env_set,
             "note": "API Key 只显示掩码；保存写 config/secrets.json（0600，不入库不提交），"
@@ -6340,14 +6642,18 @@ def api_model_config_set(req: ModelCfgReq,
     require(s, "settings")
     if req.base_url is not None and req.base_url.strip() and not req.base_url.strip().startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="模型地址要以 http:// 或 https:// 开头")
-    r = llm.save_cfg(base_url=req.base_url, model=req.model,
-                     api_key=req.api_key, enabled=req.enabled)
+    try:
+        r = llm.save_cfg(base_url=req.base_url, model=req.model,
+                         api_key=req.api_key, enabled=req.enabled,
+                         context_window=req.context_window)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if not r["changed"]:
         return {"ok": True, "changed": [], "note": "没有需要保存的修改（API Key 留空 = 不修改）。"}
     conn = db.connect(DB_PATH)
     try:
         # 审计只记字段名：base_url/model 属配置可记，api_key 只记"已更新"
-        _label = {"enabled": "模型启用状态"}
+        _label = {"enabled": "模型启用状态", "context_window": "上下文窗口"}
         fields = "、".join(("api_key（值不记录）" if f == "api_key"
                             else _label.get(f, f)) for f in r["changed"])
         db.add_audit(conn, "settings", "model-config", "update",
@@ -8194,6 +8500,9 @@ OUTBOX_MAX_BYTES = 20 * 1024 * 1024
 #: SMTP 的 25MB 限制通常按编码后的报文计算；附件原始字节合计再卡一道，
 #: 避免多个单文件都合法、最后在 SMTP 阶段才失败。
 OUTBOX_MAX_TOTAL_BYTES = 20 * 1024 * 1024
+#: 从草稿移除附件时**不立刻删盘**：同一份内容在不同草稿里共用一个 outbox_id，
+#: 立刻删会让另一个还开着草稿的附件一起消失。保留期内由后台任务统一清理。
+OUTBOX_RETENTION_DAYS = 90
 
 
 def _outbox_dir() -> str:
@@ -8226,6 +8535,30 @@ def _outbox_path(outbox_id: str) -> str | None:
             != os.path.abspath(_outbox_dir()):
         return None
     return p
+
+
+def _cleanup_outbox_retention(days: int = OUTBOX_RETENTION_DAYS) -> int:
+    """清理超过保留期的临时附件。只在后台维护线程里调用。"""
+    cutoff = time.time() - max(1, int(days)) * 24 * 3600
+    removed = 0
+    try:
+        names = os.listdir(_outbox_dir())
+    except OSError:
+        return 0
+    for name in names:
+        p = os.path.join(_outbox_dir(), name)
+        try:
+            st = os.stat(_paths.long_path(p))
+        except OSError:
+            continue
+        if not os.path.isfile(_paths.long_path(p)) or st.st_mtime >= cutoff:
+            continue
+        try:
+            os.remove(_paths.long_path(p))
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 @app.post("/api/mail/outbox")
@@ -8264,9 +8597,33 @@ async def api_mail_outbox(request: Request, name: str = "",
     # 此时复用同一个 id 会让收件人看到的名字变回第一次那个 —— 所以同内容时
     # 记一份"别名"，按最新一次的原名返回。
     path = os.path.join(_outbox_dir(), digest + ext)
-    if not _paths.lp_exists(path):
-        with open(path, "wb") as fh:
-            fh.write(body)
+    _reuse = False
+    if _paths.lp_exists(path):
+        try:
+            _reuse = os.stat(_paths.long_path(path)).st_size == len(body)
+        except OSError:
+            _reuse = False
+    if _reuse:
+        # 同内容复用旧文件时刷新 mtime：否则 90 天保留期会把它当成“旧文件”
+        # 清掉，而当前草稿其实刚引用过它。
+        try:
+            os.utime(_paths.long_path(path), None)
+        except OSError:
+            pass
+    else:
+        # 先写临时文件再原子替换：进程在写一半时崩溃不会留下一个
+        # “文件名正确、内容截断”的坏附件被后续请求永久复用。
+        tmp = path + ".part-" + uuid.uuid4().hex
+        try:
+            with open(tmp, "wb") as fh:
+                fh.write(body)
+            os.replace(tmp, path)
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
     safe_name = os.path.basename(str(name or ""))[:120] or f"附件{ext}"
     conn = db.connect(DB_PATH)
     try:
@@ -8277,7 +8634,7 @@ async def api_mail_outbox(request: Request, name: str = "",
         conn.close()
     return {"ok": True, "outbox_id": digest, "filename": safe_name,
             "size": len(body),
-            "note": "已暂存。发出后文件仍保留在 data/outbox/，可追溯。"}
+            "note": f"已暂存。文件自最近上传起保留 {OUTBOX_RETENTION_DAYS} 天，可追溯。"}
 
 
 @app.get("/api/mail/outbox/{outbox_id}")
@@ -8309,31 +8666,39 @@ def api_mail_outbox_open(outbox_id: str, name: str = "", inline: int = 1,
 def api_mail_outbox_delete(outbox_id: str,
                            x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                            x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
-    """删除一个**尚未发出**的临时附件（v1.29.10，业务方要"附件删除按钮"）。
+    """把一个**尚未发出**的临时附件从当前草稿移除（v1.29.10）。
 
-    只删文件本身（data/outbox/ 下）；归档原件（documents）不走这条。附件按
-    内容哈希存 id —— 同一份文件在别的草稿里也用同一个 id，删除是"这份文件
-    不要了"的语义，都清掉。
+    ⚠️ **不立刻删磁盘文件**：outbox_id 是内容哈希，同一份文件在别的草稿/
+    另一个浏览器标签里也用同一个 id。原来直接 os.remove，会把别人还开着的
+    草稿附件一起删掉，点发送时才报“临时附件已不在暂存区”。
+    现在只解除当前草稿的引用，文件由后台按保留期清理。
     """
     s = _session(x_tp_token, x_tp_role)
     require(s, "confirm")
     p = _outbox_path(outbox_id)
     if not p:
         raise HTTPException(status_code=400, detail="附件编号不合法")
-    removed = _paths.lp_exists(p)
-    if removed:
-        try:
-            os.remove(p)
-        except OSError as exc:
-            raise HTTPException(status_code=500, detail=f"删除失败：{exc}")
+    retained = _paths.lp_exists(p)
     conn = db.connect(DB_PATH)
     try:
-        db.add_audit(conn, "outbox", str(outbox_id), "delete",
-                     str(outbox_id), f"删除临时附件（{os.path.basename(p)}）",
+        db.add_audit(conn, "outbox", str(outbox_id), "detach",
+                     str(outbox_id),
+                     f"从草稿移除临时附件（{os.path.basename(p)}）；"
+                     f"自最近上传起保留 {OUTBOX_RETENTION_DAYS} 天",
                      s["username"], s["role"])
     finally:
         conn.close()
-    return {"ok": True, "removed": removed, "note": "附件已删除"}
+    return {"ok": True, "removed": False, "retained": retained,
+            "note": f"已从当前草稿移除；暂存文件自最近上传起保留 "
+                    f"{OUTBOX_RETENTION_DAYS} 天，避免其他草稿引用同一附件时丢失。"}
+
+
+class _MailSendUncertain(HTTPException):
+    """SMTP 已进入发送阶段但连接中断：邮件可能已发出，禁止自动重发。"""
+
+    def __init__(self, detail: str):
+        super().__init__(status_code=400, detail=detail)
+        self.uncertain = True
 
 
 def _mail_send_sync(req: MailSendReq, s: dict) -> dict:
@@ -8515,6 +8880,8 @@ def _mail_send_sync(req: MailSendReq, s: dict) -> dict:
         _msg = r.get("error") or "发送失败"
         if r.get("hint"):
             _msg = f"{_msg}｜{r['hint']}"
+        if r.get("uncertain"):
+            raise _MailSendUncertain(_msg)
         raise HTTPException(status_code=400, detail=_msg)
     # 部分附件读不到（不是全部）→ 邮件已发，但必须让 HR 知道少了什么
     if att_missing:
@@ -8534,46 +8901,231 @@ def _mail_send_sync(req: MailSendReq, s: dict) -> dict:
             "note": ((r.get("note") or "邮件已发出，动作已写入审计。") + _extra)}
 
 
-def _run_mail_send_task(tid: str, req: MailSendReq, session: dict) -> None:
+def _run_mail_send_task(tid: str, req: MailSendReq, session: dict,
+                        req_id: str = "") -> None:
     """后台真正发信；浏览器只轮询任务，避免大附件把 HTTP 连接拖断。"""
     try:
+        if req_id and not db.mail_request_mark_sending(DB_PATH, req_id, tid):
+            # 同一请求已被新任务接管，或已经结束：本线程绝不能继续发信。
+            msg = "发送请求已被其他任务接管或已结束，本次未重复发送"
+            _winner = ""
+            try:
+                _winner = str((db.mail_request_get(DB_PATH, req_id) or {}).get("task_id") or "")
+            except Exception:                            # noqa: BLE001
+                _winner = ""
+            _progress_set(tid, done=1, status="error", message=msg,
+                          extra={"result": {"ok": False, "status": "superseded",
+                                            "error": msg, "winner_task_id": _winner}})
+            return
         _progress_set(tid, message="正在连接发信服务器…")
         result = _mail_send_sync(req, session)
-        _progress_set(
-            tid, done=1, status="done",
-            message="邮件已发送",
-            extra={"result": result},
-        )
+        if req_id:
+            try:
+                if not db.mail_request_finish(DB_PATH, req_id, tid, "sent", result=result):
+                    print(f"[mail] 幂等结果未落库（任务 {tid}）：请求已被接管",
+                          file=sys.stderr)
+            except Exception as _e:                            # noqa: BLE001
+                # 信已经发出去了；落库失败只能告警。下次同键重试会看到 unknown，
+                # 宁可让 HR 去已发送确认，也不能自动再发一封。
+                print(f"[mail] 幂等结果落库失败（邮件已发出）：{_e}", file=sys.stderr)
+        # ⚠️ 这里已经发信成功。进度快照落库失败只能告警，绝不能掉进下面的
+        # except 把幂等状态改成 failed —— 那会让前端允许重发，真的发第二封。
+        try:
+            _progress_set(
+                tid, done=1, status="done",
+                message="邮件已发送",
+                extra={"result": result},
+            )
+        except Exception as _e:                            # noqa: BLE001
+            print(f"[mail] 进度快照落库失败（邮件已发出，任务 {tid}）：{_e}",
+                  file=sys.stderr)
     except HTTPException as exc:
         msg = str(exc.detail or "发送失败")
+        _st = "unknown" if getattr(exc, "uncertain", False) else "failed"
+        if req_id:
+            try:
+                db.mail_request_finish(DB_PATH, req_id, tid, _st, error=msg)
+            except Exception:                                  # noqa: BLE001
+                pass
+        _extra = {"ok": False, "error": msg, "status": _st}
         _progress_set(
             tid, done=1, status="error", message=msg,
-            extra={"result": {"ok": False, "error": msg}},
+            extra={"result": _extra},
         )
     except Exception as exc:                                   # noqa: BLE001
         traceback.print_exc()
         msg = f"发送任务异常：{type(exc).__name__}: {exc}"
+        if req_id:
+            try:
+                db.mail_request_finish(DB_PATH, req_id, tid, "failed", error=msg)
+            except Exception:                                  # noqa: BLE001
+                pass
         _progress_set(
             tid, done=1, status="error", message=msg,
-            extra={"result": {"ok": False, "error": msg}},
+            extra={"result": {"ok": False, "status": "failed", "error": msg}},
         )
 
 
-def _mail_dedup_response(tid: str) -> dict:
-    """回放一条已存在的发信任务（内存优先，重启后从库里的任务快照读）。"""
+def _mail_task_snapshot(tid: str) -> dict:
     with _PROGRESS_LOCK:
         existing = dict(_PROGRESS.get(tid) or {})
     if not existing:
         existing = db.task_get(DB_PATH, tid) or {}
+    return existing
+
+
+def _mail_dedup_response(tid: str) -> dict:
+    """回放一条已存在的发信任务（内存优先，重启后从库里的任务快照读）。"""
+    existing = _mail_task_snapshot(tid)
+    if not existing:
+        return {
+            "ok": False, "status": "unknown", "task_id": tid, "deduped": True,
+            "error": "同一封邮件的上次发送状态已无法确认；为避免重复，系统未再次发送。"
+                     "请先在邮箱「已发送」里确认。",
+        }
     out = {
         "ok": True,
         "pending": existing.get("status") == "running",
         "task_id": tid,
+        "status": existing.get("status") or "",
         "deduped": True,
         "note": "同一封邮件的发送请求已存在，未重复提交。",
     }
     if "result" in existing:
         out["result"] = existing["result"]
+        _rs = (existing.get("result") or {}).get("status") if isinstance(
+            existing.get("result"), dict) else ""
+        if _rs:
+            out["status"] = _rs
+        if _rs in ("unknown", "superseded"):
+            out["ok"] = False
+            out.setdefault("error", (existing.get("result") or {}).get("error")
+                           or "发送结果未知，请先在邮箱「已发送」确认")
+    if existing.get("status") == "error":
+        out["ok"] = False
+        # 任务错误但没有任何明确 result.status（重启/旧任务）时，不能当成
+        # “确定失败”让前端清幂等键；按 unknown 处理，先查已发送。
+        if str(out.get("status") or "") in ("", "error"):
+            out["status"] = "unknown"
+        out["error"] = existing.get("message") or "上次发送结果未知，请先在已发送确认"
+    return out
+
+
+def _mail_existing_response(rec: dict) -> dict:
+    """请求键已存在时的统一回执：绝不因为“重试”再发一封。"""
+    st = str(rec.get("status") or "unknown").strip() or "unknown"
+    tid = str(rec.get("task_id") or "")
+    snap = _mail_task_snapshot(tid) if tid else {}
+    sres = snap.get("result") if isinstance(snap, dict) else None
+
+    def _from_result(r: dict) -> dict:
+        out = dict(r or {})
+        out["deduped"] = True
+        return out
+
+    # 任务快照已有明确成功结果：优先回放（覆盖“幂等表 sent 写成功、
+    # 任务快照迟到/启动被标 error”的窗口）。
+    if isinstance(sres, dict) and sres.get("ok"):
+        return _from_result(sres)
+
+    if st == "sent":
+        if isinstance(rec.get("result"), dict):
+            return _from_result(rec["result"])
+        if isinstance(sres, dict):
+            return _from_result(sres)
+        # 表说 sent 但没有可解析回执：不能 fail-open 报成功。
+        return {
+            "ok": False, "status": "unknown", "task_id": tid, "deduped": True,
+            "error": "系统记录发送成功，但找不到发送回执；请先在邮箱「已发送」确认，"
+                     "不要直接重发。",
+        }
+
+    if st in ("queued", "sending"):
+        if snap.get("status") == "running":
+            return _mail_dedup_response(tid)
+        if isinstance(sres, dict):
+            out = _from_result(sres)
+            if sres.get("status") in ("unknown", "superseded"):
+                out["ok"] = False
+            return out
+        if snap.get("status") == "error":
+            return {
+                "ok": False, "status": (sres or {}).get("status") or "unknown",
+                "task_id": tid, "deduped": True,
+                "error": snap.get("message") or "上次发送结果未知，请先在已发送确认",
+            }
+        if st == "sending" and tid.startswith("sync-"):
+            return {
+                "ok": False, "status": "sending", "pending": True, "task_id": tid,
+                "deduped": True,
+                "error": "同一封邮件正在发送中，请稍后到「已发送」确认，不要重复提交。",
+            }
+        return {
+            "ok": False, "status": "unknown", "task_id": tid, "deduped": True,
+            "error": "同一封邮件的上一次发送尚未完成或结果未知；为避免重复，"
+                     "系统未再次发送。请稍后在「已发送」确认。",
+        }
+
+    if st == "failed":
+        if isinstance(sres, dict) and sres.get("status") == "superseded":
+            return _from_result(sres)
+        return {
+            "ok": False, "status": "failed", "task_id": tid, "deduped": True,
+            "error": rec.get("error") or "上次发送失败；请重新发起一封新的发送请求。",
+        }
+    if isinstance(sres, dict):
+        out = _from_result(sres)
+        out["ok"] = False
+        out.setdefault("error", rec.get("error") or "发送结果未知，请先在已发送确认")
+        return out
+    return {
+        "ok": False, "status": "unknown", "task_id": tid,
+        "deduped": True,
+        "error": rec.get("error") or "上一次发送中断，无法确认邮件是否已发出；"
+                                     "为避免重复，系统不会自动重发。请先在邮箱「已发送」确认。",
+    }
+
+
+def _mail_send_sync_idempotent(req: MailSendReq, s: dict) -> dict:
+    """同步发信也走持久化幂等：网络重试同一个 client_request_id 不会再发一封。"""
+    req_id = str(req.client_request_id or "").strip()[:80]
+    if not req_id:
+        return _mail_send_sync(req, s)
+    task_id = "sync-" + uuid.uuid4().hex[:12]
+    try:
+        rec = db.mail_request_begin(DB_PATH, req_id, task_id, status="sending")
+    except Exception as exc:                                   # noqa: BLE001
+        # 幂等表写不进去不该阻断发信；退回进程内去重，并明确记录。
+        print(f"[mail] 同步发信幂等键落库失败，已降级：{exc}", file=sys.stderr)
+        with _MAIL_REQ_LOCK:
+            _existing = _MAIL_REQ.get(req_id)
+            if _existing:
+                return _mail_dedup_response(_existing)
+            _MAIL_REQ[req_id] = task_id
+        return _mail_send_sync(req, s)
+    if not rec.get("created"):
+        return _mail_existing_response(rec)
+    try:
+        out = _mail_send_sync(req, s)
+    except HTTPException as exc:
+        msg = str(exc.detail or "发送失败")
+        _st = "unknown" if getattr(exc, "uncertain", False) else "failed"
+        try:
+            db.mail_request_finish(DB_PATH, req_id, task_id, _st, error=msg)
+        except Exception:                                      # noqa: BLE001
+            pass
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        msg = f"{type(exc).__name__}: {exc}"
+        try:
+            db.mail_request_finish(DB_PATH, req_id, task_id, "failed", error=msg)
+        except Exception:                                      # noqa: BLE001
+            pass
+        raise
+    try:
+        db.mail_request_finish(DB_PATH, req_id, task_id, "sent", result=out)
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"[mail] 同步发信幂等结果落库失败（邮件已发出）：{exc}", file=sys.stderr)
     return out
 
 
@@ -8597,48 +9149,62 @@ def api_mail_send(req: MailSendReq,
             raise HTTPException(status_code=400,
                                 detail="收件人与投递档案不一致，已拒绝发送；请重新选择候选人")
     if not async_mode:
-        return _mail_send_sync(req, s)
+        return _mail_send_sync_idempotent(req, s)
     req_id = str(req.client_request_id or "").strip()[:80]
+    new_tid = uuid.uuid4().hex[:12]
+    _db_claim_ok = True
     if req_id:
-        # 先查进程内缓存（热路径），再落到数据库做**跨进程/重启**的原子认领。
-        with _MAIL_REQ_LOCK:
-            existing_tid = _MAIL_REQ.get(req_id)
-        if existing_tid:
-            return _mail_dedup_response(existing_tid)
-        new_tid = uuid.uuid4().hex[:12]
+        # DB 是唯一真值：内存 map 只用于“幂等表真的写不进去”的降级路径，
+        # 不能抢在 DB 前面回放，否则旧任务的 tid 可能覆盖接管方的新 tid。
         try:
-            tid, created = db.mail_request_claim(DB_PATH, req_id, new_tid)
+            rec = db.mail_request_begin(DB_PATH, req_id, new_tid, status="queued")
         except Exception as exc:                     # noqa: BLE001
             # 幂等表写不进去不该阻断发信；退回进程内去重，并明确记录降级。
             print(f"[mail] 幂等键落库失败，已降级为进程内去重：{exc}", file=sys.stderr)
-            tid, created = new_tid, True
-        if not created:
             with _MAIL_REQ_LOCK:
-                _MAIL_REQ[req_id] = tid
-            return _mail_dedup_response(tid)
-        tid = _progress_new(
-            f"发送邮件：{req.subject or '（无主题）'}", 1, kind="mail",
-            task_id=tid,
-            meta={"candidate_id": req.candidate_id,
-                  "application_id": req.application_id,
-                  "to": req.to, "subject": req.subject,
-                  "client_request_id": req_id},
-        )
+                existing_tid = _MAIL_REQ.get(req_id)
+                if existing_tid:
+                    return _mail_dedup_response(existing_tid)
+                # 锁内先占位：两个并发同键请求不能都通过“没找到”检查。
+                _MAIL_REQ[req_id] = new_tid
+            _db_claim_ok = False
+            rec = {"created": True, "status": "queued", "task_id": new_tid}
+        if not rec.get("created"):
+            return _mail_existing_response(rec)
+        # queued 状态可能被本次接管：task_id 以数据库返回的为准。
+        tid = str(rec.get("task_id") or new_tid)
+    else:
+        tid = new_tid
+    # 落库失败时数据库里没有这条请求：worker 不能再拿 req_id 去 mark_sending，
+    # 否则 0 行更新会让后台线程误以为“已被接管”而整封不发。
+    db_req_id = req_id if _db_claim_ok else ""
+    tid = _progress_new(
+        f"发送邮件：{req.subject or '（无主题）'}", 1, kind="mail",
+        task_id=tid,
+        meta={"candidate_id": req.candidate_id,
+              "application_id": req.application_id,
+              "to": req.to, "subject": req.subject,
+              "client_request_id": req_id},
+    )
+    if req_id:
         with _MAIL_REQ_LOCK:
             _MAIL_REQ[req_id] = tid
-    else:
-        tid = _progress_new(
-            f"发送邮件：{req.subject or '（无主题）'}", 1, kind="mail",
-            meta={"candidate_id": req.candidate_id,
-                  "application_id": req.application_id,
-                  "to": req.to, "subject": req.subject,
-                  "client_request_id": ""},
-        )
-    threading.Thread(
-        target=_run_mail_send_task,
-        name="mail-send",
-        daemon=True,
-        args=(tid, req, dict(s)),
-    ).start()
+    try:
+        threading.Thread(
+            target=_run_mail_send_task,
+            name="mail-send",
+            daemon=True,
+            args=(tid, req, dict(s), db_req_id),
+        ).start()
+    except Exception as exc:                         # noqa: BLE001
+        msg = f"发送任务启动失败：{type(exc).__name__}: {exc}"
+        if req_id:
+            try:
+                db.mail_request_finish(DB_PATH, req_id, tid, "failed", error=msg)
+            except Exception:                        # noqa: BLE001
+                pass
+        _progress_set(tid, done=1, status="error", message=msg,
+                      extra={"result": {"ok": False, "error": msg}})
+        raise HTTPException(status_code=500, detail=msg)
     return {"ok": True, "pending": True, "task_id": tid, "deduped": False,
-            "note": "邮件已进入后台发送队列。"}
+            "status": "queued", "note": "邮件已进入后台发送队列。"}

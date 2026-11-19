@@ -165,20 +165,36 @@ def apply_proposal(db_path: str, proposal_id: int, decision: str,
             if not auth.can(role, "archive"):
                 return _denied(conn, p, operator, role, "archive")
             cid = int(args["candidate_id"])
-            db.set_candidate_archived(conn, cid, bool(args.get("archived")), operator, role)
+            out = db.set_candidate_archived(
+                conn, cid, bool(args.get("archived")), operator, role)
+            if not out:
+                return {"ok": False, "error": "候选人已不存在，提案未执行"}
             result["after"] = {"candidate_id": cid, "archived": bool(args.get("archived"))}
+            if out.get("_unchanged"):
+                result["message"] = ("候选人本来就是该归档状态，未重复写入"
+                                     if not out.get("_merged")
+                                     else "该候选人是合并后的壳档，已跳过")
 
         elif tool == "archive_batch":
             if not auth.can(role, "archive"):
                 return _denied(conn, p, operator, role, "archive")
-            r = db.set_candidates_archived(conn, [int(x) for x in (args.get("ids") or [])],
-                                           bool(args.get("archived")), operator, role)
+            try:
+                r = db.set_candidates_archived(
+                    conn, [int(x) for x in (args.get("ids") or [])],
+                    bool(args.get("archived")), operator, role)
+            except Exception as exc:                         # noqa: BLE001
+                return {"ok": False,
+                        "error": f"批量归档失败，已全部回滚：{type(exc).__name__}: {exc}"}
             result["after"] = {"changed": r.get("changed"), "skipped": r.get("skipped")}
 
         elif tool == "archive_by_year":
             if not auth.can(role, "archive"):
                 return _denied(conn, p, operator, role, "archive")
-            r = _archive_before_year(conn, int(args["before_year"]), operator, role)
+            try:
+                r = _archive_before_year(conn, int(args["before_year"]), operator, role)
+            except Exception as exc:                         # noqa: BLE001
+                return {"ok": False,
+                        "error": f"按年归档失败，已全部回滚：{type(exc).__name__}: {exc}"}
             result["after"] = r
 
         elif tool == "split_candidate":
@@ -1010,7 +1026,8 @@ def _archive_before_year(conn, year: int, operator: str, role: str) -> dict:
     ids = [r["cid"] for r in rows]
     if not ids:
         return {"changed": 0, "note": f"没有 {year} 年及以前的在池投递需要归档"}
-    r = db.set_candidates_archived(conn, ids, True, operator, role)
+    r = db.set_candidates_archived(conn, ids, True, operator, role,
+                                   before_year=int(year))
     return {"changed": r.get("changed"), "skipped": r.get("skipped"),
             "before_year": int(year)}
 

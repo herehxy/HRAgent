@@ -240,8 +240,11 @@ SYSTEM_PROMPT = (
     "折线/柱状用 `xychart-beta`（title / x-axis [..] / y-axis \"单位\" 0 --> 上限 / line [..] 或 bar [..]）。"
     "**不要**输出 matplotlib、echarts、Python 绘图代码，也不要输出 `pie showData` 这类"
     "没有代码块包裹的裸伪代码——那样只会显示成文字。图表里的每个数字都必须来自本轮工具结果。\n"
-    "9) 回答要有结构：较长的回答用 **加粗小标题** 分段（如 **结论**、**缺口**、**下一步**），"
-    "多用短列表和表格；不要把多个要点挤成一大段。\n"
+    "9) 回答要有结构：**先给一句结论**；较长的回答用 **加粗小标题** 或 ## 分节"
+    "（如 结论 / 缺口 / 下一步 / 建议），每个小标题下 2–5 条短列表；"
+    "对比 2 人以上或多岗位时用 Markdown 表格；重要提醒用 > **注意：** 引用块；"
+    "关键数字、日期、状态加粗。不要把多个要点挤成一大段；"
+    "一句话能答完的短问题不要硬套标题和表格。\n"
     "10) 涉及日期时以 system 里的【当前时间】为准：用户说今天/明天/后天/本周/下周，"
     "先换算成 YYYY-MM-DD 再传给工具或写进答复；不要凭记忆猜年份。\n"
     "11) 用户一句话里包含多个动作时（如“筛人→归岗→安排面试→导出”），"
@@ -749,7 +752,8 @@ def _est_tokens(text: str) -> int:
     return cg.estimate_tokens(text)
 
 
-def build_context_estimate(*, window: int = 1_000_000, messages_text: str = "",
+def build_context_estimate(*, window: int = cg.DEFAULT_CONTEXT_WINDOW,
+                           messages_text: str = "",
                            allowed_specs: list[dict] | None = None,
                            text_tools: bool = False,
                            skill: dict | None = None,
@@ -766,9 +770,9 @@ def build_context_estimate(*, window: int = 1_000_000, messages_text: str = "",
     两者都只用于展示，不参与权限或业务判断。
     """
     try:
-        win = int(window or 1_000_000)
+        win = int(window or cg.DEFAULT_CONTEXT_WINDOW)
     except (TypeError, ValueError):
-        win = 1_000_000
+        win = cg.DEFAULT_CONTEXT_WINDOW
     if not budget:
         budget = cg.resolve_budget(win, max_output_tokens=(params or {}).get("max_tokens"))["budget"]
     specs = allowed_specs or []
@@ -961,12 +965,6 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
     # 先确定模型窗口/预算，再路由工具：32k 窗口不能像 1M 窗口一样给 30 个
     # 工具，否则系统提示词 + 工具说明就吃掉一半输入。
     _win, _win_source = llm.model_context_window(cfg)
-    if not _win:
-        try:
-            _win = int(cfg.get("context_window") or 1_000_000)
-            _win_source = "config" if cfg.get("context_window") else "default"
-        except (TypeError, ValueError):
-            _win, _win_source = 1_000_000, "default"
     _budget_info = cg.resolve_budget(
         _win, max_output_tokens=cfg.get("max_tokens"),
         configured_budget=cfg.get("context_budget_tokens"),

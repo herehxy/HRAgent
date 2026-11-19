@@ -57,6 +57,11 @@ class ResumeSelectionTest(unittest.TestCase):
         atts = [_att("anything.png", "身份证 公民身份号码", data=b"x")]
         self.assertEqual(mailbox.choose_resume_attachment(atts), 0)
 
+    def test_single_xlsx_is_not_treated_as_resume(self):
+        atts = [_att("成绩单.xlsx", "", ok=False, data=b"x")]
+        self.assertEqual(mailbox.choose_resume_attachment(atts), -1,
+                         "表格在白名单里但不能解析，不能建成空候选人")
+
     def test_prepare_attachments_parses_text_and_marks_ok(self):
         atts = [{"filename": "a.txt", "mime": "text/plain",
                  "data": "姓名：张三\n教育经历\n".encode("utf-8")}]

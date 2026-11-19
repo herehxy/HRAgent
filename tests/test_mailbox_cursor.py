@@ -66,6 +66,20 @@ class MailboxCursorTest(unittest.TestCase):
         self.assertTrue(report.get("stopped"))
         self.assertEqual(self._cursor(), "100", "未入库的邮件不能推进游标")
 
+    def test_fetch_imap_batch_memory_cap(self):
+        def fake_iter(*args, **kwargs):
+            yield ("uidvalidity", "uv1")
+            yield ("mail", {"uid": "101", "attachments": [{"data": b"x" * 6}]})
+            yield ("mail", {"uid": "102", "attachments": [{"data": b"y" * 6}]})
+
+        meta: dict = {}
+        with mock.patch.object(mailbox, "iter_imap", side_effect=fake_iter):
+            mails, newest = mailbox.fetch_imap({}, "100", meta=meta, max_bytes=10)
+        self.assertEqual([m["uid"] for m in mails], ["101"],
+                         "达到内存上限后要停在这一封之前，下一批再收")
+        self.assertEqual(newest, "101")
+        self.assertTrue(meta.get("batch_limit_hit"))
+
     def test_fetch_error_stops_before_failed_uid(self):
         meta: dict = {}
 
@@ -150,6 +164,7 @@ class MailboxCursorTest(unittest.TestCase):
             report = kwargs.get("report")
             if report is not None:
                 report["failed"] = int(report.get("failed") or 0) + 1
+                report["blocked_files"] = ["坏简历.pdf"]
 
         with mock.patch.object(mailbox, "fetch_imap", return_value=(mails, "101")), \
                 mock.patch.object(ingest, "stop_requested", return_value=False), \
@@ -162,12 +177,14 @@ class MailboxCursorTest(unittest.TestCase):
         self.assertEqual(self._cursor(), "101", "死信要越过并保存游标")
         conn = db.connect(self.db_path)
         try:
-            row = conn.execute("SELECT dead_letter,processed FROM email_messages "
+            row = conn.execute("SELECT dead_letter,processed,error FROM email_messages "
                                "WHERE message_id='m-dead'").fetchone()
         finally:
             conn.close()
         self.assertEqual(row["dead_letter"], 1)
         self.assertEqual(row["processed"], 0)
+        self.assertIn("坏简历.pdf", row["error"] or "",
+                      "死信要留下失败附件名，HR 才知道该补哪一份")
 
     def test_legacy_path_with_failure_keeps_cursor(self):
         mails = [{"uid": "101"}, {"uid": "102"}]
@@ -175,6 +192,33 @@ class MailboxCursorTest(unittest.TestCase):
                 mock.patch.object(ingest, "ingest_mails", return_value={"failed": 1}):
             ingest.sync_mailbox({}, {}, self.db_path, cfg=self._cfg(), limit=0)
         self.assertEqual(self._cursor(), "100", "旧路径有失败也不能推进游标")
+
+    def test_other_attachment_failure_keeps_cursor(self):
+        """只有补充附件失败（other_failed）时也不能推进游标。"""
+        mails = [{"uid": "101", "message_id": "m-other", "subject": "补充附件坏"}]
+
+        def fake_ingest(*args, **kwargs):
+            report = kwargs.get("report")
+            if report is not None:
+                report["other_failed"] = int(report.get("other_failed") or 0) + 1
+
+        with mock.patch.object(mailbox, "fetch_imap", return_value=(mails, "101")), \
+                mock.patch.object(ingest, "stop_requested", return_value=False), \
+                mock.patch.object(ingest, "update_progress", lambda *a, **k: None), \
+                mock.patch.object(ingest, "spawn_auto_analysis", lambda *a, **k: None), \
+                mock.patch.object(ingest, "ingest_mails", side_effect=fake_ingest):
+            report = ingest.sync_mailbox({}, {}, self.db_path, cfg=self._cfg(),
+                                         progress_tid="t-other", limit=0)
+        self.assertTrue(report.get("retry_pending"))
+        self.assertEqual(self._cursor(), "100", "补充附件失败也不能推进游标")
+
+    def test_legacy_path_with_other_failure_keeps_cursor(self):
+        mails = [{"uid": "101"}, {"uid": "102"}]
+        with mock.patch.object(mailbox, "incoming", return_value=(mails, "102")), \
+                mock.patch.object(ingest, "ingest_mails",
+                                  return_value={"other_failed": 1}):
+            ingest.sync_mailbox({}, {}, self.db_path, cfg=self._cfg(), limit=0)
+        self.assertEqual(self._cursor(), "100", "旧路径补充附件失败也不能推进游标")
 
     def test_successful_ingest_advances_to_last_processed(self):
         mails = [{"uid": "101", "subject": "a"}, {"uid": "102", "subject": "b"}]

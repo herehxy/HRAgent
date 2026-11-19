@@ -18,6 +18,7 @@ v0.1（扁平的 candidates + audit）会在 `connect()` 时自动迁移为新�
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -557,7 +558,13 @@ CREATE INDEX IF NOT EXISTS idx_bg_tasks_status
 CREATE TABLE IF NOT EXISTS mail_requests (
     client_request_id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL,
-    created_at TEXT
+    -- queued=已登记未发信；sending=SMTP 进行中；sent=已成功；
+    -- failed=确定未发出；unknown=发送中断，无法确认是否已发出（不得自动重发）。
+    status TEXT DEFAULT 'queued',
+    result_json TEXT,
+    error TEXT,
+    created_at TEXT,
+    updated_at TEXT
 );
 
 -- ---------- 招聘届别与年度计划（v4.0.16） ----------
@@ -979,28 +986,208 @@ def task_cleanup(db_path: str, days: int = 30) -> int:
         return 0
 
 
-def mail_request_claim(db_path: str, req_id: str, task_id: str) -> tuple[str, bool]:
-    """原子登记邮件幂等键。返回 (最终 task_id, 是否由本次请求创建)。
+def _mail_request_row(conn: sqlite3.Connection, req_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM mail_requests WHERE client_request_id = ?",
+        (req_id,)).fetchone()
+    return dict(row) if row else None
 
-    跨进程/重启有效：INSERT OR IGNORE + PRIMARY KEY 决定唯一赢家；
-    已有记录时返回原 task_id，调用方据此回放原任务状态而不是再发一封邮件。
+
+def mail_request_begin(db_path: str, req_id: str, task_id: str,
+                       status: str = "queued") -> dict:
+    """原子登记/读取发信请求。返回当前状态，调用方据此决定是否真的发信。
+
+    `status` 传 `queued`（异步任务即将创建）或 `sending`（同步接口马上发）。
+    只有 `queued` 状态允许被新的异步请求接管：旧进程可能在
+    「登记成功、后台任务还没建出来」的瞬间崩掉，此时 SMTP 一定还没开始，
+    接管是安全的；`sending` 绝不能接管，否则可能重复发信。
+
+    返回 `{"created": bool, "status": str, "task_id": str,
+            "result": dict|None, "error": str, "takeover": bool}`。
     """
     req_id = str(req_id or "").strip()
     if not req_id:
-        return task_id, True
+        return {"created": True, "status": status, "task_id": task_id,
+                "result": None, "error": "", "takeover": False}
+    conn = connect(db_path)
+    try:
+        begin_immediate(conn)
+        row = _mail_request_row(conn, req_id)
+        if not row:
+            conn.execute(
+                "INSERT INTO mail_requests "
+                "(client_request_id, task_id, status, created_at, updated_at) "
+                "VALUES (?,?,?,?,?)",
+                (req_id, task_id, status, now(), now()))
+            conn.commit()
+            return {"created": True, "status": status, "task_id": task_id,
+                    "result": None, "error": "", "takeover": False}
+        st = str(row.get("status") or "").strip() or "unknown"
+        if status == "queued" and st == "queued":
+            cur = conn.execute(
+                "UPDATE mail_requests SET task_id = ?, status = 'queued', "
+                "updated_at = ? WHERE client_request_id = ? AND status = 'queued'",
+                (task_id, now(), req_id))
+            if (cur.rowcount or 0) == 1:
+                conn.commit()
+                return {"created": True, "status": "queued", "task_id": task_id,
+                        "result": None, "error": "", "takeover": True}
+        conn.rollback()
+        result = None
+        if row.get("result_json"):
+            try:
+                result = json.loads(row["result_json"])
+            except (ValueError, TypeError):
+                result = None
+        return {"created": False, "status": st,
+                "task_id": str(row.get("task_id") or ""),
+                "result": result, "error": str(row.get("error") or ""),
+                "takeover": False}
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:                                    # noqa: BLE001
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def mail_request_get(db_path: str, req_id: str) -> dict | None:
+    """读一条发信请求（只读，不会触发接管）。"""
+    req_id = str(req_id or "").strip()
+    if not req_id:
+        return None
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM mail_requests WHERE client_request_id = ?",
+            (req_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def reconcile_mail_tasks(db_path: str) -> int:
+    """启动时把 `mail_requests` 的最终状态对账到 `background_tasks` 快照。
+
+    崩溃可能发生在「SMTP 已成功、mail_requests 已写 sent」与「任务快照写 done」
+    之间；启动时 `task_mark_interrupted` 会把任务标成 error，前端就会误报
+    “发送失败”。这里按幂等表纠正：sent → task done + result；
+    unknown/failed → task error + 明确的 result.status。
+    """
+    conn = connect(db_path)
+    try:
+        rows = conn.execute("SELECT * FROM mail_requests").fetchall()
+    finally:
+        conn.close()
+    fixed = 0
+    for row in rows:
+        d = dict(row)
+        tid = str(d.get("task_id") or "")
+        st = str(d.get("status") or "")
+        if not tid or st not in ("sent", "unknown", "failed"):
+            continue
+        t = task_get(db_path, tid)
+        if not t:
+            continue
+        result = None
+        if d.get("result_json"):
+            try:
+                result = json.loads(d["result_json"])
+            except (TypeError, ValueError):
+                result = None
+        data = dict(t.get("data") or {})
+        changed = False
+        if st == "sent" and result is not None:
+            if t.get("status") != "done":
+                t["status"] = "done"
+                t["message"] = "邮件已发送"
+                t["done"] = 1
+                changed = True
+            if data.get("result") != result:
+                data["result"] = result
+                changed = True
+        elif st in ("unknown", "failed") and t.get("status") == "error":
+            want = {"ok": False, "status": st,
+                    "error": d.get("error") or ("发送结果未知" if st == "unknown"
+                                                else "发送失败")}
+            if data.get("result") != want:
+                data["result"] = want
+                changed = True
+        if not changed:
+            continue
+        task_upsert(db_path, {
+            "task_id": tid, "kind": t.get("kind") or "mail",
+            "title": t.get("title") or "发送邮件",
+            "total": t.get("total") or 1, "done": t.get("done") or 0,
+            "failed": t.get("failed") or 0,
+            "status": t.get("status") or "error",
+            "message": t.get("message") or "",
+            "meta": t.get("meta") or {}, "data": data,
+            "started_at": t.get("started_at"),
+        })
+        fixed += 1
+    return fixed
+
+
+def mail_request_mark_sending(db_path: str, req_id: str, task_id: str) -> bool:
+    """把请求从 queued 推到 sending。返回 False 表示已被别的任务接管/已结束。"""
+    req_id = str(req_id or "").strip()
+    if not req_id:
+        return True
     conn = connect(db_path)
     try:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO mail_requests "
-            "(client_request_id, task_id, created_at) VALUES (?,?,?)",
-            (req_id, task_id, now()))
+            "UPDATE mail_requests SET status = 'sending', updated_at = ? "
+            "WHERE client_request_id = ? AND task_id = ? "
+            "AND status IN ('queued', 'sending')",
+            (now(), req_id, task_id))
         conn.commit()
-        if cur.rowcount:
-            return task_id, True
-        row = conn.execute(
-            "SELECT task_id FROM mail_requests WHERE client_request_id = ?",
-            (req_id,)).fetchone()
-        return (row["task_id"] if row else task_id), False
+        return (cur.rowcount or 0) == 1
+    finally:
+        conn.close()
+
+
+def mail_request_finish(db_path: str, req_id: str, task_id: str,
+                        status: str, *, result: dict | None = None,
+                        error: str = "") -> bool:
+    """落最终状态。只允许当前 task 写，避免旧任务覆盖新任务。"""
+    req_id = str(req_id or "").strip()
+    if not req_id:
+        return True
+    conn = connect(db_path)
+    try:
+        payload = json.dumps(result, ensure_ascii=False) if result is not None else None
+        cur = conn.execute(
+            "UPDATE mail_requests SET status = ?, result_json = ?, error = ?, "
+            "updated_at = ? WHERE client_request_id = ? AND task_id = ?",
+            (status, payload, error or "", now(), req_id, task_id))
+        conn.commit()
+        return (cur.rowcount or 0) == 1
+    finally:
+        conn.close()
+
+
+def mail_requests_mark_stale(db_path: str) -> int:
+    """服务启动时收口上次进程遗留的请求。
+
+    `queued` 一定还没开始 SMTP → 记为 failed（可以重新发起）；
+    `sending`/旧版空状态 → unknown（可能已经发出，绝不能自动重发）。
+    """
+    conn = connect(db_path)
+    try:
+        cur1 = conn.execute(
+            "UPDATE mail_requests SET status = 'failed', "
+            "error = COALESCE(NULLIF(error,''), '服务重启，邮件未发出'), updated_at = ? "
+            "WHERE status = 'queued'", (now(),))
+        cur2 = conn.execute(
+            "UPDATE mail_requests SET status = 'unknown', "
+            "error = COALESCE(NULLIF(error,''), '服务重启，发送结果未知'), updated_at = ? "
+            "WHERE status IN ('sending', 'claimed') OR status IS NULL OR status = ''",
+            (now(),))
+        conn.commit()
+        return (cur1.rowcount or 0) + (cur2.rowcount or 0)
     finally:
         conn.close()
 
@@ -1218,6 +1405,18 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "retry_count": "INTEGER DEFAULT 0",
             "dead_letter": "INTEGER DEFAULT 0",
             "dead_at": "TEXT",
+            # 白名单外/超限等未收取附件的可追溯清单（JSON）。
+            "attachment_skipped_json": "TEXT",
+        },
+        # 发信幂等状态机：老库只有 client_request_id/task_id，补状态与结果。
+        # ⚠️ status 不加 DEFAULT 'queued'：老行补列后必须是 NULL（未知），
+        # 由启动收口标成 unknown；若默认成 queued 会被当成“还没发”，
+        # 老版本已经发出去的邮件就可能被重发。
+        "mail_requests": {
+            "status": "TEXT",
+            "result_json": "TEXT",
+            "error": "TEXT",
+            "updated_at": "TEXT",
         },
         "jobs": {
             "dept_id": "INTEGER",
@@ -3253,6 +3452,32 @@ def update_application_fields(conn: sqlite3.Connection, aid: int, *,
     return get_application(conn, aid)
 
 
+def _own_transaction(func):
+    """给「先查后写」的 db 函数补事务归属：自己开的事务自己提交/回滚。
+
+    调用方已经在外层事务里时不抢边界（由外层统一提交/回滚）。这样批量循环里
+    某一个人失败会立刻回滚他那半截写入；不会因为下一个人 commit 把失败者的
+    阶段 UPDATE 顺手提交、审计却丢了。
+    """
+    @functools.wraps(func)
+    def wrapper(conn, *args, **kwargs):
+        own = not conn.in_transaction
+        if own:
+            begin_immediate(conn)
+        try:
+            out = func(conn, *args, **kwargs)
+        except Exception:
+            if own:
+                conn.rollback()
+            raise
+        else:
+            if own:
+                conn.commit()
+            return out
+    return wrapper
+
+
+@_own_transaction
 def set_application_stage(conn: sqlite3.Connection, aid: int, stage: str,
                           outcome: str | None = None,
                           sign_status: str | None = None,
@@ -3371,7 +3596,8 @@ def set_application_stage(conn: sqlite3.Connection, aid: int, stage: str,
             f"UPDATE applications SET {', '.join(sets)} "
             "WHERE id = ? AND stage = ?", (*vals, aid, _cur_stage))
         if (_cur.rowcount or 0) != 1:
-            conn.rollback()
+            # 事务归属交给 `_own_transaction`：自己开的事务它负责回滚；
+            # 外层事务则留给外层，不能在这里误回滚别人的写入。
             raise ValueError("阶段已被其他操作改动，本次没有执行；请刷新后重试")
     else:
         conn.execute(f"UPDATE applications SET {', '.join(sets)} WHERE id = ?",
@@ -3399,16 +3625,80 @@ def set_application_stage(conn: sqlite3.Connection, aid: int, stage: str,
                                        operator=operator, role=role,
                                        skip_auto_archive=True)
                 auto_archived = True
-    # 阶段变更与审计、以及可能的自动归档在同一个事务里提交；
-    # 避免“阶段已落库、自动归档没落”或反过来的半截状态。
-    conn.commit()
+    # 阶段变更、审计、自动归档由 `_own_transaction` 统一提交；
+    # 自己开的事务失败会整笔回滚，外层事务则交给外层。
     out = get_application(conn, aid)
     if out is not None:
         # 给调用方（服务端/助手）一个明确的"刚才顺手归档了"信号。
         # 用下划线前缀与普通业务字段区分开，和 candidates 上的 `_ended_applications` 同一约定。
         out["_auto_archived"] = auto_archived
     return out
-    return get_application(conn, aid)
+
+
+def _set_candidate_archived_locked(conn: sqlite3.Connection, cid: int,
+                                   archived: bool, operator: str, role: str,
+                                   skip_auto_archive: bool = False) -> dict | None:
+    """单条归档的**事务内**实现：不 BEGIN / COMMIT / ROLLBACK。
+
+    批量归档与自动归档都复用它；事务边界由调用方掌握。这样批量归档
+    要么整批生效、要么整批回滚，不会出现"前 20 人已归档、第 21 人失败"。
+    """
+    cur = get_candidate(conn, cid)
+    if not cur:
+        return None
+    # 合并后的壳档不是“人”：归档它会让 split 恢复出来的真档仍带 archived_at，
+    # 看起来像“拆分没把人还回来”。批量/单条/自动归档一律跳过。
+    if str(cur.get("merged_into") or "").strip():
+        out = dict(cur)
+        out["_ended_applications"] = 0
+        out["_unchanged"] = True
+        out["_merged"] = True
+        return out
+    # 幂等：重复点归档不能刷新 archived_at（它会成为 30 天保留期起算点），
+    # 重复点取消归档也不应重复写审计。
+    if archived and cur.get("archived_at"):
+        out = dict(cur)
+        out["_ended_applications"] = 0
+        out["_unchanged"] = True
+        return out
+    if not archived and not cur.get("archived_at"):
+        out = dict(cur)
+        out["_ended_applications"] = 0
+        out["_unchanged"] = True
+        return out
+    ts = now() if archived else None
+    _cond = "COALESCE(archived_at,'') = ''" if archived else "COALESCE(archived_at,'') != ''"
+    _cur = conn.execute(
+        f"UPDATE candidates SET archived_at = ? WHERE id = ? AND {_cond}",
+        (ts, cid))
+    if (_cur.rowcount or 0) != 1:
+        out = dict(get_candidate(conn, cid) or cur)
+        out["_ended_applications"] = 0
+        out["_unchanged"] = True
+        return out
+    ended = 0
+    if archived:
+        # 终态表从配置取（v1.29）：不再写死 `(已结束, 已入职)` 两个值——
+        # 「已入职」已按业务方裁定去掉，写死的话历史值会被当成"未结束"，
+        # 卡住上面那条自动归档，也会混进"进行中投递"统计。
+        _ph, _fin = _finished_in_clause()
+        cur2 = conn.execute(
+            f"""UPDATE applications SET stage = ?, updated_at = ?
+                WHERE candidate_id = ? AND stage NOT IN ({_ph})""",
+            (STAGE_ENDED, now(), cid, *_fin))
+        ended = cur2.rowcount or 0
+        if ended:
+            add_audit(conn, "candidate", str(cid), "auto_end_stage", "",
+                      f"归档时自动结束 {ended} 条进行中的投递流程", operator, role,
+                      commit=False)
+    add_audit(conn, "candidate", str(cid), "archive" if archived else "unarchive",
+              "未归档" if archived else "已归档",
+              "已归档（移入「归档」页，不再在人才库与检索中展示）" if archived
+              else "取消归档（恢复在人才库与检索中展示）", operator, role,
+              commit=False)
+    out = get_candidate(conn, cid) or {}
+    out["_ended_applications"] = ended
+    return out
 
 
 def set_candidate_archived(conn: sqlite3.Connection, cid: int, archived: bool,
@@ -3429,58 +3719,23 @@ def set_candidate_archived(conn: sqlite3.Connection, cid: int, archived: bool,
     而本函数内部又会把"进行中"的投递置为已结束。两向并存，
     这个参数把潜在的反向环切断（见 `set_application_stage` 的说明）。
     """
-    begin_immediate(conn)
-    cur = get_candidate(conn, cid)
-    if not cur:
-        conn.rollback()
-        return None
-    # 幂等：重复点归档不能刷新 archived_at（它会成为 30 天保留期起算点），
-    # 重复点取消归档也不应重复写审计。
-    if archived and cur.get("archived_at"):
-        conn.rollback()          # 释放 begin_immediate 的写锁
-        out = dict(cur)
-        out["_ended_applications"] = 0
-        out["_unchanged"] = True
+    # 已经在别的事务里时（自动归档/批量归档），不抢事务边界。
+    own = not conn.in_transaction
+    if own:
+        begin_immediate(conn)
+    try:
+        out = _set_candidate_archived_locked(conn, cid, archived, operator, role,
+                                             skip_auto_archive=skip_auto_archive)
+        if own:
+            if out is None or out.get("_unchanged"):
+                conn.rollback()
+            else:
+                conn.commit()
         return out
-    if not archived and not cur.get("archived_at"):
-        conn.rollback()
-        out = dict(cur)
-        out["_ended_applications"] = 0
-        out["_unchanged"] = True
-        return out
-    ts = now() if archived else None
-    _cond = "COALESCE(archived_at,'') = ''" if archived else "COALESCE(archived_at,'') != ''"
-    _cur = conn.execute(
-        f"UPDATE candidates SET archived_at = ? WHERE id = ? AND {_cond}",
-        (ts, cid))
-    if (_cur.rowcount or 0) != 1:
-        conn.rollback()
-        out = dict(get_candidate(conn, cid) or cur)
-        out["_ended_applications"] = 0
-        out["_unchanged"] = True
-        return out
-    ended = 0
-    if archived:
-        # 终态表从配置取（v1.29）：不再写死 `(已结束, 已入职)` 两个值——
-        # 「已入职」已按业务方裁定去掉，写死的话历史值会被当成"未结束"，
-        # 卡住上面那条自动归档，也会混进"进行中投递"统计。
-        _ph, _fin = _finished_in_clause()
-        cur2 = conn.execute(
-            f"""UPDATE applications SET stage = ?, updated_at = ?
-                WHERE candidate_id = ? AND stage NOT IN ({_ph})""",
-            (STAGE_ENDED, now(), cid, *_fin))
-        ended = cur2.rowcount or 0
-        if ended:
-            add_audit(conn, "candidate", str(cid), "auto_end_stage", "",
-                      f"归档时自动结束 {ended} 条进行中的投递流程", operator, role)
-    add_audit(conn, "candidate", str(cid), "archive" if archived else "unarchive",
-              "未归档" if archived else "已归档",
-              "已归档（移入「归档」页，不再在人才库与检索中展示）" if archived
-              else "取消归档（恢复在人才库与检索中展示）", operator, role)
-    conn.commit()
-    out = get_candidate(conn, cid) or {}
-    out["_ended_applications"] = ended
-    return out
+    except Exception:
+        if own:
+            conn.rollback()
+        raise
 
 
 def count_pending_applications(conn: sqlite3.Connection, cid: int) -> int:
@@ -3502,7 +3757,8 @@ def count_pending_applications(conn: sqlite3.Connection, cid: int) -> int:
 
 
 def set_candidates_archived(conn: sqlite3.Connection, cids: list[int], archived: bool,
-                            operator: str = "HR", role: str = "hr") -> dict:
+                            operator: str = "HR", role: str = "hr", *,
+                            before_year: int | None = None) -> dict:
     """批量归档 / 批量取消归档（v1.5）。
 
     为什么要批量：这套系统**按年使用**——第二年的简历进来时，上一年的档案仍留在
@@ -3513,28 +3769,55 @@ def set_candidates_archived(conn: sqlite3.Connection, cids: list[int], archived:
     返回 `{changed, skipped, ids}`；不存在的 id 计入 skipped，不整体失败——
     避免"列表是几分钟前刷的、其中一条已被别的操作删掉"把整批动作打断。
     """
+    # 去重但不改变顺序；重复 id 不应重复写审计。
+    _ids: list[int] = []
+    _seen: set[int] = set()
+    for cid in cids or []:
+        try:
+            _cid = int(cid)
+        except (TypeError, ValueError):
+            continue
+        if _cid not in _seen:
+            _seen.add(_cid)
+            _ids.append(_cid)
     changed: list[int] = []
     skipped: list[int] = []
     ended = 0
-    for cid in cids:
-        cur = get_candidate(conn, cid)
-        if not cur:
-            skipped.append(cid)
-            continue
-        if (cur.get("archived_at") or "") and archived:
-            skipped.append(cid)          # 已归档的不重复写审计
-            continue
-        # 复用单人归档：它会同时结束进行中的投递。批量入口不能只改
-        # candidates.archived_at，否则取消归档后会复活一批仍在旧阶段里的流程。
-        out = set_candidate_archived(conn, cid, archived, operator, role)
-        if not out:
-            skipped.append(cid)
-            continue
-        ended += int(out.get("_ended_applications") or 0)
-        changed.append(cid)
-    return {"changed": len(changed), "skipped": len(skipped),
-            "ids": changed, "skipped_ids": skipped, "archived": bool(archived),
-            "ended_applications": ended}
+    # 整批一个事务：任何意外异常都整批回滚，绝不留下“部分人已归档”的半截状态。
+    # 不存在的 id / 已归档的人仍按 skipped 处理，不因此回滚整批。
+    own = not conn.in_transaction
+    if own:
+        begin_immediate(conn)
+    try:
+        for cid in _ids:
+            # 按年归档：年份初选在事务外完成，写锁内必须复核“最后一条投递”；
+            # 否则筛选后被新投递命中的老档案会连同新流程一起被归档并置为已结束。
+            if archived and before_year is not None:
+                _row = conn.execute(
+                    "SELECT COALESCE((SELECT MAX(a.applied_at) FROM applications a "
+                    "WHERE a.candidate_id = c.id), c.created_at, '') AS last_at "
+                    "FROM candidates c WHERE c.id = ?", (cid,)).fetchone()
+                _last = str((_row["last_at"] if _row else "") or "")
+                if _last and _last >= f"{int(before_year)}-01-01":
+                    skipped.append(cid)
+                    continue
+            # 复用事务内实现：它会同时结束进行中的投递。批量入口不能只改
+            # candidates.archived_at，否则取消归档后会复活一批仍在旧阶段里的流程。
+            out = _set_candidate_archived_locked(conn, cid, archived, operator, role)
+            if not out or out.get("_unchanged"):
+                skipped.append(cid)
+                continue
+            ended += int(out.get("_ended_applications") or 0)
+            changed.append(cid)
+        if own:
+            conn.commit()
+        return {"changed": len(changed), "skipped": len(skipped),
+                "ids": changed, "skipped_ids": skipped, "archived": bool(archived),
+                "ended_applications": ended}
+    except Exception:
+        if own:
+            conn.rollback()
+        raise
 
 
 #: 归档满多少天后**彻底删除**（试用反馈："删除那个应该做成 30 天后彻底删除"）。
@@ -4124,6 +4407,7 @@ AUDIT_LABEL = {
     "suggest_job": "给出岗位建议", "route_suggest": "给出了岗位建议",
     "auto_end_stage": "系统自动结束了投递", "purge": "清理了到期数据",
     "delete": "删除了数据", "clear": "清空了数据", "remove": "移入了回收站",
+    "detach": "从草稿移除了附件",
     "restore": "从回收站恢复", "archive_pinned": "归档了原件",
     # v3.0.3 账号管理
     "create": "新建了", "update": "修改了", "set_password": "重置了密码",
@@ -5070,15 +5354,15 @@ def record_email(conn: sqlite3.Connection, rec: dict) -> int:
             """INSERT OR IGNORE INTO email_messages
                (message_id, uid, mailbox, from_addr, subject, body_text, body_html,
                 received_at, has_attachment, attachment_count, processed, added, skipped,
-                failed, error, fetched_at, processed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                failed, error, fetched_at, processed_at, attachment_skipped_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (mid, rec.get("uid"), rec.get("mailbox"), rec.get("from_addr"),
              rec.get("subject"), rec.get("body_text") or "", rec.get("body_html") or "",
              rec.get("received_at"),
              1 if rec.get("has_attachment") else 0, rec.get("attachment_count", 0),
              1 if rec.get("processed") else 0, rec.get("added", 0), rec.get("skipped", 0),
              rec.get("failed", 0), rec.get("error"), rec.get("fetched_at", now()),
-             rec.get("processed_at")),
+             rec.get("processed_at"), rec.get("attachment_skipped_json")),
         )
         row = conn.execute("SELECT id FROM email_messages WHERE message_id = ?",
                            (mid,)).fetchone()
@@ -5089,21 +5373,29 @@ def record_email(conn: sqlite3.Connection, rec: dict) -> int:
                     "UPDATE email_messages SET body_text = COALESCE(NULLIF(body_text,''), ?),"
                     " body_html = COALESCE(NULLIF(body_html,''), ?) WHERE id = ?",
                     (rec.get("body_text") or "", rec.get("body_html") or "", row["id"]))
+            # 重收/占位行升级：附件数与清单以**本次实际结果**为准；
+            # JSON 为空时写入 NULL（不保留上一次的旧清单）。
+            conn.execute(
+                "UPDATE email_messages SET has_attachment = ?, attachment_count = ?, "
+                "attachment_skipped_json = ? WHERE id = ?",
+                (1 if rec.get("has_attachment") else 0,
+                 rec.get("attachment_count", 0),
+                 rec.get("attachment_skipped_json"), row["id"]))
             conn.commit()
             return int(row["id"])
     cur = conn.execute(
         """INSERT INTO email_messages
            (message_id, uid, mailbox, from_addr, subject, body_text, body_html,
             received_at, has_attachment, attachment_count, processed, added, skipped,
-            failed, error, fetched_at, processed_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            failed, error, fetched_at, processed_at, attachment_skipped_json)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (mid, rec.get("uid"), rec.get("mailbox"), rec.get("from_addr"),
          rec.get("subject"), rec.get("body_text") or "", rec.get("body_html") or "",
          rec.get("received_at"),
          1 if rec.get("has_attachment") else 0, rec.get("attachment_count", 0),
          1 if rec.get("processed") else 0, rec.get("added", 0), rec.get("skipped", 0),
          rec.get("failed", 0), rec.get("error"), rec.get("fetched_at", now()),
-         rec.get("processed_at")),
+         rec.get("processed_at"), rec.get("attachment_skipped_json")),
     )
     conn.commit()
     return cur.lastrowid

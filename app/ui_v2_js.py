@@ -697,6 +697,15 @@ function rowHtml(x){
     qual += '<span class="flagneutral" title="' + esc(x.status_hint || '') + '">' +
       esc(x.status_display) + '</span>';
   }
+  var tagline = stageChip(x.stage) + outcomeChip(x.outcome, x.stage) +
+    (x.search_score != null
+      ? '<span class="jchip sug">匹配 ' + (Math.round(x.search_score * 100) / 100) + '</span>'
+      : '') +
+    (x.search_hits && x.search_hits.length
+      ? '<span class="rtag-text">' +
+        x.search_hits.slice(0, 5).map(function(k){ return esc(k); }).join('、') +
+        '</span>'
+      : jobChip(x));
   return '<div class="row' + (CUR === x.id ? ' on' : '') + '" data-id="' + x.id + '"' +
     ' role="button" tabindex="0" aria-label="打开 ' + nm + ' 的档案">' +
     '<div class="rowbar"></div>' +
@@ -704,14 +713,9 @@ function rowHtml(x){
       (SEL[x.id] ? ' checked' : '') + '></div>' +
     '<div class="av">' + esc((x.name || '?').slice(0,1)) + av + '</div>' +
     '<div style="min-width:0">' +
-      '<div class="nm">' + nm + stageChip(x.stage) + outcomeChip(x.outcome, x.stage) +
-        (x.search_score != null
-          ? '<span class="jchip sug">匹配 ' + (Math.round(x.search_score * 100) / 100) + '</span>'
-          : '') + qual + '</div>' +
-      '<div class="sub">' + esc(sub) + '</div>' +
-      '<div class="sub">' + (x.search_hits && x.search_hits.length
-        ? x.search_hits.slice(0, 5).map(function(k){ return esc(k); }).join('、')
-        : jobChip(x)) + '</div>' +
+      '<div class="nm">' + nm + '</div>' +
+      '<div class="sub">' + esc(sub) + qual + '</div>' +
+      '<div class="sub rtags">' + tagline + '</div>' +
     '</div>' +
     '<div class="tier ' + esc(t) + '">' + esc(t || '–') + '</div>' +
   '</div>';
@@ -827,6 +831,26 @@ function bindListOnce(){
       ev.preventDefault();
       pick(Number(row.dataset.id));
     }
+  });
+  /* 悬停预取：停在同一行 180ms 才发，快速划过多行不会打出一串请求。
+     指针移出该行就取消未发出的预取。 */
+  var pfTimer = null, pfId = null;
+  el.addEventListener('pointerover', function(ev){
+    var row = ev.target.closest ? ev.target.closest('.row') : null;
+    if(!row || !row.dataset.id) return;
+    var id = Number(row.dataset.id);
+    if(pfId === id) return;
+    pfId = id;
+    clearTimeout(pfTimer);
+    pfTimer = setTimeout(function(){
+      if(pfId === id) prefetchDetail(id);
+    }, 180);
+  });
+  el.addEventListener('pointerout', function(ev){
+    var row = ev.target.closest ? ev.target.closest('.row') : null;
+    if(!row) return;
+    clearTimeout(pfTimer);
+    pfId = null;
   });
 }
 
@@ -979,6 +1003,30 @@ function tierSeg(d){
 var MODE = 'detail';
 /* 请求代际：快速点 A→B 时，A 的旧响应不能覆盖 B（详情/概览/写邮件收件人）。 */
 var DETAIL_SEQ = 0;
+/* 详情预取：鼠标在名单行上停留 120ms 就先请求该档案；
+   点击时如果请求还在路上就共用它，避免"先点、再等一整个往返"。
+   只保留**进行中**的请求，不缓存已完成的旧档案（避免保存后看到旧数据）。 */
+var DETAIL_PREFETCH = {};
+var DETAIL_PREFETCH_MAX = 2;   /* 最多同时预取 2 份，别让鼠标扫过名单时打爆服务 */
+var DETAIL_PREFETCH_N = 0;
+function prefetchDetail(id){
+  if(!id || (MODE === 'detail' && Number(CUR) === Number(id))) return null;
+  if(DETAIL_PREFETCH[id]) return DETAIL_PREFETCH[id];
+  if(DETAIL_PREFETCH_N >= DETAIL_PREFETCH_MAX) return null;
+  DETAIL_PREFETCH_N += 1;
+  var p = api('/api/candidates/' + id);
+  DETAIL_PREFETCH[id] = p;
+  if(p && p.finally){
+    p.finally(function(){
+      DETAIL_PREFETCH_N = Math.max(0, DETAIL_PREFETCH_N - 1);
+      if(DETAIL_PREFETCH[id] === p) delete DETAIL_PREFETCH[id];
+    });
+  }else{
+    DETAIL_PREFETCH_N = Math.max(0, DETAIL_PREFETCH_N - 1);
+    delete DETAIL_PREFETCH[id];
+  }
+  return p;
+}
 var CAND_SEQ = 0;
 var COMPARE_MAX = 10;
 var COMPARE_IDS = [];
@@ -993,6 +1041,7 @@ async function showOverview(){
   renderList();
   var box = document.getElementById('detail');
   box.classList.remove('comparing');
+  box.removeAttribute('aria-busy');
   box.innerHTML = '<div class="hint">读取概览…</div>';
   /* 两个请求互不依赖，必须并行（v3.0.3）。原来是串行 await，
      等于白白多等一个完整往返 —— 而这是**打开页面第一眼**看到的东西。 */
@@ -1238,6 +1287,7 @@ function openPinnedProfile(cid){
     .map(function(x){ return x.trim(); }).filter(Boolean);
   var box = document.getElementById('detail');
   box.classList.add('comparing');
+  box.removeAttribute('aria-busy');
   box.innerHTML = pinnedTabsHtml() +
     '<div class="pinned-profile" id="pinnedProfile">' + fullDetail(d) + '</div>';
   multiRenderIvUnit();
@@ -1437,10 +1487,11 @@ async function loadProjects(d, box){
   projectFill(live, data);
 }
 function openDetail(d){
+  var box = document.getElementById('detail');
+  if(box) box.removeAttribute('aria-busy');
   /* 多选初值：库里是顿号连接的串 */
   MULTI_IVUNIT = String(d.interview_unit || '').split(/[、，,;；]+/)
     .map(function(x){ return x.trim(); }).filter(Boolean);
-  var box = document.getElementById('detail');
   box.classList.remove('comparing');
   /* 换人 → 回到最上方（2026-10-28）。原来沿用上一个人的滚动位置：
      从第 1 个人（看到底）切到第 2 个人，右栏还停在半截，每次都得手动往上滚。
@@ -2593,6 +2644,7 @@ function progressModal(taskId, opts){
   var fill = document.getElementById('progFill');
   var meta = document.getElementById('progMeta');
   var stopped = false;
+  var _lostRetries = 0;
   var tick = async function(){
     if(stopped || gen !== PROG_GEN) return;
     var r = await api('/api/tasks/' + taskId);
@@ -2601,12 +2653,21 @@ function progressModal(taskId, opts){
        代际校验同时覆盖"用户关窗后又开了新任务"的情况。 */
     if(stopped || gen !== PROG_GEN) return;
     if(r.__err || !r.ok){
+      // 邮件发送任务：一次轮询失败不等于“发送失败”。短暂网络抖动/服务重启
+      // 时先重试几次；仍读不到才转“结果未知”，绝不能直接清幂等键。
+      if(o.unknownOnLost && _lostRetries < 5){
+        _lostRetries += 1;
+        if(meta) meta.textContent = '网络中断，正在确认发送结果…'
+                                    + '（' + _lostRetries + '/5）';
+        return;
+      }
       stopped = true;
       clearInterval(__progTimer); __progTimer = null;
       var msg = (r && (r.__err || r.error)) || '任务不存在或已过期';
       if(o.onDone){
-        o.onDone({status: 'error', message: msg,
-                  result: {ok: false, error: msg}});
+        var _lost = {ok: false, error: msg};
+        if(o.unknownOnLost) _lost.status = 'unknown';
+        o.onDone({status: 'error', message: msg, result: _lost});
       }else{
         resultModal({title: '任务已中断', kind: 'danger',
                      headline: '无法继续读取任务',
@@ -2614,6 +2675,7 @@ function progressModal(taskId, opts){
       }
       return;
     }
+    _lostRetries = 0;
     var pct = r.percent || 0;
     if(fill) fill.style.width = pct + '%';
     var line = r.total ? ('已完成 ' + (r.done || 0) + ' / ' + r.total +
@@ -2781,7 +2843,10 @@ function ingestFinal(label, rep, ar){
   var num = function(k){ return (rep[k] == null ? 0 : rep[k]); };
   var summary = '新增 ' + num('added') + '，新版本 ' + num('merged_versions') +
     '，跳过重复 ' + num('skipped_dup') + '，无附件 ' + num('no_attachment') +
-    '，解析失败(仍入库) ' + num('parse_failed') + '，异常 ' + num('failed');
+    '，解析失败(仍入库) ' + num('parse_failed') + '，异常 ' + num('failed') +
+    '，附件未收 ' + num('attachments_skipped') +
+    (num('other_failed') ? ('，补充附件失败 ' + num('other_failed')) : '') +
+    (num('other_reused') ? ('，补充附件已存在 ' + num('other_reused')) : '');
   var extra = num('insight_skipped') > 0
     ? '<div style="margin-top:8px;color:var(--ink-2)">有 ' + num('insight_skipped') +
       ' 人未分析（"入库即分析"当前是关的）——可点「分析待分析的人」批量补上。</div>' : '';
@@ -2790,7 +2855,9 @@ function ingestFinal(label, rep, ar){
   var bad = (rep.details || []).filter(function(d){
     return d && (d.status === 'failed' || d.parse_failed ||
                  d.status === 'no_attachment' || d.status === 'skipped_dup' ||
-                 d.status === 'dead_letter');
+                 d.status === 'dead_letter' || d.status === 'attachment_skipped' ||
+                 d.status === 'other_failed' || d.status === 'other_reused' ||
+                 d.status === 'other_unassigned');
   });
   var badHtml = '';
   if(bad.length){
@@ -2798,10 +2865,14 @@ function ingestFinal(label, rep, ar){
       '<div style="font-weight:600;color:var(--warn)">需要核对（' + bad.length + '）</div>' +
       '<div style="max-height:240px;overflow:auto;margin-top:6px">' +
       bad.map(function(d){
-        var label = d.status === 'failed' ? '异常'
-          : (d.status === 'dead_letter' ? '已转死信'
-          : (d.parse_failed ? '解析失败（已入库）'
-          : (d.status === 'no_attachment' ? '无附件' : '重复跳过')));
+        var _labelMap = {failed: '异常', dead_letter: '已转死信',
+                         attachment_skipped: '附件未收',
+                         other_failed: '补充附件归档失败',
+                         other_reused: '补充附件已存在（未挂载）',
+                         other_unassigned: '附件已归档但未挂人',
+                         no_attachment: '无附件', skipped_dup: '重复跳过'};
+        var label = d.parse_failed ? '解析失败（已入库）'
+                                  : (_labelMap[d.status] || '重复跳过');
         var who = d.name || d.file || '（未识别）';
         var file = d.name && d.file && d.file !== d.name ? '（' + d.file + '）' : '';
         var why = (d.notes || []).join('；');
@@ -2815,6 +2886,10 @@ function ingestFinal(label, rep, ar){
   var stopped = rep.stopped
     ? '<div style="margin-top:8px;color:var(--warn)">已按你的要求停止（完成当前文件后停下）；' +
       '已读取的全部保留，下次收取会从停下的地方继续。</div>' : '';
+  if(rep.batch_limit_hit){
+    stopped += '<div style="margin-top:8px;color:var(--warn)">' +
+      '本批下载达到内存上限，已先处理这一批；再点一次「收取」会从游标继续。</div>';
+  }
   /* 逐条分析阶段的结果（ar = 分析任务的进度）。之前这个参数**接了但没用**，
      于是"入库即分析"跑完了也不告诉用户结果 —— 现在补上。 */
   var ana = '';
@@ -2823,8 +2898,10 @@ function ingestFinal(label, rep, ar){
       : ('完成 ' + (ar.done || 0) + ' 人' + (ar.failed ? ('，失败 ' + ar.failed + ' 人') : ''));
     ana = '<div style="margin-top:8px;color:var(--ink-2)">逐条分析：' + esc(aLine) + '</div>';
   }
-  resultModal({title: label + '完成', kind: num('failed') ? 'warn' : 'ok',
-               headline: num('failed') ? '部分失败' : '收取完成',
+  var _badCount = num('failed') + num('other_failed') + num('attachments_skipped');
+  resultModal({title: label + '完成', kind: _badCount ? 'warn' : 'ok',
+               headline: _badCount ? '部分失败'
+                         : (rep.batch_limit_hit ? '本批完成' : '收取完成'),
                body: summary + badHtml + stopped + extra + ana});
 }
 async function skipBlockedMail(){
@@ -2910,16 +2987,36 @@ async function doIngest(source){
   ingestReopen();
 }
 
-async function doUpload(files){
+/* 「导入本地文件夹」：每次都弹系统的文件夹选择器，而不是读配置里的固定目录。
+   浏览器会把文件夹里的所有文件带过来（含子目录），这里筛出支持的类型再逐个
+   走和「上传简历照片/文件」相同的导入流程。 */
+function doUploadFolder(files){
   var arr = Array.prototype.filter.call(files || [], function(f){
-    return /[.](jpe?g|png|bmp|webp|tiff?|pdf|docx?|txt)$/i.test(f.name);
+    var n = String(f.name || '');
+    return !/^[.~]/.test(n) &&
+      /[.](jpe?g|png|bmp|webp|tiff?|pdf|docx?|txt)$/i.test(n);
+  });
+  var inp = document.getElementById('upFolder');
+  if(inp) inp.value = '';
+  if(!arr.length){
+    resultModal({title:'导入本地文件夹', kind:'warn',
+      body:'这个文件夹里没有可导入的文件（支持图片 / PDF / Word / txt）。'});
+    return;
+  }
+  doUpload(arr, '导入本地文件夹');
+}
+async function doUpload(files, label){
+  var arr = Array.prototype.filter.call(files || [], function(f){
+    return !/^[.~]/.test(String(f.name || '')) &&
+      /[.](jpe?g|png|bmp|webp|tiff?|pdf|docx?|txt)$/i.test(f.name);
   });
   if(!arr.length){
-    resultModal({title:'上传', kind:'warn', body:'没有可上传的文件（支持图片 / PDF / Word / txt）'});
+    resultModal({title: label || '上传', kind:'warn',
+      body:'没有可上传的文件（支持图片 / PDF / Word / txt）'});
     return;
   }
   /* 给出可数的进度：多份文件的裸字节上传常常十几秒，只弹一个 toast 之后界面就没反馈了*/
-  setModalTitle('上传简历文件');
+  setModalTitle(label || '上传简历文件');
   document.getElementById('edDlgBody').innerHTML =
     '<div>' +
       '<div style="font-size:14px;color:var(--ink-2);margin-bottom:4px">正在上传 ' +
@@ -2963,7 +3060,7 @@ async function doUpload(files){
   }
   if(fill) fill.style.width = '100%';
   resultModal({
-    title: '上传完成',
+    title: label ? '导入完成' : '上传完成',
     kind: fail ? (ok ? 'warn' : 'danger') : 'ok',
     headline: fail ? (ok ? '部分文件未上传成功' : '全部文件上传失败') : '上传成功',
     body: '共 ' + arr.length + ' 份：成功 ' + ok + ' 份'
@@ -2975,6 +3072,8 @@ async function doUpload(files){
   });
   var inp = document.getElementById('upFile');
   if(inp) inp.value = '';
+  var finp = document.getElementById('upFolder');
+  if(finp) finp.value = '';
   await load();
 }
 function saveBlob(blob, name){
@@ -3121,8 +3220,17 @@ async function doBundle(){
   if(!r.ok){ var j = await r.json().catch(function(){ return {}; });
     toast(j.detail || ('打包失败 HTTP ' + r.status)); return; }
   var span = (range.date_from || '不限') + '至' + (range.date_to || '不限');
+  var ack = r.headers.get('X-Bundle-Ack') || '';
   saveBlob(await r.blob(), '初筛通过-' + span + '.zip');
   toast('已打包：' + span);
+  // 只有真正拿到文件后才让服务端记「上次下载到哪」。
+  if(ack){
+    var ar = await api('/api/bundle/initial-pass/ack?token=' + encodeURIComponent(ack),
+                       {method:'POST'});
+    if(ar.__err){
+      toast('文件已下载，但未能记录“上次下载区间”：' + ar.__err, 'warn');
+    }
+  }
 }
 function pageAllSelected(){
   return ITEMS.length > 0 && ITEMS.every(function(x){ return !!SEL[x.id]; });
@@ -3146,8 +3254,8 @@ function setAll(on){
 function syncSel(){
   var ids = Object.keys(SEL).filter(function(k){ return SEL[k]; }).map(Number);
   var n = ids.length;
-  /* 勾选**跨筛选/翻页保留**（批量操作需要），但必须让人看见"选中的里有
-     当前列表看不见的人"——否则改完筛选点归档，会动到以为已经消失的人。 */
+  /* 勾选**跨筛选/翻页保留**（批量操作需要）；选中数由各按钮文案表达，
+     不再在动作栏里塞一行会换行的说明（只在按钮 title 里保留提示）。 */
   var visible = {};
   (ITEMS || []).forEach(function(x){ visible[Number(x.id)] = 1; });
   var hidden = ids.filter(function(id){ return !visible[id]; }).length;
@@ -3158,13 +3266,10 @@ function syncSel(){
   if(clearBtn) clearBtn.hidden = n === 0;
   var hint = document.getElementById('selHint');
   if(hint){
-    if(hidden){
-      hint.style.display = '';
-      hint.textContent = '已选 ' + n + ' 人，其中 ' + hidden + ' 人不在当前筛选结果中';
-    }else{
-      hint.style.display = 'none';
-      hint.textContent = '';
-    }
+    /* 勾选跨筛选保留的说明不再放在动作栏里：放大字号后它会被挤成竖排，
+       既难看又把工具栏撑出横向滚动。选择状态已经由各按钮上的计数表达。 */
+    hint.style.display = 'none';
+    hint.textContent = '';
   }
   var ops = document.getElementById('btnBatchOps');
   if(ops){
@@ -4056,6 +4161,28 @@ function fillUnitSel(items){
   }).join('');
   sel.value = cur;
 }
+/* 切换候选人时右栏先显示骨架屏：旧档案不能一直留到新请求返回，
+   否则观感就是"卡在上一个人，过一会儿突然跳过去"。 */
+function detailLoadingHtml(name){
+  var who = String(name || '').trim();
+  var head = who ? ('正在读取 <b>' + esc(who) + '</b> 的档案…') : '正在读取档案…';
+  return '<div class="detail-loading" role="status" aria-live="polite">' +
+    '<div class="dl-head"><span class="dl-spin" aria-hidden="true"></span>' +
+      '<span>' + head + '</span></div>' +
+    '<div class="dl-card dl-hero"><span class="dl-av" aria-hidden="true"></span>' +
+      '<div class="dl-lines">' +
+        '<i class="dl-line" style="width:38%"></i>' +
+        '<i class="dl-line" style="width:66%"></i>' +
+        '<i class="dl-line" style="width:52%"></i>' +
+      '</div></div>' +
+    '<div class="dl-card"><div class="dl-lines">' +
+      '<i class="dl-line" style="width:24%"></i>' +
+      '<i class="dl-line" style="width:88%"></i>' +
+      '<i class="dl-line" style="width:74%"></i>' +
+      '<i class="dl-line" style="width:81%"></i>' +
+    '</div></div>' +
+  '</div>';
+}
 async function pick(id){
   var seq = ++DETAIL_SEQ;
   CUR = id;
@@ -4066,10 +4193,28 @@ async function pick(id){
   MODE = 'detail';
   COMPARE_IDS = []; COMPARE_DATA = {}; COMPARE_ACTIVE = null;
   highlightRow(id);          /* 只换高亮，不重建列表（见 highlightRow 的说明） */
-  var d = await api('/api/candidates/' + id);
+  /* 先把右栏换成新人的骨架屏；旧档案不能留到请求返回后再突然跳。 */
+  var box = document.getElementById('detail');
+  var _row = (ITEMS || []).filter(function(x){ return Number(x.id) === Number(id); })[0] || {};
+  if(box){
+    box.classList.remove('comparing');
+    box.dataset.cid = '';
+    box.setAttribute('aria-busy', 'true');
+    box.innerHTML = detailLoadingHtml(_row.name || '');
+    box.scrollTop = 0;
+  }
+  /* 悬停已经预取过：直接等那个请求，不再重复发一次。 */
+  var d = DETAIL_PREFETCH[id] ? await DETAIL_PREFETCH[id]
+                              : await api('/api/candidates/' + id);
   /* 慢网络下先点的 A 可能晚于后点的 B 返回；只让最后一次点击生效。 */
   if(seq !== DETAIL_SEQ || CUR !== id) return;
-  if(d.__err){ document.getElementById('detail').innerHTML = '<div class="hint">' + esc(d.__err) + '</div>'; return; }
+  if(box) box.removeAttribute('aria-busy');
+  if(!d || d.__err){
+    if(box) box.innerHTML = '<div class="hint">读取失败：' +
+      esc((d && d.__err) || '空响应') +
+      ' <button class="btn sm" onclick="pick(' + Number(id) + ')">重试</button></div>';
+    return;
+  }
   CUR_DETAIL = d;
   MODE = 'detail';
   /* 面试字典要先拿到 —— 面试单位/时段/方式的下拉候选都来自它 */
@@ -4134,6 +4279,9 @@ var M_OUTBOX = [];          /* 临时上传的附件 {outbox_id, filename, size}
 var M_RESULT = null;        /* 发送结果（成功凭据或失败原因） */
 var M_SENDING = false;
 var M_MAIL_META = {to: '', subject: ''};
+/* 本次点击发送时带上的附件**条目键**快照（不是内容 id —— 同一份内容
+   可以在草稿里出现两次）。发送成功后只移除这些条目，发送期间新加进来的保留。 */
+var M_MAIL_SENT_IDS = [];
 var M_MAIL_REQ_ID = (function(){
   try{ return sessionStorage.getItem('tp_mail_req_id') || ''; }catch(e){ return ''; }
 })();
@@ -4184,6 +4332,7 @@ function setView(v, fromHash){
   if(v === 'recruit') initRecruit();
   if(v === 'schedule') initSchedule();
   if(v === 'chat') initChat();
+  else closeChatConv();
 }
 /* v4.0.17：登录/启动完成后的默认视图。
    没有 hash → 智能助手；有 hash → 尊重刷新前的视图（#recruit 等）。
@@ -4290,7 +4439,13 @@ function finishMailSent(r){
   M_RESULT = {ok: true, to: M_MAIL_META.to, subject: M_MAIL_META.subject,
               at: new Date().toLocaleString(), res: r || {},
               missing: missAtt, res_written: ((r && r.written) || {})};
-  M_OUTBOX = [];
+  /* 只移除本次真正发出去的附件。发送期间新上传的附件保留在草稿里，
+     否则用户刚加的《补充材料》会被“发送完成”一起清掉。 */
+  var _sentIds = M_MAIL_SENT_IDS || [];
+  M_OUTBOX = M_OUTBOX.filter(function(x){
+    return _sentIds.indexOf(String(x.key || '')) < 0;
+  });
+  M_MAIL_SENT_IDS = [];
   setMailRequestId('');
   M_MAIL_ACTIVE_TASK = '';
   setMailSending(false);
@@ -4303,7 +4458,7 @@ function finishMailSent(r){
     toast('已发送至 ' + M_MAIL_META.to, 'ok');
   }
 }
-function handleMailTask(task){
+async function handleMailTask(task){
   if(!task) return;
   var tid = String(task.task_id || '');
   if(tid && M_MAIL_TASK_ACK === tid && !M_SENDING) return;
@@ -4313,10 +4468,35 @@ function handleMailTask(task){
   var sent = task.result || (task.extra || {}).result || {};
   if(task.status !== 'done' || !sent.ok){
     var err = sent.error || task.message || '发送失败';
+    var _st = String(sent.status || '');
+    // 旧任务/服务重启/轮询失败没有明确 result.status：按“结果未知”处理，
+    // 绝不能当成确定失败去清幂等键。
+    if(!_st && task.status !== 'done') _st = 'unknown';
     M_RESULT = {ok: false, msg: err};
-    setMailRequestId('');
     setMailSending(false);
     renderSent();
+    if(_st === 'superseded'){
+      var wt = String(sent.winner_task_id || '');
+      toast('本次发送已由另一个任务接管，正在等待它的结果', 'warn');
+      if(wt) attachMailTask(wt, task);
+      else setTimeout(function(){ resumeMailTask(); }, 800);
+      return;
+    }
+    if(_st === 'unknown'){
+      var again = await askConfirm({
+        title: '发送结果未知', danger: true, okText: '确认未收到，重新发送',
+        body: err + '\n\n请先到邮箱「已发送」里确认。'
+              + '如果已经能看到这封，千万不要重发。'});
+      if(again){
+        setMailRequestId('');
+        toast('已解除原请求；请再次点击「确认发送」重新提交', 'warn');
+      }else{
+        toast('已保留原请求，本次没有重发', 'warn');
+      }
+      return;
+    }
+    M_MAIL_SENT_IDS = [];
+    setMailRequestId('');
     toast('发送失败：' + err, 'danger');
     return;
   }
@@ -4334,6 +4514,7 @@ function attachMailTask(tid, meta){
     title: '发送邮件',
     desc: '邮件正在后台发送，请勿重复点击。附件较大时会多等一会儿。',
     chain: true,
+    unknownOnLost: true,
     onDone: handleMailTask
   });
 }
@@ -4352,12 +4533,11 @@ async function resumeMailTask(){
   }
   var r = await api('/api/tasks/active?kind=mail&include_done=1');
   var tasks = (r && r.tasks) || [];
+  // 只挂**本次请求键**对应的任务。没有键时绝不挑“任意 running 邮件任务” ——
+  // 共享部署下会把别人的收件人/主题/发送结果显示给当前用户。
   var task = tasks.filter(function(t){
     return M_MAIL_REQ_ID && ((t.meta || {}).client_request_id === M_MAIL_REQ_ID);
   })[0];
-  if(!task && !M_MAIL_REQ_ID){
-    task = tasks.filter(function(t){ return t.status === 'running'; })[0];
-  }
   if(!task) return false;
   if(task.meta){
     if(task.meta.to) M_MAIL_META.to = task.meta.to;
@@ -5804,7 +5984,7 @@ function embIndexText(idx){
    展开后这一行是**独占的一行**（不是挤在现值右边），改完点「保存」提交该组。 */
 var CFG_VALUES = {};      /* 草稿：字段 id → 新值 */
 var CFG_GROUP = {
-  mcBaseUrl:'model', mcModel:'model', mcKey:'model',
+  mcBaseUrl:'model', mcModel:'model', mcKey:'model', mcCtx:'model',
   embEnabled:'embed', embBaseUrl:'embed', embModel:'embed',
   cfgSmtpHost:'smtp', cfgSmtpPort:'smtp', cfgSmtpSsl:'smtp', cfgSmtpUser:'smtp',
   cfgSmtpFrom:'smtp', cfgSmtpPwd:'smtp',
@@ -6954,6 +7134,8 @@ async function initSys(target){
               [['1', '开'], ['0', '关']]) +
       cfgEdit('mcBaseUrl', '接口地址', m.base_url, 'https://…/compatible-mode/v1', 'text') +
       cfgEdit('mcModel', '模型名', m.model, '', 'text') +
+      cfgEdit('mcCtx', '上下文窗口', m.context_window || '',
+              '留空 = 自动探测（可写 32000 / 32k / 1M）', 'text') +
       cfgEdit('mcKey', 'API Key', m.key_set ? ('已配置（' + m.key_masked + '）') : '未配置',
               m.key_set ? '留空 = 不修改' : '', 'password', true) +
     '</div>' +
@@ -7002,7 +7184,8 @@ async function initSys(target){
       cfgEdit('cfgMbPwd', '授权码', mb.password_set ? '已配置' : '未配置',
               mb.password_set ? '留空 = 不修改' : '输入后保存', 'password', true) +
       cfgEdit('cfgEmlDir', 'EML 目录', mb.eml_dir, 'data/mail_in', 'text') +
-cfgEdit('cfgFolderDir', '简历目录', mb.folder_dir, 'data/resumes', 'text') +
+      cfgEdit('cfgFolderDir', '助手导入目录', mb.folder_dir,
+              '可选：智能助手按目录导入时使用（如 data/resumes）', 'text') +
       /* 这三项原来既不展示也不提交 —— 在 v2 里**永远改不了**，而后端是支持的
          （`MailboxCfgReq`：`attachment_ext` / `max_attachment_mb` /
          `same_job_reapply_days`，`server.py:4394-4396`），GET 也已经回传
@@ -7061,24 +7244,6 @@ cfgEdit('cfgFolderDir', '简历目录', mb.folder_dir, 'data/resumes', 'text') +
       '<div style="margin-top:10px"><button class="btn" data-cfg="newTpl">新建模板</button></div>' +
     '</div>' +
 
-    cfgGroup('简历来源与导入', 'sources',
-      '<div class="crow"><label>来源文件夹</label><div class="cval">' +
-        '<span class="cur" id="srcPath">读取中…</span></div></div>' +
-      '<div class="crow"><label>待导入</label><div class="cval">' +
-        '<span class="cur" id="srcFiles">—</span></div></div>' +
-      '<div id="srcFileList" style="margin:2px 0 6px"></div>' +
-      /* 逐文件操作（业务方 2026-10-21）：勾选后可单独移除，
-         回收站里也能逐个恢复 —— 原来只能"整个目录全移 / 全部恢复"，粒度太粗。 */
-      '<div style="margin:2px 0 8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
-        '<label class="ck2"><input type="checkbox" id="srcChkAll"> 全选</label>' +
-        '<button class="btn sm" onclick="srcRemoveChecked()">移除勾选</button>' +
-        '<span class="hint" id="srcChkInfo"></span></div>' +
-      '<div class="crow"><label>回收站</label><div class="cval">' +
-        '<span class="cur" id="srcRecycle">—</span>' +
-        '<button class="btn sm" data-src="recycle">全部恢复</button></div></div>' +
-      '<div id="srcRecList" style="margin:2px 0 6px"></div>',
-      '', true) +
-
     cfgGroup('运行设置', 'settings',
       '<div class="crow"><label>管道超期</label><div class="cval">' +
         '<span class="cur" id="setOverdue">—</span>' +
@@ -7105,9 +7270,6 @@ cfgEdit('cfgFolderDir', '简历目录', mb.folder_dir, 'data/resumes', 'text') +
         dictAdd(inp.id.replace('dictAdd_', ''));
       }
     });
-  });
-  Array.prototype.forEach.call(box.querySelectorAll('[data-src]'), function(b){
-    b.addEventListener('click', function(){ srcAct(b.dataset.src); });
   });
   Array.prototype.forEach.call(box.querySelectorAll('[data-cfg-g]'), function(b){
     b.addEventListener('click', function(){
@@ -7151,7 +7313,7 @@ cfgEdit('cfgFolderDir', '简历目录', mb.folder_dir, 'data/resumes', 'text') +
       toast('已按预设填好服务器；方式已自动切到「IMAP 收信」', 'ok');
     }
   });
-  loadEnv(); loadSources(); loadSettings();
+  loadEnv(); loadSettings();
   if(SYS_TARGET === 'settingsBody') applySettingsCat();
   killAutofill();
 }
@@ -7215,7 +7377,8 @@ async function sysAct(act){
   }
   if(act === 'model'){
     var body = {base_url: v('mcBaseUrl'), model: v('mcModel'),
-                enabled: v('mcEnabled') === '1'};
+                enabled: v('mcEnabled') === '1',
+                context_window: v('mcCtx')};
     if(v('mcKey')) body.api_key = v('mcKey');
     var r = await api('/api/model-config', {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
@@ -7466,6 +7629,11 @@ var CHAT = [], CHAT_HIST = [];
 var CHAT_OUTPUTS = [];
 /* v4.0.17：当前会话 id、会话列表、是否已完成首次进入初始化 */
 var CHAT_CONV_ID = '', CHAT_CONVS = [], CHAT_BOOTED = false;
+/* 会话列表折叠：超过 10 条只显示最近 10 条，其余收进「更早的会话」。
+   CONV_FOLD_USER 记录用户是否手动点过，避免刷新/轮询又把列表自动展开。 */
+var CONV_FOLD_LIMIT = 10;
+var CONV_FOLD_OPEN = false;
+var CONV_FOLD_USER = false;
 /* ---------- Mermaid 图表 → 内联 SVG ----------
    模型按 Mermaid 语法输出图表（pie / xychart-beta）。内网/离线环境不能加载
    mermaid.js，所以这里只实现这两类最常用的图，直接生成 SVG：不依赖外部库、
@@ -8290,8 +8458,13 @@ function mdLite(src){
     blocks.push('<pre><code>' + code.replace(/^\n+|\n+$/g, '') + '</code></pre>');
     return '\n<pre>ZBLOCK' + (blocks.length - 1) + 'Z</pre>\n';
   });
-  s = s.replace(/`([^`]+)`/g, '<code>$1</code>')
-       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  /* 模型常用的「**结论**」单独成行：转成真正的小标题（带色条），
+     而不是行内 <strong> 混在段落里 —— 这是"全是文字堆砌"最主要的原因。 */
+  s = s.replace(/^[ \t]*\*\*([^*\n]{1,40})\*\*[ \t]*[:：]?[ \t]*$/gm, function(m, t){
+    return '<h4 class="md-sec">' + String(t).replace(/[:：]\s*$/, '') + '</h4>';
+  });
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
        .replace(/^######[ \t]+(.+)$/gm, '<h4>$1</h4>')
        .replace(/^#####[ \t]+(.+)$/gm, '<h4>$1</h4>')
        .replace(/^####[ \t]+(.+)$/gm, '<h4>$1</h4>')
@@ -8300,6 +8473,14 @@ function mdLite(src){
        .replace(/^#[ \t]+(.+)$/gm, '<h3>$1</h3>')
        .replace(/^&gt; (.*)$/gm, '<blockquote>$1</blockquote>')
        .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>');
+  /* 语义色：只给短的加粗标签上色（风险/注意=红，通过/达标=绿，结论/建议=蓝），
+     其余加粗仍是普通强调色。避免整段变成彩虹。 */
+  s = s.replace(/<strong>([^<]{1,24})<\/strong>/g, function(m, t){
+    if(/风险|注意|警告|问题|缺口/.test(t)) return '<strong class="md-alert">' + t + '</strong>';
+    if(/达标|通过|已签约|完成|合格/.test(t)) return '<strong class="md-good">' + t + '</strong>';
+    if(/结论|建议|下一步|重点|总览|摘要/.test(t)) return '<strong class="md-key">' + t + '</strong>';
+    return m;
+  });
   /* 链接：放开到任意协议与相对路径（模型很爱写站内锚点）；javascript: 由白名单挡掉 */
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function(m, txt, url){
     if(!/^(https?:\/\/|mailto:|\/|#|\.)/i.test(url)) return m;
@@ -8355,6 +8536,8 @@ function mdLite(src){
       continue;
     }
     if(!t){ flushLi(); flushPara(); continue; }
+    if(/^-{3,}$/.test(t)){ flushLi(); flushPara(); out.push('<hr class="md-hr">'); continue; }
+    if(/^<blockquote>/.test(t)){ flushLi(); flushPara(); out.push(t); continue; }
     if(/^[-*+][ \t]+/.test(t)){
       flushPara();
       if(liBuf.length && liTag !== 'ul') flushLi();
@@ -8533,34 +8716,70 @@ function chatAskAdd(){
   chatAsksConfig();
 }
 
+function toggleChatConv(){
+  var open = !document.body.classList.contains('chatconv-open');
+  document.body.classList.toggle('chatconv-open', open);
+  var b = document.getElementById('chatConvBtn');
+  if(b) b.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if(open){
+    setTimeout(function(){
+      var first = document.querySelector('#chatConvList .chatconv-item .cc-open');
+      if(first) first.focus();
+    }, 30);
+  }
+}
+function closeChatConv(){
+  var wasOpen = document.body.classList.contains('chatconv-open');
+  var box = document.getElementById('chatConvBox');
+  document.body.classList.remove('chatconv-open');
+  var b = document.getElementById('chatConvBtn');
+  if(b) b.setAttribute('aria-expanded', 'false');
+  if(wasOpen && b && box && box.contains(document.activeElement)){
+    try{ b.focus({preventScroll:true}); }catch(e){}
+  }
+}
 async function initChat(){
   var box = document.getElementById('chatView');
   if(!document.getElementById('chatLog')){
     box.innerHTML =
-      '<div class="chatconv">' +
+      '<div class="chatconv" id="chatConvBox" role="navigation" aria-label="历史对话">' +
         '<div class="chatconv-head"><h3>对话</h3>' +
-          '<button class="btn sm" id="chatNew">新对话</button></div>' +
+          '<button class="btn sm" id="chatNew">新对话</button>' +
+          '<button class="btn sm chatconv-close" onclick="closeChatConv()" ' +
+            'aria-label="关闭对话列表">×</button></div>' +
         '<div class="chatconv-list" id="chatConvList"></div>' +
+        '<div class="chatconv-foldbar" id="chatConvFold" hidden></div>' +
       '</div>' +
+      '<div class="chatconvmask" id="chatConvMask" onclick="closeChatConv()"></div>' +
       '<div class="chatwrap">' +
+        '<div class="chatmobhead">' +
+          '<button class="btn sm" id="chatConvBtn" onclick="toggleChatConv()" ' +
+            'aria-controls="chatConvBox" aria-expanded="false">对话</button>' +
+          '<button class="btn sm primary" onclick="closeChatConv();newChat()">新对话</button>' +
+        '</div>' +
         '<div class="chatlog" id="chatLog"></div>' +
         '<div class="chatinput">' +
           '<input type="file" id="chatFile" style="display:none" ' +
-            'accept=".pdf,.doc,.docx,.txt,.md,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff,.xlsx,.xls">' +
-          /* 待发送附件：停在输入框上方，发送后移进用户消息气泡。 */
-          '<div class="chatpending" id="chatPending" hidden></div>' +
+            'accept=".pdf,.doc,.docx,.txt,.md,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff">' +
           '<div class="ciwrap">' +
-          '<label class="chatadd-inline" id="chatAttach" for="chatFile" ' +
-            'title="上传简历，或直接在输入框粘贴图片/文件">+</label>' +
-          '<textarea id="chatIn" rows="3" placeholder="输入指令或问题，Enter 发送"></textarea>' +
-          '<button class="btn primary" id="chatSend" aria-label="发送" title="发送">' +
-            '<svg class="ci-ico ci-enter" viewBox="0 0 24 24" aria-hidden="true">' +
-              '<path d="M20 5v7a3 3 0 0 1-3 3H6"></path>' +
-              '<path d="m10 11-4 4 4 4"></path></svg>' +
-            '<svg class="ci-ico ci-stop" viewBox="0 0 24 24" aria-hidden="true">' +
-              '<rect x="7.5" y="7.5" width="9" height="9" rx="2"></rect></svg>' +
-          '</button>' +
-        '</div></div>' +
+            /* 待发送附件：放在 composer 内部上方，发送后移进用户消息气泡。 */
+            '<div class="chatpending" id="chatPending" hidden></div>' +
+            '<div class="ci-row">' +
+              '<button type="button" class="chatadd-inline" id="chatAttach" ' +
+                'aria-label="添加文件" aria-controls="chatFile" ' +
+                'title="上传简历，或直接在输入框粘贴图片/文件">+</button>' +
+              '<textarea id="chatIn" rows="3" aria-label="给智能助手发消息" ' +
+                'placeholder="输入指令或问题，Enter 发送"></textarea>' +
+              '<button class="btn primary" id="chatSend" aria-label="发送" title="发送">' +
+                '<svg class="ci-ico ci-enter" viewBox="0 0 24 24" aria-hidden="true">' +
+                  '<path d="M19 6v6a3 3 0 0 1-3 3H6"></path>' +
+                  '<path d="m10 11-4 4 4 4"></path></svg>' +
+                '<svg class="ci-ico ci-stop" viewBox="0 0 24 24" aria-hidden="true">' +
+                  '<rect x="7.5" y="7.5" width="9" height="9" rx="2"></rect></svg>' +
+              '</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
         '<div class="chatstatus" id="chatStatusBar"></div>' +
       '</div>' +
       '<div class="chatside">' +
@@ -8594,7 +8813,14 @@ async function initChat(){
       if(CHAT_CTRL) stopRunningChat();
       else askAgent();
     });
-    document.getElementById('chatNew').addEventListener('click', newChat);
+    document.getElementById('chatAttach').addEventListener('click', function(){
+      var f = document.getElementById('chatFile');
+      if(f) f.click();
+    });
+    document.getElementById('chatNew').addEventListener('click', function(){
+      closeChatConv();
+      newChat();
+    });
     var _cf = document.getElementById('chatFile');
     if(_cf){
       _cf.addEventListener('change', function(){
@@ -8672,6 +8898,13 @@ async function loadConversations(){
   var r = await api('/api/agent/conversations');
   if(r && !r.__err){
     CHAT_CONVS = r.items || [];
+    /* 当前会话在 10 条之后时自动展开，避免刷新后左侧看不到当前项；
+       用户手动收起过的优先（CONV_FOLD_USER）。 */
+    if(!CONV_FOLD_USER && CHAT_CONVS.length > CONV_FOLD_LIMIT &&
+       CHAT_CONVS.findIndex(function(c){ return c.id === CHAT_CONV_ID; })
+         >= CONV_FOLD_LIMIT){
+      CONV_FOLD_OPEN = true;
+    }
     renderConvList();
   }
 }
@@ -8702,22 +8935,47 @@ function renderConvList(){
     box.innerHTML = '<div class="chatconv-empty">还没有对话<br>点「新对话」开始</div>';
     return;
   }
-  box.innerHTML = convs.map(function(c){
+  var folded = convs.length > CONV_FOLD_LIMIT && !CONV_FOLD_OPEN;
+  var shown = folded ? convs.slice(0, CONV_FOLD_LIMIT) : convs;
+  var html = shown.map(function(c){
     var active = (c.id === CHAT_CONV_ID) ? ' on' : '';
     var title = c.title || '新对话';
     var live = !!(CHAT_CTRL && RUN_CONV_ID === c.id);
     var meta = live
       ? '<span class="cc-live">生成中…</span>'
       : ((c.message_count || 0) + ' 轮 · ' + esc(String(c.updated_at || '').slice(5, 16)));
-    return '<div class="chatconv-item' + active + '" onclick="openConversation(\'' +
-        esc(c.id) + '\')">' +
-      '<div class="cc-title">' + esc(title) + '</div>' +
-      '<div class="cc-meta">' + meta + '</div>' +
-      '<button class="cc-ren" title="重命名" onclick="event.stopPropagation();renameConversation(\'' +
-        esc(c.id) + '\')">✎</button>' +
-      '<button class="cc-del" title="删除会话" onclick="event.stopPropagation();deleteConversation(\'' +
-        esc(c.id) + '\')">×</button></div>';
+    return '<div class="chatconv-item' + active + '">' +
+      '<button type="button" class="cc-open" aria-current="' +
+        (active ? 'true' : 'false') + '" ' +
+        'onclick="closeChatConv();openConversation(\'' + esc(c.id) + '\')">' +
+        '<span class="cc-title">' + esc(title) + '</span>' +
+        '<span class="cc-meta">' + meta + '</span>' +
+      '</button>' +
+      '<button class="cc-ren" title="重命名" aria-label="重命名会话" ' +
+        'onclick="renameConversation(\'' + esc(c.id) + '\')">✎</button>' +
+      '<button class="cc-del" title="删除会话" aria-label="删除会话" ' +
+        'onclick="deleteConversation(\'' + esc(c.id) + '\')">×</button></div>';
   }).join('');
+  if(convs.length > CONV_FOLD_LIMIT){
+    var more = convs.length - CONV_FOLD_LIMIT;
+    var fbox = document.getElementById('chatConvFold');
+    if(fbox){
+      fbox.hidden = false;
+      fbox.innerHTML = '<button type="button" class="chatconv-fold" aria-expanded="' +
+        (folded ? 'false' : 'true') + '" onclick="toggleConvFold()">' +
+        (folded ? ('更早的会话（' + more + '）') : '收起更早的会话') +
+        '<span aria-hidden="true">' + (folded ? '▾' : '▴') + '</span></button>';
+    }
+  }else{
+    var fbox2 = document.getElementById('chatConvFold');
+    if(fbox2){ fbox2.hidden = true; fbox2.innerHTML = ''; }
+  }
+  box.innerHTML = html;
+}
+function toggleConvFold(){
+  CONV_FOLD_OPEN = !CONV_FOLD_OPEN;
+  CONV_FOLD_USER = true;
+  renderConvList();
 }
 
 /* 今日建议点过就开始处理了：当天不再重复出现。
@@ -8978,8 +9236,8 @@ function renderContext(c){
   var box = document.getElementById('chatContext');
   if(!box) return;
   var _st = document.getElementById('ctxState');
-  if(_st) _st.title = '窗口优先取模型端点 /models 的 context_length；取不到时用 config/model.json 的 context_window；再取不到按 1M 默认。token 为估算值。';
-  box.title = '窗口优先取模型端点 /models 的 context_length；取不到时用 config/model.json 的 context_window；再取不到按 1M 默认。参数量取不到时显示 —，可在 config/model.json 的 parameter_count 指定。';
+  if(_st) _st.title = '窗口优先取系统配置里的人工值；没有则读模型端点 /models 的 context_length；再按模型官方默认；都取不到按 32k 保守默认。可在「系统配置 → 模型与密钥 → 上下文窗口」修改。token 为估算值。';
+  box.title = '窗口优先取系统配置里的人工值；没有则读模型端点 /models 的 context_length；再按模型官方默认；都取不到按 32k 保守默认。可在「系统配置 → 模型与密钥 → 上下文窗口」修改。参数量取不到时显示 —，可在 config/model.json 的 parameter_count 指定。';
   if(!c || !c.window){
     box.innerHTML = '<div class="hint">提问后显示</div>';
     return;
@@ -9013,6 +9271,18 @@ function renderContext(c){
     rows += '<div class="ctxrow"><span class="ctxname" style="color:#b25000">告警</span>' +
       '<span class="ctxnum" style="color:#b25000">' + esc(alerts[0].message || (alerts.length + ' 项')) +
       '</span></div>';
+  }
+  /* 窗口来源明确标出来：避免"怎么又是 1M / 怎么只有 32k"的困惑。 */
+  var _ws = String(c.window_source || '');
+  if(_ws === 'fallback'){
+    rows += '<div class="ctxrow"><span class="ctxname">窗口来源</span>' +
+      '<span class="ctxnum">未探测到，按 32k 保守估算 · 可在系统配置修改</span></div>';
+  }else if(_ws === 'model'){
+    rows += '<div class="ctxrow"><span class="ctxname">窗口来源</span>' +
+      '<span class="ctxnum">模型官方默认 · 可在系统配置修改</span></div>';
+  }else if(_ws === 'provider'){
+    rows += '<div class="ctxrow"><span class="ctxname">窗口来源</span>' +
+      '<span class="ctxnum">模型端点返回的 context_length</span></div>';
   }
   var modelLine = c.model
     ? '<div class="ctxmodel"><b>' + esc(c.model) + '</b></div>'
@@ -9310,6 +9580,11 @@ async function openConversation(cid, quiet){
   if(h.__err){ if(!quiet) toast('读取会话失败：' + h.__err, 'danger'); return false; }
   CHAT_CONV_ID = cid;
   rememberConv(cid);
+  /* 从链接/恢复状态打开一条较旧的会话时，把折叠展开，保证当前项在列表里可见。 */
+  if((CHAT_CONVS || []).findIndex(function(c){ return c.id === cid; })
+       >= CONV_FOLD_LIMIT){
+    CONV_FOLD_OPEN = true;
+  }
   var _last = renderChatMessages(h.messages || []);
   loadChatStats();
   /* 如果切回来的正是仍在生成的那一条：把当前累积的思考/答案重新挂到页面上，
@@ -9426,6 +9701,12 @@ function rememberTurn(q, answer){
   }
   CHAT.push({role:'assistant', content: answer || ''});
 }
+/* 文件图标用线稿 SVG，和 Claude 的 composer 一样是单色，不用彩色 emoji。 */
+function _docIconSvg(){
+  return '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+    '<path d="M7 3.5h6.5L18 8v12.5H7z"></path>' +
+    '<path d="M13.5 3.5V8H18"></path></svg>';
+}
 /* 已发送消息里的附件预览：小缩略图 + 文件名，和 Claude Code 一样跟在
    该条消息气泡内部，而不是在会话顶部单独占一张卡。 */
 function _msgAttsHtml(atts){
@@ -9433,11 +9714,20 @@ function _msgAttsHtml(atts){
   return '<div class="msg-atts">' + atts.map(function(a){
     var nm = (a && a.name) ? String(a.name) : '文件';
     var isImg = !!(a && a.kind === 'image');
+    var token = (a && a.token) ? String(a.token) : '';
     var thumb = (a && a.thumb)
       ? '<img src="' + esc(a.thumb) + '" alt="">'
-      : '<span class="favi">' + (isImg ? '🖼️' : '📄') + '</span>';
+      : '<span class="favi">' + (isImg ? '🖼️' : _docIconSvg()) + '</span>';
+    var ap = '';
+    if(token && !a.approved){
+      ap = '<button type="button" class="msg-att-approve" data-token="' +
+        esc(token) + '" data-name="' + esc(nm) +
+        '" onclick="approveStoredAttachment(this)" title="批准后才会加入人才库">入库</button>';
+    }else if(token && a.approved){
+      ap = '<span class="msg-att-ok">已入库</span>';
+    }
     return '<span class="msg-att" title="' + esc(nm) + '">' + thumb +
-      '<span class="nm">' + esc(nm) + '</span></span>';
+      '<span class="nm">' + esc(nm) + '</span>' + ap + '</span>';
   }).join('') + '</div>';
 }
 function pushMsg(role, content, atts){
@@ -9757,7 +10047,8 @@ function _chatAttsSave(cid, q, atts){
   var clean = atts.map(function(a){
     return {name: a.name || '', stored: a.stored || '',
             status: a.status || '', summary: a.summary || '',
-            kind: a.kind || 'file', thumb: a.thumbData || ''};
+            kind: a.kind || 'file', thumb: a.thumbData || '',
+            token: a.token || '', approved: !!a.approved};
   });
   var list = _chatAttsLoad(cid);
   list.push({q: String(q || ''), atts: clean});
@@ -9783,6 +10074,13 @@ function _removePendingUpload(att){
   var i = CHAT_PENDING_UPLOADS.indexOf(att);
   if(i >= 0) CHAT_PENDING_UPLOADS.splice(i, 1);
   if(att && att._card) att._card.remove();
+  /* 未入库的聊天临时附件：移除时顺手清掉服务器暂存；已入库的目录早已删除。 */
+  if(att && att.token && !att.approved){
+    try{
+      fetch('/api/chat/attachments/' + encodeURIComponent(att.token),
+            {method:'DELETE', headers:hdr()});
+    }catch(e){}
+  }
   _uploadTraySync();
 }
 function _clearPendingUploads(){
@@ -9820,13 +10118,14 @@ function _uploadCard(file, name){
   if(!tray) return null;
   var isImg = String(file.type || '').indexOf('image/') === 0;
   var att = {name: name, stored: '', status: 'running', summary: '',
-             kind: isImg ? 'image' : 'file', thumbData: '', thumbUrl: ''};
+             kind: isImg ? 'image' : 'file', thumbData: '', thumbUrl: '',
+             token: '', approved: false, text: '', parse_ok: null};
   var thumb;
   if(isImg){
     att.thumbUrl = URL.createObjectURL(file);
     thumb = '<img class="upload-thumb" src="' + att.thumbUrl + '" alt="">';
   } else {
-    thumb = '<div class="upload-thumb upload-file">📄</div>';
+    thumb = '<div class="upload-thumb upload-file">' + _docIconSvg() + '</div>';
   }
   var card = document.createElement('div');
   card.className = 'upload-card';
@@ -9836,11 +10135,18 @@ function _uploadCard(file, name){
     '<div class="upload-info"><div class="upload-name">' + esc(name) + '</div>' +
     '<div class="upload-meta">正在上传…</div>' +
     '<div class="upload-bar"><i></i></div></div>' +
+    '<button class="upload-approve" type="button" disabled ' +
+      'title="解析完成后可批准加入人才库" aria-label="批准加入人才库">入库</button>' +
     '<button class="upload-x" type="button" title="移除" aria-label="移除">×</button>';
   var x = card.querySelector('.upload-x');
   if(x) x.addEventListener('click', function(ev){
     ev.preventDefault(); ev.stopPropagation();
     _removePendingUpload(att);
+  });
+  var ap = card.querySelector('.upload-approve');
+  if(ap) ap.addEventListener('click', function(ev){
+    ev.preventDefault(); ev.stopPropagation();
+    approvePendingUpload(att, ap);
   });
   tray.appendChild(card);
   tray.hidden = false;
@@ -9861,41 +10167,178 @@ function _uploadSet(card, text, pct, state){
     if(state === 'done') att.status = 'done';
     else if(state === 'error') att.status = 'error';
     else if(att.status !== 'done') att.status = 'running';
+    var ap = card.querySelector('.upload-approve');
+    if(ap){
+      var can = !!att.token && (state === 'done' || state === 'error')
+                && !att.approved;
+      if(att.token) ap.setAttribute('data-token', att.token);
+      ap.disabled = !can;
+      ap.textContent = att.approved ? '已入库' : '入库';
+      ap.classList.toggle('ok', !!att.approved);
+      ap.title = att.approved ? '已加入人才库'
+        : (can ? '批准后才会加入人才库' : '解析完成后可批准加入人才库');
+    }
   }
 }
 function _uploadSummary(rep){
   try{
     if(!rep || typeof rep !== 'object') return '';
+    if(Object.prototype.hasOwnProperty.call(rep, 'parse_ok')){
+      return rep.parse_ok ? ('已识别 ' + (rep.chars || 0) + ' 字')
+                          : '未识别出文字';
+    }
     var d = (rep.details || [])[0] || {};
     return d.name || rep.name || (rep.added ? ('新增 ' + rep.added + ' 人') : '');
   }catch(e){ return ''; }
 }
-function _uploadRemember(att, stored, status, summary){
+function _uploadRemember(att, stored, status, summary, extra){
   if(!att) return;
   att.stored = stored || att.stored || att.name;
   if(status) att.status = status;
   att.summary = summary || '';
+  if(extra && typeof extra === 'object'){
+    Object.keys(extra).forEach(function(k){ att[k] = extra[k]; });
+  }
 }
 function _pendingUploadContext(){
   if(!CHAT_PENDING_UPLOADS.length) return '';
-  var lines = CHAT_PENDING_UPLOADS.map(function(x){
+  /* 服务端只接收约 8000 字符的 extra_context（loop.py），所以正文总量要留出
+     规则文字的余量：多文件按份额均分，避免后一条规则被截掉。 */
+  var per = Math.max(600, Math.floor(6000 / CHAT_PENDING_UPLOADS.length));
+  var lines = [];
+  CHAT_PENDING_UPLOADS.forEach(function(x){
     var state = x.status === 'done'
       ? ('已解析' + (x.summary ? ('：' + x.summary) : ''))
       : (x.status === 'error'
           ? ('解析失败' + (x.summary ? ('：' + x.summary) : '') + '，不要臆测内容')
           : '仍在解析中，不要臆测内容');
-    return '- ' + x.name + '（' + state + '）';
+    lines.push('- ' + x.name + '（' + state + '）');
+    if(x.status === 'done' && x.text){
+      var body = String(x.text);
+      if(body.length > per) body = body.slice(0, per) + '\n……（文件较长，以下省略）';
+      lines.push('文件内容：\n' + body);
+    }
   });
-  return '用户刚上传了以下文件：\n' + lines.join('\n') +
-         '\n已解析的文件请结合回答；解析中/失败的文件不要声称已经看到或编造内容。';
+  return '用户刚上传了以下文件。它们只是本次对话的临时附件：\n' + lines.join('\n') +
+    '\n\n规则：\n' +
+    '1) 这些附件尚未加入人才库。不要调用入库工具处理它们，' +
+    '也不要声称已入库、已建档或已创建候选人。\n' +
+    '2) 文件不一定都是简历。只按文件实际内容和用户的问题回答，' +
+    '不要默认把文件当成候选人简历处理。\n' +
+    '3) 如果用户明确要求入库，请告诉用户点附件上的「入库」按钮批准，由用户决定。\n' +
+    '4) 解析中/失败的文件不要声称已经看到或编造内容。';
 }
 function _uploadSnapshot(){
   return CHAT_PENDING_UPLOADS.map(function(a){
     return {name: a.name, stored: a.stored, status: a.status,
             summary: a.summary, kind: a.kind,
+            token: a.token || '', approved: !!a.approved,
             thumb: a.thumbData || a.thumbUrl || '',
             thumbData: a.thumbData || ''};
   });
+}
+/* 聊天附件默认只解析、不入库。HR 点「入库」= 明确批准，才调用入库接口。
+   批准后把本地记录（待发送托盘 + 已发送消息里的预览）统一标成已入库。 */
+function _approveBtnBusy(btn, on){
+  if(!btn) return;
+  if(on){
+    if(!btn.dataset.label) btn.dataset.label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '入库中…';
+  }else{
+    btn.disabled = false;
+    btn.textContent = btn.dataset.label || '入库';
+  }
+}
+function _markStoredApproved(token){
+  var tok = String(token || '');
+  if(!tok) return;
+  CHAT_PENDING_UPLOADS.forEach(function(a){
+    if(a && String(a.token || '') === tok) a.approved = true;
+  });
+  /* localStorage 里保存的会话附件预览：同一 token 全部标成已入库，
+     刷新页面或切回会话后不再出现「入库」按钮。 */
+  try{
+    var keys = [];
+    for(var i = 0; i < localStorage.length; i++){
+      var k = localStorage.key(i);
+      if(k && k.indexOf('hragent.chat_atts.') === 0) keys.push(k);
+    }
+    keys.forEach(function(k){
+      var list;
+      try{ list = JSON.parse(localStorage.getItem(k) || '[]'); }catch(e){ return; }
+      if(!Array.isArray(list)) return;
+      var dirty = false;
+      list.forEach(function(rec){
+        ((rec && rec.atts) || []).forEach(function(a){
+          if(a && String(a.token || '') === tok){ a.approved = true; dirty = true; }
+        });
+      });
+      if(dirty){
+        try{ localStorage.setItem(k, JSON.stringify(list)); }catch(e){}
+      }
+    });
+  }catch(e){}
+  /* 当前页面上的按钮：待发送卡片直接改状态；消息气泡里的「入库」换成「已入库」。 */
+  var nodes = document.querySelectorAll('[data-token]');
+  for(var j = 0; j < nodes.length; j++){
+    var el = nodes[j];
+    if(String(el.getAttribute('data-token') || '') !== tok) continue;
+    if(el.classList.contains('upload-approve')){
+      el.disabled = true;
+      el.textContent = '已入库';
+      el.classList.add('ok');
+      el.title = '已加入人才库';
+    }else if(el.classList.contains('msg-att-approve')){
+      var ok = document.createElement('span');
+      ok.className = 'msg-att-ok';
+      ok.textContent = '已入库';
+      if(el.parentNode) el.parentNode.replaceChild(ok, el);
+    }
+  }
+}
+var CHAT_APPROVING = {};
+async function _approveChatAttachment(token, btn){
+  var tok = String(token || '');
+  if(!tok){ toast('附件已过期，请重新上传后再入库', 'warn'); return; }
+  if(CHAT_APPROVING[tok]) return;      /* 同一附件只跑一次入库 */
+  CHAT_APPROVING[tok] = true;
+  _approveBtnBusy(btn, true);
+  var r = await api('/api/chat/attachments/' + encodeURIComponent(tok) + '/approve',
+                    {method: 'POST'});
+  delete CHAT_APPROVING[tok];
+  if(!r || r.__err){
+    _approveBtnBusy(btn, false);
+    toast('入库失败：' + ((r && r.__err) || '网络错误'), 'danger');
+    return;
+  }
+  var rep = r.result || {};
+  var failed = Number(rep.failed || 0);
+  if(failed > 0){
+    /* 服务端保留了临时附件：再次点击会重试，已入库的部分靠去重不会重复。 */
+    _approveBtnBusy(btn, false);
+    var doneN = Number(rep.added || 0) + Number(rep.merged_versions || 0);
+    toast('入库未全部成功：已处理 ' + doneN + '，失败 ' + failed + '；可再点一次重试',
+          'danger');
+    return;
+  }
+  _markStoredApproved(tok);
+  var tail = Number(rep.skipped_oversize || 0) > 0
+    ? ('；' + rep.skipped_oversize + ' 份超限未导入') : '';
+  toast((r.summary || '已加入人才库') + tail, 'ok');
+  /* 入库会改变列表与管道；用户切回人才库时应看到新数据。 */
+  try{ load({push:false}); }catch(e){}
+  try{ loadPipe(); }catch(e){}
+  try{ loadChatStats(); }catch(e){}
+}
+function approvePendingUpload(att, btn){
+  if(!att) return;
+  if(att.approved){ toast('已入库，无需重复操作', 'info'); return; }
+  _approveChatAttachment(att.token, btn);
+}
+function approveStoredAttachment(btn){
+  _approveChatAttachment(btn && btn.getAttribute
+    ? btn.getAttribute('data-token') : '', btn);
 }
 async function uploadChatFile(file){
   if(!file) return;
@@ -9925,7 +10368,9 @@ async function uploadChatFile(file){
   }, 1000);
   var resp;
   try{
-    resp = await fetch('/api/upload?async=1&name=' + encodeURIComponent(sendName), {
+    /* 聊天附件走 /api/chat/upload：只解析文本给对话用，**不写入人才库**。
+       是否入库由 HR 点附件上的「入库」按钮批准（/api/chat/attachments/…/approve）。 */
+    resp = await fetch('/api/chat/upload?name=' + encodeURIComponent(sendName), {
       method: 'POST', headers: hdr({'Content-Type': 'application/octet-stream'}),
       body: file
     });
@@ -9954,11 +10399,16 @@ async function uploadChatFile(file){
   CHAT_UPLOADING = false;
   if(timer){ clearInterval(timer); timer = null; }
   if(att) att.style.pointerEvents = '';
+  /* 服务端只暂存并解析；token 是「入库」按钮的凭据，先记在附件上。 */
+  if(j.token) _uploadRemember(card._att, j.stored || sendName, 'running', '',
+                              {token: j.token, approved: false});
   if(!j.pending || !j.task_id){
     card._done = true;
-    _uploadSet(card, '解析完成', 100, 'done');
-    _uploadRemember(card._att, j.stored || sendName, 'done', _uploadSummary(j.result));
-    toast('已解析：' + display, 'ok');
+    _uploadSet(card, '已解析 · 未入库', 100, 'done');
+    _uploadRemember(card._att, j.stored || sendName, 'done', _uploadSummary(j.result),
+                    {token: j.token || '', text: String((j.result || {}).text || ''),
+                     parse_ok: !!(j.result || {}).parse_ok, approved: false});
+    toast('已解析（未入库）：' + display, 'ok');
     return;
   }
   _uploadSet(card, '已上传，后台解析中…', 8, 'running');
@@ -9975,13 +10425,17 @@ async function uploadChatFile(file){
     clearInterval(poll);
     card._done = true;
     if(t.status === 'done'){
-      var who = _uploadSummary(t.result);
-      _uploadSet(card, '解析完成' + (who ? ('：' + who) : ''), 100, 'done');
-      _uploadRemember(card._att, j.stored || sendName, 'done', who);
-      toast('已解析：' + display, 'ok');
+      var res = t.result || {};
+      var who = _uploadSummary(res);
+      _uploadSet(card, (who ? (who + ' · ') : '已解析 · ') + '未入库', 100, 'done');
+      _uploadRemember(card._att, j.stored || sendName, 'done', who,
+                      {token: j.token || '', text: String(res.text || ''),
+                       parse_ok: !!res.parse_ok, approved: false});
+      toast('已解析（未入库）：' + display, 'ok');
     } else {
       _uploadSet(card, '解析失败：' + (t.message || '未知错误'), 100, 'error');
-      _uploadRemember(card._att, j.stored || sendName, 'error', t.message || '');
+      _uploadRemember(card._att, j.stored || sendName, 'error', t.message || '',
+                      {token: j.token || '', approved: false});
       toast('解析失败：' + display, 'danger');
     }
   }, 1200);
@@ -9991,6 +10445,10 @@ async function askAgent(override){
   var sendQ = override ? String(override.send || '') : (inp.value || '').trim();
   var q = override ? String(override.display || sendQ) : sendQ;
   var resumeFlag = !!(override && override.resume);
+  /* 附件还在传（尚未拿到 token）：此时发送会让消息里的附件永远没有入库入口。 */
+  if(!override && CHAT_UPLOADING){
+    toast('文件正在上传，请稍候再发送', 'info'); return;
+  }
   var extraCtx = _pendingUploadContext();
   var turnAtts = _uploadSnapshot();
   /* 只上传了文件、没写文字时，点发送也应该把附件发出去。 */
@@ -11362,7 +11820,9 @@ async function uploadOutbox(files){
         {method:'POST', headers: hdr({'Content-Type':'application/octet-stream'}), body: f});
       var b = await r.json();
       if(!r.ok || b.error){ throw new Error(b.detail || b.error || ('HTTP ' + r.status)); }
-      M_OUTBOX.push({outbox_id: b.outbox_id, filename: b.filename, size: b.size});
+      M_OUTBOX.push({outbox_id: b.outbox_id, filename: b.filename, size: b.size,
+                     key: 'att-' + Date.now().toString(36) + '-' +
+                          Math.random().toString(36).slice(2, 10)});
     }catch(e){
       if(msg) msg.textContent = f.name + ' 上传失败：' + (e.message || e);
       renderOutbox();
@@ -11407,14 +11867,17 @@ async function dropOutbox(i){
   if(!x) return;
   var ok = await askConfirm({title: '移除附件', danger: true, okText: '移除',
     body: '移除附件「' + (x.filename || ('附件' + (x.outbox_id || ''))) + '」？'
-        + '\n\n只删暂存区里的这份副本（已入库的简历原件不受影响），发送前还可以重新上传。'});
+        + '\n\n只从当前草稿移除；暂存文件会保留一段时间，'
+        + '避免别的草稿引用同一附件时一起丢失。发送前还可以重新上传。'});
   if(!ok) return;
   if(x.outbox_id){
     var r = await api('/api/mail/outbox/' + encodeURIComponent(x.outbox_id) + '/delete',
       {method: 'POST'});
     if(r.__err){ toast(r.__err, 'danger'); return; }
   }
-  M_OUTBOX.splice(i, 1);
+  // await 期间列表可能已被发送完成/另一条移除改过；按对象身份删，不能用旧下标。
+  var j = M_OUTBOX.indexOf(x);
+  if(j >= 0) M_OUTBOX.splice(j, 1);
   renderOutbox();
   var msg = document.getElementById('upAttMsg');
   if(msg) msg.textContent = '已上传 ' + M_OUTBOX.length + ' 个附件';
@@ -12011,6 +12474,7 @@ async function sendMail(){
           '\n\n发出后无法撤回。'});
   if(!okC) return;
   M_MAIL_META = {to: to, subject: subject};
+  M_MAIL_SENT_IDS = M_OUTBOX.map(function(x){ return String(x.key || ''); });
   if(!M_MAIL_REQ_ID) setMailRequestId(newMailRequestId());
   setMailSending(true);
   var r = await api('/api/mail/send?async=1', {method:'POST',
@@ -12035,10 +12499,47 @@ async function sendMail(){
     })});
   if(r.__err){
     setMailSending(false);
+    // 不要在这里清快照：请求可能仍在后台发送，成功后 finishMailSent
+    // 还要靠它精确移除本次附件。
     var resumed = await resumeMailTask();
     if(!resumed){
       toast('网络中断，暂时无法确认发送结果；请稍后重试。系统会复用本次请求，不会重复发送。', 'warn');
     }
+    return;
+  }
+  /* 幂等接口可能返回 200 + ok:false（同键上次失败/结果未知）。
+     不能把它当成功渲染 —— 尤其 unknown：邮件可能已经发出。 */
+  if(r && r.ok === false){
+    setMailSending(false);
+    M_RESULT = {ok: false, msg: r.error || '发送失败'};
+    renderSent();
+    if(String(r.status || '') === 'superseded'){
+      var _wt = String(((r.result || {}).winner_task_id) || '');
+      toast('本次发送已由另一个任务接管，正在等待它的结果', 'warn');
+      if(_wt) attachMailTask(_wt, {meta: {to: to, subject: subject}});
+      else setTimeout(function(){ resumeMailTask(); }, 800);
+      return;
+    }
+    if(String(r.status || '') === 'unknown'){
+      var again = await askConfirm({
+        title: '发送结果未知', danger: true, okText: '确认未收到，重新发送',
+        body: (r.error || '上次发送中断，无法确认邮件是否已发出。') +
+              '\n\n请先到邮箱「已发送」里确认。如果已经能看到这封，千万不要重发。'});
+      if(again){
+        setMailRequestId('');
+        toast('已解除原请求；请再次点击「确认发送」重新提交', 'warn');
+      }else{
+        toast('已保留原请求，本次没有重发', 'warn');
+      }
+    }else{
+      M_MAIL_SENT_IDS = [];
+      setMailRequestId('');
+      toast('发送失败：' + (r.error || '未知原因'), 'danger');
+    }
+    return;
+  }
+  if(r && r.deduped && r.result){
+    finishMailSent(r.result);
     return;
   }
   if(r.task_id){
@@ -12278,4 +12779,92 @@ document.addEventListener('keydown', function(ev){
     try{ openSelMenu(sel); }catch(e){ closeSelMenu(); }
   }
 });
+
+/* ---------- 窄屏动作栏：次要动作收进「更多操作」 ---------- */
+function _top2OverflowIds(){
+  return ['btnExportRoster','btnBundle','top2AllBox','btnArch',
+          'btnCompare','btnClearSel','btnPipe'];
+}
+function _top2MoveOut(el, panel){
+  if(!el || el._top2Marker) return;
+  var marker = document.createComment('top2-overflow');
+  el.parentNode.insertBefore(marker, el);
+  el._top2Marker = marker;
+  panel.appendChild(el);
+}
+function _top2MoveBack(el){
+  if(!el || !el._top2Marker) return;
+  var marker = el._top2Marker;
+  if(marker.parentNode) marker.parentNode.replaceChild(el, marker);
+  el._top2Marker = null;
+}
+function syncTop2Overflow(){
+  var panel = document.getElementById('top2MorePanel');
+  var wrap = document.getElementById('moreTop2');
+  if(!panel || !wrap) return;
+  if(panel.classList.contains('on')){
+    panel.classList.remove('on');
+    var mb = document.getElementById('btnTop2More');
+    if(mb) mb.setAttribute('aria-expanded', 'false');
+  }
+  var narrow = window.innerWidth <= 1000;
+  _top2OverflowIds().forEach(function(id){
+    var el = document.getElementById(id);
+    if(!el) return;
+    if(narrow) _top2MoveOut(el, panel);
+    else _top2MoveBack(el);
+  });
+  if(!narrow){
+    panel.classList.remove('on');
+    var b = document.getElementById('btnTop2More');
+    if(b) b.setAttribute('aria-expanded', 'false');
+  }
+}
+function toggleTop2More(){
+  var panel = document.getElementById('top2MorePanel');
+  var b = document.getElementById('btnTop2More');
+  if(!panel) return;
+  var open = !panel.classList.contains('on');
+  if(open && b){
+    var r = b.getBoundingClientRect();
+    var width = Math.min(240, window.innerWidth - 24);
+    panel.style.width = width + 'px';
+    panel.style.left = Math.max(8, Math.min(r.right - width,
+                                            window.innerWidth - width - 8)) + 'px';
+    panel.style.top = (r.bottom + 6) + 'px';
+  }else if(!open && b && panel.contains(document.activeElement)){
+    try{ b.focus({preventScroll:true}); }catch(e){}
+  }
+  panel.classList.toggle('on', open);
+  if(b) b.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+document.addEventListener('click', function(ev){
+  var wrap = document.getElementById('moreTop2');
+  var panel = document.getElementById('top2MorePanel');
+  if(!wrap || !panel || !panel.classList.contains('on')) return;
+  if(!wrap.contains(ev.target)){
+    panel.classList.remove('on');
+    var b = document.getElementById('btnTop2More');
+    if(b) b.setAttribute('aria-expanded', 'false');
+  }
+});
+(function(){
+  var panel = document.getElementById('top2MorePanel');
+  if(!panel) return;
+  panel.addEventListener('click', function(ev){
+    if(!ev.target || !ev.target.closest || !ev.target.closest('.btn')) return;
+    panel.classList.remove('on');
+    var b = document.getElementById('btnTop2More');
+    if(b) b.setAttribute('aria-expanded', 'false');
+  });
+})();
+document.addEventListener('keydown', function(ev){
+  if(ev.key === 'Escape'){
+    var panel = document.getElementById('top2MorePanel');
+    if(panel && panel.classList.contains('on')) toggleTop2More();
+    if(document.body.classList.contains('chatconv-open')) closeChatConv();
+  }
+});
+window.addEventListener('resize', syncTop2Overflow);
+setTimeout(syncTop2Overflow, 0);
 """

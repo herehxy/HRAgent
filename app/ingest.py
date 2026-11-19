@@ -1457,8 +1457,8 @@ def _prepare_attachments(atts: list[dict]) -> list[dict]:
 
 def _save_other_attachments(conn, cfg: dict, atts: list[dict],
                             candidate_id: int | None, message_id: str | None,
-                            received_at: str | None = None) -> int:
-    """归档**非简历附件**（v1.27）。返回成功归档的数量。
+                            received_at: str | None = None) -> dict:
+    """归档**非简历附件**（v1.27）。返回 `{"saved": [...], "failed": [...]}`。
 
     做的事：按内容哈希落一份到原件区 + 写一条 `documents(kind='other')` 台账。
     刻意**不做**的事：不解析、不建档、不参与任何评分与去重判断。
@@ -1469,16 +1469,47 @@ def _save_other_attachments(conn, cfg: dict, atts: list[dict],
     `candidate_id` 为 None 时照样归档 —— 本封邮件没有可归属的简历（比如简历本身
     被白名单过滤掉了），此时台账的 candidate_id 为空，"完整档案"里看不到，
     但原件仍在库里且可按 `source_message_id` 追溯。**宁可暂存也不丢件**。
+
+    ⚠️ 归档失败不再静默 `continue`：每个失败都带回文件名+原因，调用方据此
+    保持邮件未处理并重试（死信机制兜底），否则 HR 永远不知道少了哪份材料。
     """
-    saved = 0
+    from .paths import lp_exists
+    saved: list[str] = []
+    failed: list[dict] = []
+    reused: list[dict] = []
     for att in atts or []:
         name = att.get("filename") or "attachment"
         data = att.get("data")
         if not data:
+            failed.append({"filename": name, "error": "附件内容为空"})
             continue
         try:
-            archived, size = archive_file(cfg, name, data)
             digest = sha256_bytes(data)
+            # **先查已有哈希再落盘**：同一份材料换个文件名再投，不应该在
+            # 原件区留下第二份“无台账野文件”。命中已有台账时直接复用路径；
+            # 跨候选人/未挂人也在这一步判断，避免先写文件再报冲突。
+            _existing = conn.execute(
+                "SELECT id, candidate_id, archived_path FROM documents "
+                "WHERE file_hash = ?", (digest,)).fetchone()
+            if _existing and _existing["archived_path"] \
+                    and lp_exists(_existing["archived_path"]):
+                _ecid = _existing["candidate_id"]
+                if (_ecid is not None and candidate_id is not None
+                        and int(_ecid) != int(candidate_id)):
+                    reused.append({
+                        "filename": name,
+                        "note": f"同一份文件已归档到候选人 #{_ecid}",
+                    })
+                    continue
+                if _ecid is None and candidate_id is not None:
+                    conn.execute(
+                        "UPDATE documents SET candidate_id = ? "
+                        "WHERE id = ? AND candidate_id IS NULL",
+                        (candidate_id, _existing["id"]))
+                    conn.commit()
+                saved.append(name)
+                continue
+            archived, size = archive_file(cfg, name, data)
             # 邮件路径已经预解析过：图片在这里已经 OCR，文本一并落库。
             # 没有预解析的旧调用方保持原行为（raw_text 空、parse_ok=None），
             # 界面仍显示“未解析”，不会把“没尝试”误报成“解析失败”。
@@ -1491,8 +1522,8 @@ def _save_other_attachments(conn, cfg: dict, atts: list[dict],
                     engine = "ocr_empty" if not ok else "parsed"
             else:
                 ok = None
-                engine = "非简历附件，未解析"
-            db.insert_document(conn, {
+                engine = att.get("_archive_note") or "非简历附件，未解析"
+            _did = db.insert_document(conn, {
                 "file_hash": digest, "candidate_id": candidate_id,
                 "application_id": None,
                 "file_name": name, "file_path": archived, "archived_path": archived,
@@ -1502,13 +1533,58 @@ def _save_other_attachments(conn, cfg: dict, atts: list[dict],
                 "raw_text": text, "parse_engine": engine,
                 "parse_ok": ok, "kind": "other",
             })
-            saved += 1
-        except Exception:                                    # noqa: BLE001
-            # 单个附件归档失败不能拖垮整封邮件（简历已经入库了）。
-            # 失败只丢这一个附件，不回滚、不影响简历 —— 但也不能当没事发生，
-            # 邮件台账里 attachment_count 仍记着它（record_email 已写）。
-            continue
-    return saved
+            # 同一份文件先在“无简历邮件”里以 candidate_id=NULL 归档，后来
+            # 又随某人的简历投递：insert_document 命中旧行直接返回，若不回填，
+            # 这个人永远在档案里看不到这份材料。
+            try:
+                _row = conn.execute(
+                    "SELECT candidate_id FROM documents WHERE id = ?", (_did,)).fetchone()
+                if (_row and _row["candidate_id"] is None and candidate_id is not None):
+                    conn.execute(
+                        "UPDATE documents SET candidate_id = ? "
+                        "WHERE id = ? AND candidate_id IS NULL",
+                        (candidate_id, _did))
+                    conn.commit()
+            except Exception:                                # noqa: BLE001
+                pass
+            saved.append(name)
+        except ValueError as exc:
+            # 同一份内容已归档在**另一个候选人**名下（例如单位统一的证明模板）。
+            # documents.file_hash 是全局唯一，不能再挂第二个人；这不是“归档失败”，
+            # 更不能让整封邮件永远重试。如实记一条“已在原件库”即可。
+            if "同一份文件已归档到候选人" in str(exc):
+                reused.append({"filename": name, "note": str(exc)})
+            else:
+                failed.append({"filename": name,
+                               "error": f"{type(exc).__name__}: {exc}"})
+        except Exception as exc:                             # noqa: BLE001
+            failed.append({"filename": name,
+                           "error": f"{type(exc).__name__}: {exc}"})
+    return {"saved": saved, "failed": failed, "reused": reused}
+
+
+_SKIP_REASON_LABEL = {
+    "extension_not_allowed": "格式不在白名单，按原件归档（未解析）",
+    "oversize": "超过附件体积上限，未收取",
+    "empty": "空附件，未收取",
+    "decode_failed": "附件解码失败，未收取",
+    "inline_image_ignored": "内嵌小图（签名/图标）未收取",
+}
+
+
+def _attachment_skip_meta(items: list[dict]) -> list[dict]:
+    """给邮件台账的 JSON 清单：只留可展示字段，绝不把附件字节写进库。"""
+    out: list[dict] = []
+    for x in items or []:
+        out.append({
+            "filename": str(x.get("filename") or ""),
+            "status": "skipped",
+            "reason": str(x.get("reason") or ""),
+            "label": _SKIP_REASON_LABEL.get(str(x.get("reason") or ""), "未收取"),
+            "size": int(x.get("size") or 0),
+            "mime": str(x.get("mime") or ""),
+        })
+    return out
 
 
 def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: str,
@@ -1534,7 +1610,10 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
                   "skipped_dup": 0, "failed": 0, "no_attachment": 0, "parse_failed": 0,
                   "routed": 0, "unassigned": 0,
                   # v1.27：非简历附件计数（收到几个 / 归档成功几个）
-                  "other_attachments": 0, "other_saved": 0,
+                  "other_attachments": 0, "other_saved": 0, "other_failed": 0,
+                  "other_reused": 0,
+                  # 白名单外/超限/空附件：必须留下“哪份、为什么”的痕迹
+                  "attachments_skipped": 0,
                   "details": []}
     report["mails"] = int(report.get("mails") or 0) + len(mails)
     try:
@@ -1562,33 +1641,72 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
             else:
                 report["unassigned"] += 1
 
+            atts = mail.get("attachments") or []
+            _att_skipped = list(mail.get("attachments_skipped") or [])
+            # 格式不在白名单的附件带原始字节，后面原样归档；
+            # 超限/空/解码失败没有可用字节，只记原因。
+            _skip_archive = [s for s in _att_skipped
+                             if s.get("reason") == "extension_not_allowed" and s.get("data")]
+            _skip_rejected = [s for s in _att_skipped
+                              if not (s.get("reason") == "extension_not_allowed"
+                                      and s.get("data"))]
+            # 台账里的附件清单要等**实际归档结果**出来后再写，不能先写“已归档”。
+            _manifest = _attachment_skip_meta(_skip_rejected)
             db.record_email(conn, {
                 "message_id": mid, "uid": mail.get("uid"), "mailbox": mail.get("mailbox"),
                 "from_addr": mail.get("from_addr"), "subject": mail.get("subject"),
                 "body_text": mail.get("body_text"), "body_html": mail.get("body_html"),
                 "received_at": mail.get("received_at"),
-                "has_attachment": bool(mail.get("attachments")),
-                "attachment_count": len(mail.get("attachments") or []),
+                "has_attachment": bool(atts or _att_skipped),
+                "attachment_count": len(atts) + len(_att_skipped),
                 "error": mail.get("error"),
             })
 
-            atts = mail.get("attachments") or []
-            if not atts:
-                report["no_attachment"] += 1
-                # 让完成弹窗能列出"哪封邮件没有附件"，而不是只给一个数字。
-                report["details"].append({
-                    "file": mail.get("subject") or "（无附件邮件）",
-                    "status": "no_attachment",
-                    "name": None,
-                    "notes": [f"发件人：{mail.get('from_addr') or '未知'}；"
-                              f"{mail.get('error') or '没有简历附件'}"],
-                })
-                db.update_email(conn, mid, processed=1, processed_at=db.now(),
-                                error=mail.get("error") or "无简历附件")
+            if not atts and not _skip_archive:
+                if _skip_rejected:
+                    # 有附件，但都被白名单/体积/解码挡下了：不能报“无附件”。
+                    report["attachments_skipped"] = (
+                        int(report.get("attachments_skipped") or 0) + len(_skip_rejected))
+                    report["details"].append({
+                        "file": mail.get("subject") or "（附件未收邮件）",
+                        "status": "attachment_skipped",
+                        "name": None,
+                        "notes": [f"发件人：{mail.get('from_addr') or '未知'}"]
+                                 + [f"{s.get('filename') or '（未命名）'}："
+                                    f"{_SKIP_REASON_LABEL.get(s.get('reason'), '未收取')}"
+                                    for s in _skip_rejected],
+                    })
+                else:
+                    report["no_attachment"] += 1
+                    # 让完成弹窗能列出"哪封邮件没有附件"，而不是只给一个数字。
+                    report["details"].append({
+                        "file": mail.get("subject") or "（无附件邮件）",
+                        "status": "no_attachment",
+                        "name": None,
+                        "notes": [f"发件人：{mail.get('from_addr') or '未知'}；"
+                                  f"{mail.get('error') or '没有简历附件'}"],
+                    })
+                db.update_email(
+                    conn, mid, processed=1, processed_at=db.now(),
+                    attachment_skipped_json=(
+                        json.dumps(_manifest, ensure_ascii=False) if _manifest else None),
+                    error=mail.get("error") or (
+                        "有附件未收取" if _skip_rejected else "无简历附件"))
                 db.update_email(conn, mid, dead_letter=0, dead_at=None)
                 continue
+            # 被拒收的附件（超限/空/解码失败）：重试也不会变好，只留痕。
+            if _skip_rejected:
+                report["attachments_skipped"] = (
+                    int(report.get("attachments_skipped") or 0) + len(_skip_rejected))
+                for s in _skip_rejected:
+                    report["details"].append({
+                        "file": s.get("filename") or "（未命名附件）",
+                        "status": "attachment_skipped",
+                        "notes": [_SKIP_REASON_LABEL.get(s.get("reason"), "未收取")
+                                  + (f"（{s.get('size')} 字节）" if s.get("size") else "")],
+                    })
 
-            added = mm = skipped = failed = pf = other_saved = 0
+            added = mm = skipped = failed = pf = other_saved = other_failed = other_reused = 0
             # v1.27：先按 kind 分流。非简历附件（作品集/成绩单/证书扫描件…）
             # **不建档、不解析** —— 解析它们只会得到一堆空字段，
             # 然后各自变成一个"解析失败的新人"混进人才库。
@@ -1618,9 +1736,16 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
                 _a["kind"] = "resume" if _i == _resume_idx else "other"
             _resume_atts = [atts[_resume_idx]] if _resume_idx >= 0 else []
             _other_atts = [a for _i, a in enumerate(atts) if _i != _resume_idx]
+            # 白名单外但拿到字节的附件：原样归档，不解析、不参与“谁是简历”。
+            _skip_names = {str(s.get("filename") or "") for s in _skip_archive}
+            for _s in _skip_archive:
+                _s["kind"] = "other"
+                _s["_archive_note"] = _SKIP_REASON_LABEL["extension_not_allowed"]
+                _other_atts.append(_s)
             # 本封邮件建出来的人（**局部变量**）。不能回头扫 `report["details"]` ——
             # 那个列表是**整批累积**的，会把上一封邮件的人挂到这封的附件上。
             _mail_cid: int | None = None
+            _failed_names: list[str] = []
 
             for att in _resume_atts:
                 report["attachments"] += 1
@@ -1651,6 +1776,14 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
                     report["details"].append(r)
                 except Exception as exc:  # 单份附件失败不影响整批
                     failed += 1
+                    _failed_names.append(att.get("filename") or "（未命名简历附件）")
+                    _manifest.append({
+                        "filename": att.get("filename") or "",
+                        "status": "failed", "reason": "resume",
+                        "size": len(att.get("data") or b""),
+                        "mime": att.get("mime") or "",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
                     report["details"].append({"file": att.get("filename"), "status": "failed",
                                               "notes": [f"处理异常：{exc}"]})
 
@@ -1658,20 +1791,64 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
             # 挂不上的（本封没有任何简历成功建档）也要归档，只是暂时找不到归属
             # —— 不能静默丢弃，那等于"收到了但没存"。
             if _other_atts:
-                other_saved += _save_other_attachments(
+                _save_res = _save_other_attachments(
                     conn, cfg, _other_atts, candidate_id=_mail_cid, message_id=mid,
                     received_at=mail.get("received_at"))
+                other_saved += len(_save_res.get("saved") or [])
                 report["other_attachments"] += len(_other_atts)
-                _notes = [f"{n}已归档"
-                          + ("" if _mail_cid else "（本封没有可归属的简历，暂存未挂人）")
-                          for n in [a.get("filename", "") for a in _other_atts]]
+                _notes = []
+                for n in (_save_res.get("saved") or []):
+                    _notes.append(
+                        f"{n}已归档"
+                        + ("（原样归档，未解析）" if n in _skip_names else "")
+                        + ("" if _mail_cid else "（本封没有可归属的简历，暂存未挂人）"))
+                    _manifest.append({
+                        "filename": n, "status": "archived",
+                        "reason": "extension_not_allowed" if n in _skip_names else "other",
+                        "note": ("原样归档（未解析）" if n in _skip_names else "已解析/已归档"),
+                    })
+                for f in (_save_res.get("failed") or []):
+                    other_failed += 1
+                    _failed_names.append(f.get("filename") or "（未命名附件）")
+                    _notes.append(f"{f.get('filename')}归档失败：{f.get('error')}")
+                    _manifest.append({
+                        "filename": f.get("filename") or "",
+                        "status": "failed", "reason": "other",
+                        "error": f.get("error") or "",
+                    })
+                    report["details"].append({
+                        "file": f.get("filename") or "（未命名附件）",
+                        "status": "other_failed",
+                        "notes": [f"非简历附件归档失败：{f.get('error')}"],
+                    })
+                for f in (_save_res.get("reused") or []):
+                    other_reused += 1
+                    _notes.append(f"{f.get('filename')}已在原件库（同一文件归在他人档案下，"
+                                  "未重复挂载）")
+                    _manifest.append({
+                        "filename": f.get("filename") or "",
+                        "status": "reused", "reason": "other",
+                        "note": "同一文件已在原件库（未重复挂载）",
+                    })
+                    report["details"].append({
+                        "file": f.get("filename") or "（未命名附件）",
+                        "status": "other_reused",
+                        "notes": ["同一份文件已归档在其他人档案下，未重复挂载；"
+                                  "如确属本人材料，请让候选人重命名后重发"],
+                    })
                 # 口径（业务方 2026-10-27 明确）：**一封邮件只建一个档案**。
                 # 同封邮件里的其余文件一律视为这个人的补充材料，挂在他的
                 # 「其他附件」下。真有两个人的简历被塞进同一封邮件，
                 # 那是投递方的问题 —— 不做自动拆分，也不额外解析去猜。
                 report["details"].append({
                     "file": f"（本封共 {len(_other_atts)} 个非简历附件）",
-                    "status": "other_saved",
+                    # 单个失败已在上面的 details 里逐条列出；这里是汇总行，
+                    # 不再重复标成 other_failed，避免弹窗出现两遍。
+                    # 没有可归属简历时，已归档材料也不会出现在任何人档案里，
+                    # 必须让 HR 看到“已归档但未挂人”。
+                    "status": ("other_unassigned" if _mail_cid is None
+                               and (_save_res.get("saved") or [])
+                               else "other_saved"),
                     "candidate_id": _mail_cid,
                     "notes": _notes,
                 })
@@ -1680,20 +1857,33 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
             report["skipped_dup"] += skipped
             report["failed"] += failed
             report["parse_failed"] += pf
-            report["other_saved"] += other_saved
-            # 简历附件处理失败时保持 processed=0：游标不越过这封，
+            report["other_saved"] = int(report.get("other_saved") or 0) + other_saved
+            report["other_failed"] = int(report.get("other_failed") or 0) + other_failed
+            report["other_reused"] = int(report.get("other_reused") or 0) + other_reused
+            # 简历附件或非简历附件归档失败时保持 processed=0：游标不越过这封，
             # 下次同步重新拉取重试；成功才标记已处理（P2 数据修复）。
-            _mail_ok = failed == 0
+            _mail_ok = failed == 0 and other_failed == 0
+            _err_text = ""
             if not _mail_ok:
-                db.bump_email_retry(
-                    conn, mid, f"有 {failed} 份简历附件处理失败，等待下次同步重试")
+                _fail_bits = []
+                if failed:
+                    _fail_bits.append(f"{failed} 份简历附件")
+                if other_failed:
+                    _fail_bits.append(f"{other_failed} 份补充附件")
+                _names_txt = ("：" + "、".join(_failed_names[:5])) if _failed_names else ""
+                _err_text = (f"{'、'.join(_fail_bits)}处理失败{_names_txt}；"
+                             "等待下次同步重试")
+                report["blocked_files"] = _failed_names[:20]
+                db.bump_email_retry(conn, mid, _err_text)
             db.update_email(
                 conn, mid,
                 processed=1 if _mail_ok else 0,
                 processed_at=db.now() if _mail_ok else None,
-                added=added, skipped=skipped, failed=failed,
-                error=("有简历附件处理失败，等待下次同步重试" if not _mail_ok
-                       else None),
+                added=added, skipped=skipped,
+                failed=int(failed or 0) + int(other_failed or 0),
+                attachment_skipped_json=(
+                    json.dumps(_manifest, ensure_ascii=False) if _manifest else None),
+                error=(_err_text or None),
             )
             if _mail_ok:
                 # 手动重试死信或游标回退后重新入库成功 → 清掉死信标记。
@@ -1971,7 +2161,8 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
         report: dict = {"mails": 0, "attachments": 0, "added": 0, "merged_versions": 0,
                         "skipped_dup": 0, "failed": 0, "no_attachment": 0,
                         "parse_failed": 0, "routed": 0, "unassigned": 0,
-                        "other_attachments": 0, "other_saved": 0, "details": []}
+                        "other_attachments": 0, "other_saved": 0, "other_failed": 0,
+                        "other_reused": 0, "attachments_skipped": 0, "details": []}
         total = 0
         done = 0
         mailbox_total = 0
@@ -1996,6 +2187,10 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                     cfg, cursor, limit,
                     should_stop=lambda: stop_requested(progress_tid),
                     meta=_meta)
+                if _meta.get("batch_limit_hit"):
+                    report["batch_limit_hit"] = True
+                    report["note"] = ("本批达到内存上限，已先处理下载到的邮件；"
+                                      "再点一次收取会从游标继续")
                 _uv = str(_meta.get("uidvalidity") or "")
                 fetch_error = _meta.get("fetch_error") or {}
                 # 旧格式游标没有 uidvalidity，无法判断邮箱是否重建过：
@@ -2064,6 +2259,9 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                                     message=f"已停止：完成 {done} / {total} 封后按你的要求停下")
                     break
                 _failed_before = int(report.get("failed") or 0)
+                _other_failed_before = int(report.get("other_failed") or 0)
+                # 死信文案只写当前这封的附件名，不能沿用上一封的。
+                report["blocked_files"] = []
                 try:
                     ingest_mails([item], cfg, jd, tiers, db_path, job_id,
                                  use_llm, llm_conf, report=report, spawn=False)
@@ -2085,13 +2283,15 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                             pass
                     _retry = _email_retry_count(db_path, _mid)
                     _marked = False
+                    _names = report.get("blocked_files") or []
+                    _names_txt = ("：" + "、".join(_names[:5])) if _names else ""
                     if _mid and _retry >= MAX_EMAIL_RETRIES:
                         try:
                             _c = db.connect(db_path)
                             try:
                                 _marked = bool(db.mark_email_dead(
                                     _c, _mid,
-                                    f"连续 {_retry} 次入库异常，已转入死信"))
+                                    f"连续 {_retry} 次入库异常{_names_txt}，已转入死信"))
                             finally:
                                 _c.close()
                         except Exception:                    # noqa: BLE001
@@ -2104,8 +2304,8 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                             "status": "dead_letter",
                             "uid": item.get("uid"),
                             "message_id": _mid,
-                            "notes": [f"连续 {_retry} 次入库异常，已跳过并保留为死信；"
-                                      "可在邮件记录里手动重试"],
+                            "notes": [f"连续 {_retry} 次入库异常{_names_txt}，"
+                                      "已跳过并保留为死信；可在邮件记录里手动重试"],
                         })
                         newest = item.get("uid") or newest
                         done += 1
@@ -2120,19 +2320,23 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                     report["blocked_message_id"] = _mid
                     report["retry_count"] = _retry
                     break
-                if int(report.get("failed") or 0) > _failed_before:
-                    # 这封有附件失败：先看是不是同一封反复失败。连续失败达到
+                if (int(report.get("failed") or 0) > _failed_before
+                        or int(report.get("other_failed") or 0) > _other_failed_before):
+                    # 这封有附件失败（简历附件或补充附件都算）：先看是不是同一封
+                    # 反复失败。连续失败达到
                     # 上限就转死信、越过它继续收后面的邮件；否则停在它之前重试。
                     _mid = item.get("message_id") or ""
                     _retry = _email_retry_count(db_path, _mid)
                     _marked = False
+                    _names = report.get("blocked_files") or []
+                    _names_txt = ("：" + "、".join(_names[:5])) if _names else ""
                     if _mid and _retry >= MAX_EMAIL_RETRIES:
                         try:
                             _c = db.connect(db_path)
                             try:
                                 _marked = bool(db.mark_email_dead(
                                     _c, _mid,
-                                    f"连续 {_retry} 次入库失败，已转入死信"))
+                                    f"连续 {_retry} 次入库失败{_names_txt}，已转入死信"))
                             finally:
                                 _c.close()
                         except Exception:                    # noqa: BLE001
@@ -2145,8 +2349,8 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                             "status": "dead_letter",
                             "uid": item.get("uid"),
                             "message_id": _mid,
-                            "notes": [f"连续 {_retry} 次失败，已跳过并保留为死信；"
-                                      "可在邮件记录里手动重试"],
+                            "notes": [f"连续 {_retry} 次失败{_names_txt}，"
+                                      "已跳过并保留为死信；可在邮件记录里手动重试"],
                         })
                         newest = item.get("uid") or newest
                         done += 1
@@ -2245,7 +2449,7 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
         # 旧路径（CLI / 助手收信工具，没有逐封进度）也要遵守同一条规则：
         # 这一批里只要有附件失败，游标就停在原处，下次整批重扫；已入库的
         # 邮件按 message_id 去重，不会重复建档。否则失败的那封会被游标越过。
-        if not report.get("failed"):
+        if not (report.get("failed") or report.get("other_failed")):
             newest = new_cursor or newest
         else:
             report["retry_pending"] = True

@@ -323,10 +323,24 @@ def send_mail(to: str, subject: str, body: str,
     used: dict = {}
     try:
         s, used, corrected, tried = connect_smtp(conf, pwd, timeout=30)
+    except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
+        return _explain_conn_error(exc, conf, tried)
+    try:
         s.sendmail(conf["user"], [parseaddr(to)[1] or to], msg.as_string())
     except smtplib.SMTPRecipientsRefused:
         return {"ok": False, "error": f"对方服务器拒收了收件人地址：{to}"}
-    except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
+    except (smtplib.SMTPServerDisconnected, ConnectionError, TimeoutError,
+            ssl.SSLError) as exc:
+        # 已经进入 sendmail 阶段后连接断开/超时：服务器**可能已经接收**了报文。
+        # 这时绝不能报“发送失败”让 HR 直接重发 —— 邮件不可撤回。
+        out = _explain_conn_error(exc, conf, tried)
+        out["ok"] = False
+        out["uncertain"] = True
+        out["error"] = "发送过程中连接中断，无法确认邮件是否已被服务器接收。"
+        out["hint"] = ("请先到邮箱「已发送」里确认；如果已经能看到这封，千万不要重发。"
+                       + ((" " + out["hint"]) if out.get("hint") else ""))
+        return out
+    except (smtplib.SMTPException, OSError) as exc:
         return _explain_conn_error(exc, conf, tried)
     finally:
         if s is not None:

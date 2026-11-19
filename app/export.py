@@ -65,6 +65,88 @@ def _phone(c: dict) -> str:
         return EMPTY
 
 
+#: 只从“较早的正向投递”合并**录用结论相关**字段。
+#: 阶段/面试日期/面试单位等**当前流程字段绝不能覆盖**：否则 HR 按“待面试 +
+#: 3 月 10 日 + 新单位”筛出来的人，表里却显示旧 offer 的“1 月 5 日 + 老单位”，
+#: 筛选口径与展示自相矛盾（已由并发复审复现）。
+_ROSTER_POSITIVE_FIELDS = (
+    "offer_sent_at", "signed_at", "onboard_deadline", "onboard_status",
+)
+
+
+def _apply_positive_outcomes(conn, items: list[dict], db_mod) -> None:
+    """多人多投时，让**较早的拟录用/offer/签约**不被最新一次普通投递盖掉。
+
+    `list_candidates` 每人只带“最新一次投递”。一个人先投 A 岗拿到 offer/签约，
+    后来又投了 B 岗（新投递），名单原来只看 B 岗 → “是否录用/签约时间”全是空，
+    年度统计就少了一个已签约的人。这里只挑**正向结论**（拟录用/已发放offer/
+    已签约）覆盖；不拿“不录用/拒签”覆盖，否则会误伤另一个仍在流程中的岗位。
+    筛选条件仍按最新一次投递计算，这是导出入口原有口径。
+    """
+    if not items:
+        return
+    ids = [int(i.get("id") or 0) for i in items if i.get("id") is not None]
+    if not ids:
+        return
+    best: dict[int, tuple[tuple, dict]] = {}
+    # SQLite 的 SQL 变量上限通常 999；1100 人的库直接 IN 会报
+    # "too many SQL variables"。按 500 一批查询，避免导出在千人库上直接失败。
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        marks = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"""SELECT id, candidate_id, stage, outcome, signed_at, offer_sent_at,
+                       interview_date, interview_unit, interview_slot, interview_mode,
+                       interview_place, interviewed_at, onboard_deadline,
+                       onboard_status, hire_unit, sign_status, applied_at
+                 FROM applications
+                 WHERE candidate_id IN ({marks})
+                   AND (COALESCE(signed_at,'') != ''
+                        OR COALESCE(offer_sent_at,'') != ''
+                        OR stage = '已发放offer'
+                        OR outcome IN ('已签约', '拟录用'))""",
+            chunk).fetchall()
+        for row in rows:
+            d = dict(row)
+            ss = db_mod.effective_sign_status(d)
+            # 旧投递后来被拒签/毁约的，不能再作为“正向结论”来源：
+            # outcome=拟录用、offer_sent_at 仍在，但人已经拒了。
+            if ss in ("拒签", "毁约"):
+                continue
+            if stages_mod.verdict(d.get("stage"), d.get("outcome"), ss) == "不录用":
+                continue
+            if ss == "已签约" or d.get("signed_at"):
+                prio = 3
+            elif d.get("offer_sent_at") or d.get("stage") == "已发放offer":
+                prio = 2
+            elif d.get("outcome") == "拟录用":
+                prio = 1
+            else:
+                continue
+            cid = int(d.get("candidate_id") or 0)
+            key = (prio, str(d.get("applied_at") or ""), int(d.get("id") or 0))
+            if cid not in best or key > best[cid][0]:
+                best[cid] = (key, d)
+    for item in items:
+        # 最新一次投递本身是“不录用”（拒签/毁约/不录用）时，保留它：
+        # 不能用较早的“好消息”盖掉后来实际发生的拒绝。
+        # 若最新一次是正向结论（拟录用/offer），仍允许较早的“已签约”补上
+        # 录用函/签约时间，但绝不覆盖阶段和面试字段。
+        if stages_mod.verdict(item.get("stage"), item.get("outcome"),
+                              db_mod.effective_sign_status(item)) == "不录用":
+            continue
+        got = best.get(int(item.get("id") or 0))
+        if not got:
+            continue
+        d = got[1]
+        for k in _ROSTER_POSITIVE_FIELDS:
+            if k in d:
+                item[k] = d[k]
+        item["_roster_verdict"] = (stages_mod.verdict(
+            d.get("stage"), d.get("outcome"), db_mod.effective_sign_status(d))
+            or "拟录用")
+
+
 def build_roster(conn, *, operator: str = "HR", role: str = "hr",
                  include_archived: bool = True, candidate_ids: list[int] | None = None,
                  **filters) -> tuple[list[str], list[list], set[int], int]:
@@ -72,6 +154,11 @@ def build_roster(conn, *, operator: str = "HR", role: str = "hr",
 
     `include_archived=True`（默认）：**归档的人也在表里**。业务方 2026-10-15 明确要求 ——
     自动归档之后他们从人才库消失了，而这恰恰是「是否录用」列最该出现的一批。
+
+    多投递口径：最新一次投递若还没有结论，较早一次若有「拟录用 / 已发放offer /
+    已签约」，用较早那次覆盖展示，避免年度统计漏掉已录用的人；如果**最新一次
+    本身已有结论**（包括拒签/毁约），以最新一次为准，不能用旧的好消息盖掉
+    后来实际发生的拒绝。
 
     `text_cols` 含「序号」与「电话」—— 后者是**必须的**：不设文本格式的话
     Excel 会把 13800138000 显示成 1.38E+10，而"看起来表是好的"，
@@ -84,6 +171,8 @@ def build_roster(conn, *, operator: str = "HR", role: str = "hr",
     if candidate_ids:
         wanted = {int(x) for x in candidate_ids}
         items = [i for i in items if int(i.get("id") or 0) in wanted]
+    # 多投递：优先展示较早的拟录用/offer/签约，避免被最新一次普通投递覆盖。
+    _apply_positive_outcomes(conn, items, db_mod)
     order = stages_mod.all_stages()
     rank = {s: i for i, s in enumerate(order)}
 
@@ -96,9 +185,12 @@ def build_roster(conn, *, operator: str = "HR", role: str = "hr",
 
     rows: list[list] = []
     for n, i in enumerate(items, 1):
-        # 「是否录用」由 (阶段, 结论) 推导 —— 还没判的阶段给 `—`
-        vd = stages_mod.verdict(i.get("stage"), i.get("outcome"),
-                                db_mod.effective_sign_status(i))
+        # 「是否录用」由 (阶段, 结论) 推导 —— 还没判的阶段给 `—`。
+        # 多投递时 `_roster_verdict` 可能来自较早的正向投递；阶段/面试字段
+        # 仍保留最新投递，保证筛选口径与展示一致。
+        vd = (i.get("_roster_verdict")
+              or stages_mod.verdict(i.get("stage"), i.get("outcome"),
+                                    db_mod.effective_sign_status(i)))
         rows.append([
             n,
             _v(i.get("interview_date")),     # 发面试邀请时回写

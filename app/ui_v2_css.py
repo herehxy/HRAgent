@@ -775,6 +775,16 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .cc-del:hover{background:var(--bad-soft);color:var(--bad)}
 .cc-ren:hover{background:var(--accent-soft);color:var(--accent-ink)}
 .chatconv-empty{padding:22px 12px;color:var(--ink-3);font-size:12.5px;text-align:center;line-height:1.8}
+/* 会话超过 10 条时，第 11 条起折叠在「更早的会话」下面；
+   不隐藏入口，点一下展开/收起，列表长度可控。 */
+.chatconv-foldbar{flex:none;padding:0 8px 10px;background:var(--nav)}
+.chatconv-foldbar[hidden]{display:none}
+.chatconv-fold{display:flex;align-items:center;justify-content:space-between;gap:6px;
+  width:100%;margin:0;padding:9px 10px;border:0;border-top:1px solid var(--line);
+  border-radius:0;background:transparent;color:var(--ink-3);font-size:12.5px;
+  line-height:1.4;text-align:left;cursor:pointer}
+.chatconv-fold:hover{background:var(--fill-hover);color:var(--ink)}
+.chatconv-fold:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 /* 新会话欢迎区：输入第一句后由 pushMsg 移除 */
 .chatwelcome{max-width:760px;margin:4vh auto 0;padding:0 2px 20px}
 .cw-mark{width:46px;height:46px;border-radius:14px;background:var(--accent-soft);
@@ -939,6 +949,32 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
    限到 960px 后行宽落在舒适区（中文 ~45 字/行）。 */
 .detail > *{max-width:1280px}
 .detail > .detail-toolbar{max-width:none;width:auto;margin:0 -24px;padding:20px 24px 12px}
+/* 切换候选人时的右栏骨架屏：先给反馈，不让旧档案一直挂着、
+   等请求回来再"突然跳过去"。 */
+.detail-loading{padding:28px 0 40px;max-width:980px}
+.dl-head{display:flex;align-items:center;gap:10px;margin:2px 0 20px;
+  font-size:14px;color:var(--ink-2)}
+.dl-head b{color:var(--ink);font-weight:600}
+.dl-spin{width:18px;height:18px;flex:none;border-radius:50%;
+  border:2px solid var(--line-2);border-top-color:var(--accent);
+  animation:dlspin .8s linear infinite}
+@keyframes dlspin{to{transform:rotate(360deg)}}
+.dl-card{display:flex;gap:16px;align-items:flex-start;
+  padding:20px;margin-bottom:14px;border:1px solid var(--line);
+  border-radius:16px;background:var(--surface-2)}
+.dl-hero .dl-av{width:64px;height:64px;border-radius:16px;flex:none;
+  background:var(--fill-hover)}
+.dl-lines{flex:1;min-width:0}
+.dl-line{display:block;height:12px;margin:8px 0;border-radius:6px;
+  background:var(--fill-hover);position:relative;overflow:hidden}
+.dl-line::after{content:'';position:absolute;inset:0;transform:translateX(-100%);
+  background:linear-gradient(90deg,transparent,var(--surface),transparent);
+  animation:dlshimmer 1.15s ease-in-out infinite}
+@keyframes dlshimmer{to{transform:translateX(100%)}}
+@media (prefers-reduced-motion: reduce){
+  .dl-spin,.dl-line::after{animation:none}
+  .dl-line::after{display:none}
+}
 /* 操作条**常驻**（2026-10-28）：档案往下滚时，"保存更正 / 阶段 / 归档"要一直够得着。
    原先是 position:relative，跟着内容一起滚走 —— 看到页面下半部分想改阶段，
    得先滚回顶部。
@@ -3233,7 +3269,8 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   #chatView.on,#recruitView.on,#scheduleView.on,
   .detail.swap > *,.mask.on .dlg{animation:none!important}
   .btn,.side button,.row,.tabs button,.seg button,.cw-card,.toast,.sched-ev,
-  .chatconv-item,.loginbtn{transition:none!important}
+  .chatconv-item,.loginbtn,.ciwrap,#chatSend,.chatadd-inline,.upload-card,
+  .msg-att,.chatconv{transition:none!important}
   .btn:active,.side button:active,.loginbtn:active{transform:none!important}
   #chatView .cw-card:hover{transform:none}
 }
@@ -3264,7 +3301,6 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   .top .search{flex:1 1 220px;width:auto;min-width:160px}
   .top2{padding:8px 14px}
   .tabbar{padding:8px 14px}
-  #chatView.on{grid-template-columns:1fr}
   .chatinput{padding:12px 18px 18px}
   .chatlog{padding:20px 18px}
   #recruitView.on,#sysView.on{padding:20px 16px 40px}
@@ -3337,4 +3373,431 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   font-size:16px;flex:none}
 .msg-att .nm{max-width:175px;white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}
+/* 聊天附件「入库」：附件默认只解析、不入库，HR 点这个按钮才批准写入人才库。 */
+.upload-approve{flex:none;border:1px solid var(--line);border-radius:8px;
+  background:var(--surface);color:var(--ink-2);font-size:11.5px;line-height:1;
+  padding:5px 8px;cursor:pointer;white-space:nowrap}
+.upload-approve:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.upload-approve:disabled{opacity:.45;cursor:default}
+.upload-approve.ok{color:var(--ok);border-color:transparent;background:transparent}
+.msg-att-approve{flex:none;border:1px solid var(--line);border-radius:999px;
+  background:var(--surface-2);color:var(--ink-2);font-size:11px;line-height:1;
+  padding:3px 7px;cursor:pointer;white-space:nowrap}
+.msg-att-approve:hover{border-color:var(--accent);color:var(--accent)}
+.msg-att-ok{flex:none;font-size:11px;color:var(--ok);white-space:nowrap}
+
+/* ---------- 22. Modern product UI refresh (2026-11-19) ----------
+   目标：从“信息密集的后台表格”往现代产品界面靠 —— 更大的正文与控件、
+   更松的行距/间距、统一的 10px 控件圆角与 16px 卡片圆角。
+   只调视觉层，不改任何交互与信息结构。 */
+:root{
+  --ink-2:#3a3a3c;
+  --ink-3:#6e6e73;
+  --control-h:38px;
+  --r-control:10px;
+  --r-card:16px;
+}
+/* 上面这组只用于浅色；深色必须恢复原来的次级文字色，否则深底深字不可读。 */
+:root[data-theme="dark"]{--ink-2:#d2d2d7;--ink-3:#98989d}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){--ink-2:#d2d2d7;--ink-3:#98989d}
+}
+body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
+.side{padding:16px 12px 12px}
+.sbrand{font-size:16px;padding:4px 10px 20px}
+.sgroup{font-size:11.5px;letter-spacing:.1em;padding:18px 12px 8px}
+.side button{height:42px;font-size:14px;gap:12px;border-radius:10px}
+.side button .ico{width:18px;height:18px}
+.acct{height:46px}
+.top{height:66px;padding:0 26px;gap:12px}
+.search{width:340px;height:40px;padding:0 16px;font-size:14px;
+  border-radius:var(--r-control)}
+.sel,.msel > .msbtn,.vsel,.stagesel{height:40px;padding:0 14px;font-size:14px;
+  border-radius:var(--r-control)}
+.top .btn{height:38px;padding:0 18px;font-size:13.5px;border-radius:var(--r-control)}
+.count{font-size:13px}
+.count b{font-size:16px}
+.vdiv{height:22px}
+.top2{padding:10px 22px;gap:7px;min-height:56px}
+.top2 .btn-lg{height:38px;padding:0 14px;font-size:14px;
+  border-radius:var(--r-control)}
+/* 动作栏只保留两个“真主操作”的强调色，其余用中性按钮，减少一屏十几颗彩色胶囊。 */
+.top2 .btn{background:var(--surface);border:1px solid var(--line);
+  color:var(--ink-2);font-weight:500}
+.top2 .btn:hover{background:var(--surface-2);border-color:var(--line-2);
+  color:var(--ink)}
+.top2 #btnIngestMail,.top2 #btnProp{background:var(--accent-soft);
+  border-color:transparent;color:var(--accent-ink);font-weight:600}
+.top2 #btnIngestMail:hover,.top2 #btnProp:hover{background:var(--accent-hi);
+  border-color:transparent;color:var(--accent-ink)}
+.top2 .btn-green{background:var(--surface);border-color:var(--line);color:var(--ok)}
+.top2 .btn-green:hover{background:var(--ok-soft);border-color:transparent;
+  color:var(--ok)}
+#batchPanel .btn,#batchOpsPanel .btn{color:var(--ink)}
+/* 窄屏把次要动作收进「更多操作」，避免动作栏堆成三四行。 */
+.top2-more{display:none}
+@media (max-width:1000px){
+  .top2{padding:8px 12px;gap:5px}
+  .top2 .btn-lg{height:34px;padding:0 10px;font-size:13px}
+  .top2 > .vdiv{display:none}
+  .top2-more{display:block;flex:none}
+  .top2-more > .morePanel{
+    position:fixed;top:44px;left:0;right:auto;min-width:0;width:230px;
+    max-width:none;flex-direction:column;flex-wrap:nowrap;gap:2px;padding:6px;
+  }
+  .top2-more > .morePanel .btn{
+    width:100%;height:auto;justify-content:flex-start;text-align:left;
+    padding:8px 10px;font-size:13.5px;border:0;background:transparent;
+  }
+  .top2-more > .morePanel .allbox{width:100%;padding:8px 10px}
+}
+#topBar .btn.primary{font-size:14px}
+.allbox{font-size:13.5px;gap:7px}
+.allbox input{width:16px;height:16px}
+.tabbar{padding:10px 24px}
+.tabs{gap:3px;padding:3px;border-radius:12px}
+.tabs button{padding:7px 16px;font-size:14px;border-radius:9px}
+.btn{height:36px;padding:0 16px;font-size:13.5px;border-radius:var(--r-control)}
+.btn.sm{height:30px;padding:0 12px;font-size:12.5px}
+.btn-lg{height:38px;padding:0 18px;font-size:14px}
+.msel .msPanel{border-radius:12px;padding:6px}
+.msItem{font-size:14px;padding:8px 10px;border-radius:8px}
+.morePanel{border-radius:12px;gap:10px;padding:12px 14px}
+.morePanel .lbl{font-size:13.5px}
+.morePanel .sel,.morePanel .msel > .msbtn{
+  width:180px;min-width:180px;max-width:180px;height:38px;font-size:14px}
+.morePanel .dateRange{height:38px}
+.morePanel .dateRange input{height:38px;font-size:14px}
+.wrap{grid-template-columns:392px 1fr}
+.list{padding:10px}
+.row{grid-template-columns:3px 18px 36px 1fr auto;gap:12px;
+  padding:12px 14px 12px 0;border-radius:12px}
+.row .nm{font-size:15.5px}
+.row .sub{font-size:13px;line-height:1.5}
+.row .sub .flagbad,.row .sub .flagwarn,.row .sub .flagneutral{
+  margin-left:5px;vertical-align:1px}
+.row .rtags{display:flex;align-items:center;gap:4px;margin-top:4px;
+  overflow:hidden;white-space:nowrap;min-width:0}
+.row .rtags .stg,.row .rtags .jchip,.row .rtags .ochip,
+.row .rtags .rtag-text{flex:none;margin:0}
+.row .rtags .rtag-text{font-size:12.5px;color:var(--ink-3);
+  overflow:hidden;text-overflow:ellipsis}
+.av{width:36px;height:36px;font-size:12px}
+.rowbar{min-height:42px}
+.tier{height:22px;min-width:24px;font-size:12px}
+.pager{font-size:13px;padding:12px 16px}
+.pager .btn{height:30px;font-size:12.5px}
+.detail{padding:0 clamp(24px,3.2vw,44px) 64px}
+.detail > *{max-width:1200px}
+.detail-toolbar{padding:18px 0 14px}
+.dname{font-size:30px;letter-spacing:-.025em}
+.dmeta{font-size:15px;gap:8px 14px}
+#detail .dmeta .chipl{font-size:14.5px}
+.dmeta .edv{font-size:14px;padding:5px 13px}
+.sec{margin-top:34px}
+.sec > h3,#detail .sec > h3{font-size:18px;padding-bottom:11px;margin-bottom:16px}
+.sec.tier-sec > h3{font-size:18px}
+.profile-layout{font-size:15px}
+#detail .ev{font-size:15px;line-height:1.8;padding:14px 16px}
+#detail .sum{font-size:16.5px;line-height:1.75}
+.kv{font-size:15px;grid-template-columns:104px 1fr;gap:9px 16px}
+.fgroup > h4{font-size:13px}
+.utable{font-size:14px}
+.utable th{font-size:13px}
+.utable td{padding:11px 12px}
+.mdtable{font-size:14px}
+.mdtable th,.mdtable td{padding:7px 10px}
+.rp-table{font-size:14.5px}
+.rp-table th{font-size:13px}
+.rp-table td{padding:11px 10px}
+.dlg{padding:28px 30px;border-radius:18px}
+.dlg h3{font-size:21px}
+.dlg .db{font-size:15px;line-height:1.7}
+.toast{font-size:13.5px}
+.settingsbody{font-size:14.5px}
+.settingsbody .sec > h3{font-size:16px}
+.settingsnav h3{font-size:17px}
+.settingsnav button{font-size:14.5px;padding:11px 12px}
+.settingsclose{width:36px;height:36px;font-size:20px}
+/* Mail composer form: same readable scale as the rest of the app. */
+.mform .sec > h3{font-size:16px}
+.mrow > label{width:72px;font-size:13.5px}
+.mrow input,.mrow select,.mrow > div > input,.mrow > div > select{
+  height:40px;font-size:14.5px}
+.mtool button{height:30px;font-size:13px}
+.richeditor,#mBody{font-size:15px;line-height:1.75}
+.tochip{font-size:14px}
+/* Overview labels were the smallest text left on the home screen. */
+.ovcol > h3{font-size:17px}
+.ov-jobs h3{font-size:15px}
+.ov-jobs .ov-jobs-note{font-size:13px}
+.rh-k{font-size:12.5px}
+.anaringtip{font-size:14px}
+.chatstatus{font-size:13.5px}
+.chatconv-head h3{font-size:15px;letter-spacing:0;color:var(--ink-2);flex:1}
+.cc-title{font-size:14px}
+.cc-meta{font-size:12.5px}
+.cc-open{display:block;width:100%;padding:0;border:0;background:transparent;
+  color:inherit;font:inherit;text-align:left;cursor:pointer}
+.cc-open .cc-title,.cc-open .cc-meta{display:block}
+.cc-open:focus-visible{outline:2px solid var(--accent);outline-offset:2px;
+  border-radius:6px}
+.chatconv-empty{font-size:13px}
+.chatconv-item{padding:12px 32px 12px 12px;border-radius:10px}
+.chatconv-item:focus-within .cc-del,
+.chatconv-item:focus-within .cc-ren{opacity:1}
+.sgroup{font-size:12px}
+.acctMenu .ver{font-size:12px}
+.loginhint{font-size:12px}
+.tier{font-size:12.5px}
+.flagneutral,.flagbad,.flagwarn,.jchip,.ochip{font-size:12.5px}
+.sched-sub{font-size:13.5px}
+.sched-ev{font-size:13px}
+.sched-ev .meta{font-size:12px}
+#detail .ev,#detail .sum{max-width:1040px}
+.chatmobhead,.chatconvmask{display:none}
+.chatconv-close{display:none}
+@media (max-width:900px){
+  #chatView{position:relative}
+  #chatView .chatconv{
+    display:flex;position:absolute;left:0;top:0;bottom:0;
+    width:min(320px,86vw);z-index:60;background:var(--nav);
+    border-right:1px solid var(--line);box-shadow:8px 0 28px rgba(0,0,0,.18);
+    transform:translateX(-105%);transition:transform .2s var(--ease);
+    visibility:hidden;pointer-events:none;
+  }
+  body.chatconv-open #chatView .chatconv{
+    transform:none;visibility:visible;pointer-events:auto;
+  }
+  .chatmobhead{display:flex;align-items:center;gap:8px;flex:none;
+    padding:8px 14px;border-bottom:1px solid var(--line);background:var(--surface)}
+  .chatmobhead .btn{height:30px;font-size:12.5px}
+  .chatconv-close{display:inline-flex;margin-left:0}
+  .chatconvmask{position:absolute;inset:0;z-index:55;background:rgba(0,0,0,.24)}
+  body.chatconv-open .chatconvmask{display:block}
+}
+.msg-att{font-size:12.5px}
+#chatView .chatwelcome h2{font-size:34px}
+#chatView .chatwelcome p{font-size:15px;line-height:1.7}
+#selHint{display:none!important}
+/* 1173–1400 的常见窗口：搜索框的 340px 基础值会盖掉前面的 1280 响应式规则，
+   把「概览·待办」和人数顶出右边界。这里统一收口：搜索框收窄，顶栏允许换行。 */
+@media (max-width:1400px){
+  .top{height:auto;min-height:66px;flex-wrap:wrap;row-gap:8px}
+  .search{width:230px}
+}
+/* 中型桌面：动作栏**不隐藏任何按钮**，改成 6 列等宽网格。
+   11 个动作自然排成 6+5 两行，视觉上比 flex 换行留下的“半空第二行”整齐；
+   窄于 1000px 时才沿用原有的「更多操作」下沉菜单。>1700 仍是一行。 */
+@media (min-width:1001px) and (max-width:1700px){
+  .top2{
+    display:grid;
+    grid-template-columns:repeat(6,minmax(0,1fr));
+    gap:8px;
+    overflow:visible;
+  }
+  .top2 > .vdiv{display:none}
+  .top2 > .btn,
+  .top2 > .more,
+  .top2 > .allbox{width:100%;min-width:0}
+  .top2 > .btn{
+    height:auto;min-height:38px;padding:6px 10px;font-size:13.5px;
+    line-height:1.25;white-space:normal;text-align:center;justify-content:center;
+  }
+  .top2 > .more > .btn{width:100%;justify-content:center}
+  .top2 > .allbox{min-height:38px;justify-content:center;white-space:normal;text-align:center}
+}
+@media (max-width:1000px){
+  .top2{flex-wrap:wrap;overflow:visible;row-gap:8px}
+}
+
+@media (max-width:1280px){
+  body{grid-template-columns:220px 1fr}
+  .wrap{grid-template-columns:360px 1fr}
+  .side{padding:12px 8px 10px}
+  .sbrand{padding:4px 8px 16px;font-size:15px}
+}
+@media (max-width:1100px){
+  body{grid-template-columns:64px 1fr}
+  .wrap{grid-template-columns:1fr}
+  .side{padding:10px 6px}
+  .sbrand{justify-content:center;padding:4px 0 14px}
+  .top{height:auto;min-height:66px;flex-wrap:wrap;padding:10px 18px;row-gap:8px}
+  .search{width:min(100%,360px);flex:1 1 260px}
+}
+
+/* ---------- 23. Claude-style chat composer (2026-11-19) ----------
+   一个带边框的 composer：附件预览在内部上方，下面一行 [+ 输入 发送]。
+   加号/发送都改成单色线性图标，不再用大黑圆钮；发送键变小、贴右下。 */
+#chatView .chatinput{
+  padding:10px 24px 8px;background:transparent;border-top:0;
+}
+#chatView .ciwrap{
+  display:flex;flex-direction:column;gap:6px;
+  padding:8px 10px 8px;border:1px solid var(--line-2);border-radius:18px;
+  background:var(--surface);
+  transition:border-color .18s var(--ease),box-shadow .18s var(--ease);
+}
+#chatView .ciwrap:focus-within{
+  border-color:var(--accent);box-shadow:var(--ring);
+}
+#chatView .ci-row{
+  display:flex;align-items:flex-end;gap:6px;min-height:36px;
+}
+#chatView .chatadd-inline{
+  position:static;width:32px;height:32px;min-width:32px;min-height:32px;
+  margin:0 0 1px;padding:0;display:grid;place-items:center;
+  border:0;border-radius:9px;background:transparent;color:var(--ink-3);
+  font-size:22px;line-height:1;font-weight:400;text-align:center;
+  cursor:pointer;user-select:none;z-index:2;
+  transition:background-color .16s var(--ease),color .16s var(--ease),
+    transform .12s var(--ease);
+}
+#chatView .chatadd-inline:hover{background:var(--fill-hover);color:var(--ink)}
+#chatView .chatadd-inline:active{transform:scale(.92)}
+#chatView .ci-row textarea{
+  flex:1;width:auto;min-height:calc(3 * 1.6em);
+  max-height:calc(10 * 1.6em);
+  padding:8px 2px 7px;border:0;border-radius:0;background:transparent;
+  box-shadow:none;font-size:15px;line-height:1.6;resize:none;
+}
+#chatView .ci-row textarea:focus{
+  border:0;box-shadow:none;background:transparent;
+}
+#chatView .ci-row textarea::placeholder{color:var(--ink-3)}
+#chatView .ci-row #chatSend{
+  position:static;right:auto;bottom:auto;
+  width:34px;height:34px;min-width:34px;min-height:34px;margin:0 0 0 2px;
+  padding:0;display:grid;place-items:center;border:0;border-radius:9px;
+  background:transparent;color:var(--ink);box-shadow:none;
+  transition:background-color .16s var(--ease),color .16s var(--ease),
+    transform .12s var(--ease),opacity .2s var(--ease);
+}
+#chatView .ci-row #chatSend:hover{
+  background:var(--fill-hover);color:var(--ink);filter:none;
+}
+#chatView .ci-row #chatSend:active{transform:scale(.92)}
+#chatView .ci-row #chatSend:disabled{opacity:.35}
+#chatView .ci-row #chatSend.busy{background:var(--fill-hover);color:var(--bad)}
+#chatView .ci-row #chatSend .ci-ico{
+  width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.85;
+  stroke-linecap:round;stroke-linejoin:round;
+}
+#chatView .chatpending{
+  display:flex;flex-wrap:nowrap;gap:8px;overflow-x:auto;overflow-y:hidden;
+  padding:2px 1px 4px;margin:0;scrollbar-width:thin;
+}
+#chatView .chatpending[hidden]{display:none}
+#chatView #chatPending .upload-card{
+  width:96px;max-width:96px;flex:0 0 96px;
+  flex-direction:column;align-items:stretch;gap:4px;
+  margin:0;padding:5px;position:relative;
+  border:1px solid var(--line);border-radius:12px;background:var(--surface-2);
+}
+#chatView #chatPending .upload-thumb{
+  width:84px;height:64px;border-radius:8px;object-fit:cover;
+}
+#chatView #chatPending .upload-file{
+  display:grid;place-items:center;background:var(--surface);color:var(--ink-3);
+  font-size:0;
+}
+#chatView #chatPending .upload-file svg{
+  width:26px;height:26px;fill:none;stroke:currentColor;stroke-width:1.6;
+  stroke-linecap:round;stroke-linejoin:round;
+}
+#chatView #chatPending .upload-info{min-width:0;width:100%}
+#chatView #chatPending .upload-name{
+  font-size:12px;font-weight:500;line-height:1.35;max-width:100%;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+#chatView #chatPending .upload-meta{
+  font-size:10.5px;line-height:1.3;margin-top:1px;max-width:100%;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+#chatView #chatPending .upload-bar{
+  height:2px;border-radius:999px;margin-top:4px;overflow:hidden;
+}
+#chatView #chatPending .upload-x{
+  position:absolute;top:3px;right:3px;width:18px;height:18px;padding:0;
+  display:grid;place-items:center;border:0;border-radius:50%;
+  background:rgba(20,20,20,.55);color:#fff;font-size:13px;line-height:1;
+  opacity:.9;z-index:3;
+}
+#chatView #chatPending .upload-x:hover{background:var(--bad);color:#fff}
+#chatView #chatPending .upload-approve{
+  width:100%;padding:3px 4px;font-size:10.5px;border-radius:7px;
+}
+#chatView .msg-att .favi svg{
+  width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;
+  stroke-linecap:round;stroke-linejoin:round;
+}
+@media (max-width:900px){
+  #chatView .chatinput{padding:8px 14px 6px}
+  #chatView .ci-row #chatSend{width:32px;height:32px;min-width:32px;min-height:32px}
+}
+@media (pointer:coarse){
+  #chatView .chatadd-inline{width:40px;height:40px;min-width:40px;min-height:40px}
+  #chatView .ci-row #chatSend{width:40px;height:40px;min-width:40px;min-height:40px}
+  #chatView #chatPending .upload-x{width:24px;height:24px;font-size:15px}
+}
+
+/* ---------- 24. Assistant answer structure (2026-11-19) ----------
+   长回复不再是一整块文字：小标题有左侧色条，列表有彩色标记，
+   引用块是浅色提示卡，表格有强调表头；加粗的结论/风险/通过再用语义色区分。
+   只作用于对话正文，不影响其他页面。 */
+#chatView .msg h3,
+#chatView .msg h4,
+#chatView .msg .md-sec{
+  position:relative;
+  margin:18px 0 8px;
+  padding-left:13px;
+  color:var(--ink);
+  font-weight:650;
+  line-height:1.45;
+}
+#chatView .msg h3{font-size:17px;letter-spacing:-.02em}
+#chatView .msg h4,#chatView .msg .md-sec{font-size:15.5px;letter-spacing:-.01em}
+#chatView .msg h3::before,
+#chatView .msg h4::before,
+#chatView .msg .md-sec::before{
+  content:'';position:absolute;left:0;top:.22em;bottom:.22em;
+  width:2px;border-radius:2px;background:var(--accent);opacity:.75;
+}
+#chatView .msg h3:first-child,
+#chatView .msg h4:first-child,
+#chatView .msg .md-sec:first-child{margin-top:0}
+#chatView .msg p{margin:0 0 9px;line-height:1.78}
+#chatView .msg p:last-child{margin-bottom:0}
+#chatView .msg strong{font-weight:650;color:var(--ink)}
+#chatView .msg strong.md-alert{color:var(--bad)}
+#chatView .msg strong.md-good{color:var(--ok)}
+#chatView .msg strong.md-key{color:var(--accent-ink)}
+/* 列表保持系统标记，只给标记上一点主题色；不做自定义圆点/编号徽章。 */
+#chatView .msg ul,#chatView .msg ol{margin:4px 0 12px;line-height:1.78}
+#chatView .msg ul{list-style:disc;padding-left:20px}
+#chatView .msg ol{list-style:decimal;padding-left:22px}
+#chatView .msg li{margin:3px 0}
+#chatView .msg li::marker{color:var(--accent);font-weight:600}
+#chatView .msg blockquote{
+  margin:10px 0;padding:9px 13px;
+  border-left:2px solid var(--accent);
+  border-radius:0 8px 8px 0;
+  background:var(--surface-2);
+  color:var(--ink-2);
+}
+#chatView .msg blockquote strong{color:var(--accent-ink)}
+#chatView .msg blockquote p{margin:0}
+#chatView .msg code{
+  background:var(--surface-2);border:1px solid var(--line);border-radius:6px;
+  padding:1px 6px;color:var(--ink);font-size:.92em;
+}
+#chatView .msg pre code{border:0;padding:0;background:none}
+#chatView .msg a{
+  color:var(--accent-ink);text-decoration:underline;text-underline-offset:2px;
+}
+#chatView .msg .md-hr{border:0;border-top:1px solid var(--line);margin:18px 0}
+#chatView .msg .mdtable-wrap{
+  display:inline-block;vertical-align:top;max-width:100%;overflow-x:auto;
+}
+#chatView .msg .mdtable{min-width:0;max-width:100%}
 """
