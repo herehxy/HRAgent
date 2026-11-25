@@ -52,6 +52,10 @@ class ContextGovernanceTest(unittest.TestCase):
         self.assertEqual(llm.model_default_context_window("qwen3-30b-a3b"), 32_768)
         self.assertEqual(llm.model_default_context_window("phi-4-14b"), 16_384)
         self.assertEqual(llm.model_default_context_window("phi-4-mini"), 131_072)
+        # 云端 Qwen3.5 是 1M；本地 Qwen2.5/Qwen3 GGUF 仍是 32k。
+        self.assertEqual(llm.model_default_context_window("qwen3.5-flash"), 1_000_000)
+        self.assertEqual(llm.model_default_context_window("qwen3-max"), 131_072)
+        self.assertEqual(llm.model_default_context_window("qwen2.5:7b"), 32_768)
 
     def test_extract_ctx_reads_ollama_namespaced_keys(self):
         """Ollama /api/show 的键是 `qwen2.context_length`，不能只认裸键名。"""
@@ -61,7 +65,7 @@ class ContextGovernanceTest(unittest.TestCase):
         self.assertEqual(llm._extract_ctx(hit), 32_768)
 
     def test_probe_reads_ollama_show_metadata(self):
-        """本地 30B/9B 的窗口以 Ollama 实际加载的模型元数据为准。"""
+        """Ollama /api/ps 不可用时，回退到 /api/show 的模型架构上限。"""
         from unittest import mock
         from app.agent import llm
 
@@ -95,6 +99,108 @@ class ContextGovernanceTest(unittest.TestCase):
         self.assertEqual(llm._extract_ctx(hit), 32_768)
         self.assertTrue(any("/api/show" in u for u in calls),
                         "OpenAI /models 不带窗口时应回退到 Ollama /api/show")
+
+    def test_probe_prefers_ollama_live_context_over_model_max(self):
+        """/api/ps 是实际加载的 num_ctx，必须优先于 /api/show 的模型上限。"""
+        from unittest import mock
+        from app.agent import llm
+
+        class FakeResp:
+            def __init__(self, obj):
+                self.obj = obj
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps(self.obj).encode("utf-8")
+
+        def fake_urlopen(req, timeout=0):
+            url = req.full_url
+            if url.endswith("/api/ps"):
+                return FakeResp({"models": [
+                    {"name": "qwen2.5:7b", "context_length": 4_096}]})
+            if "/api/show" in url:
+                return FakeResp({"model_info": {"qwen2.context_length": 40_960}})
+            raise OSError("not available")
+
+        llm._MODEL_META_CACHE.clear()
+        with mock.patch.object(llm.net, "urlopen", side_effect=fake_urlopen):
+            hit = llm._probe_model_meta({
+                "base_url": "http://127.0.0.1:11434/v1",
+                "model": "qwen2.5:7b", "api_key": "",
+            })
+        self.assertEqual(llm._extract_ctx(hit), 4_096,
+                         "实际服务 4k 时不能按模型卡 40k 发")
+        self.assertEqual(hit.get("_ctx_source"), "provider:ollama:/api/ps")
+
+    def test_context_overflow_error_is_learned(self):
+        from app.agent import llm
+        cfg = {"base_url": "http://127.0.0.1:9/v1", "model": "served-32k"}
+        llm._MODEL_CTX_OVERRIDE.clear()
+        try:
+            exc = RuntimeError(
+                "This model's maximum context length is 32768 tokens. "
+                "However, your messages resulted in 40000 tokens.")
+            self.assertEqual(llm.context_overflow_limit(exc, cfg), 32_768)
+            self.assertEqual(llm.model_context_window(cfg), (32_768, "runtime"))
+            self.assertEqual(llm.context_overflow_limit(
+                RuntimeError("prompt is too long: 208000 tokens > 200000 maximum"),
+                cfg), 200_000)
+            self.assertEqual(llm.context_overflow_limit(
+                RuntimeError("Range of input length should be [1, 131072]"),
+                cfg), 131_072)
+        finally:
+            llm._MODEL_CTX_OVERRIDE.clear()
+
+    def test_usage_accumulator_tracks_last_prompt_separately(self):
+        """上下文面板只看最后一次请求；整轮累加值会远超窗口。"""
+        from app.agent import loop
+        total: dict = {}
+        loop._accumulate(total, {"prompt_tokens": 100, "completion_tokens": 5})
+        loop._accumulate(total, {"prompt_tokens": 150, "completion_tokens": 7})
+        self.assertEqual(total["prompt_tokens"], 250, "计费仍用整轮累加")
+        self.assertEqual(total["last_prompt_tokens"], 150,
+                         "面板要用最后一次请求，而不是 250")
+
+    def test_system_messages_are_merged_to_one_at_top(self):
+        """vLLM + Qwen3.6 只接受一条 system，且必须在开头。"""
+        from app.agent import llm
+        msgs = [
+            {"role": "system", "content": "主提示词"},
+            {"role": "user", "content": "旧问题"},
+            {"role": "assistant", "content": "旧回答"},
+            {"role": "system", "content": "【当前时间】..."},
+            {"role": "system", "content": "【SOP】..."},
+            {"role": "user", "content": "当前问题"},
+        ]
+        out = llm._merge_system_messages(msgs)
+        self.assertEqual(out[0]["role"], "system")
+        self.assertIn("主提示词", out[0]["content"])
+        self.assertIn("【当前时间】", out[0]["content"])
+        self.assertIn("【SOP】", out[0]["content"])
+        self.assertEqual([m["role"] for m in out],
+                         ["system", "user", "assistant", "user"])
+        # 没有 system 时原样返回
+        plain = [{"role": "user", "content": "hi"}]
+        self.assertEqual(llm._merge_system_messages(plain), plain)
+
+    def test_context_overflow_only_shrinks(self):
+        from app.agent import llm
+        cfg = {"base_url": "http://127.0.0.1:9/v1", "model": "same-32k"}
+        key = ("http://127.0.0.1:9/v1", "same-32k")
+        exc = RuntimeError("maximum context length is 32768 tokens")
+        llm._MODEL_CTX_OVERRIDE.clear()
+        try:
+            self.assertIsNone(
+                llm.context_overflow_limit(exc, cfg, current_window=32_768),
+                "报错数字不小于当前窗口时不重试")
+            self.assertNotIn(key, llm._MODEL_CTX_OVERRIDE)
+        finally:
+            llm._MODEL_CTX_OVERRIDE.clear()
 
     def test_compact_tool_result_keeps_actionable_fields(self):
         raw = json.dumps({

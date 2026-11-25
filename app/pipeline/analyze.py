@@ -13,6 +13,7 @@ import sys
 from ..agent import llm
 from .. import tiers as tiers_mod
 from .. import univ as univ_mod
+from .. import school_subjects as subject_mod
 from . import normalize as nz
 from . import sanitize
 from .tier import edu_gate, guess_major_family, lock_tier
@@ -43,6 +44,11 @@ _FIT_SYSTEM = (
     "『第一学历院校（985｜校实力 B 档·软科第 39）』都是系统按**固定名单与公开排名**"
     "算出的确定标签，**不要靠自己的记忆去猜哪所学校强**。"
     "判强弱看**校实力档 A > B > C > D**；985/211 只是身份标签，档相同时才作参考。"
+    "**学科强项**（2026-11-23）：简报中的『学科强项：信息与通信工程 A』是系统按"
+    "教育部学科评估/双一流/受控模型判断算出的**学科维度确定标签**；当它注明"
+    "『本岗位方向命中，校实力按 X 档参考』时，**该校在本岗位上的强弱就以该档为准**，"
+    "不要因为综合排名低而忽略（西电/北邮/南邮等就是这种情况）；"
+    "岗位方向未命中的学科强项不参与判断。"
     "**两个院校都要看，但分量不同**：第一学历（本科）是**底子**，反映入学时的竞争力，"
     "单位**更看重**；最高学历院校反映当前水平。综合次序："
     "本科强+硕士强 > 本科强、硕士一般 ≳ 本科一般、硕士强 > 两者都一般。"
@@ -125,19 +131,36 @@ def _honors_summary(cand: dict) -> str:
         return ""
 
 
-def _school_txt(school: str | None) -> str:
-    """学校 → `校名（985｜校实力 B 档·软科第 40）`。给模型的是**规则算出的确定标签**，
-    不让它凭记忆猜"这所学校强不强"（v2.0.5）。没有排名数据时明说，不当成差。"""
+def _school_txt(school: str | None, jd: dict | None = None,
+                cand: dict | None = None, allow_llm: bool = True) -> str:
+    """学校 → `校名（985｜校实力 B 档·软科第 40｜学科强项：通信 A）`。
+
+    给模型的是**规则算出的确定标签**，不让它凭记忆猜"这所学校强不强"（v2.0.5）。
+    2026-11-23 增加学科维度：综合排名会把西电/北邮/南邮这类行业特色校判低，
+    岗位方向命中其学科强项时，校实力按学科档参考（最多抬一档）。
+    `allow_llm` 只在分析/判档时打开；面试提纲、归岗等场景用缓存或权威名单即可。
+    """
     if not school or not str(school).strip():
         return "未识别"
     tier = univ_mod.uni_tier(school)
-    band = univ_mod.school_band(school)
-    inner = (f"{tier}｜" if tier else "") + (
-        f"校实力 {band[0]} 档·软科第 {band[1]}" if band else "校实力：无排名数据")
+    a = subject_mod.annotate(school, jd, cand, allow_llm=allow_llm)
+    band = a.get("band")
+    rank = a.get("rank")
+    if band and rank:
+        strength = f"校实力 {band} 档·软科第 {rank}"
+    elif band:
+        strength = f"校实力 {band} 档"
+    else:
+        strength = "校实力：无排名数据"
+    subj = subject_mod.format_brief(a)
+    inner = (f"{tier}｜" if tier else "") + strength
+    if subj:
+        inner += "｜" + subj
     return f"{school}（{inner}）"
 
 
-def _cand_brief(cand: dict) -> str:
+def _cand_brief(cand: dict, jd: dict | None = None,
+                allow_llm: bool = True) -> str:
     skills = _names(cand.get("skills"))
     certs = _names(cand.get("certificates"))
     edu = cand.get("education") or cand.get("edu_level")
@@ -168,6 +191,19 @@ def _cand_brief(cand: dict) -> str:
         raw = sanitize.scrub(raw)[0][:3000]
     except Exception:
         raw = raw[:3000]
+    # 2026-11-23：院校学科强项要按**对应学历的专业**判断，不能拿最高学历专业
+    # 去套本科院校（本科材料、硕士计算机的人，本科院校的"材料强项"不该被硕士专业带偏）。
+    _first_major = ""
+    for h in cand.get("edu_history") or []:
+        if isinstance(h, dict) and h.get("degree") == "本科" and h.get("major"):
+            _first_major = str(h["major"])
+            break
+    _highest_ctx = {**cand, "edu_history": []}
+    _first_ctx = {"major": _first_major or major,
+                  "major_canonical": None,
+                  "skills": cand.get("skills") or [],
+                  "business_direction": cand.get("business_direction"),
+                  "edu_history": []}
     return (
         f"姓名:{cand.get('name')}；学历:{edu}；年限:{years}；"
         # v2.0.5（业务方 2026-10-20）：**把规则判定的院校层次直接告诉模型**。
@@ -178,8 +214,8 @@ def _cand_brief(cand: dict) -> str:
         # v2.0.5（业务方 2026-10-20）：**第一学历与最高学历的院校都要看**。
         # 只给最高学历院校时，模型看不到"本科出身"——而院所/高校普遍认为本科底子更硬。
         # 两个都按 `univ` 的名单+排名算成确定标签，模型只管比，不许猜。
-        f"院校:{_school_txt(cand.get('school'))}"
-        + (f"；第一学历院校:{_school_txt(cand.get('first_degree_school'))}"
+        f"院校:{_school_txt(cand.get('school'), jd, _highest_ctx, allow_llm)}"
+        + (f"；第一学历院校:{_school_txt(cand.get('first_degree_school'), jd, _first_ctx, allow_llm)}"
            if (cand.get("first_degree_school") or "").strip() else "；第一学历院校:未识别")
         + f"；专业:{major}"
         + (f"（推断专业大类：{family}）" if family else "")
@@ -263,6 +299,8 @@ _TIER_SYSTEM = (
     "你是招聘档位评定员。依据岗位要求与候选人简历，给出**一个**建议档位字母。"
     + _CALIBER
     + f"注意：学历不达标由系统直接判 {_HARD}，你不用管学历。"
+    "简报里『学科强项…本岗位方向命中』是系统算出的学科维度标签，"
+    "命中时校实力以该档为准，不要因为综合排名低而低判。"
     '严格只输出 JSON：{"tier":"X"}，其中 X 只能是 ' + _ENUM + "。"
 )
 
@@ -277,7 +315,7 @@ def ask_tier(cand: dict, jd: dict) -> str | None:
     """
     try:
         r = llm.chat_json(_TIER_SYSTEM,
-                          f"【岗位要求】\n{_jd_brief(jd)}\n\n【候选人】\n{_cand_brief(cand)}")
+                          f"【岗位要求】\n{_jd_brief(jd)}\n\n【候选人】\n{_cand_brief(cand, jd)}")
     except Exception as exc:                                # noqa: BLE001
         print(f"[ask_tier] 模型调用失败：{type(exc).__name__}: {exc}", file=sys.stderr)
         return None
@@ -356,7 +394,7 @@ def draft_mail(cand: dict, job_title: str, purpose: str = "", tone: str = "",
 
 def analyze_fit(cand: dict, jd: dict) -> dict | None:
     try:
-        return llm.chat_json(_FIT_SYSTEM, f"【岗位要求】\n{_jd_brief(jd)}\n\n【候选人】\n{_cand_brief(cand)}")
+        return llm.chat_json(_FIT_SYSTEM, f"【岗位要求】\n{_jd_brief(jd)}\n\n【候选人】\n{_cand_brief(cand, jd)}")
     except Exception as exc:
         print(f"[analyze_fit] 模型调用失败：{type(exc).__name__}: {exc}", file=sys.stderr)
         return None
@@ -399,7 +437,7 @@ def suggest_job(cand: dict, jobs: list[dict]) -> dict | None:
     try:
         r = llm.chat_json(_JOB_PICK_SYSTEM,
                           "【在招岗位】\n" + "\n".join(lines)
-                          + "\n\n【候选人】\n" + _cand_brief(cand))
+                          + "\n\n【候选人】\n" + _cand_brief(cand, None, allow_llm=False))
     except Exception as exc:
         import traceback
         print(f"[suggest_job] 模型调用失败：{type(exc).__name__}: {exc}", file=sys.stderr)
@@ -416,7 +454,7 @@ def draft_interview(cand: dict, jd: dict, focus: str = "") -> dict | None:
     try:
         return llm.chat_json(
             _IV_SYSTEM,
-            f"【岗位要求】\n{_jd_brief(jd)}\n\n【候选人】\n{_cand_brief(cand)}{extra}",
+            f"【岗位要求】\n{_jd_brief(jd)}\n\n【候选人】\n{_cand_brief(cand, jd, allow_llm=False)}{extra}",
         )
     except Exception as exc:
         print(f"[draft_interview] 模型调用失败：{type(exc).__name__}: {exc}", file=sys.stderr)

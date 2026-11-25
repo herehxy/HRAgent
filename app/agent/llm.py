@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import ipaddress
 import json
 import os
 import re
@@ -46,7 +47,8 @@ def mask_key(key) -> str:
 
 def save_cfg(base_url: str | None = None, model: str | None = None,
              api_key: str | None = None, enabled: bool | None = None,
-             context_window: str | int | None = None) -> dict:
+             context_window: str | int | None = None,
+             thinking: bool | None = None) -> dict:
     """界面保存模型配置（v1.7.6）。
 
     base_url / model / enabled / context_window 写 `config/model.json`
@@ -61,7 +63,7 @@ def save_cfg(base_url: str | None = None, model: str | None = None,
     """
     changed: list[str] = []
     if (base_url is not None or model is not None or enabled is not None
-            or context_window is not None):
+            or context_window is not None or thinking is not None):
         cfg: dict = {}
         if os.path.exists(CONFIG_PATH):
             try:
@@ -80,6 +82,11 @@ def save_cfg(base_url: str | None = None, model: str | None = None,
         if enabled is not None and bool(cfg.get("enabled", True)) != bool(enabled):
             cfg["enabled"] = bool(enabled)
             changed.append("enabled")
+        # 思考模式（2026-11-23）：部分模型（Qwen3 等）默认输出思维链。
+        # 关闭后请求里带 enable_thinking=false；开启则由模型决定。
+        if thinking is not None and bool(cfg.get("thinking", True)) != bool(thinking):
+            cfg["thinking"] = bool(thinking)
+            changed.append("thinking")
         if context_window is not None:
             raw = str(context_window).strip()
             want = _parse_ctx(raw) if raw else None
@@ -220,11 +227,40 @@ def _apply_provider_quirks(payload: dict, cfg: dict, stream: bool = False) -> di
     `cfg["extra_body"]` 里的键**优先级最高**（换模型或想显式开启时可覆盖）。
     """
     model = str(cfg.get("model") or "")
+    _think = cfg.get("thinking")
+    # 显式关闭思考：Qwen3 系类端点认 enable_thinking=false；其他模型忽略未知字段
+    # 的居多，但为避免严格端点 400，只对 qwen 系发送。
+    if _think is False and "enable_thinking" not in payload and (
+            "qwen" in model.lower() or "通义" in model):
+        payload["enable_thinking"] = False
     if not stream and model.startswith("qwen3") and "enable_thinking" not in payload:
         payload["enable_thinking"] = False
     for k, v in (cfg.get("extra_body") or {}).items():
         payload[k] = v
     return payload
+
+
+def _merge_system_messages(messages: list[dict]) -> list[dict]:
+    """把多条 system 消息合并成**开头的一条**。
+
+    为什么必须合并（2026-11-23 实测）：vLLM + Qwen3.6 的聊天模板只允许
+    **一条** system，且必须在第一位；HRAgent 会分别插入「主提示词 / 当前时间 /
+    SOP / 会话记忆 / 工具清单 / 附加上下文」多条 system，服务端直接回
+    `400 System message must be at the beginning`，表现为“模型不可达”。
+    合并后内容一条不少，对接受多条 system 的端点也完全兼容。
+    """
+    parts: list[str] = []
+    rest: list[dict] = []
+    for m in messages or []:
+        if m.get("role") == "system":
+            c = m.get("content")
+            if isinstance(c, str) and c.strip():
+                parts.append(c.strip())
+            continue
+        rest.append(m)
+    if not parts:
+        return list(rest)
+    return [{"role": "system", "content": "\n\n".join(parts)}] + rest
 
 
 def chat(messages: list[dict], tools: list[dict] | None = None, cfg: dict | None = None,
@@ -247,7 +283,7 @@ def chat(messages: list[dict], tools: list[dict] | None = None, cfg: dict | None
     cfg = cfg or load_cfg()
     payload: dict = {
         "model": cfg.get("model", "qwen2.5:14b"),
-        "messages": messages,
+        "messages": _merge_system_messages(messages),
         "temperature": cfg.get("temperature", 0),
     }
     if tools:
@@ -284,7 +320,7 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None,
     cfg = cfg or load_cfg()
     payload: dict = {
         "model": cfg.get("model", "qwen2.5:14b"),
-        "messages": messages,
+        "messages": _merge_system_messages(messages),
         "temperature": cfg.get("temperature", 0),
         "stream": True,
         # 让兼容端点把 token 用量作为最后一块 SSE 发回来；不支持该参数的
@@ -412,9 +448,13 @@ def list_models(cfg: dict | None = None) -> list[str]:
 _CTX_KEYS = (
     "context_length", "context_window", "max_context_length", "max_model_len",
     "max_input_tokens", "input_token_limit", "max_sequence_length",
-    "context_size", "n_ctx",
+    "context_size", "n_ctx", "loaded_context_length", "max_total_tokens",
 )
 _MODEL_META_CACHE: dict[tuple[str, str], tuple[dict | None, float]] = {}
+#: 运行时从“上下文超长”报错里学到的真实窗口。按 (base_url, model) 缓存，
+#: 进程内有效；配置里的人工值优先级仍然最高。服务端把 128k 模型开成 32k
+#: 时，第一次失败后就能纠正，不再永远按模型卡的上限发。
+_MODEL_CTX_OVERRIDE: dict[tuple[str, str], int] = {}
 #: 常见模型的厂商默认上下文窗口（tokens）。只在 `config/model.json` 与
 #: 端点 `/models` 都拿不到时使用；顺序从上到下，先匹配到的生效。
 #: 参数量**不能**决定窗口（同为 9B：GLM-4-9B 是 128k，Gemma-2-9B 是 8k），
@@ -431,8 +471,11 @@ _MODEL_CTX_DEFAULTS: tuple[tuple[str, int], ...] = (
     # 更早的 MiMo-7B 是 32K，不能一起按 1M 处理。
     (r"mimo-v2\.(?:5|6)|mimo-v2-pro", 1_048_576),
     (r"mimo", 32_768),
-    # Qwen3 / Qwen2.5：原生 32K，YaRN 可扩到 128K；Ollama 分发的 GGUF
-    # 常按 32K 服务。实际部署若开了 YaRN，用 context_window 明确覆盖。
+    # Qwen3.5（2026 云端版，含 Flash）官方 1M、最大输出约 64K；
+    # Qwen3-Max/Plus/Flash 等云端型号按 128K 起。
+    # Qwen3 / Qwen2.5 的本地 GGUF（Ollama 等）通常按 32K 服务，不能用云端值。
+    (r"qwen-?3\.5|qwen3\.5", 1_000_000),
+    (r"qwen-?3[-_](?:max|plus|flash|turbo)|qwen-?(?:max|plus|flash|turbo)", 131_072),
     (r"qwen|tongyi|qwq|通义", 32_768),
     (r"glm-4|chatglm", 131_072),
     # Llama 3.1/3.2/3.3 与 Llama 4 是 128K；Llama 3.0 只有 8K。
@@ -548,11 +591,60 @@ def _extract_params(obj) -> str | None:
     return None
 
 
-def _probe_model_meta(cfg: dict) -> dict | None:
-    """探测 `/models` / `/models/{model}` 的模型元数据（缓存 1 小时）。
+def _root_of(base: str) -> str:
+    """OpenAI 兼容地址的根（去掉 /v1），本地推理服务的管理接口都在根上。"""
+    return base[:-3] if base.endswith("/v1") else base
 
-    失败/不支持不报错，也不把 traceback 打到服务日志——这是可选信息，
-    不该污染正常对话日志。
+
+def _is_local_base(base: str) -> bool:
+    low = base.lower()
+    if "ollama" in low or "11434" in low:
+        return True
+    host = (urllib.parse.urlsplit(base).hostname or "").lower()
+    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_private
+    except ValueError:
+        return False
+
+
+def _http_json(url: str, headers: dict, *, timeout: float = 3.0,
+               data: bytes | None = None):
+    """GET/POST 一个管理接口；失败返回 None（探测是可选信息，不抛）。"""
+    try:
+        req = urllib.request.Request(
+            url, data=data, headers=headers,
+            method="POST" if data is not None else "GET")
+        with net.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
+def _match_model_item(items, model: str):
+    if not isinstance(items, list):
+        return None
+    for it in items:
+        if isinstance(it, dict) and str(it.get("id") or it.get("name") or "") == model:
+            return it
+    for it in items:
+        if isinstance(it, dict) and model in str(it.get("id") or it.get("name") or ""):
+            return it
+    return None
+
+
+def _probe_model_meta(cfg: dict) -> dict | None:
+    """探测模型元数据（缓存 1 小时）。
+
+    优先读**当前服务实际窗口**，而不是模型卡上限：
+      1. OpenAI `/models` / `/models/{model}`（vLLM/SGLang 的 max_model_len）
+      2. Ollama `/api/ps`（已加载实例的 context_length，即 num_ctx）
+      3. llama.cpp `/props`（n_ctx）
+      4. LM Studio `/api/v0/models`（max_context_length / loaded_context_length）
+      5. TGI `/info`（max_input_tokens）
+      6. Ollama `/api/show`（模型架构上限，最后兜底）
+    都拿不到时返回不带窗口的元数据（参数量展示仍可用）。
     """
     base = str(cfg.get("base_url") or "").rstrip("/")
     model = str(cfg.get("model") or "")
@@ -565,54 +657,80 @@ def _probe_model_meta(cfg: dict) -> dict | None:
         return cached[0]
 
     headers = {"Authorization": f"Bearer {cfg.get('api_key', '')}"}
+    root = _root_of(base)
     hit: dict | None = None
+    fallback_hit: dict | None = None
+
+    def _use(obj, source: str) -> bool:
+        nonlocal hit
+        if isinstance(obj, dict) and _extract_ctx(obj):
+            out = dict(obj)
+            out["_ctx_source"] = source
+            hit = out
+            return True
+        return False
+
     with contextlib.redirect_stderr(io.StringIO()):
-        try:
-            req = urllib.request.Request(f"{base}/models", headers=headers)
-            with net.urlopen(req, timeout=4) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-            items = body.get("data") if isinstance(body, dict) else body
-            if isinstance(items, list):
-                for it in items:
-                    if isinstance(it, dict) and str(it.get("id") or "") == model:
-                        hit = it
-                        break
-                if hit is None:
-                    for it in items:
-                        if isinstance(it, dict) and model in str(it.get("id") or ""):
-                            hit = it
-                            break
-        except Exception:                                    # noqa: BLE001
-            hit = None
+        # 1) OpenAI 兼容列表：vLLM / SGLang / OpenRouter / 部分 LM Studio
+        body = _http_json(f"{base}/models", headers, timeout=4)
+        items = body.get("data") if isinstance(body, dict) else body
+        item = _match_model_item(items, model)
+        if item is not None:
+            fallback_hit = item
+            _use(item, "provider:/models")
         if hit is None:
-            try:
-                path = "/models/" + urllib.parse.quote(model, safe="")
-                req = urllib.request.Request(f"{base}{path}", headers=headers)
-                with net.urlopen(req, timeout=4) as resp:
-                    body = json.loads(resp.read().decode("utf-8"))
-                if isinstance(body, dict):
-                    hit = body
-            except Exception:                                # noqa: BLE001
-                hit = None
-        if hit is None and ("11434" in base or "ollama" in base.lower()
-                            or "127.0.0.1" in base or "localhost" in base):
-            # Ollama 的 OpenAI 兼容 `/v1/models` 不带窗口信息，但 `/api/show`
-            # 会返回 GGUF 元数据（`qwen2.context_length` 等）。本地 7B/9B/30B
-            # 到底按 32k 还是 128k，以实际加载的模型为准，不靠参数量猜。
-            try:
-                root = base[:-3] if base.endswith("/v1") else base
-                payload = json.dumps({"name": model, "model": model}).encode("utf-8")
-                req = urllib.request.Request(
-                    root + "/api/show", data=payload, method="POST",
-                    headers={**headers, "Content-Type": "application/json"})
-                with net.urlopen(req, timeout=4) as resp:
-                    body = json.loads(resp.read().decode("utf-8"))
-                if isinstance(body, dict):
-                    hit = body
-            except Exception:                                # noqa: BLE001
-                hit = None
-    _MODEL_META_CACHE[key] = (hit, now)
-    return hit
+            body = _http_json(
+                f"{base}/models/{urllib.parse.quote(model, safe='')}",
+                headers, timeout=4)
+            if isinstance(body, dict):
+                fallback_hit = fallback_hit or body
+                _use(body, "provider:/models/{model}")
+
+        # 2) Ollama：/api/ps 是实际加载的 num_ctx，比 /api/show 的模型上限准
+        if hit is None and _is_local_base(base):
+            body = _http_json(f"{root}/api/ps", headers, timeout=3)
+            items = body.get("models") if isinstance(body, dict) else None
+            item = _match_model_item(items, model)
+            if isinstance(item, dict):
+                ctx = _extract_ctx(item)
+                if ctx:
+                    out = dict(item)
+                    out["context_length"] = ctx
+                    out["_ctx_source"] = "provider:ollama:/api/ps"
+                    hit = out
+
+        # 3) llama.cpp server：/props 的 n_ctx 是当前服务窗口
+        if hit is None and _is_local_base(base):
+            body = _http_json(f"{root}/props", headers, timeout=3)
+            _use(body, "provider:llamacpp:/props")
+
+        # 4) LM Studio：/api/v0/models
+        if hit is None and _is_local_base(base):
+            body = _http_json(f"{root}/api/v0/models", headers, timeout=3)
+            items = body.get("data") if isinstance(body, dict) else body
+            item = _match_model_item(items, model)
+            if item is not None:
+                _use(item, "provider:lmstudio:/api/v0/models")
+
+        # 5) TGI：/info（本地或远端都可能）
+        if hit is None:
+            body = _http_json(f"{root}/info", headers, timeout=3)
+            _use(body, "provider:tgi:/info")
+
+        # 6) Ollama /api/show：模型架构上限，只有前面都失败时才用
+        if hit is None and _is_local_base(base):
+            payload = json.dumps({"name": model, "model": model}).encode("utf-8")
+            body = _http_json(
+                f"{root}/api/show",
+                {**headers, "Content-Type": "application/json"},
+                timeout=4, data=payload)
+            if isinstance(body, dict):
+                fallback_hit = fallback_hit or body
+                _use(body, "provider:ollama:/api/show")
+
+    out = hit or fallback_hit
+    _MODEL_META_CACHE[key] = (out, now)
+    return out
 
 
 def model_parameter_count(cfg: dict | None = None) -> str:
@@ -648,23 +766,108 @@ def model_default_context_window(model: str) -> int | None:
 def model_context_window(cfg: dict | None = None) -> tuple[int, str]:
     """获取模型实际上下文窗口。
 
-    顺序：`config/model.json` 的 `context_window`（人工确认值）→ 端点
-    `/models` 元数据里的 context_length 等字段 → 按模型名推断厂商默认
-    → 128k 保守默认。返回 `(tokens, source)`，source 为
-    config/provider/model/fallback。
+    顺序：`config/model.json` 的 `context_window`（人工确认值）→ 运行时从
+    “上下文超长”报错里学到的真实窗口 → 端点管理接口（vLLM /models 的
+    max_model_len、Ollama /api/ps、llama.cpp /props、LM Studio、TGI）
+    → 按模型名推断厂商默认 → 128k 保守默认。
+    返回 `(tokens, source)`，source 为 config/runtime/provider:…/model/fallback。
     """
     cfg = cfg or load_cfg()
+    base = str(cfg.get("base_url") or "").rstrip("/")
+    model = str(cfg.get("model") or "")
     explicit = _parse_ctx(cfg.get("context_window"))
     if explicit:
         return explicit, "config"
+    runtime = _MODEL_CTX_OVERRIDE.get((base, model))
+    if runtime:
+        return runtime, "runtime"
     hit = _probe_model_meta(cfg)
     ctx = _extract_ctx(hit) if hit else None
     if ctx:
-        return ctx, "provider"
-    guess = model_default_context_window(str(cfg.get("model") or ""))
+        return ctx, str((hit or {}).get("_ctx_source") or "provider")
+    guess = model_default_context_window(model)
     if guess:
         return guess, "model"
     return cg.DEFAULT_CONTEXT_WINDOW, "fallback"
+
+
+def _exception_text(exc: Exception) -> str:
+    parts = [str(exc)]
+    if isinstance(exc, urllib.error.HTTPError):
+        body = getattr(exc, "_hr_body", None)
+        if body is None:
+            try:
+                body = exc.read().decode("utf-8", "ignore")
+            except Exception:                             # noqa: BLE001
+                body = ""
+            # HTTPError 的 body 只能读一次；缓存到异常上，后面的
+            # `_tools_unsupported()` 还要用它判断“不支持 tools”。
+            setattr(exc, "_hr_body", body)
+        if body:
+            parts.append(str(body)[:6000])
+    return "\n".join(parts)
+
+
+_CTX_ERROR_PATTERNS = (
+    r"maximum context length is\s*([0-9][0-9,]{2,})",
+    r"max(?:imum)?\s+(?:model\s+)?(?:context\s+)?(?:length|window)"
+    r"\s*(?:is|of|:)?\s*([0-9][0-9,]{2,})",
+    r"context (?:length|window)\s*(?:is|of|:)\s*([0-9][0-9,]{2,})",
+    r"max(?:imum)?\s+seq(?:uence)?\s+len(?:gth)?\s*[\(\s]*([0-9][0-9,]{2,})",
+    r"input length.*?\[1,\s*([0-9][0-9,]{2,})\]",
+    r"([0-9][0-9,]{2,})\s*(?:tokens?\s*)?(?:maximum|max)",
+    r"limit of\s*([0-9][0-9,]{2,})",
+)
+
+
+def error_detail(exc: Exception, limit: int = 600) -> str:
+    """给界面看的错误详情：带上服务端返回的 body（截断）。
+
+    只显示 `HTTP Error 400` 时，HR 无法知道是模型名、参数还是权限问题；
+    把 body 里的 `detail` 带出来，才能直接定位（例如 vLLM 的
+    `"model not found"` / `"enable_thinking is not supported"`）。
+    """
+    text = _exception_text(exc).strip()
+    return text[:limit]
+
+
+def context_overflow_limit(exc: Exception, cfg: dict | None = None,
+                           current_window: int | None = None) -> int | None:
+    """从“上下文超长”报错里解析真实窗口，并记到进程内覆盖表。
+
+    典型报错：
+      · vLLM/OpenAI：`This model's maximum context length is 32768 tokens`
+      · Anthropic：`prompt is too long: 208000 tokens > 200000 maximum`
+      · 百炼 Qwen：`Range of input length should be [1, 131072]`
+    只处理明确“窗口不够”的报错；网络/鉴权/普通参数错误返回 None。
+    `current_window` 用于只往小里收：报错数字不小于当前窗口时不记、不重试。
+    """
+    text = _exception_text(exc)
+    if not re.search(r"context|sequence length|input length|too long|max seq",
+                     text, re.I):
+        return None
+    for pat in _CTX_ERROR_PATTERNS:
+        m = re.search(pat, text, re.I)
+        if not m:
+            continue
+        try:
+            n = int(m.group(1).replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+        if not (1_024 <= n <= 10_000_000):
+            continue
+        if current_window:
+            try:
+                if n >= int(current_window):
+                    return None
+            except (TypeError, ValueError):
+                pass
+        cfg = cfg or load_cfg()
+        key = (str(cfg.get("base_url") or "").rstrip("/"),
+               str(cfg.get("model") or ""))
+        _MODEL_CTX_OVERRIDE[key] = n
+        return n
+    return None
 
 
 def status() -> dict:

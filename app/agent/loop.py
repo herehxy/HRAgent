@@ -232,6 +232,13 @@ SYSTEM_PROMPT = (
     "（full=true 取完整）；需要看来源邮件正文时调 get_source_mail。\n"
     "7j) 问「有某证书的人」时，用 search_candidates 的 certificate 参数"
     "（keyword 也已包含证书）；证书名以档案里的证书字段为准，不要自己猜。\n"
+    # 业务方 2026-11-25：部分工种本来就要求男性/女性，性别是正常筛选条件。
+    # 以前导出工具没有 gender 参数，模型只能拿"男"去匹配关键词，还要附一段
+    # "系统不支持、建议去 Excel 过滤"的限制说明——现在参数已补齐，禁止再用绕法。
+    "7k) **性别是普通筛选条件**：部分工种明确要求男性或女性。按性别筛人/导出时，"
+    "直接用 search_candidates、export_roster、export_resume_bundle 的 gender 参数"
+    "（男/女/未标注），**不要**用关键词『男』『女』去匹配姓名或岗位，"
+    "也不要附『系统不支持按性别筛选』『建议下载后用 Excel 过滤』这类限制说明。\n"
     # v4.3.3（业务方截图：要折线图和饼图，模型吐了两段 Mermaid 伪代码，界面
     # 按代码块原样显示）。界面现在能直接把 Mermaid 渲染成图，这里把格式说死：
     # 必须用 ```mermaid 代码块，数据必须来自本轮工具结果。
@@ -249,7 +256,10 @@ SYSTEM_PROMPT = (
     "先换算成 YYYY-MM-DD 再传给工具或写进答复；不要凭记忆猜年份。\n"
     "11) 用户一句话里包含多个动作时（如“筛人→归岗→安排面试→导出”），"
     "先拆成编号步骤，**按顺序把每个动作都执行**；写操作分别生成待确认提案，"
-    "最后集中汇总，让 HR 一次「全部同意」。不要只做第一个动作就收尾。"
+    "最后集中汇总，让 HR 一次「全部同意」。不要只做第一个动作就收尾。\n"
+    "12) 需要分析/对比多个候选人时，把多个 `analyze_fit` 或 `compare_candidates` "
+    "调用**放在同一条回复里一次性发出**（系统会并行执行），不要一人一轮逐个调用；"
+    "这样更快，也不浪费工具轮次。"
 )
 
 
@@ -853,10 +863,14 @@ def _tools_unsupported(exc: Exception) -> bool:
     code = ""
     if isinstance(exc, urllib.error.HTTPError):
         code = str(getattr(exc, "code", "") or "")
-        try:
-            text += " " + exc.read().decode("utf-8", "ignore").lower()
-        except Exception:                                    # noqa: BLE001
-            pass
+        body = getattr(exc, "_hr_body", None)
+        if body is None:
+            try:
+                body = exc.read().decode("utf-8", "ignore")
+            except Exception:                                # noqa: BLE001
+                body = ""
+            setattr(exc, "_hr_body", body)
+        text += " " + str(body).lower()
     if code and code not in ("400", "422"):
         return False
     return ("tool" in text or "function" in text) and any(
@@ -1113,6 +1127,9 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
     usage_total: dict = {}
     model_used = cfg.get("model")
     max_rounds, _rounds_cap = _round_budget(cfg, user_message, _route_groups, _skill)
+    # 动态预算最多延长 4 轮（简单 5→9，多步 8→12），不会无限跑。
+    _max_extend = max(0, min(4, _rounds_cap - max_rounds))
+    _rounds_extended = 0
     ctx.metrics["max_rounds"] = max_rounds
     ctx.metrics["max_rounds_cap"] = _rounds_cap
     # 时间预算与轮次预算同时生效：模型在工具之间打转时，轮次可能还没到，
@@ -1150,6 +1167,34 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         ctx.metrics["context_trimmed_max"] = max(
             int(ctx.metrics.get("context_trimmed_max") or 0), _trim)
         return g
+
+    def _retry_with_smaller_context(exc: Exception,
+                                    tools: list[dict] | None):
+        """上下文超长时，从报错里学到真实窗口，按更小预算重试一次。
+
+        典型场景：服务端把 128k 模型用 `--max-model-len 32768` 起了，
+        而 `/models` 没报窗口；第一次超长后把 32768 记进覆盖表，
+        重新治理历史/工具结果再发，用户不必手动改配置。
+        """
+        nonlocal _win, _budget_info, _tools
+        n = llm.context_overflow_limit(exc, cfg, current_window=_win)
+        if not n:
+            return None
+        _win = n
+        _budget_info = cg.resolve_budget(
+            n, max_output_tokens=cfg.get("max_tokens"),
+            configured_budget=cfg.get("context_budget_tokens"),
+            cap=cfg.get("context_budget_cap"))
+        ctx.metrics["budget_info"] = dict(_budget_info)
+        ctx.metrics["context_window_learned"] = n
+        # 窗口变小时工具也要跟着收：system prompt + 30 个工具说明本身就占很大
+        # 一块，只裁历史不裁工具，重试仍会超长。
+        if tools:
+            _limit = max(1, int(_budget_info.get("max_tools") or len(tools)))
+            tools = tools[:_limit]
+            _tools = tools
+        _govern_for_turn()
+        return llm.chat(messages, tools=tools, cfg=cfg)
 
     def _usage_delta(before: dict, after: dict) -> dict:
         out = {}
@@ -1199,6 +1244,9 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
             try:
                 return llm.chat(msgs, tools=tools, cfg=cfg)
             except Exception as exc:                         # noqa: BLE001
+                _retried = _retry_with_smaller_context(exc, tools)
+                if _retried is not None:
+                    return _retried
                 if tools and _tools_unsupported(exc):
                     _activate_text_mode()
                     _m = (msgs if msgs is messages else
@@ -1232,6 +1280,9 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
             # 已经显示了一半再换协议会造成重复/截断，宁可把错误抛给上层。
             if reasoning_parts or content_parts:
                 raise
+            _retried = _retry_with_smaller_context(exc, tools)
+            if _retried is not None:
+                return _retried
             if tools and _tools_unsupported(exc):
                 _activate_text_mode()
                 _m = (msgs if msgs is messages else
@@ -1377,7 +1428,11 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         return len(prepared)
 
     try:
-        for _ in range(max_rounds):
+        # v6.4.5：动态轮次预算。起始预算仍是 5/8 轮，但**每轮如果确实产生了
+        # 新的工具调用且没有全部失败，就自动延长 1 轮，最多到硬上限**。
+        # 以前固定 5 轮，正常“查人→看档案→补统计”多查两步就被判超预算；
+        # 现在只拦真正打转/报错/超时的，正常任务允许跑到 cap。
+        while rounds < max_rounds:
             if _cancelled():
                 ctx.metrics["stop_reason"] = "stopped"
                 return _finalize(ctx, user_message, "已停止。", trace, "stopped",
@@ -1463,6 +1518,17 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
             _run_calls(calls)
             _detail["tool_calls"] = int(ctx.metrics.get("tool_calls") or 0) - _c0
             _detail["tool_errors"] = int(ctx.metrics.get("tool_errors") or 0) - _e0
+            # 这一轮有新的工具调用、且不是全部报错 → 预算自动 +1（不超过硬上限）。
+            # 真正打转的已在上面的 `_sig == _last_call_sig` 处停住；
+            # 全部工具报错或额度到 cap 时不再延长，直接进入总结轮。
+            if (rounds >= max_rounds and rounds < _rounds_cap
+                    and _rounds_extended < _max_extend
+                    and _detail["tool_calls"] > 0
+                    and _detail["tool_errors"] < _detail["tool_calls"]):
+                max_rounds = min(_rounds_cap, max_rounds + 1)
+                _rounds_extended += 1
+                ctx.metrics["max_rounds"] = max_rounds
+                ctx.metrics["rounds_extended"] = _rounds_extended
         # 预算用尽/检测到原地打转，强制收敛；不再做邮件/口头提案等出口兜底，
         # 最终答复以模型输出为准。提示里说明“还有什么没做”，方便用户点「继续」。
         _stop = str(ctx.metrics.get("stop_reason") or "")
@@ -1474,15 +1540,15 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         except Exception:                                  # noqa: BLE001
             pass
         if _stop == "no_progress":
-            _force_msg = ("检测到连续两轮调用了完全相同的工具与参数，没有产生新信息。"
-                          "请基于已获取的信息直接给出结论，并说明还缺什么。")
+            _force_msg = ("请基于已获取的信息直接给出结论；"
+                          "如果还有信息缺口，简要列出即可，不要解释内部原因。")
         elif _stop == "time":
-            _force_msg = ("本轮时间预算已用完。请先总结已获取的信息，"
-                          "并明确还有哪些步骤没完成，方便用户决定是否继续。")
+            _force_msg = ("请先总结已经拿到的结果；"
+                          "如果还有没做完的步骤，只列出下一步要做什么，不要解释内部原因。")
         else:
             ctx.metrics["stop_reason"] = "rounds"
-            _force_msg = ("轮次预算已用完。请基于已获取的信息给出当前能确定的结果，"
-                          "并简要说明还有哪些步骤未完成，方便用户继续。")
+            _force_msg = ("请基于已获取的信息给出当前能确定的完整结果；"
+                          "如果还有没做完的步骤，只列出下一步要做什么，不要解释内部原因。")
         messages.append({"role": "user", "content": _force_msg})
         rounds += 1
         _gov = _govern_for_turn()
@@ -1517,7 +1583,11 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
     except Exception as exc:
         # 模型不可用 → 规则路由兜底（不是罢工）
         st = llm.status()
-        reason = st.get("error") or f"{type(exc).__name__}: {exc}"
+        # 优先用**本次请求**的错误详情（含服务端 body）；status 只是补充。
+        # 只看 status 时，配置刚改好但进程内缓存/瞬时错误会掩盖真实原因。
+        reason = (llm.error_detail(exc)
+                  or st.get("error")
+                  or f"{type(exc).__name__}: {exc}")
         ctx.metrics["stop_reason"] = "rule"
         answer = _rule_answer(user_message, ctx, reason=reason, trace=trace)
         if emit and _stream_answer:
@@ -1997,6 +2067,11 @@ def _accumulate(total: dict, usage: dict | None) -> None:
     for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
         if usage.get(k):
             total[k] = total.get(k, 0) + int(usage[k])
+    # 上下文面板要的是**最后一次请求**的 prompt 大小，不是整轮累加。
+    # 一次回答里每个工具轮次都会重新发一遍上下文，累加值会远大于窗口
+    # （实测 5 轮把 131k 模型的 prompt_tokens 累成 977k，面板显示 745%）。
+    if usage.get("prompt_tokens"):
+        total["last_prompt_tokens"] = int(usage["prompt_tokens"])
     # 各家缓存命中的字段名不同：OpenAI 在 prompt_tokens_details.cached_tokens，
     # DeepSeek 用 prompt_cache_hit_tokens，Anthropic 兼容层用 cache_read_input_tokens。
     hit = usage.get("cache_hit_tokens")
@@ -2106,6 +2181,8 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
                   or (ctx.context or {}).get("budget") or 0)
     _prompt_est = int(_metrics.get("prompt_tokens_est") or 0)
     _tokens_in = int(usage.get("prompt_tokens") or 0) if usage else 0
+    # 上下文告警看**单次请求**（last_prompt_tokens）；计费与今日 Token 仍用累加值。
+    _prompt_last = int(usage.get("last_prompt_tokens") or 0) if usage else 0
     _effective_in = _tokens_in or _prompt_est
     _tool_tokens = int(_metrics.get("tool_result_tokens") or 0)
     _tool_calls = int(_metrics.get("tool_calls") or 0)
@@ -2123,7 +2200,9 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
     _trimmed_max = int(_metrics.get("context_trimmed_max")
                        or _gov.get("trimmed_tokens") or 0)
     _alerts = cg.evaluate_alerts(
-        tokens_in=_tokens_in, prompt_estimate=_prompt_est,
+        # 没有真实 usage 的端点：用**最后一次治理后**的估算，而不是整轮累加。
+        tokens_in=_prompt_last,
+        prompt_estimate=int((_gov or {}).get("estimated_after") or _prompt_est),
         budget=_budget, tool_tokens=_tool_tokens,
         tool_calls=_tool_calls, tool_errors=_tool_errors,
         rounds=rounds, max_rounds=int(_metrics.get("max_rounds") or 5),
@@ -2159,7 +2238,7 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
 
     # 有真实 usage 时，用 prompt_tokens 校准上下文总量；分项按比例缩放。
     # 流式端点没返回 usage 时保留估算值，不强行编一个数。
-    _actual_prompt = int(usage.get("prompt_tokens") or 0) if usage else 0
+    _actual_prompt = int(usage.get("last_prompt_tokens") or 0) if usage else 0
     if _actual_prompt and ctx.context and ctx.context.get("window"):
         _parts = ctx.context.get("parts") or []
         _nonfree = [p for p in _parts if p.get("key") != "free"]

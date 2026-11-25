@@ -126,7 +126,8 @@ _PAGE = r"""<!DOCTYPE html>
           aria-label="打开候选人名单">名单</button>
   <div class="brand" style="display:none"><i></i>人才库</div>
   <input id="kw" class="search" placeholder="搜索姓名 / 院校 / 专业 / 技能"
-         aria-label="搜索候选人" role="searchbox"
+         aria-label="搜索候选人" role="searchbox" autocomplete="off"
+         name="candidate-search" data-form-type="other"
          onkeydown="if(event.key==='Enter'){doSearch()}">
   <!-- 搜索就是**一个输入框 + 一个按钮**，与原版一致（`ui.py:1787-1793`）：
        原来这里有个「关键词 / 按技能 / 语义」下拉，还有一个「具备其一/全部具备」下拉 —
@@ -205,6 +206,7 @@ _PAGE = r"""<!DOCTYPE html>
     <div class="morePanel" id="batchOpsPanel">
       <button class="btn" id="btnInitial" onclick="toggleBatchOpsMenu();initialPassChecked()" disabled>批量初筛通过（0）</button>
       <button class="btn" id="btnBulkAssign" onclick="toggleBatchOpsMenu();bulkAssignChecked()" disabled>批量归岗（0）</button>
+      <button class="btn" id="btnBatchBundle" onclick="toggleBatchOpsMenu();batchDownloadResumes()" disabled>下载选中简历（0）</button>
       <button class="btn" onclick="toggleBatchOpsMenu();batchReanalyze()">批量重新分析</button>
       <button class="btn" onclick="toggleBatchOpsMenu();analyzePending()">分析未分析的人</button>
     </div>

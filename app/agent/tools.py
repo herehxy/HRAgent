@@ -276,6 +276,8 @@ TOOL_SPECS = [
                                    "不要用 keyword 去猜校名（名单外会漏）。选 211 时 985 也算。"},
            "skill": {"type": "string", "description": "单个技能关键词（keyword 模式的快捷写法）"},
            "stage": {"type": "string", "description": "投递阶段，取值：" + "/".join(STAGES)},
+           "gender": {"type": "string",
+                      "description": "性别：男 / 女 / 未标注（部分工种有性别要求时用这个参数，不要用 keyword 去猜）"},
            "limit": {"type": "integer", "description": "最多返回条数，默认 20"}}),
     _spec("get_candidate",
           "取某候选人的完整档案：基本信息、联系方式、来源邮件、全部投递/面试/签约记录、"
@@ -452,7 +454,8 @@ TOOL_SPECS = [
     # ------------------------------ 算 ------------------------------
     _spec("analyze_fit",
           "用模型对某候选人做岗位匹配分析，输出亮点/风险/一句话结论/建议档位。"
-          "只在需要深入判断时调用；结果仅为建议，最终档位由 HR 决定。",
+          "**分析多人时，在一条回复里一次性发出多个 analyze_fit 调用**（系统并行执行），"
+          "不要一人一轮逐个调用。",
           {"candidate_id": {"type": "integer"}, "job_id": {"type": "integer", "description": "岗位 id，可空"}},
           ["candidate_id"]),
     _spec("compare_candidates",
@@ -556,6 +559,7 @@ TOOL_SPECS = [
                               "description": "候选人 id 或姓名；给定时只打包这些人"},
            "education": {"type": "string", "description": "学历精确匹配"},
            "univ": {"type": "string", "description": "985 或 211"},
+           "gender": {"type": "string", "description": "性别：男 / 女 / 未标注"},
            "keyword": {"type": "string", "description": "姓名/院校/专业关键词"},
            "date_from": {"type": "string", "description": "投递开始日期 YYYY-MM-DD"},
            "date_to": {"type": "string", "description": "投递结束日期 YYYY-MM-DD（含当天）"}},
@@ -571,6 +575,9 @@ TOOL_SPECS = [
            "education": {"type": "string",
                          "description": "学历精确匹配：大专/本科/硕士/博士，多个用逗号分隔"},
            "univ": {"type": "string", "description": "院校层次：985 或 211"},
+           "gender": {"type": "string",
+                      "description": "性别：男 / 女 / 未标注；按性别筛选时直接用这个参数，"
+                                     "不要拿关键词去匹配姓名或岗位"},
            "keyword": {"type": "string", "description": "姓名/院校/专业关键词"},
            "date_from": {"type": "string", "description": "投递开始日期 YYYY-MM-DD"},
            "date_to": {"type": "string", "description": "投递结束日期 YYYY-MM-DD（含当天）"},
@@ -1837,7 +1844,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 allowed = None
                 if any(args.get(k) for k in ("job", "education", "stage", "tier",
                                              "univ", "mail_subject", "mail_from",
-                                             "mail_body", "certificate")):
+                                             "mail_body", "certificate", "gender")):
                     _job_id = ctx.job_id
                     if args.get("job"):
                         _job_id, _jerr = _resolve_job_id(conn, args["job"])
@@ -1850,6 +1857,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                         mail_from=args.get("mail_from"),
                         mail_body=args.get("mail_body"),
                         certificate=args.get("certificate"),
+                        gender=args.get("gender"),
                         job_id=_job_id, archived=False)}
                 out = []
                 for r in (res.get("results") or []):
@@ -1905,6 +1913,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 mail_from=args.get("mail_from"),
                 mail_body=args.get("mail_body"),
                 certificate=args.get("certificate"),
+                gender=args.get("gender"),
                 job_id=job_id,
                 # 归档的人不在人才库里，助手也就不该把他们列出来（与界面同一口径）
                 archived=False)
@@ -3397,7 +3406,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 if _jerr:
                     return _err(_jerr)
                 filters["job_id"] = _jid
-            for _k in ("education", "univ", "keyword"):
+            for _k in ("education", "univ", "keyword", "gender"):
                 _v = str(args.get(_k) or "").strip()
                 if _v:
                     filters[_k] = _v
@@ -3417,7 +3426,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 qs.append("job_id=" + str(filters["job_id"]))
             if stage:
                 qs.append("stage=" + urllib.parse.quote(stage))
-            for _k in ("education", "univ", "keyword"):
+            for _k in ("education", "univ", "keyword", "gender"):
                 if filters.get(_k):
                     qs.append(_k + "=" + urllib.parse.quote(str(filters[_k])))
             if df:
@@ -3454,6 +3463,11 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             kw = str(args.get("keyword") or "").strip()
             edu = str(args.get("education") or "").strip()
             univ = str(args.get("univ") or "").strip()
+            # 性别是普通筛选条件（业务方 2026-11-25）。以前这里没有参数，
+            # 助手只能拿"男"去匹配关键词，筛不准还要附一段限制说明——不再这么干。
+            gender = str(args.get("gender") or "").strip()
+            if gender and gender not in ("男", "女", "未标注"):
+                return _err("性别只能填：男 / 女 / 未标注")
             df = _resolve_date_arg(args.get("date_from"))
             dt = _resolve_date_arg(args.get("date_to"))
             filters: dict = {}
@@ -3469,6 +3483,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 filters["education"] = edu
             if univ:
                 filters["univ"] = univ
+            if gender:
+                filters["gender"] = gender
             if df:
                 filters["date_from"] = df
             if dt:
@@ -3485,6 +3501,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 parts.append(edu)
             if univ:
                 parts.append(univ + "院校")
+            if gender:
+                parts.append(gender)
             if kw:
                 parts.append(kw)
             if df or dt:
@@ -3512,6 +3530,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 qs.append("education=" + urllib.parse.quote(edu))
             if univ:
                 qs.append("univ=" + urllib.parse.quote(univ))
+            if gender:
+                qs.append("gender=" + urllib.parse.quote(gender))
             if df:
                 qs.append("date_from=" + urllib.parse.quote(df))
             if dt:

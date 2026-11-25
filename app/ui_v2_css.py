@@ -6,6 +6,8 @@ _CSS = r"""
      Canvas = Apple 官网的浅灰 #f5f5f7，内容 = 纯白，文字 = #1d1d1f，
      功能色 = Apple Blue #0071e3；分隔线只保留一层极淡的 hairline。 */
   color-scheme:light;
+  /* 字号缩放系数：只影响字体大小，不缩放布局（2026-11-23） */
+  --ui-fs:1;
   --font-ui:"SF Pro Display","SF Pro Text",-apple-system,BlinkMacSystemFont,
     "Segoe UI Variable Display","Segoe UI","PingFang SC","Hiragino Sans GB",
     "HarmonyOS Sans SC","Source Han Sans SC","Noto Sans CJK SC",
@@ -110,7 +112,7 @@ button{cursor:pointer}
   flex:none;height:52px;display:flex;align-items:center;gap:10px;padding:0 16px;
   background:var(--surface);border-bottom:1px solid var(--line);
 }
-.brand{font-size:15px;font-weight:600;letter-spacing:.02em;margin-right:4px;flex:none;white-space:nowrap}
+.brand{font-size:calc(15px * var(--ui-fs, 1));font-weight:600;letter-spacing:.02em;margin-right:4px;flex:none;white-space:nowrap}
 .brand i{
   display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--accent);
   margin-right:7px;vertical-align:1px;
@@ -128,7 +130,7 @@ button{cursor:pointer}
 .msel{position:relative;flex:none}
 .msel > .msbtn{cursor:pointer;text-align:left;min-width:118px;max-width:210px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:inherit;
-  font-size:13px;color:var(--ink-2)}
+  font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2)}
 .msel > .msbtn.active{color:var(--accent-ink);border-color:var(--accent-line);
   background:var(--accent-soft)}
 .msel .msPanel{display:none;position:absolute;top:36px;left:0;z-index:45;min-width:190px;
@@ -136,14 +138,14 @@ button{cursor:pointer}
   border-radius:var(--r);box-shadow:0 8px 22px rgba(24,28,32,.12);padding:4px}
 .msel.open .msPanel{display:block}
 .msItem{display:flex;align-items:center;gap:7px;padding:6px 8px;border-radius:4px;
-  font-size:13px;color:var(--ink);cursor:pointer}
+  font-size:calc(13px * var(--ui-fs, 1));color:var(--ink);cursor:pointer}
 .msItem:hover{background:var(--accent-soft)}
 .msItem input{width:14px;height:14px;accent-color:var(--accent);cursor:pointer}
 .msFoot{border-top:1px solid var(--line);margin-top:4px;padding-top:5px;
   display:flex;justify-content:flex-end}
 .sel:focus{outline:none;border-color:var(--accent)}
-.count{margin-left:auto;color:var(--ink-3);font-size:13px;flex:none;white-space:nowrap}
-.count b{color:var(--ink);font-size:15px;font-weight:600}
+.count{margin-left:auto;color:var(--ink-3);font-size:calc(13px * var(--ui-fs, 1));flex:none;white-space:nowrap}
+.count b{color:var(--ink);font-size:calc(15px * var(--ui-fs, 1));font-weight:600}
 
 /* ---------------- 两栏 ---------------- */
 /* ---------------- 第二行：动作 + 频道 ---------------- */
@@ -162,7 +164,7 @@ button{cursor:pointer}
 /* 这一条栏里的按钮比别处**小一档**：btn-lg 的 9px/18px 是给详情页那种
    稀疏布局定的，13 个按钮并排时每个省 10px 就是 130px。
    语义色（蓝=收进来 / 绿=发出去）和字重一概不动，只收紧内边距与字号。 */
-.top2 .btn-lg{padding:7px 10px;font-size:13px;letter-spacing:-.01em}
+.top2 .btn-lg{padding:7px 10px;font-size:calc(13px * var(--ui-fs, 1));letter-spacing:-.01em}
 /* 计数型按钮（归档勾选（0）/ 对比档案（0/10））的数字用等宽：
    数字变化时按钮宽度不跳，右边的按钮不会跟着左右滑。 */
 .top2 .btn{font-variant-numeric:tabular-nums}
@@ -175,7 +177,7 @@ button{cursor:pointer}
   background:var(--surface);border-bottom:1px solid var(--line);
 }
 .vdiv{width:1px;height:18px;background:var(--line-2);margin:0 2px;flex:none}
-.allbox{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--ink-2);
+.allbox{display:inline-flex;align-items:center;gap:5px;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);
   cursor:pointer;user-select:none;padding:0 4px;white-space:nowrap;flex:none}
 .allbox input{width:14px;height:14px;accent-color:var(--accent);cursor:pointer}
 .more{position:relative}
@@ -196,15 +198,15 @@ button{cursor:pointer}
 #batchPanel,#batchOpsPanel{flex-direction:column;flex-wrap:nowrap;gap:2px;padding:5px;min-width:170px;
   max-width:none;position:fixed;top:0;left:0}
 #batchPanel .btn,#batchOpsPanel .btn{width:100%;text-align:left;border-color:transparent;background:transparent;
-  padding:8px 10px;font-size:13.5px}
+  padding:8px 10px;font-size:calc(13.5px * var(--ui-fs, 1))}
 #batchPanel .btn:hover,#batchOpsPanel .btn:hover{background:var(--accent-soft);border-color:transparent;
   color:var(--accent-ink)}
 /* 面板里所有筛选框**同宽同字号**（业务方 2026-10-21：四楞八样的宽度和字号看着乱）。
    `.sel` 原来由文字长度决定宽度，勾选式下拉又自带 min/max-width —— 统一成一把尺子。 */
 .morePanel .sel,.morePanel .msel > .msbtn{
   width:172px;min-width:172px;max-width:172px;box-sizing:border-box;flex:none;
-  font-size:14px;line-height:1.2}
-.morePanel .lbl{font-size:13px;color:var(--ink-3)}
+  font-size:calc(14px * var(--ui-fs, 1));line-height:1.2}
+.morePanel .lbl{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3)}
 /* 投递时间：开始/结束两个日期框（业务方 2026-11-02 要求具体到天）。
    单独占一行，避免和 172px 的下拉挤在一起；宽度够显示完整 yyyy-mm-dd。 */
 .morePanel .dateRange{flex:0 0 100%;display:flex;align-items:center;gap:8px;height:32px}
@@ -212,7 +214,7 @@ button{cursor:pointer}
 .morePanel .dateRange input{
   width:150px;height:32px;padding:0 8px;border:1px solid var(--line-2);
   border-radius:var(--r-s);background:var(--surface);color:var(--ink-2);
-  font:inherit;font-size:14px;box-sizing:border-box}
+  font:inherit;font-size:calc(14px * var(--ui-fs, 1));box-sizing:border-box}
 .morePanel .dateRange input:focus{outline:none;border-color:var(--accent)}
 .morePanel .dateRange .dash{color:var(--ink-3);user-select:none}
 /* 「清空筛选」单独占一行、靠右、用警示色（它是"推翻所有条件"的动作，
@@ -228,7 +230,7 @@ button{cursor:pointer}
 .tabs button{flex:none;white-space:nowrap}
 .tabs button{
   border:1px solid transparent;background:transparent;color:var(--ink-2);
-  padding:4px 10px;border-radius:14px;font-size:13px;
+  padding:4px 10px;border-radius:14px;font-size:calc(13px * var(--ui-fs, 1));
 }
 .tabs button:hover{background:var(--ground)}
 .tabs button.on{
@@ -248,20 +250,20 @@ button{cursor:pointer}
    这个页面是**单文件内联**的（JS/CSS 全在 HTML 里，见 render_page_v2），
    再挂一个 /logo.png 请求只会多一次往返，还会在服务刚起时闪一下空图。
    base64 是 icon_tray.png 缩到 96px 的版本，四角已透明，浅色侧栏上不露白边。 */
-.sbrand{display:flex;align-items:center;gap:9px;font-size:14.5px;font-weight:600;
+.sbrand{display:flex;align-items:center;gap:9px;font-size:calc(14.5px * var(--ui-fs, 1));font-weight:600;
   padding:2px 10px 14px;letter-spacing:.01em;line-height:1.25}
 .sbrand img{width:26px;height:26px;flex:none;display:block;
   border-radius:7px;box-shadow:0 1px 2px rgba(24,28,32,.14)}
 .sbrand span{display:flex;flex-direction:column;min-width:0}
 .sbrand b{font-weight:650;color:var(--ink);white-space:nowrap}
-.sbrand small{font-size:11.5px;font-weight:400;color:var(--ink-3);
+.sbrand small{font-size:calc(11.5px * var(--ui-fs, 1));font-weight:400;color:var(--ink-3);
   white-space:nowrap;letter-spacing:.02em;margin-top:1px}
-.sgroup{font-size:11px;color:var(--ink-3);padding:14px 10px 6px;
+.sgroup{font-size:calc(11px * var(--ui-fs, 1));color:var(--ink-3);padding:14px 10px 6px;
   letter-spacing:.08em;font-weight:500}
 .side button{
   display:flex;align-items:center;gap:10px;width:100%;text-align:left;
   border:0;background:transparent;color:var(--ink-2);
-  padding:0 10px;height:34px;border-radius:8px;font-size:14px;
+  padding:0 10px;height:34px;border-radius:8px;font-size:calc(14px * var(--ui-fs, 1));
   margin-bottom:2px;line-height:1;cursor:pointer;
 }
 .side button .ico{width:17px;height:17px;flex:none;stroke:currentColor;fill:none;
@@ -273,9 +275,9 @@ button{cursor:pointer}
 .multi{display:inline-flex;flex-wrap:wrap;align-items:center;gap:5px;flex:1;min-width:230px}
 .mchip{display:inline-flex;align-items:center;gap:4px;background:var(--accent-soft);
   border:1px solid var(--accent-line);color:var(--accent-ink);border-radius:4px;
-  padding:2px 5px 2px 8px;font-size:13px}
-.mchip b{cursor:pointer;font-weight:700;color:var(--ink-3);font-size:13px}
-.tochip b{cursor:pointer;font-weight:700;color:var(--accent-ink);font-size:14px;
+  padding:2px 5px 2px 8px;font-size:calc(13px * var(--ui-fs, 1))}
+.mchip b{cursor:pointer;font-weight:700;color:var(--ink-3);font-size:calc(13px * var(--ui-fs, 1))}
+.tochip b{cursor:pointer;font-weight:700;color:var(--accent-ink);font-size:calc(14px * var(--ui-fs, 1));
   margin-left:6px;opacity:.7}
 .tochip b:hover{opacity:1;color:var(--bad)}
 .mchip b:hover{color:var(--bad)}
@@ -288,24 +290,24 @@ button{cursor:pointer}
    超宽屏上把气泡拉到 1100px，一句话占一整屏 —— 很难读。 */
 .chatlog > *{max-width:880px}
 .msg{display:inline-block;max-width:100%;margin:0 0 12px;padding:9px 13px;border-radius:8px;
-  font-size:15px;line-height:1.7;vertical-align:top}
+  font-size:calc(15px * var(--ui-fs, 1));line-height:1.7;vertical-align:top}
 .msg.user{background:var(--accent-soft);color:var(--ink);border:1px solid var(--accent-line)}
 .msg.assistant{background:var(--surface);border:1px solid var(--line);display:block}
-.msg h3,.msg h4{margin:8px 0 6px;font-size:15px}
+.msg h3,.msg h4{margin:8px 0 6px;font-size:calc(15px * var(--ui-fs, 1))}
 .msg blockquote{margin:6px 0;padding:4px 10px;border-left:2px solid var(--line-2);color:var(--ink-2)}
-.msg code{background:var(--surface-2);padding:1px 5px;border-radius:4px;font-size:13px}
+.msg code{background:var(--surface-2);padding:1px 5px;border-radius:4px;font-size:calc(13px * var(--ui-fs, 1))}
 .msg ul{margin:6px 0;padding-left:20px}
 .msg ol{margin:6px 0;padding-left:20px}
 .msg pre{background:var(--surface-2);padding:9px 11px;border-radius:6px;overflow:auto;
-  margin:8px 0;font-size:13px;line-height:1.55}
+  margin:8px 0;font-size:calc(13px * var(--ui-fs, 1));line-height:1.55}
 .msg pre code{background:none;padding:0}
 /* 管道表格：模型做"全员对比"时几乎一定输出表格，没有它整块以原始 `|` 文本怼在页面上 */
 .mdtable-wrap{margin:8px 0;overflow-x:auto}
 .mdtable-bar{display:flex;gap:6px;justify-content:flex-end;margin-bottom:4px}
 .mdt-btn{border:1px solid var(--line);background:var(--surface);color:var(--ink-3);
-  border-radius:5px;padding:2px 8px;font-size:11.5px;cursor:pointer}
+  border-radius:5px;padding:2px 8px;font-size:calc(11.5px * var(--ui-fs, 1));cursor:pointer}
 .mdt-btn:hover{color:var(--ink);border-color:var(--line-2);background:var(--surface-2)}
-.mdtable{border-collapse:collapse;font-size:13px;min-width:100%}
+.mdtable{border-collapse:collapse;font-size:calc(13px * var(--ui-fs, 1));min-width:100%}
 .mdtable th,.mdtable td{border:1px solid var(--line);padding:5px 9px;text-align:left;
   vertical-align:top}
 .mdtable th{background:var(--surface-2);font-weight:600;white-space:nowrap}
@@ -317,7 +319,7 @@ button{cursor:pointer}
 .chatinput textarea{
   width:100%;min-height:calc(3 * 1.72em);max-height:calc(10 * 1.72em);
   padding:14px 92px 16px 11px;border:1px solid var(--line-2);
-  border-radius:var(--r-s);font:inherit;font-size:15px;resize:none;outline:none;
+  border-radius:var(--r-s);font:inherit;font-size:calc(15px * var(--ui-fs, 1));resize:none;outline:none;
   overflow-y:hidden;line-height:1.72;
   transition:padding-right .15s ease,border-color .15s ease;
 }
@@ -329,7 +331,7 @@ button{cursor:pointer}
    否则键会压住最后一行字和右侧的引用标记。 */
 #chatSend, #chatStop{
   position:absolute;right:8px;bottom:8px;transition:right .15s ease;
-  min-height:40px;padding:0 18px;font-size:15px;font-weight:600;
+  min-height:40px;padding:0 18px;font-size:calc(15px * var(--ui-fs, 1));font-weight:600;
 }
 #chatStop{position:absolute;right:8px;bottom:8px;background:var(--bad-soft);
   border-color:var(--bad-line);color:var(--bad);font-weight:600}
@@ -339,34 +341,34 @@ button{cursor:pointer}
 #chatStop:hover{background:var(--bad-soft);filter:brightness(.97)}
 #chatSend.busy{opacity:.5;pointer-events:none}
 .chatside{border-left:1px solid var(--line);background:var(--surface);padding:16px 18px;overflow-y:auto}
-.metricpanel{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--ink-2)}
+.metricpanel{display:flex;flex-direction:column;gap:6px;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2)}
 .metric-row{display:flex;justify-content:space-between;gap:8px;padding:6px 9px;
   background:var(--surface-2);border-radius:6px}
-.metric-k{color:var(--ink-3);flex:none;font-size:12.5px}
-.metric-v{font-variant-numeric:tabular-nums;text-align:right;min-width:0;font-size:13px}
-.ctxpanel{font-size:13px;color:var(--ink-2)}
-.ctxmodel{font-size:14px;color:var(--ink-3);line-height:1.55;margin-bottom:6px;
+.metric-k{color:var(--ink-3);flex:none;font-size:calc(12.5px * var(--ui-fs, 1))}
+.metric-v{font-variant-numeric:tabular-nums;text-align:right;min-width:0;font-size:calc(13px * var(--ui-fs, 1))}
+.ctxpanel{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2)}
+.ctxmodel{font-size:calc(14px * var(--ui-fs, 1));color:var(--ink-3);line-height:1.55;margin-bottom:6px;
   word-break:break-word}
-.ctxmodel b{color:var(--ink);font-weight:700;font-size:15px}
+.ctxmodel b{color:var(--ink);font-weight:700;font-size:calc(15px * var(--ui-fs, 1))}
 .ctxhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px}
-.ctxhead b{font-size:15px;color:var(--ink)}
-.ctxhead span{color:var(--ink-3);font-size:12.5px}
+.ctxhead b{font-size:calc(15px * var(--ui-fs, 1));color:var(--ink)}
+.ctxhead span{color:var(--ink-3);font-size:calc(12.5px * var(--ui-fs, 1))}
 .ctxbar{display:flex;height:8px;border-radius:5px;overflow:hidden;
   background:var(--surface-2);margin:0 0 8px}
 .ctxseg{height:100%;min-width:0}
-.ctxrow{display:flex;align-items:center;gap:7px;padding:3px 0;font-size:12.5px}
+.ctxrow{display:flex;align-items:center;gap:7px;padding:3px 0;font-size:calc(12.5px * var(--ui-fs, 1))}
 .ctxdot{width:8px;height:8px;border-radius:2px;flex:none}
 .ctxname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ctxnum{font-variant-numeric:tabular-nums;color:var(--ink-3);font-size:12.5px;flex:none}
-.outpanel{display:flex;flex-direction:column;gap:4px;font-size:13px}
+.ctxnum{font-variant-numeric:tabular-nums;color:var(--ink-3);font-size:calc(12.5px * var(--ui-fs, 1));flex:none}
+.outpanel{display:flex;flex-direction:column;gap:4px;font-size:calc(13px * var(--ui-fs, 1))}
 .outitem{display:flex;align-items:center;gap:7px;padding:6px 8px;
   border:1px solid var(--line);border-radius:6px;background:var(--surface-2);
   cursor:pointer;color:var(--ink-2);text-align:left;width:100%;font:inherit;
-  font-size:12.5px}
+  font-size:calc(12.5px * var(--ui-fs, 1))}
 .outitem:hover{border-color:var(--line-2);color:var(--ink)}
 .outicon{width:17px;text-align:center;flex:none;color:var(--accent-ink)}
 .outname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.outtag{font-size:11px;color:var(--ink-3);flex:none}
+.outtag{font-size:calc(11px * var(--ui-fs, 1));color:var(--ink-3);flex:none}
 /* v4.0.17：右侧实时调用轨迹 */
 .tracepanel{display:flex;flex-direction:column}
 .tp-step{position:relative;padding:0 0 16px 22px}
@@ -377,23 +379,23 @@ button{cursor:pointer}
 .tp-dot.m{background:var(--plum)}
 .tp-dot.t{background:var(--accent)}
 .tp-dot.a{background:var(--ok)}
-.tp-title{font-size:13px;font-weight:600;color:var(--ink)}
-.tp-meta{font-size:11.5px;color:var(--ink-3);margin-top:2px;line-height:1.5;word-break:break-all}
+.tp-title{font-size:calc(13px * var(--ui-fs, 1));font-weight:600;color:var(--ink)}
+.tp-meta{font-size:calc(11.5px * var(--ui-fs, 1));color:var(--ink-3);margin-top:2px;line-height:1.5;word-break:break-all}
 .tp-badge{display:inline-block;margin:4px 6px 0 0;padding:1px 6px;border-radius:4px;
-  font-size:10.5px;background:var(--warn-soft);color:var(--warn)}
+  font-size:calc(10.5px * var(--ui-fs, 1));background:var(--warn-soft);color:var(--warn)}
 .tp-badge.disabled{background:var(--bad-soft);color:var(--bad)}
 .tp-running .tp-dot{animation:tpPulse 1s infinite}
-.trace-empty{font-size:12.5px;color:var(--ink-3);line-height:1.7;padding:8px 0}
+.trace-empty{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3);line-height:1.7;padding:8px 0}
 @keyframes tpPulse{0%,100%{opacity:1}50%{opacity:.35}}
 .asks{display:flex;flex-direction:column;gap:6px;align-items:flex-start}
 .askhead{display:flex;align-items:center;gap:8px}
 .askhead .btn{margin-left:auto}
 .ask{border:1px solid var(--line-2);background:var(--surface);border-radius:14px;
-  padding:4px 11px;font-size:13px;color:var(--ink-2);text-align:left}
+  padding:4px 11px;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);text-align:left}
 .ask:hover{border-color:var(--accent);color:var(--accent-ink);background:var(--accent-soft)}
-.src-line{margin-top:6px;font-size:11.5px;color:var(--ink-3);line-height:1.6}
+.src-line{margin-top:6px;font-size:calc(11.5px * var(--ui-fs, 1));color:var(--ink-3);line-height:1.6}
 .msg-actions{margin-top:6px;display:flex;gap:6px}
-.tracebox{margin-top:8px;font-size:13px}
+.tracebox{margin-top:8px;font-size:calc(13px * var(--ui-fs, 1))}
 .tracebox summary{cursor:pointer;color:var(--ink-3)}
 .trace{margin-top:4px;padding:6px 9px;background:var(--surface-2);border-radius:5px;
   color:var(--ink-2);line-height:1.7}
@@ -401,16 +403,16 @@ button{cursor:pointer}
 .thinkbox{margin:0 0 10px;border:1px solid var(--line);border-radius:8px;
   background:var(--surface-2);overflow:hidden}
 .thinkbox>summary{display:flex;align-items:center;gap:7px;padding:6px 10px;
-  cursor:pointer;font-size:12.5px;color:var(--ink-3);user-select:none;list-style:none}
+  cursor:pointer;font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3);user-select:none;list-style:none}
 .thinkbox>summary::-webkit-details-marker{display:none}
-.thinkbox>summary::before{content:'▸';font-size:10px;transition:transform .15s}
+.thinkbox>summary::before{content:'▸';font-size:calc(10px * var(--ui-fs, 1));transition:transform .15s}
 .thinkbox[open]>summary::before{transform:rotate(90deg)}
-.thinkbox .think-meta{margin-left:auto;font-size:11.5px;color:var(--ink-3)}
-.think-body{padding:0 11px 9px;font-size:12.5px;line-height:1.72;color:var(--ink-2);
+.thinkbox .think-meta{margin-left:auto;font-size:calc(11.5px * var(--ui-fs, 1));color:var(--ink-3)}
+.think-body{padding:0 11px 9px;font-size:calc(12.5px * var(--ui-fs, 1));line-height:1.72;color:var(--ink-2);
   word-break:break-word;max-height:150px;overflow:auto}
 .think-live{margin:0 0 8px;padding:8px 10px;border:1px dashed var(--accent-line);
   border-radius:8px;background:var(--accent-soft)}
-.think-live-h{font-size:12px;color:var(--accent-ink);margin-bottom:4px}
+.think-live-h{font-size:calc(12px * var(--ui-fs, 1));color:var(--accent-ink);margin-bottom:4px}
 /* 流式阶段先按纯文本追加（逐字可见），完成后再用 mdLite 渲染成排版 */
 .think-live .think-body{white-space:pre-wrap}
 .stream-answer{min-height:8px}
@@ -422,71 +424,99 @@ button{cursor:pointer}
 .dcard{margin-top:9px;padding:10px 12px;border:1px solid var(--accent-line);
   border-radius:var(--r-s);background:var(--accent-soft)}
 .dcard.prop{border-color:var(--warn-line);background:var(--warn-soft)}
-.dcard-t{font-weight:600;font-size:14px;margin-bottom:4px}
-.dcard-b{font-size:13px;color:var(--ink-2);line-height:1.6}
+.dcard-t{font-weight:600;font-size:calc(14px * var(--ui-fs, 1));margin-bottom:4px}
+.dcard-b{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);line-height:1.6}
 .dcard-a{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 /* 行内勾选框（来源文件逐文件选择用） */
-.ck2{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--ink-2);cursor:pointer}
+.ck2{display:inline-flex;align-items:center;gap:5px;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);cursor:pointer}
 .ck2 input{width:14px;height:14px;accent-color:var(--accent);cursor:pointer}
 /* 提案卡里的一条：标题 + 风险标 + 两个决定按钮，每条独立可点 */
 .proprow{padding:7px 0;border-top:1px dashed var(--warn-line)}
 .proprow:first-of-type{border-top:0;padding-top:2px}
-.proprow-t{font-size:13px;line-height:1.6;color:var(--ink)}
+.proprow-t{font-size:calc(13px * var(--ui-fs, 1));line-height:1.6;color:var(--ink)}
 /* 提案里的候选人姓名：点开右侧档案。做成明确的下划线链接，别让人猜可不可点 */
 .plink{color:var(--accent-ink);text-decoration:none;border-bottom:1px dashed var(--accent-line);
   cursor:pointer}
 .plink:hover{color:var(--accent);border-bottom-style:solid}
 .proprow-a{margin-top:6px;display:flex;gap:6px;align-items:center}
 /* 提案的前后值：让 HR 在卡片上核对完再点，不用跳档案盲签 */
-.proprow-c{font-size:12.5px;color:var(--ink-2);margin-top:4px;line-height:1.55}
+.proprow-c{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-2);margin-top:4px;line-height:1.55}
 .proprow-c b{color:var(--ink-3);font-weight:500;margin:0 2px}
-.proprow-st{font-size:12.5px;color:var(--ink-3)}
+.proprow-st{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3)}
 .proprow-st.approve{color:var(--ok);font-weight:600}
 .proprow-st.reject{color:var(--bad);font-weight:600}
 .proprow.done{opacity:.62}
 /* 点下决定后、接口返回前：两个按钮一起禁用，旁边明确写出“选了哪一个”。 */
-.propchoice{font-size:12.5px;font-weight:600;white-space:nowrap}
+.propchoice{font-size:calc(12.5px * var(--ui-fs, 1));font-weight:600;white-space:nowrap}
 .propchoice.approve{color:var(--ok)}
 .propchoice.reject{color:var(--bad)}
 .btn.chosen{box-shadow:0 0 0 2px var(--accent-soft),0 0 0 3px var(--accent-line)}
 /* 同类型提案超过 3 条时折叠成一组，避免一屏几十条。 */
 .propgroup{margin:6px 0;border-top:1px dashed var(--warn-line);padding-top:6px}
-.propgroup > summary{cursor:pointer;list-style:none;font-size:13px;font-weight:600;
+.propgroup > summary{cursor:pointer;list-style:none;font-size:calc(13px * var(--ui-fs, 1));font-weight:600;
   color:var(--ink);display:flex;align-items:center;gap:6px}
 .propgroup > summary::-webkit-details-marker{display:none}
-.propgroup > summary::before{content:'▸';color:var(--ink-3);font-size:12px}
+.propgroup > summary::before{content:'▸';color:var(--ink-3);font-size:calc(12px * var(--ui-fs, 1))}
 .propgroup[open] > summary::before{content:'▾'}
-.propgroup-hint{font-size:12px;color:var(--ink-3);font-weight:400;margin-left:auto}
-.stg{font-size:12px;line-height:1;padding:2px 7px;border-radius:4px;margin-left:7px;
+.propgroup-hint{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);font-weight:400;margin-left:auto}
+.stg{font-size:calc(12px * var(--ui-fs, 1));line-height:1;padding:2px 7px;border-radius:4px;margin-left:7px;
   font-weight:600;white-space:nowrap;display:inline-block;vertical-align:1px}
-.ochip{font-size:13px;line-height:1;padding:3px 9px;border-radius:5px;margin-left:6px;
+.ochip{font-size:calc(13px * var(--ui-fs, 1));line-height:1;padding:3px 9px;border-radius:5px;margin-left:6px;
   font-weight:700;white-space:nowrap;display:inline-block;vertical-align:1px;
   border:1px solid transparent}
 .ochip.g{color:var(--ok);background:var(--ok-soft);border:1px solid var(--ok-line)}
 .ochip.r{color:var(--bad);background:var(--bad-soft);border-color:var(--bad-line);
   box-shadow:0 0 0 1px var(--bad-line)}
-.jchip{display:inline-block;font-size:12px;padding:1px 7px;border-radius:4px;
+.jchip{display:inline-block;font-size:calc(12px * var(--ui-fs, 1));padding:1px 7px;border-radius:4px;
   background:var(--surface-2);color:var(--ink-2);border:1px solid var(--line)}
 .jchip.sug{background:var(--warn-soft);color:var(--warn);border-color:var(--warn-line)}
 .jchip.none{color:var(--ink-3);background:transparent}
-.ppager{display:flex;align-items:center;gap:6px;margin-top:4px;font-size:12px;color:var(--ink-3)}
+.ppager{display:flex;align-items:center;gap:6px;margin-top:4px;font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3)}
 .ppager .pg{border:1px solid var(--line-2);background:var(--surface);border-radius:4px;
   width:22px;height:20px;line-height:1;color:var(--ink-2);padding:0}
 .ppager .pg:hover:not(:disabled){border-color:var(--accent);color:var(--accent-ink)}
 .ppager .pg:disabled{opacity:.4;cursor:default}
 /* 配置项：现值只读 + 「改」按钮；编辑区独占一行 */
+/* 外观设置的分段选择器（主题 / 字体大小）：浅灰轨道 + 选中项白底 */
+.seg{display:inline-flex;align-items:center;gap:2px;padding:3px;
+  border-radius:12px;background:var(--surface-2);border:1px solid var(--line)}
+.seg button{display:inline-flex;align-items:center;justify-content:center;
+  min-width:40px;height:32px;padding:0 10px;border:0;border-radius:9px;
+  background:transparent;color:var(--ink-2);font:inherit;font-size:calc(13.5px * var(--ui-fs, 1));
+  cursor:pointer;transition:background .15s,color .15s,box-shadow .15s}
+.seg button:hover{color:var(--ink)}
+.seg button.on{background:var(--surface);color:var(--ink);
+  box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.seg button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+@media (prefers-reduced-motion: reduce){.seg button{transition:none}}
 .cfgsec h3{display:flex;align-items:center;gap:8px}
+/* 必填标记：黑色星号，跟在字段名后（替代红色“必填”文字） */
+.req{margin-left:2px;font-size:14px;font-weight:700;color:var(--ink);
+  line-height:1;vertical-align:1px;letter-spacing:0}
 .cfgsec h3 .cfgacts{margin-left:auto;display:flex;gap:6px}
 .cfgsec .ced{display:none}
-.cfgsec.editing .cur{display:none}
+/* 院校学科强项：这里是常驻可编辑的档位下拉，不走"先点修改"那套显隐规则 */
+#settingsSchoolSubjects .ced{display:block}
+.subjmeta{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);margin:2px 0 6px}
+/* 2026-11-23：设置不再有「修改」这一步——输入框常驻，改完直接点「保存」覆盖。
+   因此 `.editing` 在渲染时就固定加上；现值文本只在有输入框的行里隐藏。 */
+.cfgsec.editing .crow:has(.ced) .cur{display:none}
 .cfgsec.editing .ced{display:block}
+.cfgsec.editing .ck.sw > .ced{display:block;position:absolute}
 /* 面试字典（2026-11-02 重做）：只读态只显示条目本身，编辑态才出现"添加"框和批量文本框。
    原来两行都在：上面一行"面试单位（还没有条目）[输入后回车添加]"，下面一行
    "面试单位 未设置" —— 同一个标题出现两次，用户不知道该用哪个。 */
+/* 字典的批量文本框只作为保存载荷，**始终不显示**：
+   界面上用「条目 + 输入框」维护，避免同一组值出现两套编辑器。 */
 .dict-bulk{display:none}
-.cfgsec.editing .dict-bulk{display:block}
 .dict-add{display:none}
 .cfgsec.editing .dict-add{display:block}
+/* 面试字典：条目一行、添加框单独一行，所有输入框与标签对齐 */
+.dict-row{padding:12px 0;border-top:1px dashed var(--line);align-items:flex-start}
+.dict-row > label{padding-top:8px;color:var(--ink-2)}
+.dictrow{display:flex;flex-direction:column;gap:9px;flex:1;min-width:0}
+.dictchips{display:flex;flex-wrap:wrap;gap:6px;min-height:24px;align-items:center}
+.dictrow .dict-add{width:100%;height:36px}
 .vsel{height:32px;padding:0 8px;border:1px solid var(--line-2);border-radius:var(--r-s);
   background:var(--surface);font:inherit;outline:none;cursor:pointer;min-width:110px}
 .vsel:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
@@ -499,10 +529,10 @@ button{cursor:pointer}
 .cval .ced[type=checkbox]{width:15px;height:15px;accent-color:var(--accent)}
 .cval textarea.ced{height:auto;padding:8px 10px;line-height:1.6;resize:vertical}
 .cval .ced:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
-.cval .cur{font-size:14px;color:var(--ink);word-break:break-all;white-space:pre-wrap;
+.cval .cur{font-size:calc(14px * var(--ui-fs, 1));color:var(--ink);word-break:break-all;white-space:pre-wrap;
   font-family:inherit;line-height:1.55}
 .cval .cur.none{color:var(--ink-3)}
-.btn.sm{height:26px;padding:0 10px;font-size:13px}
+.btn.sm{height:26px;padding:0 10px;font-size:calc(13px * var(--ui-fs, 1))}
 .cedit{background:var(--surface-2);border-radius:var(--r-s);padding:8px 10px;margin-bottom:4px}
 .cinput{display:flex;align-items:flex-start;gap:8px;flex:1;min-width:0;flex-wrap:wrap}
 .cinput input,.cinput select,.cinput textarea{
@@ -512,48 +542,68 @@ button{cursor:pointer}
 .cinput input:focus,.cinput select:focus,.cinput textarea:focus{
   border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .crow{display:flex;align-items:flex-start;gap:10px;margin:6px 0}
-.crow > label{width:86px;flex:none;font-size:13px;color:var(--ink-3);padding-top:7px}
+.crow > label{width:86px;flex:none;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3);padding-top:7px}
 .crow input,.crow select,.crow textarea{
   flex:1;min-width:0;height:34px;padding:0 10px;border:1px solid var(--line-2);
   border-radius:var(--r-s);background:var(--surface);font:inherit;outline:none}
 .crow textarea{height:auto;padding:8px 10px;line-height:1.6;resize:vertical}
 .crow input:focus,.crow select:focus,.crow textarea:focus{
   border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
-.ck{display:inline-flex;align-items:center;gap:6px;font-size:14px;padding-top:7px}
+.ck{display:inline-flex;align-items:center;gap:6px;font-size:calc(14px * var(--ui-fs, 1));padding-top:7px}
 .ck input{width:15px;height:15px;accent-color:var(--accent)}
+/* 设置里的布尔项统一用拨动开关（2026-11-23）：
+   原生 checkbox 隐藏，轨道 + 圆点自己画；点击轨道/圆点都能切换，Tab + 空格也可用。 */
+.ck.sw{padding-top:0;gap:0;position:relative;vertical-align:middle}
+.ck.sw > input{position:absolute;width:1px;height:1px;margin:0;padding:0;
+  opacity:0;pointer-events:none}
+.ck.sw > .sw-track{display:inline-block;position:relative;flex:none;
+  width:44px;height:26px;border-radius:999px;background:var(--line-2);
+  border:1px solid transparent;cursor:pointer;
+  transition:background .18s ease,border-color .18s ease}
+.ck.sw > .sw-track::after{content:'';position:absolute;top:2px;left:2px;
+  width:20px;height:20px;border-radius:50%;background:#fff;
+  box-shadow:0 1px 3px rgba(0,0,0,.28);
+  transition:transform .18s ease}
+.ck.sw > input:checked + .sw-track{background:var(--accent)}
+.ck.sw > input:checked + .sw-track::after{transform:translateX(18px)}
+.ck.sw > input:focus-visible + .sw-track{box-shadow:0 0 0 3px var(--accent-soft)}
+.ck.sw > input:disabled + .sw-track{opacity:.45;cursor:default}
+@media (prefers-reduced-motion: reduce){
+  .ck.sw > .sw-track,.ck.sw > .sw-track::after{transition:none}
+}
 .archbar{flex:none;height:44px;align-items:center;gap:8px;padding:0 16px;
   background:var(--surface);border-bottom:1px solid var(--line);flex-wrap:wrap}
 .propbox{display:none;max-height:320px;overflow-y:auto;padding:10px 16px;
   background:var(--surface);border-bottom:1px solid var(--line)}
 .propbox.on{display:block}
 .prow{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--line);
-  font-size:14px}
+  font-size:calc(14px * var(--ui-fs, 1))}
 .prow:last-child{border-bottom:0}
 .prow.done{opacity:.45}
 .ptext{flex:1;min-width:0}
-.prisk{font-size:12px;padding:1px 6px;border-radius:4px;white-space:nowrap;
+.prisk{font-size:calc(12px * var(--ui-fs, 1));padding:1px 6px;border-radius:4px;white-space:nowrap;
   background:var(--surface-2);color:var(--ink-3)}
 .prisk.中{background:var(--warn-soft);color:var(--warn)}
 .prisk.高{background:var(--bad-soft);color:var(--bad)}
 .pacts{display:flex;gap:6px;flex:none}
 #btnProp.on{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent-ink)}
 .taskbar{display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--warn-soft);
-  border-bottom:1px solid var(--warn-line);font-size:13px;color:var(--ink)}
+  border-bottom:1px solid var(--warn-line);font-size:calc(13px * var(--ui-fs, 1));color:var(--ink)}
 .progtrack{height:10px;background:var(--surface-2);border-radius:6px;overflow:hidden;margin:12px 0 8px}
 .progfill{height:100%;background:var(--accent);border-radius:6px;transition:width .3s ease}
-.progmeta{font-size:13px;color:var(--ink-2);line-height:1.6}
+.progmeta{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);line-height:1.6}
 /* 提示条：**浅绿底**（原版 ok-soft 口径）——原来用灰字太淡，看不出是"成功"还是"没跑" */
 .msgline{display:inline-block;margin-left:8px;padding:3px 10px;border-radius:5px;
-  background:var(--ok-soft);border:1px solid var(--ok-line);color:var(--ok);font-size:13px}
+  background:var(--ok-soft);border:1px solid var(--ok-line);color:var(--ok);font-size:calc(13px * var(--ui-fs, 1))}
 .msgline.bad{background:var(--bad-soft);border-color:var(--bad-line);color:var(--bad)}
 .msgline.busy{background:var(--surface-2);border-color:var(--line);color:var(--ink-3)}
 .pvbox{border:1px solid var(--line);border-radius:var(--r-s);background:var(--surface-2);
   padding:6px 10px;max-width:520px}
-.pvhead{font-size:13px;color:var(--ink-3);margin-bottom:4px}
-.pvrow{display:flex;align-items:baseline;gap:8px;padding:2px 0;font-size:13px;line-height:1.5}
+.pvhead{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3);margin-bottom:4px}
+.pvrow{display:flex;align-items:baseline;gap:8px;padding:2px 0;font-size:calc(13px * var(--ui-fs, 1));line-height:1.5}
 .pvsub{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
 .pvmeta{flex:none;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-  color:var(--ink-3);font-size:12px}
+  color:var(--ink-3);font-size:calc(12px * var(--ui-fs, 1))}
 /* ---------------- 图表（纯 CSS/SVG，不引图表库） ---------------- */
 .tier-donut{display:flex;align-items:center;gap:14px;flex:none}
 .tier-donut svg .td-seg{cursor:pointer;transition:stroke-width .12s}
@@ -561,14 +611,14 @@ button{cursor:pointer}
 .tier-donut svg .td-total{cursor:pointer;transition:fill .12s}
 .tier-donut svg .td-total:hover{fill:var(--accent-ink)}
 .donutlegend{display:grid;gap:3px}
-.lgitem{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink-2);
+.lgitem{display:flex;align-items:center;gap:6px;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);
   cursor:pointer;padding:1px 4px;border-radius:4px}
 .lgitem:hover{background:var(--surface-2)}
 .lgitem i{width:8px;height:8px;border-radius:2px;display:inline-block;flex:none}
 .lgitem span{flex:1;min-width:0}
 .lgitem b{font-weight:600;color:var(--ink)}
 .barchart{display:flex;flex-direction:column;gap:7px;max-width:640px}
-.brow{display:flex;align-items:center;gap:10px;font-size:13px}
+.brow{display:flex;align-items:center;gap:10px;font-size:calc(13px * var(--ui-fs, 1))}
 .blabel{width:126px;flex:none;text-align:right;color:var(--ink-2);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .btrack{flex:1;min-width:0;height:14px;background:var(--surface-2);border-radius:3px;overflow:hidden}
@@ -576,22 +626,22 @@ button{cursor:pointer}
 .bnum{width:44px;flex:none;text-align:right;color:var(--ink);font-weight:600}
 /* 环 + 图例一行，提示另起一行（挤在一行会与图例叠字） */
 .anaring{display:block}
-.anaringtip{color:var(--ink-3);font-size:13px;line-height:1.7;margin-top:10px}
+.anaringtip{color:var(--ink-3);font-size:calc(13px * var(--ui-fs, 1));line-height:1.7;margin-top:10px}
 .anagrp{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:6px 0}
 /* 条件选项排成网格：每行放几个由宽度决定，不再由"这一行字有多长"决定 */
 .anackgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(94px,1fr));
   gap:5px 10px;flex:1;min-width:0;align-items:center}
-.anagname{width:78px;flex:none;color:var(--ink-3);font-size:13px}
-.anack{display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;
+.anagname{width:78px;flex:none;color:var(--ink-3);font-size:calc(13px * var(--ui-fs, 1))}
+.anack{display:inline-flex;align-items:center;gap:4px;font-size:calc(13px * var(--ui-fs, 1));cursor:pointer;
   padding:2px 8px;border:1px solid var(--line-2);border-radius:12px;background:var(--surface)}
 .anack input{width:13px;height:13px;accent-color:var(--accent);margin:0}
 .anack:hover{border-color:var(--accent-line)}
 .anares{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
-.anacount{font-size:13px;color:var(--ink-2);margin-bottom:8px}
-.anacount b{font-size:18px;color:var(--ink);margin-right:2px}
+.anacount{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);margin-bottom:8px}
+.anacount b{font-size:calc(18px * var(--ui-fs, 1));color:var(--ink);margin-right:2px}
 .anadim{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px}
 .dimbtn{border:1px solid var(--line-2);background:var(--surface);border-radius:12px;
-  padding:2px 10px;font-size:13px;color:var(--ink-2)}
+  padding:2px 10px;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2)}
 .dimbtn.on{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent-ink);font-weight:600}
 /* 概览第一行：环 + 库存并排 */
 .ovrow{display:grid;grid-template-columns:minmax(300px,.9fr) minmax(400px,1.1fr);
@@ -599,17 +649,17 @@ button{cursor:pointer}
 .ovcol{min-width:0;background:var(--surface);border:1px solid var(--line);
   border-radius:8px;padding:14px 16px;display:flex;flex-direction:column}
 .ovcol > h3{margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line);
-  font-size:15px;font-weight:650;color:var(--ink);flex:none}
+  font-size:calc(15px * var(--ui-fs, 1));font-weight:650;color:var(--ink);flex:none}
 .ov-todos{flex:1 1 auto;min-height:0}
 .ov-progress .anaring{display:flex;justify-content:center}
 .ov-progress .anaringtip{text-align:center;max-width:420px;margin:10px auto 0}
 /* v4.0.17：投递进度下方补“岗位投递人数”横向柱，填掉原来那块空白 */
 .ov-jobs{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
-.ov-jobs h3{font-size:14px;margin:0 0 4px;color:var(--ink)}
-.ov-jobs .ov-jobs-note{font-size:12px;color:var(--ink-3);margin:0 0 10px}
+.ov-jobs h3{font-size:calc(14px * var(--ui-fs, 1));margin:0 0 4px;color:var(--ink)}
+.ov-jobs .ov-jobs-note{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);margin:0 0 10px}
 .ovjob-list{max-height:300px;overflow:auto;padding-right:4px}
 .ovjob{margin-bottom:10px}
-.ovjob-head{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;
+.ovjob-head{display:flex;justify-content:space-between;gap:10px;font-size:calc(12.5px * var(--ui-fs, 1));
   color:var(--ink-2);margin-bottom:5px}
 .ovjob-head span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ovjob-head b{font-variant-numeric:tabular-nums;color:var(--ink);flex:none}
@@ -633,21 +683,21 @@ button{cursor:pointer}
 .anacondhead{display:flex;align-items:center;gap:12px;margin-bottom:8px}
 .anack.on{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent-ink)}
 .pgjump{height:26px;width:52px;text-align:center;border:1px solid var(--line-2);
-  border-radius:4px;font:inherit;font-size:13px;outline:none}
+  border-radius:4px;font:inherit;font-size:calc(13px * var(--ui-fs, 1));outline:none}
 .pgjump:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
-.contactline{display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:14px}
+.contactline{display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:calc(14px * var(--ui-fs, 1))}
 .cval1{display:inline-flex;align-items:center;gap:6px}
 .pgjump{height:26px;width:52px;text-align:center;border:1px solid var(--line-2);
-  border-radius:4px;font:inherit;font-size:13px;outline:none}
+  border-radius:4px;font:inherit;font-size:calc(13px * var(--ui-fs, 1));outline:none}
 .pgjump:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
-.contactline{display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:14px}
+.contactline{display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:calc(14px * var(--ui-fs, 1))}
 .cval1{display:inline-flex;align-items:center;gap:6px}
-.achip{font-size:12px;line-height:1;padding:2px 7px;border-radius:4px;
+.achip{font-size:calc(12px * var(--ui-fs, 1));line-height:1;padding:2px 7px;border-radius:4px;
   margin-left:6px;white-space:nowrap;display:inline-block;vertical-align:1px}
 .achip.exp{color:var(--bad);background:var(--bad-soft);border:1px solid var(--bad-line)}
 .btn.danger{background:var(--bad-soft);border-color:var(--bad-line);color:var(--bad)}
 .btn.danger:hover{background:var(--bad-soft);filter:brightness(.97)}
-.jst{font-size:12px;line-height:1;padding:3px 7px;border-radius:4px;
+.jst{font-size:calc(12px * var(--ui-fs, 1));line-height:1;padding:3px 7px;border-radius:4px;
   font-weight:600;white-space:nowrap;display:inline-block}
 .jst.on{color:var(--ok);background:var(--ok-soft);border:1px solid var(--ok-line)}
 .jst.off{color:var(--ink-3);background:var(--surface-2);border:1px solid var(--line)}
@@ -674,26 +724,26 @@ button{cursor:pointer}
 .acct:hover{background:var(--ground)}
 .acct:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .acct .av{width:22px;height:22px;border-radius:50%;flex:none;display:grid;place-items:center;
-  background:var(--accent-soft);color:var(--accent-ink);font-weight:700;font-size:11px}
+  background:var(--accent-soft);color:var(--accent-ink);font-weight:700;font-size:calc(11px * var(--ui-fs, 1))}
 .acct .txt{flex:1;min-width:0;display:flex;align-items:baseline;gap:6px;overflow:hidden}
-.acct .txt b{font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;
+.acct .txt b{font-size:calc(13.5px * var(--ui-fs, 1));font-weight:600;white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}
-.acct .txt i{font-style:normal;font-size:11.5px;color:var(--ink-3);white-space:nowrap;
+.acct .txt i{font-style:normal;font-size:calc(11.5px * var(--ui-fs, 1));color:var(--ink-3);white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis}
-.acct .chev{color:var(--ink-3);font-size:10px;flex:none;opacity:.55}
+.acct .chev{color:var(--ink-3);font-size:calc(10px * var(--ui-fs, 1));flex:none;opacity:.55}
 .acctMenu{position:absolute;left:2px;right:2px;bottom:calc(100% + 4px);z-index:60;
   background:var(--surface);border:1px solid var(--line);border-radius:10px;
   box-shadow:0 12px 30px rgba(16,24,40,.16);padding:4px;display:none}
 .acctMenu.on{display:block}
 .acctMenu button{display:block;width:100%;text-align:left;padding:0 10px;height:32px;
   border:0;background:transparent;border-radius:7px;cursor:pointer;font:inherit;
-  color:var(--ink);font-size:13.5px;line-height:32px}
+  color:var(--ink);font-size:calc(13.5px * var(--ui-fs, 1));line-height:32px}
 .acctMenu button:hover{background:var(--ground)}
 /* ⚠️ 必须显式写：上面把 display 设成 block，会盖掉浏览器对 [hidden] 的默认隐藏，
    导致"没权限的账号管理"仍然显示出来（点了才 403）。 */
 .acctMenu button[hidden]{display:none}
 .acctMenu .ver{margin-top:2px;padding:7px 10px 3px;border-top:1px solid var(--line);
-  font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+  font-size:calc(11px * var(--ui-fs, 1));color:var(--ink-3);font-variant-numeric:tabular-nums}
 
 .main{min-width:0;height:100vh;display:flex;flex-direction:column;overflow:hidden}
 
@@ -722,14 +772,14 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
   border:1px solid var(--line);border-radius:18px;box-shadow:0 24px 80px rgba(0,0,0,.22);
   display:grid;grid-template-columns:232px 1fr;overflow:hidden;position:relative}
 .settingsnav{padding:20px 12px;border-right:1px solid var(--line);background:var(--nav)}
-.settingsnav h3{font-size:16px;margin:0 10px 16px}
+.settingsnav h3{font-size:calc(16px * var(--ui-fs, 1));margin:0 10px 16px}
 .settingsnav button{display:block;width:100%;text-align:left;border:0;background:transparent;
-  color:var(--ink-2);font:inherit;font-size:14px;padding:10px 11px;border-radius:9px;cursor:pointer}
+  color:var(--ink-2);font:inherit;font-size:calc(14px * var(--ui-fs, 1));padding:10px 11px;border-radius:9px;cursor:pointer}
 .settingsnav button:hover,.settingsnav button.on{background:var(--surface-2);color:var(--ink)}
 .settingsbody{padding:28px 34px;overflow:auto;min-width:0}
 .settingsbody .dhead{display:none}
 .settingsclose{position:absolute;top:12px;right:14px;width:32px;height:32px;border:0;
-  border-radius:50%;background:var(--surface-2);color:var(--ink-2);font-size:18px;cursor:pointer}
+  border-radius:50%;background:var(--surface-2);color:var(--ink-2);font-size:calc(18px * var(--ui-fs, 1));cursor:pointer}
 @media (max-width:800px){
   .settingsdlg{grid-template-columns:1fr;height:90vh}
   .settingsnav{display:flex;gap:4px;overflow:auto;border-right:0;border-bottom:1px solid var(--line);padding:10px}
@@ -758,45 +808,45 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .chatconv{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line);
   background:var(--surface)}
 .chatconv-head{padding:16px 14px 10px;display:flex;align-items:center;justify-content:space-between;gap:8px}
-.chatconv-head h3{font-size:14px;margin:0}
+.chatconv-head h3{font-size:calc(14px * var(--ui-fs, 1));margin:0}
 /* 智能助手左侧「新对话」：默认 .btn.sm 只有 26px，实操偏小；单独放大。 */
-#chatNew{height:34px;padding:0 18px;font-size:14px;font-weight:600;border-radius:999px}
+#chatNew{height:34px;padding:0 18px;font-size:calc(14px * var(--ui-fs, 1));font-weight:600;border-radius:999px}
 .chatconv-list{flex:1;overflow-y:auto;padding:0 8px 14px;min-height:0}
 .chatconv-item{position:relative;padding:10px 30px 10px 10px;border-radius:6px;cursor:pointer;margin-bottom:3px}
 .chatconv-item:hover{background:var(--surface-2)}
 .chatconv-item.on{background:var(--accent-soft)}
-.cc-title{font-size:13.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cc-meta{font-size:11.5px;color:var(--ink-3);margin-top:2px}
+.cc-title{font-size:calc(13.5px * var(--ui-fs, 1));color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cc-meta{font-size:calc(11.5px * var(--ui-fs, 1));color:var(--ink-3);margin-top:2px}
 .cc-del{position:absolute;right:4px;top:50%;transform:translateY(-50%);border:0;background:transparent;
-  color:var(--ink-3);font-size:16px;line-height:1;padding:3px 6px;border-radius:4px;opacity:0}
+  color:var(--ink-3);font-size:calc(16px * var(--ui-fs, 1));line-height:1;padding:3px 6px;border-radius:4px;opacity:0}
 .cc-ren{position:absolute;right:26px;top:50%;transform:translateY(-50%);border:0;background:transparent;
-  color:var(--ink-3);font-size:13px;line-height:1;padding:3px 5px;border-radius:4px;opacity:0}
+  color:var(--ink-3);font-size:calc(13px * var(--ui-fs, 1));line-height:1;padding:3px 5px;border-radius:4px;opacity:0}
 .chatconv-item:hover .cc-del,.chatconv-item:hover .cc-ren{opacity:1}
 .cc-del:hover{background:var(--bad-soft);color:var(--bad)}
 .cc-ren:hover{background:var(--accent-soft);color:var(--accent-ink)}
-.chatconv-empty{padding:22px 12px;color:var(--ink-3);font-size:12.5px;text-align:center;line-height:1.8}
+.chatconv-empty{padding:22px 12px;color:var(--ink-3);font-size:calc(12.5px * var(--ui-fs, 1));text-align:center;line-height:1.8}
 /* 会话超过 10 条时，第 11 条起折叠在「更早的会话」下面；
    不隐藏入口，点一下展开/收起，列表长度可控。 */
 .chatconv-foldbar{flex:none;padding:0 8px 10px;background:var(--nav)}
 .chatconv-foldbar[hidden]{display:none}
 .chatconv-fold{display:flex;align-items:center;justify-content:space-between;gap:6px;
   width:100%;margin:0;padding:9px 10px;border:0;border-top:1px solid var(--line);
-  border-radius:0;background:transparent;color:var(--ink-3);font-size:12.5px;
+  border-radius:0;background:transparent;color:var(--ink-3);font-size:calc(12.5px * var(--ui-fs, 1));
   line-height:1.4;text-align:left;cursor:pointer}
 .chatconv-fold:hover{background:var(--fill-hover);color:var(--ink)}
 .chatconv-fold:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 /* 新会话欢迎区：输入第一句后由 pushMsg 移除 */
 .chatwelcome{max-width:760px;margin:4vh auto 0;padding:0 2px 20px}
 .cw-mark{width:46px;height:46px;border-radius:14px;background:var(--accent-soft);
-  display:flex;align-items:center;justify-content:center;color:var(--accent-ink);font-weight:800;font-size:16px;
+  display:flex;align-items:center;justify-content:center;color:var(--accent-ink);font-weight:800;font-size:calc(16px * var(--ui-fs, 1));
   letter-spacing:.5px;margin-bottom:18px}
-.chatwelcome h2{font-size:27px;line-height:1.3;margin:0 0 8px;letter-spacing:-.4px}
-.chatwelcome p{color:var(--ink-3);font-size:14px;margin:0 0 22px;max-width:620px}
+.chatwelcome h2{font-size:calc(27px * var(--ui-fs, 1));line-height:1.3;margin:0 0 8px;letter-spacing:-.4px}
+.chatwelcome p{color:var(--ink-3);font-size:calc(14px * var(--ui-fs, 1));margin:0 0 22px;max-width:620px}
 .cw-asks{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .cw-card{text-align:left;background:var(--surface);border:1px solid var(--line);border-radius:8px;
   padding:12px 14px;cursor:pointer;transition:border-color .15s ease,background .15s ease}
 .cw-card:hover{border-color:var(--accent-line);background:var(--accent-soft)}
-.cw-card .cw-q{display:block;color:var(--ink);font-size:13.5px;line-height:1.5}
+.cw-card .cw-q{display:block;color:var(--ink);font-size:calc(13.5px * var(--ui-fs, 1));line-height:1.5}
 .cw-config{margin-top:12px;text-align:right}
 @media(max-width:1280px){
   #chatView.on{grid-template-columns:220px minmax(0,1fr)}
@@ -825,16 +875,16 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
   .medit .richeditor{min-height:360px}
 }
 .mrow{display:flex;align-items:center;gap:8px;margin-bottom:10px}
-.mrow > label{width:64px;flex:none;font-size:13px;color:var(--ink-3)}
+.mrow > label{width:64px;flex:none;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3)}
 .mrow input,.mrow select{flex:1;min-width:0;height:34px;padding:0 10px;border:1px solid var(--line-2);
-  border-radius:var(--r-s);background:var(--surface);outline:none;font-size:14px;box-sizing:border-box}
+  border-radius:var(--r-s);background:var(--surface);outline:none;font-size:calc(14px * var(--ui-fs, 1));box-sizing:border-box}
 /* 变量区的控件在 `<div style="flex:1">` 包裹层里，**不是** .mrow 的直接子元素 ——
    上面那条 `flex:1` 管不到它，裸 input 只有浏览器默认的 ~177px，
    于是左栏拖宽后这些框还是原来那么窄（业务方 2026-10-21 反馈"格式太小"）。
    这里让包裹层内的控件填满，日期这类定长字段单独限宽，不跟着拉成一条长条。 */
 .mrow > div > input,.mrow > div > select{width:100%;min-width:0;height:34px;
   padding:0 10px;border:1px solid var(--line-2);border-radius:var(--r-s);
-  background:var(--surface);outline:none;font-size:14px;box-sizing:border-box}
+  background:var(--surface);outline:none;font-size:calc(14px * var(--ui-fs, 1));box-sizing:border-box}
 .mrow > div > input[type="date"]{width:auto;max-width:220px}
 .mrow > div > input:focus,.mrow > div > select:focus{
   border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
@@ -846,16 +896,16 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .richeditor table{border-collapse:collapse;width:100%;margin:8px 0}
 .richeditor td,.richeditor th{border:1px solid #bfbfbf;padding:6px 10px;vertical-align:middle}
 .mtool .btn-primary{background:var(--accent-soft);border:1px solid var(--accent-line);
-  color:var(--accent-ink);padding:2px 10px;border-radius:4px;font-size:13px}
+  color:var(--accent-ink);padding:2px 10px;border-radius:4px;font-size:calc(13px * var(--ui-fs, 1))}
 .mtool button{height:26px;min-width:28px;padding:0 8px;border:1px solid var(--line-2);
-  border-radius:4px;background:var(--surface);color:var(--ink-2);font-size:13px}
+  border-radius:4px;background:var(--surface);color:var(--ink-2);font-size:calc(13px * var(--ui-fs, 1))}
 .mtool button:hover{border-color:var(--accent);color:var(--accent-ink)}
 #mBody{width:100%;min-height:320px;padding:10px 12px;border:1px solid var(--line-2);
-  border-radius:var(--r-s);background:var(--surface);font-size:14px;line-height:1.7;
+  border-radius:var(--r-s);background:var(--surface);font-size:calc(14px * var(--ui-fs, 1));line-height:1.7;
   outline:none;overflow-y:auto}
 #mBody:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 #mBody table{border-collapse:collapse;width:100%;margin:6px 0}
-#mBody td,#mBody th{border:1px solid var(--line-2);padding:5px 8px;font-size:14px}
+#mBody td,#mBody th{border:1px solid var(--line-2);padding:5px 8px;font-size:calc(14px * var(--ui-fs, 1))}
 .ac{position:relative;flex:1;min-width:0}
 /* 补全容器是 flex:1，但里面的 input 默认只有 ~177px —— 同样要显式填满 */
 .ac > input{width:100%;min-width:0;box-sizing:border-box}
@@ -863,19 +913,19 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
   background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r);
   box-shadow:0 8px 22px rgba(24,28,32,.10);display:none}
 .acList.on{display:block}
-.acItem{padding:6px 10px;font-size:14px;cursor:pointer}
+.acItem{padding:6px 10px;font-size:calc(14px * var(--ui-fs, 1));cursor:pointer}
 .acItem:hover{background:var(--accent-soft);color:var(--accent-ink)}
 .acItem small{color:var(--ink-3);margin-left:8px}
-.att{display:flex;align-items:center;gap:7px;font-size:14px;padding:3px 0}
+.att{display:flex;align-items:center;gap:7px;font-size:calc(14px * var(--ui-fs, 1));padding:3px 0}
 .att input{width:14px;height:14px;accent-color:var(--accent)}
 .pv{background:#fff;border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;
-  font-size:14px;line-height:1.75;min-height:200px}
+  font-size:calc(14px * var(--ui-fs, 1));line-height:1.75;min-height:200px}
 .pv table{border-collapse:collapse;width:100%;margin:8px 0}
-.pv td,.pv th{border:1px solid var(--line-2);padding:5px 8px;font-size:14px}
-.tochip{display:inline-block;background:var(--accent-soft);border:1px solid var(--accent-line);color:var(--accent-ink);font-size:15px;font-weight:600;padding:5px 12px;border-radius:6px}
-.vhint code{background:var(--ground);border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-size:13px;color:var(--ink-2);margin-right:4px;display:inline-block;margin-bottom:4px}
+.pv td,.pv th{border:1px solid var(--line-2);padding:5px 8px;font-size:calc(14px * var(--ui-fs, 1))}
+.tochip{display:inline-block;background:var(--accent-soft);border:1px solid var(--accent-line);color:var(--accent-ink);font-size:calc(15px * var(--ui-fs, 1));font-weight:600;padding:5px 12px;border-radius:6px}
+.vhint code{background:var(--ground);border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);margin-right:4px;display:inline-block;margin-bottom:4px}
 .acItem.sel{background:var(--accent-soft);color:var(--accent-ink)}
-.miss{color:var(--bad);font-size:13px;background:var(--bad-soft);border-radius:5px;padding:7px 10px;margin-bottom:10px}
+.miss{color:var(--bad);font-size:calc(13px * var(--ui-fs, 1));background:var(--bad-soft);border-radius:5px;padding:7px 10px;margin-bottom:10px}
 
 .wrap{flex:1;min-height:0;display:grid;grid-template-columns:392px 1fr;overflow:hidden}
 
@@ -889,18 +939,18 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
    同时面板高度改成自适应（原来写死 134px，多一行头部就放不下了）。 */
 .pipehead{flex:0 0 100%;display:flex;align-items:center;justify-content:space-between;
   gap:12px;margin-bottom:6px;padding-bottom:5px;border-bottom:1px solid var(--line)}
-.pipeh-t{font-size:13px;font-weight:600;color:var(--ink-2)}
+.pipeh-t{font-size:calc(13px * var(--ui-fs, 1));font-weight:600;color:var(--ink-2)}
 .pcol{flex:1 0 168px;min-width:168px;padding:0 10px 0 0;border-right:1px solid var(--line)}
 .pcol:last-child{border-right:0;padding-right:0}
-.pcol > h4{margin:0 0 6px;font-size:12px;font-weight:600;color:var(--ink-2);
+.pcol > h4{margin:0 0 6px;font-size:calc(12px * var(--ui-fs, 1));font-weight:600;color:var(--ink-2);
   display:flex;align-items:center;gap:6px}
-.pcol > h4 b{font-size:13px}
+.pcol > h4 b{font-size:calc(13px * var(--ui-fs, 1))}
 .pcol.zero > h4{color:var(--ink-3)}
 .pchip{display:block;width:100%;text-align:left;border:0;background:transparent;
-  padding:2px 6px;border-radius:4px;font-size:13px;color:var(--ink);
+  padding:2px 6px;border-radius:4px;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pchip:hover{background:var(--accent-soft);color:var(--accent-ink)}
-.pmore{font-size:12px;color:var(--ink-3);padding:2px 6px}
+.pmore{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);padding:2px 6px}
 
 /* 左：候选人列表 —— 一行一人，靠分隔线分隔，不做卡片 */
 .listwrap{display:flex;flex-direction:column;min-height:0;background:var(--surface);
@@ -908,7 +958,7 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .list{flex:1;min-height:0;overflow-y:auto}
 .pgwrap{display:inline-flex;align-items:center;gap:3px;white-space:nowrap}
 .pager{flex:none;display:flex;align-items:center;gap:8px;padding:8px 12px;
-  border-top:1px solid var(--line);font-size:13px;color:var(--ink-2);flex-wrap:wrap}
+  border-top:1px solid var(--line);font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);flex-wrap:wrap}
 .row{
   display:grid;grid-template-columns:3px 18px 26px 1fr auto;gap:8px;align-items:center;
   padding:9px 12px 9px 0;border-bottom:1px solid var(--line);cursor:pointer;
@@ -925,20 +975,20 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
   transition:background .14s ease}
 .av{
   width:26px;height:26px;border-radius:50%;overflow:hidden;position:relative;flex:none;
-  background:var(--ground);color:var(--ink-3);font-size:12px;font-weight:600;
+  background:var(--ground);color:var(--ink-3);font-size:calc(12px * var(--ui-fs, 1));font-weight:600;
   display:flex;align-items:center;justify-content:center;
 }
 .av img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
-.row .nm{font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.row .sub{font-size:13px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .nm{font-size:calc(15px * var(--ui-fs, 1));font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .sub{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tier{
-  min-width:22px;height:20px;padding:0 6px;border-radius:4px;font-size:12px;font-weight:700;
+  min-width:22px;height:20px;padding:0 6px;border-radius:4px;font-size:calc(12px * var(--ui-fs, 1));font-weight:700;
   display:inline-flex;align-items:center;justify-content:center;
 }
 .tier.A{color:var(--ok);background:var(--ok-soft)}
 .tier.B{color:var(--tier-b);background:var(--tier-b-soft)}
 .tier.C{color:var(--ink-3);background:var(--surface-2)}
-.empty{padding:28px 16px;color:var(--ink-3);font-size:13px;text-align:center}
+.empty{padding:28px 16px;color:var(--ink-3);font-size:calc(13px * var(--ui-fs, 1));text-align:center}
 
 /* 右：详情 */
 /* 上内边距挪进 `.detail-toolbar`（见那里的说明）：否则 sticky 贴边后
@@ -953,7 +1003,7 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
    等请求回来再"突然跳过去"。 */
 .detail-loading{padding:28px 0 40px;max-width:980px}
 .dl-head{display:flex;align-items:center;gap:10px;margin:2px 0 20px;
-  font-size:14px;color:var(--ink-2)}
+  font-size:calc(14px * var(--ui-fs, 1));color:var(--ink-2)}
 .dl-head b{color:var(--ink);font-weight:600}
 .dl-spin{width:18px;height:18px;flex:none;border-radius:50%;
   border:2px solid var(--line-2);border-top-color:var(--accent);
@@ -1007,23 +1057,24 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .profile-layout > .srcbar,
 .profile-layout > .edu-band{grid-column:1/-1}
 /* 头部信息行字号在 `.dmeta` 里统一定义（17px，比姓名小一号）；
-   这里原有一行 `font-size:15px` 因为选择器更具体会把它盖掉，已去掉。 */
-.profile-layout{font-size:15px}
-.profile-layout .sec > h3{font-size:14px}
-.profile-layout .hint{font-size:14px}
-.profile-layout .ev{font-size:15px;line-height:1.7}
-.profile-layout .sum{font-size:16px}
-.profile-layout .edu-line{font-size:15px}
-.profile-layout .edu-degree,.profile-layout .edu-major{font-size:14px}
-.profile-layout .doc{font-size:15px}
-.profile-layout .fld > .fl,.profile-layout .lbl2{font-size:14px}
-.profile-layout .skill span{font-size:14px}
-.profile-layout .chipl{font-size:14px}
-.profile-layout .edv{font-size:15px}
-.profile-layout input,.profile-layout select,.profile-layout textarea{font-size:15px}
-.profile-layout .rawbox pre{font-size:13.5px}
-.profile-layout .auditbox{font-size:14px}
-.dhead{display:flex;align-items:flex-start;gap:14px}
+   这里原有一行 `font-size:calc(15px * var(--ui-fs, 1))` 因为选择器更具体会把它盖掉，已去掉。 */
+.profile-layout{font-size:calc(15px * var(--ui-fs, 1))}
+.profile-layout .sec > h3{font-size:calc(14px * var(--ui-fs, 1))}
+.profile-layout .hint{font-size:calc(14px * var(--ui-fs, 1))}
+.profile-layout .ev{font-size:calc(15px * var(--ui-fs, 1));line-height:1.7}
+.profile-layout .sum{font-size:calc(16px * var(--ui-fs, 1))}
+.profile-layout .edu-line{font-size:calc(15px * var(--ui-fs, 1))}
+.profile-layout .edu-degree,.profile-layout .edu-major{font-size:calc(14px * var(--ui-fs, 1))}
+.profile-layout .doc{font-size:calc(15px * var(--ui-fs, 1))}
+.profile-layout .fld > .fl,.profile-layout .lbl2{font-size:calc(14px * var(--ui-fs, 1))}
+.profile-layout .skill span{font-size:calc(14px * var(--ui-fs, 1))}
+.profile-layout .chipl{font-size:calc(14px * var(--ui-fs, 1))}
+.profile-layout .edv{font-size:calc(15px * var(--ui-fs, 1))}
+.profile-layout input,.profile-layout select,.profile-layout textarea{font-size:calc(15px * var(--ui-fs, 1))}
+.profile-layout .rawbox pre{font-size:calc(13.5px * var(--ui-fs, 1))}
+.profile-layout .auditbox{font-size:calc(14px * var(--ui-fs, 1))}
+.dhead{display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap}
+.dhead-act{flex:0 1 auto;max-width:100%}
 /* 头部两行：上=姓名+操作按钮，下=基本信息。信息与姓名左对齐、头像顶对齐 */
 .dmain{flex:1;min-width:0}
 .dtop{display:flex;align-items:center;gap:16px}
@@ -1034,10 +1085,10 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .av-lg{
   width:96px;height:96px;border-radius:10px;overflow:hidden;position:relative;flex:none;
   background:var(--surface);border:1px solid var(--line);color:var(--ink-3);
-  font-size:30px;font-weight:600;display:flex;align-items:center;justify-content:center;
+  font-size:calc(30px * var(--ui-fs, 1));font-weight:600;display:flex;align-items:center;justify-content:center;
 }
 .av-lg img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
-.dname{font-size:24px;font-weight:650;letter-spacing:-.01em;line-height:1.25}
+.dname{font-size:calc(24px * var(--ui-fs, 1));font-weight:650;letter-spacing:-.01em;line-height:1.25}
 /* 姓名可点改：hover 才显出底色，平时保持大标题的干净 */
 .dname.edu-click{border-bottom-color:transparent}
 .dname.edu-click:hover{background:var(--accent-soft);color:var(--accent-ink)}
@@ -1050,13 +1101,13 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
      ③ 联系方式：浅灰底的胶囊（可点改），比纯文字重、比阶段/结论轻。 */
 /* 字号：比姓名（24px）小一号（17px）。这一行是"这个人是谁"的全部关键信息，
    13.5px 在 24px 的姓名旁边显得像脚注（业务方 2026-10-28 反馈）。 */
-.dmeta{margin-top:6px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;
-  font-size:17px;color:var(--ink-2)}
+.dmeta{margin-top:6px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;min-width:0;
+  font-size:calc(17px * var(--ui-fs, 1));color:var(--ink-2)}
 .dfacts{display:inline-flex;align-items:center;min-width:0}
-/* ⚠️ 必须带 `#detail` 前缀：下面"详情页整体放大一号"那段有 `#detail .chipl{font-size:14px}`，
+/* ⚠️ 必须带 `#detail` 前缀：下面"详情页整体放大一号"那段有 `#detail .chipl{font-size:calc(14px * var(--ui-fs, 1))}`，
    ID 选择器会把这里的字号盖掉（2026-10-28 踩过：改了等于没改）。 */
 #detail .dmeta .chipl{background:transparent;border-color:transparent;color:var(--ink-3);
-  font-weight:500;font-size:16px;padding:0;border-radius:0}
+  font-weight:500;font-size:calc(16px * var(--ui-fs, 1));padding:0;border-radius:0}
 .dmeta .chipl.jchip{color:var(--ink-2);font-weight:600}
 .dmeta .chipl.jchip.none{color:var(--warn)}
 .dmeta .chipl.jchip:hover{background:transparent;border-color:transparent;
@@ -1065,8 +1116,9 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
   margin:0 10px;flex:none}
 .vsep{width:1px;height:16px;background:var(--line);margin:0 4px;flex:none}
 .dcontact{display:inline-flex;align-items:center;gap:8px;min-width:0}
-.dmeta .edv{background:var(--surface-2);border:1px solid transparent;color:var(--ink);
-  font-weight:500;font-size:16px;padding:3px 11px;border-radius:6px}
+.dmeta .edv{max-width:100%;min-width:0;background:var(--surface-2);
+  border:1px solid transparent;color:var(--ink);
+  font-weight:500;font-size:calc(16px * var(--ui-fs, 1));padding:3px 11px;border-radius:6px}
 .dmeta .edv:hover{background:var(--surface);border-color:var(--accent-line);
   color:var(--accent-ink)}
 .dmeta .edv.empty{color:var(--ink-3);font-weight:400}
@@ -1074,12 +1126,12 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
    给实底（阶段深灰、结论绿/红、录用函浅绿），与上面那行的事实区拉开层级。 */
 .dmeta.dmeta2{margin-top:10px;gap:8px}
 /* 同样要带 `#detail`：上面 `#detail .dmeta .chipl` 会连第二行一起放大 */
-#detail .dmeta.dmeta2 .chipl{font-size:14px;font-weight:600;padding:3px 11px;border-radius:6px;
+#detail .dmeta.dmeta2 .chipl{font-size:calc(14px * var(--ui-fs, 1));font-weight:600;padding:3px 11px;border-radius:6px;
   background:var(--surface-2);border:1px solid var(--line);color:var(--ink-2)}
 .dmeta.dmeta2 .stagechip{background:#3f4753;border-color:#3f4753;color:#fff}
 .dmeta.dmeta2 .offerchip{background:var(--ok-soft);border-color:var(--ok-line);
   color:var(--ok)}
-.dmeta.dmeta2 .ochip{font-size:14px;padding:4px 11px;margin-left:0}
+.dmeta.dmeta2 .ochip{font-size:calc(14px * var(--ui-fs, 1));padding:4px 11px;margin-left:0}
 /* 岗位标签做成可点：看起来是标签，点下去是"改岗位" */
 .jchip{cursor:pointer;font-family:inherit;line-height:1.5}
 .jchip:hover{background:var(--accent-soft);border-color:var(--accent-line);
@@ -1087,7 +1139,7 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 /* 疑似重复提示：只由姓名完全一致触发，暖色底提醒但不示警（同名真的可能是两个人）。
    右侧那个按钮是"确认过了，别再提示"，所以整条做成 flex，按钮贴着右边。 */
 .dupwarn{background:var(--warn-soft);border:1px solid var(--warn-line);border-radius:var(--r);
-  padding:7px 11px;margin:10px 0 0;font-size:13px;color:var(--ink);
+  padding:7px 11px;margin:10px 0 0;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink);
   display:flex;align-items:center;gap:12px}
 .dupwarn-t{flex:1;min-width:0}
 .dupwarn .btn{flex:none;background:var(--surface);border-color:var(--warn-line);
@@ -1099,18 +1151,20 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .dupi{display:inline-block;margin-left:10px;color:var(--ink-2)}
 /* 敏感字段剔除明细：绿底＝隐私处理已生效；none 用中性底色，明说"没留痕"≠"没敏感信息" */
 .sensline{background:var(--ok-soft);border:1px solid var(--ok-line);border-radius:var(--r);
-  padding:7px 11px;margin-bottom:9px;font-size:13px;color:var(--ink)}
+  padding:7px 11px;margin-bottom:9px;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink)}
 .sensline.none{background:var(--surface-2);border-color:var(--line);color:var(--ink-2)}
 /* （原有一条重复的 .dmeta 规则在这里，字号 14px 把上面 17px 覆盖掉了 —— 已合并进上方） */
 .chipl{
-  padding:2px 8px;border-radius:4px;font-size:13px;font-weight:700;
+  padding:2px 8px;border-radius:4px;font-size:calc(13px * var(--ui-fs, 1));font-weight:700;
   color:var(--accent-ink);background:var(--accent-soft);border:1px solid var(--accent-line);
 }
 /* 软科排名是业务方明确要看重的信息 —— 不当灰注释，给强调色与字重 */
-.rk{color:var(--accent-ink);font-size:13px;font-weight:600;background:var(--accent-soft);
+.rk{color:var(--accent-ink);font-size:calc(13px * var(--ui-fs, 1));font-weight:600;background:var(--accent-soft);
   border-radius:4px;padding:1px 6px}
 .rk.none{color:var(--ink-3);background:transparent;font-weight:400}
 .chipl.gray{color:var(--ink-3);background:var(--ground);border-color:var(--line)}
+/* 学科强项：与 985/211 并列但视觉上区分开（虚线），提示它是"学科维度"而不是身份标签 */
+.chipl.subj{color:var(--accent-ink);background:var(--ground);border:1px dashed var(--accent-line)}
 /* 操作按钮：独占第一行右侧；宽度不够时**只在这一块里换行**，不会挤到下面的信息行 */
 .dact{margin-left:auto;display:flex;gap:8px;align-items:center;
   flex-wrap:wrap;justify-content:flex-end;flex:1;min-width:0}
@@ -1127,12 +1181,12 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .pinned-tab{display:flex;align-items:center;gap:7px;flex:none;max-width:220px;
   padding:8px 8px 8px 11px;margin-bottom:-1px;border:1px solid var(--line);
   border-bottom:0;border-radius:7px 7px 0 0;background:var(--surface-2);
-  color:var(--ink-2);cursor:pointer;font-size:13px;white-space:nowrap}
+  color:var(--ink-2);cursor:pointer;font-size:calc(13px * var(--ui-fs, 1));white-space:nowrap}
 .pinned-tab:hover{background:var(--accent-soft)}
 .pinned-tab.on{background:var(--surface);color:var(--accent-ink);font-weight:600;
   border-color:var(--line-2);position:relative;z-index:1}
 .pinned-tab .pt-name{max-width:150px;overflow:hidden;text-overflow:ellipsis}
-.pinned-tab .pt-x{border:0;background:transparent;color:var(--ink-3);font-size:16px;
+.pinned-tab .pt-x{border:0;background:transparent;color:var(--ink-3);font-size:calc(16px * var(--ui-fs, 1));
   line-height:1;padding:1px 3px;border-radius:3px;flex:none}
 .pinned-tab .pt-x:hover{background:var(--bad-soft);color:var(--bad)}
 .pinned-tab-actions{flex:none;display:flex;align-items:center;gap:8px;
@@ -1142,7 +1196,7 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 /* 档位：三个按钮，选中即改（不弹确认——上下文里一眼能看出改了什么） */
 .seg{display:inline-flex;border:1px solid var(--line-2);border-radius:var(--r-s);overflow:hidden}
 .seg button{
-  border:0;background:var(--surface);color:var(--ink-2);padding:5px 13px;font-size:13px;
+  border:0;background:var(--surface);color:var(--ink-2);padding:5px 13px;font-size:calc(13px * var(--ui-fs, 1));
   border-right:1px solid var(--line-2);
 }
 .seg button:last-child{border-right:0}
@@ -1151,7 +1205,7 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
   box-shadow:inset 0 0 0 1.5px var(--accent)}
 .btn{
   border:1px solid var(--line-2);background:var(--surface);border-radius:var(--r-s);
-  padding:6px 13px;font-size:13px;color:var(--ink);
+  padding:6px 13px;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink);
   /* ⚠️ 必须 flex:none + nowrap：否则工具条里按钮会被压成竖排（一个字一行） */
   flex:none;white-space:nowrap;line-height:1.5;
 }
@@ -1169,7 +1223,7 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 /* 分节：一条细线 + 小标题，不用卡片 */
 .sec{margin-top:22px}
 .sec > h3{
-  margin:0 0 11px;font-size:13px;font-weight:600;letter-spacing:.06em;
+  margin:0 0 11px;font-size:calc(13px * var(--ui-fs, 1));font-weight:600;letter-spacing:.06em;
   color:var(--ink-3);text-transform:none;border-bottom:1px solid var(--line);padding-bottom:7px;
 }
 /* 档位是这张档案的**判断结论** —— 全页唯一"用力"的地方。
@@ -1181,33 +1235,33 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .sec > h3.ha .h3act{margin-left:auto;display:inline-flex;gap:6px}
 .sec.tier-sec{margin-top:18px}
 .sec.tier-sec > h3{
-  color:var(--ink);font-size:15px;font-weight:650;letter-spacing:0;
+  color:var(--ink);font-size:calc(15px * var(--ui-fs, 1));font-weight:650;letter-spacing:0;
   border-bottom:0;padding-bottom:0;margin-bottom:8px;
 }
-.tier-sec .seg button{font-size:14px;padding:6px 16px}
-.kv{display:grid;grid-template-columns:96px 1fr;gap:8px 14px;font-size:14px}
+.tier-sec .seg button{font-size:calc(14px * var(--ui-fs, 1));padding:6px 16px}
+.kv{display:grid;grid-template-columns:96px 1fr;gap:8px 14px;font-size:calc(14px * var(--ui-fs, 1))}
 .kv dt{color:var(--ink-3)}
 .kv dd{margin:0;color:var(--ink)}
 .skill{display:flex;gap:8px;flex-wrap:wrap}
 .skill span{
-  padding:3px 10px;border-radius:4px;font-size:13px;border:1px solid transparent;
+  padding:3px 10px;border-radius:4px;font-size:calc(13px * var(--ui-fs, 1));border:1px solid transparent;
 }
 /* ---------- 完整档案：正文整体放大一号（业务方 2026-10-21：字太小，看久了费眼） ----------
    只动档案详情区，不影响左侧列表与其它页面。
    放大一档（+1px）而不是两档：再大就撑破现有的行高与标签间距了。 */
-#detail .ev{font-size:15px;line-height:1.8}
-#detail .ev b{font-size:15px}
-#detail .doc{font-size:15px}
-#detail .doc-n{font-size:15px}
-#detail .skill span{font-size:14px;padding:4px 11px}
-#detail .kv{font-size:15px}
-#detail .sec > h3{font-size:14px}
-#detail .sec .hint{font-size:13.5px}
-#detail .chipl{font-size:14px}
-#detail .rk{font-size:14px}
-#detail .auditbox{font-size:14px}
-#detail .auditbox th{font-size:13px}
-#detail .auditbox td{font-size:14px;padding:6px 11px}
+#detail .ev{font-size:calc(15px * var(--ui-fs, 1));line-height:1.8}
+#detail .ev b{font-size:calc(15px * var(--ui-fs, 1))}
+#detail .doc{font-size:calc(15px * var(--ui-fs, 1))}
+#detail .doc-n{font-size:calc(15px * var(--ui-fs, 1))}
+#detail .skill span{font-size:calc(14px * var(--ui-fs, 1));padding:4px 11px}
+#detail .kv{font-size:calc(15px * var(--ui-fs, 1))}
+#detail .sec > h3{font-size:calc(14px * var(--ui-fs, 1))}
+#detail .sec .hint{font-size:calc(13.5px * var(--ui-fs, 1))}
+#detail .chipl{font-size:calc(14px * var(--ui-fs, 1))}
+#detail .rk{font-size:calc(14px * var(--ui-fs, 1))}
+#detail .auditbox{font-size:calc(14px * var(--ui-fs, 1))}
+#detail .auditbox th{font-size:calc(13px * var(--ui-fs, 1))}
+#detail .auditbox td{font-size:calc(14px * var(--ui-fs, 1));padding:6px 11px}
 
 /* ---------- 详情页：投递来源一行 + 面试与录用一行（2026-10-28） ----------
    两块改动都出于同一个理由：**右栏是"判断一个人"的地方，视线要能顺着一条线走完**
@@ -1218,7 +1272,7 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
    对比度：#2f5a33 on #eef4ec ≈ 7.5:1；按钮文字同色，hover 反白。 */
 .srcbar{display:flex;align-items:center;gap:12px;margin:14px 0 0;padding:9px 12px;
   background:#eef4ec;border:1px solid #dbe7d8;border-radius:var(--r);
-  font-size:13.5px;min-width:0;flex-wrap:wrap}
+  font-size:calc(13.5px * var(--ui-fs, 1));min-width:0;flex-wrap:wrap}
 .srcbar > .srck{flex:none;color:#4b7a51;font-weight:600}
 .srcbar > .srcmail{display:flex;align-items:baseline;gap:8px;min-width:0;flex:1 1 auto;
   overflow:hidden;white-space:nowrap}
@@ -1226,7 +1280,7 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
    flex:1 1 auto + min-width 保证它不会被发件人/文件名挤成几个字。 */
 .srcbar .srcsub{color:#2f5a33;font-weight:600;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;flex:1 1 auto;min-width:180px}
-.srcbar .srcmeta{color:#5c7a60;flex:none;font-size:13px;max-width:18ch;
+.srcbar .srcmeta{color:#5c7a60;flex:none;font-size:calc(13px * var(--ui-fs, 1));max-width:18ch;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 同一封邮件可能带 2 份以上简历（2026-11-05 业务方反馈“显示共两份、在线打开只有一个”）。
    一份时和原来一样贴在右侧；多份时整块换到第二行，逐份列出，每份都有自己的打开/下载。 */
@@ -1236,9 +1290,20 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
   padding-top:7px;border-top:1px solid #d3e2d0}
 .srcbar > .srcfiles .srccount{max-width:none;color:#4b7a51;font-weight:600}
 .srcbar > .srck .subcount{margin-left:8px;padding:1px 8px;border-radius:999px;
-  font-weight:650;font-size:13px;color:var(--accent);background:var(--accent-soft);
+  font-weight:650;font-size:calc(13px * var(--ui-fs, 1));color:var(--accent);background:var(--accent-soft);
   white-space:nowrap;opacity:1}
-.srcbar .srcfile{display:flex;align-items:center;gap:6px;min-width:0}
+/* 有“相同简历重复投递”时用暖色：这是 HR 该注意到的信号，不该和普通次数一个观感 */
+.srcbar > .srck .subcount.dup{color:var(--warn);background:var(--warn-soft)}
+.srcbar .srcfile{display:flex;align-items:center;gap:6px;min-width:0;
+  flex-wrap:wrap;row-gap:4px}
+/* 投递记录（2026-11-25）：同一份简历的多次投递时间都列在这行上，
+   时间用等宽数字、左对齐，便于竖着扫。
+   "当前"用强调色，"重复简历"用暖色，与标题里的重复投递提示同一套语义。 */
+.srcbar .srcfile .srcwhen{max-width:none;min-width:8.5ch;color:#5c7a60;
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+.srcbar .srcfile .srcnow{max-width:none;color:var(--accent);font-weight:650}
+.srcbar .srcfile .srcdup{max-width:none;color:var(--warn);background:var(--warn-soft);
+  padding:0 7px;border-radius:999px;font-weight:600}
 .srcbar .srcfile .fn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   color:#3c6b41;max-width:20ch}
 .srcbar > .srcfiles.many .srcfile{width:100%}
@@ -1246,7 +1311,7 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .srcbar > .srcfiles.many .srcfile .btn:first-of-type{margin-left:auto}
 /* 按钮跟着这一行的绿走：默认白底绿字，hover 反白。
    不用 btn.primary（那是蓝色的"主操作"语义），这里只是同一族里的次级动作。 */
-.srcbar .btn{height:26px;padding:0 9px;font-size:13px;background:#fff;
+.srcbar .btn{height:26px;padding:0 9px;font-size:calc(13px * var(--ui-fs, 1));background:#fff;
   border:1px solid #bcd4b9;color:#2f5a33;border-radius:var(--r-s)}
 .srcbar .btn:hover{background:#2f5a33;border-color:#2f5a33;color:#fff}
 
@@ -1254,20 +1319,20 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .ivrow{display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap}
 .ivrow + .ivrow{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
 .ivrow .fld{display:inline-flex;flex-direction:column;align-items:flex-start;gap:4px}
-.ivrow .fl{font-size:13.5px;color:var(--ink-3);white-space:nowrap}
+.ivrow .fl{font-size:calc(13.5px * var(--ui-fs, 1));color:var(--ink-3);white-space:nowrap}
 /* 面试单位**独占一整行**：它要能并排放下三个单位名 + 一个"继续添加"输入框，
    宽度不够就只能在框里换行，反而更难读。其余四项（日期/时段/方式/结论）
    在下一行并排 —— 这样不论窗口多宽，这块永远是整齐的两行，不会因为
    结论的提示文字长而被挤到第三行。 */
 .ivrow .fld-wide{flex:1 1 100%;min-width:100%;align-self:stretch}
-.ivrow input,.ivrow select{height:34px;padding:0 9px;font-size:14.5px;
+.ivrow input,.ivrow select{height:34px;padding:0 9px;font-size:calc(14.5px * var(--ui-fs, 1));
   border:1px solid var(--line-2);border-radius:var(--r-s);background:var(--surface);color:var(--ink)}
 .ivrow input[type="date"]{width:152px}
 .ivrow input[type="datetime-local"]{width:196px}
 .ivrow #ivSlot{width:130px}
 /* 面试时间：固定时段下拉 + 手动输入并排；下拉按学历生成 30/50 分钟档。 */
 .ivslot{display:flex;align-items:center;gap:5px;min-width:0}
-.ivslot select{width:142px;height:34px;padding:0 5px;font-size:12.5px}
+.ivslot select{width:142px;height:34px;padding:0 5px;font-size:calc(12.5px * var(--ui-fs, 1))}
 .ivslot #ivSlot{width:112px}
 .ivrow #ivMode{width:118px}
 .ivrow #ivPlace{width:170px}
@@ -1280,29 +1345,29 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 /* 结论 = 徽标 + 下拉 + 「清空结论」，三者同一行（见 outcomeField 的说明） */
 .ivrow .ivout{display:inline-flex;align-items:center;gap:8px;min-height:34px}
 .ivrow .ivout .btn{height:34px;padding:0 11px}
-.ivrow .mchip{font-size:13.5px;padding:3px 8px;border-radius:4px;background:var(--accent-soft);
+.ivrow .mchip{font-size:calc(13.5px * var(--ui-fs, 1));padding:3px 8px;border-radius:4px;background:var(--accent-soft);
   color:var(--accent-ink);border:1px solid var(--accent-line);white-space:nowrap}
 
 /* 「quiet」区块：证据类内容压小一号，把强调留给档位 */
 #detail .sec.quiet{margin-top:16px}
-#detail .sec.quiet > h3{font-size:13px;letter-spacing:.04em}
-#detail .sec.quiet .sum{font-size:14px;font-weight:500;line-height:1.6}
-#detail .sec.quiet .ev{font-size:13px;line-height:1.6;padding:6px 9px;margin-top:6px}
-#detail .sec.quiet .ev b{font-size:13px}
-#detail .sec.quiet .skill span{font-size:13px;padding:2px 9px}
+#detail .sec.quiet > h3{font-size:calc(13px * var(--ui-fs, 1));letter-spacing:.04em}
+#detail .sec.quiet .sum{font-size:calc(14px * var(--ui-fs, 1));font-weight:500;line-height:1.6}
+#detail .sec.quiet .ev{font-size:calc(13px * var(--ui-fs, 1));line-height:1.6;padding:6px 9px;margin-top:6px}
+#detail .sec.quiet .ev b{font-size:calc(13px * var(--ui-fs, 1))}
+#detail .sec.quiet .skill span{font-size:calc(13px * var(--ui-fs, 1));padding:2px 9px}
 .skill .hit{color:var(--ok);background:var(--ok-soft);border-color:var(--ok-line)}
 .skill .miss{color:var(--warn);background:var(--warn-soft);border-color:var(--warn-line)}
 .skill .plain{color:var(--ink-2);background:var(--ground);border-color:var(--line)}
 .ev{
-  margin-top:8px;font-size:14px;color:var(--ink-2);background:var(--ground);
+  margin-top:8px;font-size:calc(14px * var(--ui-fs, 1));color:var(--ink-2);background:var(--ground);
   border-left:2px solid var(--line-2);border-radius:0 4px 4px 0;padding:7px 10px;
 }
 .ev b{color:var(--ink);font-weight:600}
 .sum{
-  font-size:15px;color:var(--ink);font-weight:500;line-height:1.65;
+  font-size:calc(15px * var(--ui-fs, 1));color:var(--ink);font-weight:500;line-height:1.65;
 }
 .bar2{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0}
-.lbl2{font-size:13px;color:var(--ink-3)}
+.lbl2{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3)}
 /* 字段分组卡片：把"面试安排 / 面试结论 / 录用与入职"按语义分开，
    底色 + 组标题让一眼能看出这几项各管什么（业务方 2026-10-21 反馈：
    原来十几个控件堆在两行里，日期时段方式都没标签，看不出是干什么的）。*/
@@ -1310,36 +1375,36 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
    原来底色 + 1px 边框 + 圆角同时在说"这是一个组"，三重表达同一件事；
    底色已经够，边框去掉 —— 少一件装饰，分组关系反而更清楚。*/
 .fgroup{background:var(--surface-2);border-radius:var(--r);padding:10px 12px;margin:8px 0}
-.fgroup > h4{margin:0 0 8px;font-size:13px;font-weight:600;color:var(--ink-2)}
+.fgroup > h4{margin:0 0 8px;font-size:calc(13px * var(--ui-fs, 1));font-weight:600;color:var(--ink-2)}
 .frow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .frow + .frow{margin-top:8px}
 .fld{display:inline-flex;align-items:center;gap:5px}
-.fld > .fl{font-size:13px;color:var(--ink-3);white-space:nowrap}
+.fld > .fl{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3);white-space:nowrap}
 /* 面试安排与结论放在同一块里左右排：左=事实记录，右=判断结果。 */
 /* 面试提纲：问题按序号排、考察意图用灰字紧随其后（原来是一整段 JSON 原文） */
 .ivqwrap{background:var(--surface-2);border-radius:var(--r);padding:10px 14px}
-.ivqh{font-size:13px;font-weight:600;color:var(--ink-2);margin-bottom:8px}
+.ivqh{font-size:calc(13px * var(--ui-fs, 1));font-weight:600;color:var(--ink-2);margin-bottom:8px}
 .ivq{margin:0;padding-left:20px;display:grid;gap:11px}
-.ivq li{font-size:14px;line-height:1.7;color:var(--ink)}
+.ivq li{font-size:calc(14px * var(--ui-fs, 1));line-height:1.7;color:var(--ink)}
 .ivq li::marker{color:var(--accent-ink);font-weight:600}
 .ivq-q{color:var(--ink)}
-.ivq-w{color:var(--ink-3);font-size:13px;margin-top:3px}
+.ivq-w{color:var(--ink-3);font-size:calc(13px * var(--ui-fs, 1));margin-top:3px}
 /* 操作记录：折叠头做成一条明确可点的横条（箭头 + 条数 + 底色），
    而不是一行灰字。展开才铺表格 —— 平时不该占版面，但必须看得出"这里能点开"。 */
 .auditbox{border:1px solid var(--line-2);border-radius:var(--r-s);background:var(--surface)}
 .auditbox > summary{
   list-style:none;cursor:pointer;display:flex;align-items:center;gap:7px;
-  padding:7px 11px;font-size:13px;font-weight:600;color:var(--accent-ink);
+  padding:7px 11px;font-size:calc(13px * var(--ui-fs, 1));font-weight:600;color:var(--accent-ink);
   background:var(--accent-soft);border-radius:calc(var(--r-s) - 1px);
 }
 .auditbox > summary::-webkit-details-marker{display:none}
 .auditbox > summary:hover{filter:brightness(.97)}
-.audit-arrow{display:inline-block;transition:transform .15s ease;font-size:11px}
+.audit-arrow{display:inline-block;transition:transform .15s ease;font-size:calc(11px * var(--ui-fs, 1))}
 .auditbox[open] > summary{border-radius:calc(var(--r-s) - 1px) calc(var(--r-s) - 1px) 0 0}
 .auditbox[open] .audit-arrow{transform:rotate(90deg)}
-.audit-n{margin-left:auto;font-weight:600;color:var(--ink-2);font-size:12px}
-.auditbox > table{width:100%;border-collapse:collapse;font-size:13px;padding:0}
-.auditbox th{text-align:left;padding:7px 11px 4px;font-size:12px;font-weight:600;
+.audit-n{margin-left:auto;font-weight:600;color:var(--ink-2);font-size:calc(12px * var(--ui-fs, 1))}
+.auditbox > table{width:100%;border-collapse:collapse;font-size:calc(13px * var(--ui-fs, 1));padding:0}
+.auditbox th{text-align:left;padding:7px 11px 4px;font-size:calc(12px * var(--ui-fs, 1));font-weight:600;
   color:var(--ink-3);border-bottom:1px solid var(--line)}
 .auditbox th:last-child,.auditbox td:last-child{width:80px}
 .auditbox td{padding:5px 11px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -1353,19 +1418,19 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
    改成上下：各自按内容占高，中间用一条横线分隔。 */
 .iv-col{min-width:0;padding:2px 0}
 .iv-col + .iv-col{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
-.iv-col > h4{margin:0 0 8px;font-size:13px;font-weight:600;color:var(--ink-2)}
+.iv-col > h4{margin:0 0 8px;font-size:calc(13px * var(--ui-fs, 1));font-weight:600;color:var(--ink-2)}
 /* 教育经历紧贴姓名展示，不做折叠；第一学历与最高学历都保留编辑入口。 */
 .edu-band{margin-top:12px;padding:11px 0 12px;border-top:1px solid var(--line);
   border-bottom:1px solid var(--line)}
 .edu-band-head{display:flex;align-items:center;justify-content:space-between;gap:10px;
   margin-bottom:0}
-.edu-band-head h3{margin:0 0 16px;font-size:18px;font-weight:600;letter-spacing:-.015em;
+.edu-band-head h3{margin:0 0 16px;font-size:calc(18px * var(--ui-fs, 1));font-weight:600;letter-spacing:-.015em;
   color:var(--ink);width:100%;border-bottom:1px solid var(--line);padding-bottom:11px}
 .edu-list{display:grid;gap:5px}
 /* 教育经历固定一行：左侧内容不换行（太长时学校/专业省略），右侧时间段独立成列。
    起止时间只在右侧占位，不能把整行撑成两行或撑高。 */
 .edu-line{display:grid;grid-template-columns:minmax(0,1fr) auto;
-  align-items:center;gap:14px;min-height:28px;font-size:16px;padding:1px 0;
+  align-items:center;gap:14px;min-height:28px;font-size:calc(16px * var(--ui-fs, 1));padding:1px 0;
   container-type:inline-size}
 /* 窄卡片里只保留第一个院校标签（985/211），避免排名标签被裁成半截；
    宽屏（如两栏布局里的通栏 858px）仍然显示全部标签。 */
@@ -1379,12 +1444,12 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .edu-main > .edu-major{flex:none;white-space:nowrap}
 .edu-main > .edu-tags{flex:0 1 auto;min-width:0;flex-wrap:nowrap;overflow:hidden}
 .edu-main > .edu-tags > *{flex:none;white-space:nowrap}
-.edu-line .chipl{font-size:12.5px;padding:2px 8px;line-height:1.5}
-.edu-line .rk{font-size:12.5px;padding:2px 8px;line-height:1.5}
-.edu-period{font-size:16.5px;color:var(--ink);font-weight:500;white-space:nowrap;
+.edu-line .chipl{font-size:calc(12.5px * var(--ui-fs, 1));padding:2px 8px;line-height:1.5}
+.edu-line .rk{font-size:calc(12.5px * var(--ui-fs, 1));padding:2px 8px;line-height:1.5}
+.edu-period{font-size:calc(16.5px * var(--ui-fs, 1));color:var(--ink);font-weight:500;white-space:nowrap;
   font-variant-numeric:tabular-nums;line-height:1.5;flex:none;padding:1px 4px;
   margin-right:1em}
-.edu-period.missing{font-size:12.5px;color:var(--ink);font-weight:400;opacity:1;
+.edu-period.missing{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink);font-weight:400;opacity:1;
   border-bottom:1px dashed var(--line-2)}
 .edu-period-edit{display:grid;grid-template-columns:1fr auto 1fr;
   align-items:center;gap:8px}
@@ -1394,7 +1459,14 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .edu-period-edit input:focus{border-color:var(--accent);
   box-shadow:0 0 0 3px var(--accent-soft)}
 .edu-period-edit .dash{color:var(--ink-3)}
-.edu-degree{font-size:15px;color:var(--ink);font-weight:500}
+/* 时间线提示：教育断档用暖色，在读期间工作用强调色；一条一行，不折叠 */
+.edu-issues{margin-top:10px;display:grid;gap:6px}
+.edu-issue{font-size:calc(13px * var(--ui-fs, 1));line-height:1.6;
+  padding:7px 10px;border-radius:8px;border:1px solid var(--warn-line);
+  background:var(--warn-soft);color:var(--warn)}
+.edu-issue.work{border-color:var(--accent-line);background:var(--accent-soft);
+  color:var(--accent-ink)}
+.edu-degree{font-size:calc(15px * var(--ui-fs, 1));color:var(--ink);font-weight:500}
 /* 荣誉/论文/专利：分类名用强调色加粗，条目名也加粗，出处保持常规 ——
    原来整行一个灰度，扫一眼分不出"是什么"和"凭什么"（业务方 2026-10-21）。 */
 #detail .sec .ev b{color:var(--accent-ink);font-weight:650}
@@ -1411,18 +1483,18 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
    方向总结用强调底高亮，项目本身一条一块；摘要固定两行，避免长文把档案拉得很长。 */
 .projectsec .ai-tag{display:inline-block;margin-left:8px;padding:1px 7px;
   border-radius:999px;background:var(--warm-soft);border:1px solid var(--warm-line);
-  color:var(--warm);font-size:11.5px;font-weight:600;vertical-align:2px}
+  color:var(--warm);font-size:calc(11.5px * var(--ui-fs, 1));font-weight:600;vertical-align:2px}
 .proj-dir{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;
   padding:8px 11px;margin:2px 0 10px;border-radius:var(--r-s);
   background:var(--warm-soft);border:1px solid var(--warm-line);line-height:1.65}
-.proj-dir span{font-size:12px;color:var(--warm);font-weight:650;flex:none}
-.proj-dir b{font-size:14.5px;color:var(--ink);font-weight:650}
+.proj-dir span{font-size:calc(12px * var(--ui-fs, 1));color:var(--warm);font-weight:650;flex:none}
+.proj-dir b{font-size:calc(14.5px * var(--ui-fs, 1));color:var(--ink);font-weight:650}
 .proj-list{display:flex;flex-direction:column;gap:8px}
 .proj-item{padding:9px 12px;border-left:3px solid var(--accent-line);
   background:var(--surface-2);border-radius:0 var(--r-s) var(--r-s) 0}
-.proj-name{font-size:14px;font-weight:650;color:var(--ink);line-height:1.5;
+.proj-name{font-size:calc(14px * var(--ui-fs, 1));font-weight:650;color:var(--ink);line-height:1.5;
   overflow-wrap:anywhere}
-.proj-sum{font-size:13.5px;color:var(--ink-2);line-height:1.65;margin-top:2px;
+.proj-sum{font-size:calc(13.5px * var(--ui-fs, 1));color:var(--ink-2);line-height:1.65;margin-top:2px;
   display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;
   overflow:hidden;overflow-wrap:anywhere}
 .projectsec .proj-loading{padding:4px 0 2px}
@@ -1436,13 +1508,13 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .honosec .cetrow .edv.empty{height:24px;min-height:24px;line-height:1.15}
 .honosec .cetrow .edv.empty::after{line-height:1}
 .honosec .cetrow select{height:26px;min-height:26px;padding:0 8px;
-  font-size:13.5px;line-height:1.2}
+  font-size:calc(13.5px * var(--ui-fs, 1));line-height:1.2}
 /* 教育经历里可点的学校/专业：虚下划线提示"这里能改"，与基本信息那套淡灰可点击一致 */
 .edu-click{cursor:pointer;border-bottom:1px dashed transparent;border-radius:2px}
 .edu-click:hover{background:var(--accent-soft);border-bottom-color:var(--accent-line);
   color:var(--accent-ink)}
 .edu-school{font-weight:600;color:var(--ink);overflow-wrap:anywhere}
-.edu-major{font-size:15.5px;color:var(--ink);overflow-wrap:anywhere}
+.edu-major{font-size:calc(15.5px * var(--ui-fs, 1));color:var(--ink);overflow-wrap:anywhere}
 .edu-tags{display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap}
 .edu-edit{display:grid;grid-template-columns:minmax(170px,1.25fr) 112px minmax(150px,1fr) minmax(140px,1fr);
   gap:10px;align-items:start;margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)}
@@ -1452,16 +1524,16 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
    页面立刻安静下来，需要改的字段再点开。 */
 .edv{display:inline-flex;align-items:center;gap:4px;min-width:56px;padding:2px 8px;
   border:1px solid transparent;border-radius:4px;background:var(--surface-2);
-  color:var(--ink-2);font-size:14px;cursor:text;max-width:100%}
+  color:var(--ink-2);font-size:calc(14px * var(--ui-fs, 1));cursor:text;max-width:100%}
 .edv:hover{background:var(--accent-soft);color:var(--ink);border-color:var(--accent-line)}
 .edv.empty{color:var(--ink-3)}
-.edv.empty::after{content:'未填';font-size:13px}
+.edv.empty::after{content:'未填';font-size:calc(13px * var(--ui-fs, 1))}
 .edv .edv-txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px}
 .edu-field{display:grid;gap:4px;min-width:0}
 /* ⚠️ 只作用于**第一个**子 span（那是字段名）。
      写成 `.edu-field > span` 会把里面的 `.edv`（淡灰可点击值）也套上
      11.5px 灰字 —— 值就比标签还小，看着像没内容（业务方 2026-10-21 截图）。 */
-.edu-field > span:first-child{font-size:12px;color:var(--ink-3);line-height:1.4}
+.edu-field > span:first-child{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);line-height:1.4}
 .edu-field input,.edu-field select{width:100%;min-width:0;height:32px;padding:0 9px;
   border:1px solid var(--line-2);border-radius:var(--r-s);background:var(--surface);font:inherit}
 .edu-field input:focus,.edu-field select:focus{border-color:var(--accent);
@@ -1489,42 +1561,42 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:10px}
 .stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:9px 12px}
-.stat-n{font-size:21px;font-weight:600;line-height:1.2}
-.stat-l{font-size:13px;color:var(--ink-2);margin-top:1px}
-.stat-h{font-size:12px;color:var(--ink-3);margin-top:2px}
+.stat-n{font-size:calc(21px * var(--ui-fs, 1));font-weight:600;line-height:1.2}
+.stat-l{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);margin-top:1px}
+.stat-h{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);margin-top:2px}
 .todo{display:flex;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)}
 .todo:last-child{border-bottom:0}
-.todo-i{color:var(--ink-3);font-size:12px;font-weight:600;min-width:14px;padding-top:2px}
-.todo-t{font-size:14px;font-weight:600}
-.todo-w{font-size:13px;color:var(--ink-2);margin-top:2px}
-.todo-a{font-size:13px;color:var(--accent-ink);margin-top:2px}
-.doc{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:14px}
+.todo-i{color:var(--ink-3);font-size:calc(12px * var(--ui-fs, 1));font-weight:600;min-width:14px;padding-top:2px}
+.todo-t{font-size:calc(14px * var(--ui-fs, 1));font-weight:600}
+.todo-w{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);margin-top:2px}
+.todo-a{font-size:calc(13px * var(--ui-fs, 1));color:var(--accent-ink);margin-top:2px}
+.doc{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:calc(14px * var(--ui-fs, 1))}
 .doc:last-child{border-bottom:0}
 .doc-n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .doc-a{flex:none;display:flex;gap:6px}
-.hint{color:var(--ink-3);font-size:14px}
+.hint{color:var(--ink-3);font-size:calc(14px * var(--ui-fs, 1))}
 .flagbad,.flagwarn,.flagneutral{display:inline-flex;align-items:center;border-radius:4px;
-  padding:1px 6px;font-size:12px;line-height:1.55;white-space:nowrap}
+  padding:1px 6px;font-size:calc(12px * var(--ui-fs, 1));line-height:1.55;white-space:nowrap}
 .flagbad{color:var(--bad);background:var(--bad-soft);border:1px solid var(--bad-line)}
 .flagwarn{color:var(--warn);background:var(--warn-soft);border:1px solid var(--warn-line)}
 .flagneutral{color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line)}
 .quality{border-left:3px solid var(--warn);background:var(--warn-soft);padding:8px 11px;
-  border-radius:5px;margin:8px 0;font-size:13px;color:var(--ink-2)}
+  border-radius:5px;margin:8px 0;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2)}
 .quality.bad{border-left-color:var(--bad);background:var(--bad-soft)}
 .rawbox{margin-top:8px;border:1px solid var(--line);border-radius:6px;background:var(--surface)}
-.rawbox > summary{cursor:pointer;padding:7px 10px;font-size:13px;color:var(--accent-ink);
+.rawbox > summary{cursor:pointer;padding:7px 10px;font-size:calc(13px * var(--ui-fs, 1));color:var(--accent-ink);
   background:var(--accent-soft);border-radius:5px;font-weight:600}
 .rawbox pre{margin:0;padding:10px 12px;max-height:420px;overflow:auto;white-space:pre-wrap;
-  overflow-wrap:anywhere;background:var(--surface);font-size:12.5px;line-height:1.65}
+  overflow-wrap:anywhere;background:var(--surface);font-size:calc(12.5px * var(--ui-fs, 1));line-height:1.65}
 .skill{display:flex;flex-wrap:wrap;gap:6px}
 .skill > span{border:1px solid var(--line);background:var(--surface-2);
-  border-radius:4px;padding:2px 7px;font-size:12.5px}
+  border-radius:4px;padding:2px 7px;font-size:calc(12.5px * var(--ui-fs, 1))}
 .skill .hit{color:var(--ok);background:var(--ok-soft);border-color:var(--ok-line)}
 .skill .miss{color:var(--bad);background:var(--bad-soft);border-color:var(--bad-line)}
 .skill .plain.unverified{color:var(--ink-3);background:transparent;border-style:dashed}
 .toast{
   position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:260;
-  background:var(--ink);color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;
+  background:var(--ink);color:#fff;padding:9px 16px;border-radius:8px;font-size:calc(13px * var(--ui-fs, 1));
   opacity:0;pointer-events:none;transition:opacity .18s;
 }
 .toast.on{opacity:1}
@@ -1560,23 +1632,23 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
 .dlg.wide .cinput > .richeditor{width:100%;box-sizing:border-box;
   min-height:300px;max-height:46vh;overflow-y:auto}
 .dlg.wide .cinput > input,.dlg.wide .cinput > select{width:100%;box-sizing:border-box}
-.dlg h3{margin:0 0 12px;font-size:18px;font-weight:600;position:relative;padding-right:26px}
-.dlg-x{position:absolute;right:0;top:-2px;font-size:21px;font-weight:400;color:var(--ink-3);
+.dlg h3{margin:0 0 12px;font-size:calc(18px * var(--ui-fs, 1));font-weight:600;position:relative;padding-right:26px}
+.dlg-x{position:absolute;right:0;top:-2px;font-size:calc(21px * var(--ui-fs, 1));font-weight:400;color:var(--ink-3);
   cursor:pointer;line-height:1;padding:2px 5px;border-radius:4px}
 .dlg-x:hover{color:var(--ink);background:var(--surface-2)}
 .btn.busy{border-color:var(--accent-line);color:var(--accent-ink);background:var(--accent-soft)}
-.dlg .db{line-height:1.8;font-size:15px;white-space:pre-wrap;color:var(--ink)}
+.dlg .db{line-height:1.8;font-size:calc(15px * var(--ui-fs, 1));white-space:pre-wrap;color:var(--ink)}
 .dlg .dbar{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
 /* 下载初筛简历：时间段选择（v4.0.19） */
 .bundle-dates{display:flex;gap:14px;flex-wrap:wrap;margin:12px 0}
-.bundle-dates label{display:flex;flex-direction:column;gap:5px;font-size:13px;
+.bundle-dates label{display:flex;flex-direction:column;gap:5px;font-size:calc(13px * var(--ui-fs, 1));
   color:var(--ink-2);min-width:180px}
 .bundle-dates input{height:36px;padding:0 10px;border:1px solid var(--line-2);
   border-radius:var(--r-s);background:var(--surface);font:inherit;color:var(--ink)}
 .bundle-dates input:focus{border-color:var(--accent);outline:none;
   box-shadow:0 0 0 3px var(--accent-soft)}
 .bundle-last{margin-top:4px;padding:9px 11px;border-radius:var(--r-s);
-  background:var(--surface-2);color:var(--ink-2);font-size:13px;line-height:1.6}
+  background:var(--surface-2);color:var(--ink-2);font-size:calc(13px * var(--ui-fs, 1));line-height:1.6}
 /* ---- 按钮变体：**全部照搬原版**（ui.py 的同名规则）----
    原版的规矩（业务方 2026-10-14 定）：
      · 导入/收取组 = **浅蓝底深蓝字**（btn-primary）且**加大一档**（btn-lg）——每日常用动作；
@@ -1591,7 +1663,7 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
 .btn-ok:hover{background:var(--ok);border-color:var(--ok);color:var(--surface)}
 .btn-danger{background:var(--surface);border-color:var(--line-2);color:var(--bad);font-weight:600}
 .btn-danger:hover{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
-.btn-lg{padding:9px 18px;font-size:15px}
+.btn-lg{padding:9px 18px;font-size:calc(15px * var(--ui-fs, 1))}
 
 /* ---------------- 动效：只回应动作，不做装饰性入场 ----------------
    判断标准只有一条：**这段动画是不是在回答"你刚才做了什么"**。
@@ -1699,24 +1771,24 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
    观感是"推门进去"而不是"页面刷新了一下"。 */
 body > .side,body > .main{transition:opacity .3s ease,transform .3s cubic-bezier(.2,.7,.3,1)}
 body.locked > .side,body.locked > .main{opacity:0;transform:scale(.985);transform-origin:50% 40%}
-.loginbrand{display:flex;align-items:center;gap:8px;font-size:17px;font-weight:650;
+.loginbrand{display:flex;align-items:center;gap:8px;font-size:calc(17px * var(--ui-fs, 1));font-weight:650;
   color:var(--ink);letter-spacing:.01em}
 .logindot{width:9px;height:9px;border-radius:2px;background:var(--accent);flex:none}
-.loginsub{font-size:12.5px;color:var(--ink-3);margin:3px 0 22px;letter-spacing:.02em}
-.loginlabel{display:block;font-size:12.5px;color:var(--ink-2);margin-bottom:5px}
+.loginsub{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3);margin:3px 0 22px;letter-spacing:.02em}
+.loginlabel{display:block;font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-2);margin-bottom:5px}
 .logininput{
   width:100%;box-sizing:border-box;height:38px;padding:0 11px;margin-bottom:14px;
   border:1px solid var(--line-2);border-radius:var(--r-s);background:var(--ground);
-  font:inherit;font-size:14px;color:var(--ink);outline:none;
+  font:inherit;font-size:calc(14px * var(--ui-fs, 1));color:var(--ink);outline:none;
   transition:border-color .14s ease,box-shadow .14s ease,background .14s ease;
 }
 .logininput:focus{border-color:var(--accent);background:var(--surface);
   box-shadow:0 0 0 3px var(--accent-soft)}
-.loginerr{min-height:18px;font-size:12.5px;color:var(--bad);margin:-4px 0 10px}
+.loginerr{min-height:18px;font-size:calc(12.5px * var(--ui-fs, 1));color:var(--bad);margin:-4px 0 10px}
 /* 错误行淡入：抖完之后"错在哪"再出现。用 .on 类触发而不是直接挂在元素上 ——
    挂在元素上只会在页面加载时播一次，之后每次改 textContent 都不会重播。 */
 .loginerr.on{animation:loginIn .16s ease-out both}
-.loginbtn{width:100%;height:38px;font-size:14.5px;
+.loginbtn{width:100%;height:38px;font-size:calc(14.5px * var(--ui-fs, 1));
   display:flex;align-items:center;justify-content:center;gap:7px}
 /* 按钮里的"忙碌"图标（v3.2）：旋转环 → 对勾，用同一条 SVG 路径做 morph。
    **不用文字"登录中…"代替它**：文字每换一次长度，按钮内容就会左右跳一下；
@@ -1737,43 +1809,43 @@ body.locked > .side,body.locked > .main{opacity:0;transform:scale(.985);transfor
 .loginbtn.done .loginico path{animation:drawCheck .22s ease-out forwards}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes drawCheck{to{stroke-dashoffset:0}}
-.loginhint{margin-top:14px;font-size:11.5px;color:var(--ink-3);text-align:center}
+.loginhint{margin-top:14px;font-size:calc(11.5px * var(--ui-fs, 1));color:var(--ink-3);text-align:center}
 /* 首次使用提示：与普通脚注**同一副样子**（灰、小、居中），
    只是允许换行 —— 账号和密码挤在一行会糊成一片。
    刻意不做高亮块：登录框里只该有一个视觉重点（那个登录按钮）。 */
 #loginFirstHint{
-  margin-top:14px;font-size:11.5px;line-height:1.7;
+  margin-top:14px;font-size:calc(11.5px * var(--ui-fs, 1));line-height:1.7;
   color:var(--ink-3);text-align:center;white-space:pre-line;
 }
 /* 顶栏上的"当前用户 + 退出"（登录模式才出现） */
 .whoami{display:flex;align-items:center;gap:8px;flex:none;margin-left:6px;
-  font-size:12.5px;color:var(--ink-3);white-space:nowrap}
+  font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3);white-space:nowrap}
 .whoami b{color:var(--ink);font-weight:600}
 .whoami button{border:0;background:transparent;color:var(--ink-3);cursor:pointer;
-  font:inherit;font-size:12.5px;padding:2px 4px;border-radius:4px}
+  font:inherit;font-size:calc(12.5px * var(--ui-fs, 1));padding:2px 4px;border-radius:4px}
 .whoami button:hover{background:var(--surface-2);color:var(--ink)}
 
 /* ---------------- 账号管理（v3.0.3） ---------------- */
 .uwrap{max-width:920px;padding:24px 28px 40px}
 .uhead{display:flex;align-items:baseline;justify-content:space-between;
   gap:12px;margin-bottom:12px}
-.uhead h3{margin:0;font-size:16px;font-weight:600;color:var(--ink)}
-.utable{width:100%;border-collapse:collapse;font-size:13.5px}
-.utable th{text-align:left;font-weight:600;font-size:12px;color:var(--ink-3);
+.uhead h3{margin:0;font-size:calc(16px * var(--ui-fs, 1));font-weight:600;color:var(--ink)}
+.utable{width:100%;border-collapse:collapse;font-size:calc(13.5px * var(--ui-fs, 1))}
+.utable th{text-align:left;font-weight:600;font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);
   letter-spacing:.04em;padding:7px 10px;border-bottom:1px solid var(--line)}
 .utable td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
 .utable tr.off td{opacity:.55}
-.usub{font-size:11.5px;color:var(--ink-3);margin-top:2px}
-.utag{display:inline-block;font-size:10.5px;padding:1px 5px;border-radius:3px;
+.usub{font-size:calc(11.5px * var(--ui-fs, 1));color:var(--ink-3);margin-top:2px}
+.utag{display:inline-block;font-size:calc(10.5px * var(--ui-fs, 1));padding:1px 5px;border-radius:3px;
   margin-left:6px;vertical-align:1px}
 .utag.me{background:var(--accent-soft);color:var(--accent-ink)}
 .utag.off{background:var(--bad-soft);color:var(--bad)}
-.pmtable td{font-size:12px}
+.pmtable td{font-size:calc(12px * var(--ui-fs, 1))}
 /* 表头竖排：13 个权限横着放不下，写成两字一列竖着读反而清楚 */
-.pmcol{display:inline-block;width:22px;text-align:center;font-size:11px;
+.pmcol{display:inline-block;width:22px;text-align:center;font-size:calc(11px * var(--ui-fs, 1));
   color:var(--ink-3);line-height:1.15;vertical-align:bottom;
   writing-mode:vertical-rl;letter-spacing:1px;padding-bottom:4px}
-.pmask{display:inline-block;width:22px;text-align:center;font-size:13px;
+.pmask{display:inline-block;width:22px;text-align:center;font-size:calc(13px * var(--ui-fs, 1));
   color:var(--line-2)}
 .pmask.on{color:var(--ok);font-weight:700}
 
@@ -1836,7 +1908,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 }
 /* ---------------- 招聘进度（v4.0.16） ---------------- */
 .rp-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
-.rp-head h2{font-size:20px;margin:0 8px 0 0}
+.rp-head h2{font-size:calc(20px * var(--ui-fs, 1));margin:0 8px 0 0}
 .rp-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
 .rp-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}
 .rp-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
@@ -1847,21 +1919,21 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .rp-card.c-amber::before{background:var(--warn)}
 .rp-card.c-red::before{background:var(--bad)}
 .rp-card.c-purple::before{background:#7b61ff}
-.rp-card .k{font-size:13px;color:var(--ink-3)}
-.rp-card .v{font-size:32px;font-weight:800;line-height:1.15;margin-top:2px;
+.rp-card .k{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3)}
+.rp-card .v{font-size:calc(32px * var(--ui-fs, 1));font-weight:800;line-height:1.15;margin-top:2px;
   font-variant-numeric:tabular-nums}
 .rp-card.c-blue .v{color:var(--accent-ink)}
 .rp-card.c-green .v{color:var(--ok)}
 .rp-card.c-amber .v{color:var(--warn)}
 .rp-card.c-red .v{color:var(--bad)}
 .rp-card.c-purple .v{color:#6b4fe0}
-.rp-card .s{font-size:12px;color:var(--ink-3);margin-left:6px;font-weight:400}
+.rp-card .s{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);margin-left:6px;font-weight:400}
 .rp-degrees{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
 .rp-degree{background:var(--surface);border:1px solid var(--line);border-left:5px solid var(--line-2);
   border-radius:var(--r);padding:12px 14px}
-.rp-degree .dt{font-size:16px;font-weight:700;margin-bottom:6px}
-.rp-degree .dm{display:flex;gap:12px;flex-wrap:wrap;font-size:13px;color:var(--ink-2)}
-.rp-degree .dm b{font-size:15px;color:var(--ink);font-variant-numeric:tabular-nums}
+.rp-degree .dt{font-size:calc(16px * var(--ui-fs, 1));font-weight:700;margin-bottom:6px}
+.rp-degree .dm{display:flex;gap:12px;flex-wrap:wrap;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2)}
+.rp-degree .dm b{font-size:calc(15px * var(--ui-fs, 1));color:var(--ink);font-variant-numeric:tabular-nums}
 .rp-degree .gap.pos b{color:var(--warn)}
 .rp-degree .gap.zero b{color:var(--ok)}
 .rp-degree .gap.neg b{color:var(--bad)}
@@ -1881,15 +1953,15 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .rh-ring svg{width:190px;height:190px;display:block}
 .rh-ring-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
   justify-content:center;gap:2px}
-.rh-ring-center b{font-size:32px;font-weight:800;letter-spacing:-1px;font-variant-numeric:tabular-nums}
-.rh-ring-center span{font-size:12px;color:var(--ink-3);white-space:nowrap}
+.rh-ring-center b{font-size:calc(32px * var(--ui-fs, 1));font-weight:800;letter-spacing:-1px;font-variant-numeric:tabular-nums}
+.rh-ring-center span{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);white-space:nowrap}
 .rh-right{position:relative;z-index:1;min-width:0}
 .rh-kpis{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--line);
   padding-bottom:14px;margin-bottom:14px}
 .rh-kpi{padding:0 14px;border-left:1px solid var(--line)}
 .rh-kpi:first-child{border-left:0;padding-left:0}
-.rh-k{display:block;font-size:12px;color:var(--ink-3);white-space:nowrap}
-.rh-v{display:block;font-size:26px;font-weight:800;line-height:1.25;font-variant-numeric:tabular-nums}
+.rh-k{display:block;font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);white-space:nowrap}
+.rh-v{display:block;font-size:calc(26px * var(--ui-fs, 1));font-weight:800;line-height:1.25;font-variant-numeric:tabular-nums}
 .rh-v.blue{color:var(--accent-ink)}
 .rh-v.green{color:var(--ok)}
 .rh-v.amber{color:var(--warn)}
@@ -1899,17 +1971,17 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   border-top:1px solid var(--line);padding-top:12px}
 .rh-degree{min-width:0;padding:0 14px;border-left:1px solid var(--line)}
 .rh-degree:first-child{border-left:0;padding-left:0}
-.rh-dhead{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink-2);
+.rh-dhead{display:flex;align-items:center;gap:8px;font-size:calc(14px * var(--ui-fs, 1));color:var(--ink-2);
   margin-bottom:6px}
 .rh-dot{width:9px;height:9px;border-radius:50%;flex:none}
 .rh-dot.doctor{background:#7b61ff}
 .rh-dot.master{background:var(--accent)}
 .rh-dot.bachelor{background:var(--ok)}
 .rh-dot.college{background:#d97706}
-.rh-dname{font-weight:600;color:var(--ink);font-size:14px}
-.rh-dstat{display:block;font-size:13px;color:var(--ink-3);margin-top:3px;
+.rh-dname{font-weight:600;color:var(--ink);font-size:calc(14px * var(--ui-fs, 1))}
+.rh-dstat{display:block;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3);margin-top:3px;
   white-space:nowrap;line-height:1.55}
-.rh-dstat b{font-size:18px;font-variant-numeric:tabular-nums;color:var(--ink)}
+.rh-dstat b{font-size:calc(18px * var(--ui-fs, 1));font-variant-numeric:tabular-nums;color:var(--ink)}
 .rh-dstat.gap.pos b{color:var(--warn)}
 .rh-dstat.gap.zero b{color:var(--ok)}
 .rh-dstat.gap.neg b{color:var(--bad)}
@@ -1921,12 +1993,12 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
   .rh-degree:nth-child(3){border-left:0;padding-left:0}
 }
 .rp-tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:12px}
-.rp-tab{border:0;background:transparent;padding:8px 14px;color:var(--ink-3);border-bottom:2px solid transparent;font-size:14px}
+.rp-tab{border:0;background:transparent;padding:8px 14px;color:var(--ink-3);border-bottom:2px solid transparent;font-size:calc(14px * var(--ui-fs, 1))}
 .rp-tab.on{color:var(--accent-ink);border-bottom-color:var(--accent);font-weight:600}
 .rp-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
 .rp-wrap{overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);max-height:calc(100vh - 300px)}
-.rp-table{border-collapse:separate;border-spacing:0;width:100%;font-size:13px;min-width:980px}
-.rp-table th{position:sticky;top:0;z-index:2;background:var(--surface-2);color:var(--ink-2);font-weight:600;font-size:12px;text-align:center;padding:9px 8px;border-bottom:1px solid var(--line-2);white-space:nowrap}
+.rp-table{border-collapse:separate;border-spacing:0;width:100%;font-size:calc(13px * var(--ui-fs, 1));min-width:980px}
+.rp-table th{position:sticky;top:0;z-index:2;background:var(--surface-2);color:var(--ink-2);font-weight:600;font-size:calc(12px * var(--ui-fs, 1));text-align:center;padding:9px 8px;border-bottom:1px solid var(--line-2);white-space:nowrap}
 .rp-table th.plan{background:#fff8e1;color:#8a5a00}
 .rp-table th.calc{background:#eef4ff;color:var(--accent-ink)}
 .rp-table th.sign{background:#f3efff;color:#6b4fe0}
@@ -1935,7 +2007,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .rp-table tr.has-sign td{background:#f6fcf8}
 .rp-table td.unit{font-weight:600;background:var(--surface)}
 .rp-unit-del{margin-left:6px;border:0;background:var(--bad-soft);color:var(--bad);
-  border-radius:4px;font-size:12px;line-height:1.4;padding:1px 6px;cursor:pointer}
+  border-radius:4px;font-size:calc(12px * var(--ui-fs, 1));line-height:1.4;padding:1px 6px;cursor:pointer}
 .rp-unit-del:hover{background:var(--bad);color:#fff}
 .rp-table td.num{font-variant-numeric:tabular-nums}
 .rp-table td.gap-pos{color:var(--warn);font-weight:600}
@@ -1946,25 +2018,25 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .rp-table td.rate-zero{color:var(--ink-3)}
 .rp-table td.rate-none{color:var(--ink-3)}
 .rp-table input.rp-num{width:64px;height:30px;text-align:center;border:1px solid var(--line-2);border-radius:4px;padding:0 4px}
-.rp-signee{display:inline-block;margin:2px 3px 2px 0;padding:2px 7px;border-radius:999px;background:var(--accent-soft);color:var(--accent-ink);cursor:pointer;font-size:12px}
+.rp-signee{display:inline-block;margin:2px 3px 2px 0;padding:2px 7px;border-radius:999px;background:var(--accent-soft);color:var(--accent-ink);cursor:pointer;font-size:calc(12px * var(--ui-fs, 1))}
 .rp-signee:hover{background:var(--accent-hi)}
 .rp-empty{background:var(--surface);border:1px dashed var(--line-2);border-radius:var(--r);padding:36px 20px;text-align:center;color:var(--ink-3)}
 .rp-health{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
 .rp-health-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px}
-.rp-health-card h4{margin:0 0 6px;font-size:14px;display:flex;justify-content:space-between;gap:8px}
+.rp-health-card h4{margin:0 0 6px;font-size:calc(14px * var(--ui-fs, 1));display:flex;justify-content:space-between;gap:8px}
 .rp-health-card .n{color:var(--warn);font-weight:700}
-.rp-health-item{padding:6px 0;border-top:1px dashed var(--line);font-size:13px;display:flex;gap:8px;align-items:center;justify-content:space-between}
-.rp-health-item .m{color:var(--ink-3);font-size:12px}
+.rp-health-item{padding:6px 0;border-top:1px dashed var(--line);font-size:calc(13px * var(--ui-fs, 1));display:flex;gap:8px;align-items:center;justify-content:space-between}
+.rp-health-item .m{color:var(--ink-3);font-size:calc(12px * var(--ui-fs, 1))}
 .rp-health-item .a{display:flex;gap:6px;flex-shrink:0}
-.rp-import-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.rp-import-table{width:100%;border-collapse:collapse;font-size:calc(12.5px * var(--ui-fs, 1))}
 .rp-import-table th,.rp-import-table td{border-bottom:1px solid var(--line);padding:5px 6px;text-align:center}
 .rp-form{display:flex;flex-direction:column;gap:10px}
-.rp-form label{font-size:13px;color:var(--ink-3);margin-bottom:-4px}
-.rp-form > input{height:34px;border:1px solid var(--line-2);border-radius:6px;padding:0 10px;font-size:14px}
+.rp-form label{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3);margin-bottom:-4px}
+.rp-form > input{height:34px;border:1px solid var(--line-2);border-radius:6px;padding:0 10px;font-size:calc(14px * var(--ui-fs, 1))}
 .rp-form > input:focus{outline:none;border-color:var(--accent)}
 .rp-date-range{display:flex;align-items:center;gap:8px}
 .rp-date-range input{height:34px;border:1px solid var(--line-2);border-radius:6px;padding:0 10px;
-  font-size:14px;width:170px}
+  font-size:calc(14px * var(--ui-fs, 1));width:170px}
 .rp-date-range input:focus{outline:none;border-color:var(--accent)}
 .rp-date-range .dash{color:var(--ink-3);user-select:none}
 @media(max-width:900px){.rp-cards,.rp-degrees{grid-template-columns:repeat(2,1fr)}}
@@ -1972,13 +2044,13 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 /* ---------------- 日程安排（v4.4.3） ----------------
    日历只读「待面试」阶段；拖拽只改面试日期/时刻，不改阶段。 */
 .sched-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;flex:none}
-.sched-title{font-size:20px;font-weight:700;letter-spacing:-.01em;line-height:1.3}
-.sched-sub{font-size:13px;color:var(--ink-3)}
+.sched-title{font-size:calc(20px * var(--ui-fs, 1));font-weight:700;letter-spacing:-.01em;line-height:1.3}
+.sched-sub{font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3)}
 .sched-tools{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .sched-body{flex:1;min-height:0;overflow:auto;padding-bottom:8px}
 .sched-month{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));border:1px solid var(--line);
   border-radius:10px;overflow:hidden;background:var(--surface);min-width:700px}
-.sched-dow{padding:8px 9px;font-size:12.5px;font-weight:600;color:var(--ink-3);
+.sched-dow{padding:8px 9px;font-size:calc(12.5px * var(--ui-fs, 1));font-weight:600;color:var(--ink-3);
   background:var(--surface-2);border-left:1px solid var(--line)}
 .sched-dow:first-child{border-left:0}
 .sched-cell{min-height:118px;padding:5px 6px 6px;border-top:1px solid var(--line);
@@ -1986,40 +2058,40 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .sched-cell:nth-child(7n+1){border-left:0}
 .sched-cell.out{background:var(--surface-2)}
 .sched-daynum{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;
-  padding:0 5px;border-radius:999px;font-size:12.5px;font-weight:600;color:var(--ink-2)}
+  padding:0 5px;border-radius:999px;font-size:calc(12.5px * var(--ui-fs, 1));font-weight:600;color:var(--ink-2)}
 .sched-cell.out .sched-daynum{color:var(--ink-3);opacity:.65}
 .sched-cell.today .sched-daynum{background:var(--accent);color:#fff}
-.sched-ev{display:block;width:100%;text-align:left;font:inherit;font-size:12.5px;line-height:1.3;
+.sched-ev{display:block;width:100%;text-align:left;font:inherit;font-size:calc(12.5px * var(--ui-fs, 1));line-height:1.3;
   margin-top:3px;padding:3px 6px;border:0;border-left:3px solid var(--accent);border-radius:3px;
   background:var(--accent-soft);color:var(--ink);cursor:pointer;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap;transition:filter .12s,box-shadow .12s}
 .sched-ev:hover{filter:brightness(.97);box-shadow:0 0 0 1px var(--accent-line)}
 .sched-ev.dragging{opacity:.42}
 .sched-ev .t{font-weight:700;margin-right:0;color:var(--accent-ink)}
-.sched-ev .meta{display:inline;font-size:11px;font-weight:400;color:var(--ink-2);
+.sched-ev .meta{display:inline;font-size:calc(11px * var(--ui-fs, 1));font-weight:400;color:var(--ink-2);
   white-space:normal}
 /* 月视图格子窄：让“08:00-08:30”先占一行，姓名不够宽时自然换到第二行，
    时间范围始终完整可见（周/日视图仍是单行块）。 */
 .sched-cell .sched-ev{white-space:normal;text-overflow:clip;line-height:1.25;
-  font-size:11.5px;padding:2px 4px}
+  font-size:calc(11.5px * var(--ui-fs, 1));padding:2px 4px}
 .sched-cell .sched-ev .t{margin-right:0}
 .sched-more{display:block;margin-top:2px;padding:0 2px;border:0;background:none;color:var(--ink-3);
-  font:inherit;font-size:11.5px;cursor:pointer;text-align:left}
+  font:inherit;font-size:calc(11.5px * var(--ui-fs, 1));cursor:pointer;text-align:left}
 .sched-more:hover{color:var(--accent-ink)}
 .sched-cell.drag-over{background:var(--accent-soft);outline:2px dashed var(--accent);outline-offset:-3px}
-.sched-empty{padding:28px;text-align:center;color:var(--ink-3);font-size:14px}
+.sched-empty{padding:28px;text-align:center;color:var(--ink-3);font-size:calc(14px * var(--ui-fs, 1))}
 /* 有并发的日列会被 schedDayWidth 加宽；超出时整张周表横向滚动，
    表头和表体在同一个滚动容器里，不会错位。 */
 .sched-week{min-width:760px;border:1px solid var(--line);border-radius:10px;
   overflow-x:auto;overflow-y:hidden;background:var(--surface)}
 .sched-weekhead{display:flex;background:var(--surface-2);border-bottom:1px solid var(--line)}
 .sched-weekhead .sched-timecol{border-right:1px solid var(--line)}
-.sched-weekhead .sched-dayhead{flex:1;min-width:92px;padding:7px 8px;font-size:12.5px;
+.sched-weekhead .sched-dayhead{flex:1;min-width:92px;padding:7px 8px;font-size:calc(12.5px * var(--ui-fs, 1));
   font-weight:600;color:var(--ink-2);border-left:1px solid var(--line)}
 .sched-weekhead .sched-dayhead:first-of-type{border-left:0}
 .sched-weekhead .sched-dayhead.today{color:var(--accent-ink);background:var(--accent-soft)}
 .sched-weekbody{display:flex}
-.sched-timecol{width:58px;flex:none;color:var(--ink-3);font-size:11.5px;text-align:right;
+.sched-timecol{width:58px;flex:none;color:var(--ink-3);font-size:calc(11.5px * var(--ui-fs, 1));text-align:right;
   padding-right:6px;background:var(--surface);position:relative}
 .sched-allday-label{height:34px;line-height:34px;border-bottom:1px solid var(--line)}
 .sched-hourlabel{height:46px;position:relative;top:-7px}
@@ -2028,20 +2100,20 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .sched-daycol{flex:1;min-width:92px;position:relative;border-left:1px solid var(--line)}
 .sched-daycol:first-child{border-left:0}
 .sched-allday{min-height:34px;border-bottom:1px solid var(--line);padding:2px 3px}
-.sched-allday .sched-ev{margin-top:2px;padding:1px 4px;font-size:11.5px;line-height:1.25}
+.sched-allday .sched-ev{margin-top:2px;padding:1px 4px;font-size:calc(11.5px * var(--ui-fs, 1));line-height:1.25}
 .sched-hours{position:relative}
 .sched-hline{height:46px;border-top:1px solid var(--line)}
 .sched-hline:nth-child(2n){background:rgba(127,127,127,.025)}
 .sched-ev.timed{position:absolute;left:3px;right:3px;margin:0;z-index:1;
-  font-size:13px;line-height:1.15;padding:1px 6px;
+  font-size:calc(13px * var(--ui-fs, 1));line-height:1.15;padding:1px 6px;
   white-space:normal;overflow:hidden;min-height:19px}
 .sched-daycol.drag-over{background:var(--accent-soft)}
 .sched-week.single{min-width:0}
 .sched-week.single .sched-daycol{min-width:0}
 /* 日视图是单列，空间足够：时间/姓名/单位/地点统一放大两号（15px），
    行高压紧以容纳 30 分钟的卡片高度。 */
-.sched-week.single .sched-ev.timed{font-size:15px;line-height:1.05;padding:0 6px}
-.sched-week.single .sched-ev .meta{font-size:15px}
+.sched-week.single .sched-ev.timed{font-size:calc(15px * var(--ui-fs, 1));line-height:1.05;padding:0 6px}
+.sched-week.single .sched-ev .meta{font-size:calc(15px * var(--ui-fs, 1))}
 .sched-readonly .sched-ev{cursor:pointer}
 
 
@@ -2064,13 +2136,13 @@ h1,h2,h3,h4{letter-spacing:-.01em}
 /* ---- Navigation / chrome ------------------------------------------------ */
 body{grid-template-columns:232px 1fr}
 .side{padding:20px 12px 12px;background:var(--nav);border-right:1px solid var(--line)}
-.sbrand{padding:2px 12px 18px;gap:10px;font-size:15px;letter-spacing:0}
+.sbrand{padding:2px 12px 18px;gap:10px;font-size:calc(15px * var(--ui-fs, 1));letter-spacing:0}
 .sbrand img{width:28px;height:28px;border-radius:8px;box-shadow:none}
 .sbrand b{font-weight:600;letter-spacing:0}
-.sgroup{padding:16px 12px 7px;font-size:10.5px;font-weight:600;
+.sgroup{padding:16px 12px 7px;font-size:calc(10.5px * var(--ui-fs, 1));font-weight:600;
   letter-spacing:.12em;color:var(--ink-3)}
 .side button{height:38px;padding:0 11px;gap:11px;border-radius:8px;
-  font-size:13.5px;color:var(--ink-2);
+  font-size:calc(13.5px * var(--ui-fs, 1));color:var(--ink-2);
   transition:background-color .18s ease,color .18s ease,box-shadow .18s ease}
 .side button .ico{width:18px;height:18px;opacity:.62;stroke-width:1.55}
 .side button:hover{background:var(--surface-2);color:var(--ink)}
@@ -2082,32 +2154,32 @@ body{grid-template-columns:232px 1fr}
 .acct:hover{background:var(--surface-2)}
 .acctMenu{border-radius:10px;box-shadow:var(--shadow);padding:5px}
 .acctMenu button{border-radius:6px}
-.acctMenu .ver{font-size:10.5px;letter-spacing:.02em}
+.acctMenu .ver{font-size:calc(10.5px * var(--ui-fs, 1));letter-spacing:.02em}
 
 .top{height:56px;padding:0 22px;gap:9px;background:var(--surface);
   border-bottom:1px solid var(--line)}
 .top2{padding:9px 22px;gap:7px;background:var(--surface);
   border-bottom:1px solid var(--line)}
 .tabbar{padding:0 22px;background:var(--surface);border-bottom:1px solid var(--line)}
-.brand{font-size:14px;font-weight:600}
+.brand{font-size:calc(14px * var(--ui-fs, 1));font-weight:600}
 .brand i{width:7px;height:7px;border-radius:2px;background:var(--accent)}
 .search{width:280px;height:34px;border-radius:7px;border-color:transparent;
-  background:var(--surface-2);font-size:13px;
+  background:var(--surface-2);font-size:calc(13px * var(--ui-fs, 1));
   transition:background-color .18s ease,border-color .18s ease,box-shadow .18s ease}
 .search:hover{background:var(--surface-2);border-color:var(--line)}
 .search:focus{background:var(--surface);border-color:var(--accent-line);
   box-shadow:0 0 0 3px var(--accent-soft)}
 .sel,.msel > .msbtn{height:34px;border-radius:7px;border-color:var(--line);
-  background:var(--surface);color:var(--ink-2);font-size:13px}
+  background:var(--surface);color:var(--ink-2);font-size:calc(13px * var(--ui-fs, 1))}
 .sel:hover,.msel > .msbtn:hover{border-color:var(--line-2);color:var(--ink)}
-.count{font-size:12px;color:var(--ink-3)}
-.count b{font-size:14px;font-weight:600}
+.count{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3)}
+.count b{font-size:calc(14px * var(--ui-fs, 1));font-weight:600}
 .vdiv{background:var(--line)}
 .mchip,.tochip{border-radius:999px}
 
 /* ---- Buttons / forms ---------------------------------------------------- */
 .btn{height:32px;padding:0 13px;border-radius:7px;border-color:var(--line);
-  background:var(--surface);font-size:13px;font-weight:500;
+  background:var(--surface);font-size:calc(13px * var(--ui-fs, 1));font-weight:500;
   transition:background-color .18s ease,border-color .18s ease,color .18s ease}
 .btn:hover{background:var(--surface-2);border-color:var(--line-2);color:var(--ink)}
 .btn.primary{background:var(--accent-soft);border-color:var(--accent-line);
@@ -2122,13 +2194,13 @@ body{grid-template-columns:232px 1fr}
 .btn-green:hover{background:var(--ok-hi);border-color:var(--ok-line);color:var(--ok)}
 .btn.danger{background:var(--bad-soft);border-color:var(--bad-line);color:var(--bad)}
 .btn.danger:hover{background:var(--bad-soft);border-color:var(--bad);color:var(--bad)}
-.btn-lg{height:34px;padding:0 14px;font-size:13.5px}
-.top2 .btn-lg{height:32px;padding:0 12px;font-size:12.5px}
+.btn-lg{height:34px;padding:0 14px;font-size:calc(13.5px * var(--ui-fs, 1))}
+.top2 .btn-lg{height:32px;padding:0 12px;font-size:calc(12.5px * var(--ui-fs, 1))}
 .btn:disabled{opacity:.42}
 .btn:focus-visible,.side button:focus-visible,.row:focus-visible,
 .tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .seg{border-radius:8px;overflow:hidden}
-.seg button{font-size:12.5px;padding:6px 14px;transition:background-color .18s ease}
+.seg button{font-size:calc(12.5px * var(--ui-fs, 1));padding:6px 14px;transition:background-color .18s ease}
 .seg button.on{background:var(--accent-soft);color:var(--accent-ink);
   box-shadow:inset 0 0 0 1px var(--accent-line)}
 input:not([type=checkbox]):not([type=radio]),select,textarea{
@@ -2147,42 +2219,42 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
   transition:background-color .18s ease}
 .row:hover{background:var(--surface-2)}
 .row.on{background:var(--accent-soft)}
-.row .nm{font-size:14px;font-weight:600}
-.row .sub{font-size:12.5px;color:var(--ink-3)}
+.row .nm{font-size:calc(14px * var(--ui-fs, 1));font-weight:600}
+.row .sub{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3)}
 .rowbar{width:2px;min-height:38px;border-radius:0}
 .row.on .rowbar{background:var(--accent)}
-.av{background:var(--surface-2);color:var(--ink-3);font-size:11px}
-.pager{background:var(--surface);border-top-color:var(--line);font-size:12px}
+.av{background:var(--surface-2);color:var(--ink-3);font-size:calc(11px * var(--ui-fs, 1))}
+.pager{background:var(--surface);border-top-color:var(--line);font-size:calc(12px * var(--ui-fs, 1))}
 .tier{border-radius:5px;font-weight:600}
 
 /* ---- Detail / content --------------------------------------------------- */
 .detail{padding:0 30px 48px;background:var(--surface)}
 .detail-toolbar{background:var(--surface);border-bottom:1px solid var(--line);
   box-shadow:none;padding:16px 0 12px}
-.dname{font-size:24px;font-weight:600;letter-spacing:-.015em}
-.dmeta{font-size:14px;color:var(--ink-2);gap:7px 10px}
-#detail .dmeta .chipl{font-size:13.5px}
-.dmeta .edv{font-size:14px;background:var(--surface-2)}
+.dname{font-size:calc(24px * var(--ui-fs, 1));font-weight:600;letter-spacing:-.015em}
+.dmeta{font-size:calc(14px * var(--ui-fs, 1));color:var(--ink-2);gap:7px 10px}
+#detail .dmeta .chipl{font-size:calc(13.5px * var(--ui-fs, 1))}
+.dmeta .edv{font-size:calc(14px * var(--ui-fs, 1));background:var(--surface-2)}
 .dmeta.dmeta2 .stagechip{background:var(--surface-2);border-color:var(--line);
   color:var(--ink)}
 .av-lg{border-radius:10px;background:var(--surface-2)}
 .sec{margin-top:24px}
-.sec > h3,#detail .sec > h3{font-size:16px;font-weight:600;letter-spacing:0;
+.sec > h3,#detail .sec > h3{font-size:calc(16px * var(--ui-fs, 1));font-weight:600;letter-spacing:0;
   color:var(--ink);border-bottom:1px solid var(--line);padding-bottom:8px;
   margin-bottom:14px}
-.sec.tier-sec > h3{font-size:16px;border-bottom:0;padding-bottom:0}
-.profile-layout{font-size:14px;gap:0 28px}
-.profile-layout .ev,#detail .ev{font-size:14px;line-height:1.75}
-.profile-layout .sum,#detail .sum{font-size:15px;line-height:1.75}
-.profile-layout .edu-line{font-size:16px}
-.profile-layout .edu-school{font-size:16.5px}
-.profile-layout .edu-major{font-size:15.5px}
-.profile-layout .edu-degree{font-size:15px}
-.profile-layout .hint{font-size:12.5px}
+.sec.tier-sec > h3{font-size:calc(16px * var(--ui-fs, 1));border-bottom:0;padding-bottom:0}
+.profile-layout{font-size:calc(14px * var(--ui-fs, 1));gap:0 28px}
+.profile-layout .ev,#detail .ev{font-size:calc(14px * var(--ui-fs, 1));line-height:1.75}
+.profile-layout .sum,#detail .sum{font-size:calc(15px * var(--ui-fs, 1));line-height:1.75}
+.profile-layout .edu-line{font-size:calc(16px * var(--ui-fs, 1))}
+.profile-layout .edu-school{font-size:calc(16.5px * var(--ui-fs, 1))}
+.profile-layout .edu-major{font-size:calc(15.5px * var(--ui-fs, 1))}
+.profile-layout .edu-degree{font-size:calc(15px * var(--ui-fs, 1))}
+.profile-layout .hint{font-size:calc(12.5px * var(--ui-fs, 1))}
 .honosec .ev{background:var(--surface-2);border-radius:7px}
 .chipl,.jchip,.rk,.stg,.ochip{border-radius:999px;font-weight:500}
-.chipl{font-size:12px;padding:3px 9px}
-.rk{font-size:12px;padding:2px 8px}
+.chipl{font-size:calc(12px * var(--ui-fs, 1));padding:3px 9px}
+.rk{font-size:calc(12px * var(--ui-fs, 1));padding:2px 8px}
 .srcbar{background:var(--ok-soft);border-color:var(--ok-line)}
 .srcbar > .srck{color:var(--ok)}
 .srcbar .srcsub,.srcbar .srcfile .fn{color:var(--ok)}
@@ -2205,18 +2277,18 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .ana-workbench,.ov-analysis,.stat{background:var(--surface);border-color:var(--line);
   border-radius:10px;box-shadow:none}
 .ovcol{padding:18px 20px}
-.ovcol > h3{font-size:16px;font-weight:600;padding-bottom:10px}
+.ovcol > h3{font-size:calc(16px * var(--ui-fs, 1));font-weight:600;padding-bottom:10px}
 .rp-card{padding:18px 20px}
 .rp-card::before{display:none}
-.rp-card .v{font-size:30px;font-weight:650;letter-spacing:-.02em}
-.rp-card .k{font-size:12.5px;color:var(--ink-3)}
+.rp-card .v{font-size:calc(30px * var(--ui-fs, 1));font-weight:650;letter-spacing:-.02em}
+.rp-card .k{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3)}
 .rp-degree{border-left-width:2px;padding:14px 16px;border-radius:8px}
-.rp-degree .dt{font-size:15px;font-weight:600}
+.rp-degree .dt{font-size:calc(15px * var(--ui-fs, 1));font-weight:600}
 .rp-degree.d-doctor{border-left-color:var(--plum)}
 .rp-degree.d-college{border-left-color:var(--warn)}
 .recruit-hero{padding:22px 24px;border-radius:10px}
 .recruit-hero::after{display:none}
-.rh-ring-center b{font-size:30px;font-weight:650}
+.rh-ring-center b{font-size:calc(30px * var(--ui-fs, 1));font-weight:650}
 .rh-ring-track{stroke:var(--surface-2)}
 .rp-card.c-purple::before{display:none}
 .rp-card.c-purple .v,.rh-v.purple{color:var(--plum)}
@@ -2226,8 +2298,8 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .rh-degrees{border-top-color:var(--line)}
 .rh-degree{border-left-color:var(--line)}
 .rp-wrap{border-radius:10px}
-.rp-table{font-size:14.5px}
-.rp-table th{background:var(--surface-2);color:var(--ink-2);font-size:12.5px;
+.rp-table{font-size:calc(14.5px * var(--ui-fs, 1))}
+.rp-table th{background:var(--surface-2);color:var(--ink-2);font-size:calc(12.5px * var(--ui-fs, 1));
   letter-spacing:.02em;font-weight:600;padding:11px 9px;border-bottom-color:var(--line-2)}
 .rp-table th.plan{background:var(--warn-soft);color:var(--warn)}
 .rp-table th.calc{background:var(--accent-soft);color:var(--accent-ink)}
@@ -2238,8 +2310,8 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .rp-table tbody tr.unit-even td.unit{background:var(--row-unit);font-weight:650}
 .rp-table tbody tr.unit-even.has-sign td{background:#f3faf6}
 .rp-table tbody tr.unit-even.has-sign td.unit{background:#e7f4ea}
-.rp-table .rp-signee{font-size:13.5px}
-.rp-table .rp-signee .rp-deadline{font-style:normal;color:var(--ink-3);font-size:12px;margin-left:1px}
+.rp-table .rp-signee{font-size:calc(13.5px * var(--ui-fs, 1))}
+.rp-table .rp-signee .rp-deadline{font-style:normal;color:var(--ink-3);font-size:calc(12px * var(--ui-fs, 1));margin-left:1px}
 /* 签约人全部展示、不折叠：单元格保持单行，表格横向滚动查看；
    前三列（序号/单位/学历）固定，滚动时始终可见。 */
 .rp-table td.signee-cell{text-align:left;white-space:nowrap;min-width:420px}
@@ -2262,25 +2334,25 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .rp-table tr.has-sign td{background:var(--ok-soft)}
 .rp-table td.unit{background:var(--surface)}
 .rp-table input.rp-num{height:30px;border-radius:6px}
-.rp-signee{background:var(--accent-soft);color:var(--accent-ink);font-size:11.5px}
+.rp-signee{background:var(--accent-soft);color:var(--accent-ink);font-size:calc(11.5px * var(--ui-fs, 1))}
 .rp-signee:hover{background:var(--accent-hi)}
-.rp-health-card h4{font-size:14px}
-.rp-tab{font-size:13px;padding:9px 14px;font-weight:500}
+.rp-health-card h4{font-size:calc(14px * var(--ui-fs, 1))}
+.rp-tab{font-size:calc(13px * var(--ui-fs, 1));padding:9px 14px;font-weight:500}
 .rp-tab.on{font-weight:600}
-.rp-head h2{font-size:24px;font-weight:600;letter-spacing:-.015em}
+.rp-head h2{font-size:calc(24px * var(--ui-fs, 1));font-weight:600;letter-spacing:-.015em}
 .rp-empty{border-color:var(--line-2);background:var(--surface)}
 .ovjob-track{height:7px;background:var(--surface-2)}
 .ovjob-track i{background:var(--accent)}
-.ovjob-head{font-size:12px}
+.ovjob-head{font-size:calc(12px * var(--ui-fs, 1))}
 .ovjob{margin-bottom:12px}
-.lgitem{border-radius:5px;font-size:12.5px}
+.lgitem{border-radius:5px;font-size:calc(12.5px * var(--ui-fs, 1))}
 .lgitem:hover{background:var(--surface-2)}
 .tier-donut svg .td-seg{transition:stroke-width .18s ease}
 .tier-donut svg .td-seg:hover{stroke-width:17}
 .stat{padding:12px 14px}
-.stat-n{font-size:28px;font-weight:600;letter-spacing:-.01em}
-.stat-l{font-size:12.5px;color:var(--ink-2)}
-.stat-h{font-size:11.5px;color:var(--ink-3)}
+.stat-n{font-size:calc(28px * var(--ui-fs, 1));font-weight:600;letter-spacing:-.01em}
+.stat-l{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-2)}
+.stat-h{font-size:calc(11.5px * var(--ui-fs, 1));color:var(--ink-3)}
 .stats{gap:12px}
 
 /* ---- Mail / editor / system pages -------------------------------------- */
@@ -2289,7 +2361,7 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 #recruitView.on{padding:26px 30px 48px}
 #mailView.on,#orgView.on,#archView.on,#chatView.on{background:var(--surface)}
 .medit{padding:22px 30px 0;background:var(--surface)}
-.mrow > label{font-size:12.5px;color:var(--ink-3)}
+.mrow > label{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3)}
 .richeditor,#mBody{border-color:var(--line);background:var(--surface)}
 .cw-mark{width:44px;height:44px;border-radius:12px;background:var(--accent-soft);
   color:var(--accent-ink);box-shadow:none}
@@ -2301,7 +2373,7 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .chatconv-item.on{background:var(--accent-soft)}
 .chatinput{background:var(--surface);border-top-color:var(--line)}
 .chatside{background:var(--surface);border-left-color:var(--line)}
-.msg{border-radius:9px;font-size:15.5px;line-height:1.75}
+.msg{border-radius:9px;font-size:calc(15.5px * var(--ui-fs, 1));line-height:1.75}
 /* 用户自己发的消息靠右、浅蓝底，和助手的白色回答分开（2026-11-05）。
    width:fit-content 让短句只占一句话的宽度，长句到 680px 再换行；
    margin-left:auto 是右对齐的关键，只改颜色不改布局的话仍然会贴在左边。 */
@@ -2311,30 +2383,30 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .msg.assistant{background:var(--surface);border-color:var(--line);
   border-bottom-left-radius:3px}
 /* 回答里的结构：小标题加粗、段间距拉开，长答案不再是一整块文字 */
-#chatView .msg h3{font-size:16.5px;font-weight:700;margin:14px 0 7px;
+#chatView .msg h3{font-size:calc(16.5px * var(--ui-fs, 1));font-weight:700;margin:14px 0 7px;
   letter-spacing:-.01em;line-height:1.5}
-#chatView .msg h4{font-size:15.5px;font-weight:700;margin:12px 0 6px;line-height:1.55}
+#chatView .msg h4{font-size:calc(15.5px * var(--ui-fs, 1));font-weight:700;margin:12px 0 6px;line-height:1.55}
 #chatView .msg p{margin:0 0 8px}
 #chatView .msg p:last-child{margin-bottom:0}
 #chatView .msg ul,#chatView .msg ol{margin:6px 0 10px;line-height:1.75}
 #chatView .msg li{margin:3px 0}
 #chatView .msg strong{font-weight:700;color:var(--ink)}
-#chatView .msg .mdtable{font-size:15px}
+#chatView .msg .mdtable{font-size:calc(15px * var(--ui-fs, 1))}
 #chatView .msg blockquote{margin:8px 0;padding:6px 12px}
-.ask{border-radius:999px;border-color:var(--line);font-size:12.5px}
+.ask{border-radius:999px;border-color:var(--line);font-size:calc(12.5px * var(--ui-fs, 1))}
 .ask:hover{background:var(--surface-2);border-color:var(--line-2);color:var(--ink)}
 /* Empty chat: put the welcome block in the optical centre of the canvas
    instead of leaving a tall band of dead space under it. */
 .chatlog:has(.chatwelcome){display:flex;flex-direction:column;justify-content:center}
 .chatlog:has(.chatwelcome) .chatwelcome{margin:0 auto;padding-bottom:5vh}
-.chatwelcome h2{font-size:26px;font-weight:600;letter-spacing:-.03em}
-.chatwelcome p{color:var(--ink-2);font-size:13px}
+.chatwelcome h2{font-size:calc(26px * var(--ui-fs, 1));font-weight:600;letter-spacing:-.03em}
+.chatwelcome p{color:var(--ink-2);font-size:calc(13px * var(--ui-fs, 1))}
 .cw-card{background:var(--surface);border-color:var(--line)}
 .cw-card:hover{background:var(--surface-2);border-color:var(--line-2)}
 .cw-brief{margin-top:18px;display:flex;flex-direction:column;gap:6px;align-items:flex-start}
-.cw-brief-h{font-size:12px;color:var(--ink-3);margin-bottom:2px}
+.cw-brief-h{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);margin-bottom:2px}
 .cw-brief-card{align-items:flex-start;text-align:left}
-.cw-w{display:block;font-size:12px;color:var(--ink-3);margin-top:3px;line-height:1.5}
+.cw-w{display:block;font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);margin-top:3px;line-height:1.5}
 
 /* 智能助手页：Claude Code 暖色（第一版）。只作用于聊天内容区；
    左侧主导航与会话列表的“选中/点击”统一用原始蓝色，避免同一列里两种强调色。 */
@@ -2363,8 +2435,8 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .chatconv-item.on .cc-title{color:var(--sel-ink)}
 #chatView .chatlog:has(.chatwelcome){display:block}
 #chatView .chatlog:has(.chatwelcome) .chatwelcome{margin:4vh auto 0;padding-bottom:20px}
-#chatView .chatwelcome h2{font-size:27px;line-height:1.3;font-weight:650;letter-spacing:-.4px;margin:0 0 8px}
-#chatView .chatwelcome p{font-size:14px;line-height:1.65;color:var(--ink-3);max-width:620px}
+#chatView .chatwelcome h2{font-size:calc(27px * var(--ui-fs, 1));line-height:1.3;font-weight:650;letter-spacing:-.4px;margin:0 0 8px}
+#chatView .chatwelcome p{font-size:calc(14px * var(--ui-fs, 1));line-height:1.65;color:var(--ink-3);max-width:620px}
 #chatView .cw-mark{width:44px;height:44px;border-radius:12px;background:var(--accent-soft);
   color:var(--accent-ink);box-shadow:none}
 #chatView .cw-card{border-radius:8px}
@@ -2377,14 +2449,14 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .mask{background:rgba(41,40,36,.34)}
 .dlg{border:1px solid var(--line);border-radius:14px;
   box-shadow:0 24px 64px rgba(41,40,36,.16);padding:24px 26px}
-.dlg h3{font-size:17px;font-weight:600;letter-spacing:-.01em}
-.dlg .db{font-size:14px;line-height:1.75}
+.dlg h3{font-size:calc(17px * var(--ui-fs, 1));font-weight:600;letter-spacing:-.01em}
+.dlg .db{font-size:calc(14px * var(--ui-fs, 1));line-height:1.75}
 .dlg .dbar{margin-top:22px;gap:9px}
 .mask.on .dlg{animation:tpDlgIn .18s cubic-bezier(.2,.7,.3,1) both}
 @keyframes tpDlgIn{from{opacity:0;transform:scale(.985)}to{opacity:1;transform:none}}
 .msel .msPanel,.morePanel,.batchPanel,.acctMenu{box-shadow:var(--shadow);
   border-color:var(--line);border-radius:10px}
-.toast{border-radius:8px;box-shadow:var(--shadow);font-size:12.5px}
+.toast{border-radius:8px;box-shadow:var(--shadow);font-size:calc(12.5px * var(--ui-fs, 1))}
 .toast.ok,.toast.danger,.toast.info{color:var(--surface)}
 .rp-unit-del:hover,.morePanel .clearRow .btn:hover,.dupwarn .btn:hover{
   background:var(--bad);border-color:var(--bad);color:var(--surface)}
@@ -2401,7 +2473,7 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
   linear-gradient(160deg,#eef2f8 0%,#e6ecf6 100%)}
 .loginbox{background:var(--surface);border:1px solid var(--line);
   border-radius:14px;box-shadow:0 24px 64px rgba(24,32,48,.16);padding:32px 30px 26px}
-.loginbrand{font-size:18px;font-weight:600}
+.loginbrand{font-size:calc(18px * var(--ui-fs, 1));font-weight:600}
 .logindot{background:var(--accent);border-radius:2px}
 .logininput{background:var(--surface-2);border-color:transparent}
 .logininput:focus{background:var(--surface);border-color:var(--accent-line)}
@@ -2441,8 +2513,8 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 }
 @media (max-width:720px){
   .dlg{padding:20px}
-  .dname{font-size:22px}
-  .rp-head h2{font-size:22px}
+  .dname{font-size:calc(22px * var(--ui-fs, 1))}
+  .rp-head h2{font-size:calc(22px * var(--ui-fs, 1))}
 }
 @media (prefers-reduced-motion: reduce){
   .mask.on .dlg{animation:none!important}
@@ -2503,14 +2575,14 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 /* ---------- 2. Sidebar ---------- */
 body{grid-template-columns:248px 1fr}
 .side{padding:18px 14px 12px;background:var(--nav);border-right:1px solid var(--line)}
-.sbrand{padding:4px 10px 20px;gap:11px;font-size:15.5px;letter-spacing:-.01em}
+.sbrand{padding:4px 10px 20px;gap:11px;font-size:calc(15.5px * var(--ui-fs, 1));letter-spacing:-.01em}
 .sbrand img{width:30px;height:30px;border-radius:9px;
   box-shadow:0 1px 2px rgba(0,0,0,.14),0 0 0 .5px rgba(0,0,0,.06)}
 .sbrand b{font-weight:600}
-.sgroup{padding:16px 12px 8px;font-size:10.5px;font-weight:600;
+.sgroup{padding:16px 12px 8px;font-size:calc(10.5px * var(--ui-fs, 1));font-weight:600;
   letter-spacing:.12em;color:var(--ink-3)}
 .side button{height:38px;padding:0 11px;gap:11px;border-radius:10px;
-  font-size:13.5px;color:var(--ink-2);
+  font-size:calc(13.5px * var(--ui-fs, 1));color:var(--ink-2);
   transition:background-color .2s var(--ease),color .2s var(--ease),
     box-shadow .2s var(--ease),transform .12s var(--ease)}
 .side button:hover{background:var(--fill-hover);color:var(--ink)}
@@ -2522,29 +2594,29 @@ body{grid-template-columns:248px 1fr}
 .acct{height:42px;padding:0 9px;border-radius:10px;
   transition:background-color .2s var(--ease)}
 .acct:hover{background:var(--fill-hover)}
-.acct .av{width:26px;height:26px;font-size:11px;font-weight:600;color:#fff;
+.acct .av{width:26px;height:26px;font-size:calc(11px * var(--ui-fs, 1));font-weight:600;color:#fff;
   background:var(--accent);box-shadow:none}
-.acct .txt b{font-size:13px}
-.acct .txt i{font-size:11px}
+.acct .txt b{font-size:calc(13px * var(--ui-fs, 1))}
+.acct .txt i{font-size:calc(11px * var(--ui-fs, 1))}
 .acctMenu{border:1px solid var(--line);border-radius:14px;background:var(--surface);
   box-shadow:var(--elev-2);padding:6px}
-.acctMenu button{height:34px;line-height:34px;border-radius:8px;font-size:13px}
+.acctMenu button{height:34px;line-height:34px;border-radius:8px;font-size:calc(13px * var(--ui-fs, 1))}
 .acctMenu button:hover{background:var(--fill-hover)}
-.acctMenu .ver{font-size:10.5px}
+.acctMenu .ver{font-size:calc(10.5px * var(--ui-fs, 1))}
 
 /* ---------- 3. Top bars / filters ---------- */
 .top{height:60px;padding:0 24px;gap:10px;background:var(--surface);
   border-bottom:1px solid var(--line)}
-.brand{font-size:14px;font-weight:600}
+.brand{font-size:calc(14px * var(--ui-fs, 1));font-weight:600}
 .search{width:300px;height:36px;padding:0 15px;border:1px solid transparent;
-  border-radius:999px;background:var(--surface-2);color:var(--ink);font-size:13px;
+  border-radius:999px;background:var(--surface-2);color:var(--ink);font-size:calc(13px * var(--ui-fs, 1));
   transition:background-color .2s var(--ease),border-color .2s var(--ease),
     box-shadow .2s var(--ease)}
 .search::placeholder{color:var(--ink-3)}
 .search:hover{border-color:var(--line)}
 .search:focus{background:var(--surface);border-color:var(--accent);box-shadow:var(--ring)}
 .sel,.msel > .msbtn,.vsel,.stagesel{height:36px;padding:0 13px;border:1px solid transparent;
-  border-radius:999px;background:var(--surface-2);color:var(--ink-2);font-size:13px;
+  border-radius:999px;background:var(--surface-2);color:var(--ink-2);font-size:calc(13px * var(--ui-fs, 1));
   transition:background-color .2s var(--ease),border-color .2s var(--ease),
     color .2s var(--ease),box-shadow .2s var(--ease)}
 .sel:hover,.msel > .msbtn:hover,.vsel:hover,.stagesel:hover{
@@ -2553,8 +2625,8 @@ body{grid-template-columns:248px 1fr}
   border-color:var(--accent);box-shadow:var(--ring)}
 .msel > .msbtn.active{background:var(--accent-soft);border-color:transparent;
   color:var(--accent-ink)}
-.count{font-size:12px;color:var(--ink-3);letter-spacing:.01em}
-.count b{font-size:15px;font-weight:600;color:var(--ink)}
+.count{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);letter-spacing:.01em}
+.count b{font-size:calc(15px * var(--ui-fs, 1));font-weight:600;color:var(--ink)}
 .vdiv{height:16px;background:var(--line)}
 .top2{padding:9px 20px;gap:6px;background:var(--surface);border-bottom:1px solid var(--line)}
 .jobbar,.archbar{padding:9px 24px;background:var(--surface);border-color:var(--line)}
@@ -2562,7 +2634,7 @@ body{grid-template-columns:248px 1fr}
 .tabs{display:flex;flex-wrap:wrap;gap:2px;padding:3px;border-radius:999px;
   background:var(--surface-2)}
 .tabs button{padding:5px 14px;border:1px solid transparent;border-radius:999px;
-  background:transparent;color:var(--ink-2);font-size:12.5px;
+  background:transparent;color:var(--ink-2);font-size:calc(12.5px * var(--ui-fs, 1));
   transition:background-color .2s var(--ease),color .2s var(--ease),
     box-shadow .2s var(--ease)}
 .tabs button:hover{background:var(--fill-hover);color:var(--ink)}
@@ -2571,7 +2643,7 @@ body{grid-template-columns:248px 1fr}
 
 /* ---------- 4. Buttons ---------- */
 .btn{height:34px;padding:0 15px;border:1px solid transparent;border-radius:999px;
-  background:var(--surface-2);color:var(--ink);font-size:13px;font-weight:500;
+  background:var(--surface-2);color:var(--ink);font-size:calc(13px * var(--ui-fs, 1));font-weight:500;
   line-height:1.2;transition:background-color .2s var(--ease),color .2s var(--ease),
     border-color .2s var(--ease),transform .12s var(--ease),box-shadow .2s var(--ease)}
 .btn:hover{background:var(--line);border-color:transparent;color:var(--ink)}
@@ -2587,9 +2659,9 @@ body{grid-template-columns:248px 1fr}
   color:var(--bad);font-weight:500}
 .btn-danger:hover,.btn.danger:hover{background:var(--bad-line);border-color:transparent;
   color:var(--bad)}
-.btn.sm{height:28px;padding:0 11px;font-size:12px}
-.btn-lg{height:36px;padding:0 16px;font-size:13.5px}
-.top2 .btn-lg{height:32px;padding:0 11px;font-size:12px}
+.btn.sm{height:28px;padding:0 11px;font-size:calc(12px * var(--ui-fs, 1))}
+.btn-lg{height:36px;padding:0 16px;font-size:calc(13.5px * var(--ui-fs, 1))}
+.top2 .btn-lg{height:32px;padding:0 11px;font-size:calc(12px * var(--ui-fs, 1))}
 .btn:disabled{opacity:.38;cursor:not-allowed;transform:none}
 .btn.busy{border-color:var(--accent-line);color:var(--accent-ink);
   background:var(--accent-soft)}
@@ -2601,13 +2673,13 @@ body{grid-template-columns:248px 1fr}
 .seg{display:inline-flex;gap:2px;padding:3px;border:0;border-radius:999px;
   background:var(--surface-2);overflow:visible}
 .seg button{border:0;border-right:0;border-radius:999px;background:transparent;
-  color:var(--ink-2);padding:5px 14px;font-size:12.5px;
+  color:var(--ink-2);padding:5px 14px;font-size:calc(12.5px * var(--ui-fs, 1));
   transition:background-color .2s var(--ease),color .2s var(--ease),
     box-shadow .2s var(--ease)}
 .seg button:hover{background:var(--fill-hover);color:var(--ink)}
 .seg button.on{background:var(--surface);color:var(--ink);font-weight:600;
   box-shadow:var(--elev)}
-.tier-sec .seg button{font-size:13.5px;padding:6px 18px}
+.tier-sec .seg button{font-size:calc(13.5px * var(--ui-fs, 1));padding:6px 18px}
 
 /* ---------- 5. Inputs ---------- */
 input:not([type=checkbox]):not([type=radio]),select,textarea{
@@ -2633,18 +2705,18 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .row.on{background:var(--accent-soft)}
 .rowbar{width:3px;min-height:38px;border-radius:999px}
 .row.on .rowbar{background:var(--accent)}
-.row .nm{font-size:14.5px;font-weight:600;letter-spacing:-.01em}
-.row .sub{font-size:12.5px;color:var(--ink-3)}
-.av{width:30px;height:30px;background:var(--surface-2);font-size:11.5px}
+.row .nm{font-size:calc(14.5px * var(--ui-fs, 1));font-weight:600;letter-spacing:-.01em}
+.row .sub{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3)}
+.av{width:30px;height:30px;background:var(--surface-2);font-size:calc(11.5px * var(--ui-fs, 1))}
 .pager{padding:10px 14px;background:var(--surface);border-top:1px solid var(--line);
-  font-size:12px;color:var(--ink-3);gap:6px 10px}
-.pager .btn{height:28px;padding:0 11px;font-size:12px}
+  font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);gap:6px 10px}
+.pager .btn{height:28px;padding:0 11px;font-size:calc(12px * var(--ui-fs, 1))}
 .pgjumpwrap{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
 .pgbreak{flex-basis:100%;width:0;height:0;margin:0;padding:0}
 .pgwrap .pg,.ppager .pg,.pgjump{border-radius:8px;border-color:var(--line);
   background:var(--surface)}
-.tier{border-radius:999px;font-size:11.5px;font-weight:600}
-.empty{padding:36px 18px;color:var(--ink-3);font-size:13px}
+.tier{border-radius:999px;font-size:calc(11.5px * var(--ui-fs, 1));font-weight:600}
+.empty{padding:36px 18px;color:var(--ink-3);font-size:calc(13px * var(--ui-fs, 1))}
 .listmask{background:rgba(0,0,0,.22)}
 
 /* ---------- 7. Detail ---------- */
@@ -2654,49 +2726,49 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
   border-bottom:1px solid var(--line);box-shadow:none}
 .detail.swap > *:not(.detail-toolbar){animation:appleViewIn .32s var(--ease-out) both}
 .profile-head{margin-top:24px}
-.dname{font-size:28px;font-weight:650;letter-spacing:-.03em;line-height:1.22}
+.dname{font-size:calc(28px * var(--ui-fs, 1));font-weight:650;letter-spacing:-.03em;line-height:1.22}
 .av-lg{width:104px;height:104px;border:0;border-radius:18px;background:var(--surface-2);
-  box-shadow:0 1px 3px rgba(0,0,0,.08);font-size:32px}
-.dmeta{font-size:14px;gap:8px 12px;color:var(--ink-2)}
-#detail .dmeta .chipl{font-size:14px}
+  box-shadow:0 1px 3px rgba(0,0,0,.08);font-size:calc(32px * var(--ui-fs, 1))}
+.dmeta{font-size:calc(14px * var(--ui-fs, 1));gap:8px 12px;color:var(--ink-2)}
+#detail .dmeta .chipl{font-size:calc(14px * var(--ui-fs, 1))}
 .dmeta .edv{background:var(--surface-2);border:1px solid transparent;border-radius:999px;
-  padding:4px 12px;font-size:13.5px}
+  padding:4px 12px;font-size:calc(13.5px * var(--ui-fs, 1))}
 .dmeta .edv:hover{background:var(--accent-soft);border-color:transparent;
   color:var(--accent-ink)}
 .dmeta .edv.empty{color:var(--ink-3)}
 .dmeta.dmeta2{margin-top:12px}
-#detail .dmeta.dmeta2 .chipl{font-size:13px;font-weight:600;padding:4px 12px;
+#detail .dmeta.dmeta2 .chipl{font-size:calc(13px * var(--ui-fs, 1));font-weight:600;padding:4px 12px;
   border:1px solid transparent;border-radius:999px;background:var(--surface-2);
   color:var(--ink-2)}
 .dmeta.dmeta2 .stagechip{background:var(--accent-soft);border-color:transparent;
   color:var(--accent-ink)}
 .dmeta.dmeta2 .offerchip{background:var(--ok-soft);border-color:transparent;color:var(--ok)}
-.dmeta.dmeta2 .ochip{font-size:13px;padding:4px 12px}
+.dmeta.dmeta2 .ochip{font-size:calc(13px * var(--ui-fs, 1));padding:4px 12px}
 .fdsep{background:var(--line-2)}
 .vsep{background:var(--line)}
 
 /* sections */
 .sec{margin-top:30px}
-.sec > h3,#detail .sec > h3{font-size:17px;font-weight:600;letter-spacing:-.015em;
+.sec > h3,#detail .sec > h3{font-size:calc(17px * var(--ui-fs, 1));font-weight:600;letter-spacing:-.015em;
   color:var(--ink);border-bottom:1px solid var(--line);padding-bottom:10px;
   margin-bottom:14px}
 .sec.tier-sec{margin-top:24px}
-.sec.tier-sec > h3{font-size:17px;border-bottom:0;padding-bottom:0;margin-bottom:10px}
-.profile-layout{gap:0 32px;font-size:14px}
-.profile-layout .sec > h3{font-size:15px}
-#detail .ev{font-size:14px;line-height:1.75;background:var(--surface-2);
+.sec.tier-sec > h3{font-size:calc(17px * var(--ui-fs, 1));border-bottom:0;padding-bottom:0;margin-bottom:10px}
+.profile-layout{gap:0 32px;font-size:calc(14px * var(--ui-fs, 1))}
+.profile-layout .sec > h3{font-size:calc(15px * var(--ui-fs, 1))}
+#detail .ev{font-size:calc(14px * var(--ui-fs, 1));line-height:1.75;background:var(--surface-2);
   border-left:0;border-radius:12px;padding:12px 14px;color:var(--ink-2)}
 #detail .sec .ev b{color:var(--ink);font-weight:600}
-#detail .sum{font-size:15.5px;font-weight:500;line-height:1.7;color:var(--ink)}
-#detail .sec.quiet > h3{font-size:14px;letter-spacing:0;color:var(--ink-2)}
-#detail .sec.quiet .ev{font-size:13px;background:var(--surface-2)}
+#detail .sum{font-size:calc(15.5px * var(--ui-fs, 1));font-weight:500;line-height:1.7;color:var(--ink)}
+#detail .sec.quiet > h3{font-size:calc(14px * var(--ui-fs, 1));letter-spacing:0;color:var(--ink-2)}
+#detail .sec.quiet .ev{font-size:calc(13px * var(--ui-fs, 1));background:var(--surface-2)}
 .honosec .ev{background:var(--surface-2);border-radius:12px;padding:10px 13px}
 .proj-item{border-left:0;border-radius:14px;background:var(--surface-2);
   padding:12px 14px}
 .proj-dir{border:0;border-radius:12px;background:var(--accent-soft)}
 .proj-dir span{color:var(--accent-ink)}
 .fgroup{background:var(--surface-2);border-radius:14px;padding:14px 16px}
-.fgroup > h4{font-size:12.5px;font-weight:600;color:var(--ink-3);letter-spacing:.02em}
+.fgroup > h4{font-size:calc(12.5px * var(--ui-fs, 1));font-weight:600;color:var(--ink-3);letter-spacing:.02em}
 .ivqwrap{background:var(--surface-2);border-radius:14px;padding:14px 16px}
 .ivrow + .ivrow{border-top:1px solid var(--line)}
 .ivrow .multi{border-color:transparent;background:var(--surface-2);border-radius:10px}
@@ -2707,19 +2779,19 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 /* chips */
 .chipl,.jchip,.rk,.stg,.ochip,.achip,.jst,.prisk,.flagbad,.flagwarn,.flagneutral,
 .mchip,.tochip,.ivrow .mchip{border-radius:999px;border-color:transparent}
-.chipl{padding:3px 10px;font-size:12px;font-weight:500;background:var(--accent-soft);
+.chipl{padding:3px 10px;font-size:calc(12px * var(--ui-fs, 1));font-weight:500;background:var(--accent-soft);
   color:var(--accent-ink)}
 .chipl.gray{background:var(--surface-2);color:var(--ink-2)}
-.jchip{padding:2px 10px;font-size:12px;background:var(--surface-2);color:var(--ink-2)}
+.jchip{padding:2px 10px;font-size:calc(12px * var(--ui-fs, 1));background:var(--surface-2);color:var(--ink-2)}
 .jchip:hover{background:var(--accent-soft);color:var(--accent-ink);border-color:transparent}
-.rk{padding:2px 9px;font-size:12px;background:var(--accent-soft);color:var(--accent-ink)}
+.rk{padding:2px 9px;font-size:calc(12px * var(--ui-fs, 1));background:var(--accent-soft);color:var(--accent-ink)}
 .rk.none{background:transparent;color:var(--ink-3)}
-.stg,.jst{padding:3px 9px;font-size:11.5px}
-.ochip{padding:3px 11px;font-size:12.5px}
+.stg,.jst{padding:3px 9px;font-size:calc(11.5px * var(--ui-fs, 1))}
+.ochip{padding:3px 11px;font-size:calc(12.5px * var(--ui-fs, 1))}
 .achip{padding:2px 9px}
 .prisk{padding:2px 9px}
 .skill span{border:1px solid transparent;border-radius:999px;background:var(--surface-2);
-  padding:4px 11px;font-size:12.5px;color:var(--ink-2)}
+  padding:4px 11px;font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-2)}
 .skill .hit{background:var(--ok-soft);color:var(--ok);border-color:transparent}
 .skill .miss{background:var(--bad-soft);color:var(--bad);border-color:transparent}
 .skill .plain.unverified{background:transparent;border-style:dashed;border-color:var(--line-2)}
@@ -2745,26 +2817,26 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .thinkbox{background:transparent;border:0;border-radius:0;margin:0 0 18px;
   overflow:visible}
 .thinkbox > summary{display:flex;align-items:center;gap:6px;padding:3px 0;
-  font-size:13px;color:var(--ink-3);cursor:pointer;list-style:none}
+  font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3);cursor:pointer;list-style:none}
 .thinkbox > summary::-webkit-details-marker{display:none}
-.thinkbox > summary::before{content:'›';font-size:17px;line-height:1;
+.thinkbox > summary::before{content:'›';font-size:calc(17px * var(--ui-fs, 1));line-height:1;
   color:var(--ink-3);transition:transform .15s var(--ease)}
 .thinkbox[open] > summary::before{transform:rotate(90deg)}
 .thinkbox .think-body{margin:8px 0 0;padding:2px 0 2px 16px;
   border-left:2px solid var(--line-2);border-radius:0;
-  background:transparent;color:var(--ink-3);font-size:13px;
+  background:transparent;color:var(--ink-3);font-size:calc(13px * var(--ui-fs, 1));
   line-height:1.75;max-height:210px;overflow:auto;white-space:normal}
 .thinkbox .think-body p{margin:0 0 6px}
 .thinkbox .think-body p:last-child{margin-bottom:0}
 .think-live{display:block;margin:0 0 14px;padding:0;border:0;
   border-radius:0;background:transparent}
-.think-live-h{display:flex;align-items:center;gap:6px;font-size:12.5px;
+.think-live-h{display:flex;align-items:center;gap:6px;font-size:calc(12.5px * var(--ui-fs, 1));
   color:var(--ink-3);margin-bottom:6px}
-.think-live-h::before{content:'›';font-size:17px;line-height:1;
+.think-live-h::before{content:'›';font-size:calc(17px * var(--ui-fs, 1));line-height:1;
   color:var(--accent);transform:rotate(90deg)}
 .think-live .think-body{margin:0;padding:2px 0 2px 16px;
   border-left:2px solid var(--line-2);border-radius:0;
-  background:transparent;color:var(--ink-3);font-size:13px;
+  background:transparent;color:var(--ink-3);font-size:calc(13px * var(--ui-fs, 1));
   line-height:1.75;max-height:180px;overflow:auto;white-space:pre-wrap}
 .mchart{border:0;border-radius:14px;background:var(--surface-2)}
 .pvbox{border:0;border-radius:12px;background:var(--surface-2)}
@@ -2774,7 +2846,7 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .rawbox{border:0;border-radius:14px;overflow:hidden;box-shadow:0 0 0 1px var(--line)}
 .rawbox > summary{background:var(--surface-2);color:var(--ink-2)}
 .auditbox{border:0;border-radius:14px;overflow:hidden;box-shadow:0 0 0 1px var(--line)}
-.auditbox > summary{background:var(--surface-2);color:var(--ink-2);font-size:12.5px}
+.auditbox > summary{background:var(--surface-2);color:var(--ink-2);font-size:calc(12.5px * var(--ui-fs, 1))}
 .auditbox > summary:hover{background:var(--line)}
 .auditbox th{background:transparent;color:var(--ink-3);border-bottom:1px solid var(--line)}
 .auditbox td{border-bottom:1px solid var(--line)}
@@ -2798,7 +2870,7 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 /* ---------- 8. Overview / analysis ---------- */
 .ovcol,.ov-analysis,.stat{background:var(--surface-2);border:0;border-radius:18px;
   padding:20px 22px;box-shadow:none}
-.ovcol > h3{font-size:16px;font-weight:600;border-bottom:1px solid var(--line);
+.ovcol > h3{font-size:calc(16px * var(--ui-fs, 1));font-weight:600;border-bottom:1px solid var(--line);
   padding-bottom:12px;margin-bottom:14px}
 .ov-analysis{padding:20px 22px}
 .ana-workbench{background:transparent;border:0;border-radius:0;padding:0}
@@ -2811,20 +2883,20 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .ov-todos .todo:active{background:var(--fill-hover)}
 .ov-todos .todo:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .ov-todos .todo::after{content:'›';margin-left:auto;align-self:center;flex:none;
-  color:var(--ink-3);font-size:17px;line-height:1;
+  color:var(--ink-3);font-size:calc(17px * var(--ui-fs, 1));line-height:1;
   transition:color .15s var(--ease),transform .15s var(--ease)}
 .ov-todos .todo:hover::after{color:var(--accent);transform:translateX(2px)}
-.todo-t{font-size:14px}
-.todo-w{font-size:12.5px;color:var(--ink-2)}
-.todo-a{font-size:12.5px}
+.todo-t{font-size:calc(14px * var(--ui-fs, 1))}
+.todo-w{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-2)}
+.todo-a{font-size:calc(12.5px * var(--ui-fs, 1))}
 .stat{padding:16px 18px}
-.stat-n{font-size:30px;font-weight:600}
-.stat-l{font-size:12.5px;color:var(--ink-2)}
-.stat-h{font-size:11.5px;color:var(--ink-3)}
+.stat-n{font-size:calc(30px * var(--ui-fs, 1));font-weight:600}
+.stat-l{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-2)}
+.stat-h{font-size:calc(11.5px * var(--ui-fs, 1));color:var(--ink-3)}
 .ovjob-track{height:8px;background:var(--surface);border-radius:999px}
 .ovjob-track i{background:var(--accent);border-radius:999px}
-.ovjob-head{font-size:12px;color:var(--ink-2)}
-.lgitem{border-radius:8px;font-size:12.5px}
+.ovjob-head{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-2)}
+.lgitem{border-radius:8px;font-size:calc(12.5px * var(--ui-fs, 1))}
 .lgitem:hover{background:var(--fill-hover)}
 .anack{border-radius:999px;border-color:transparent;background:var(--surface)}
 .anack:hover{border-color:transparent;background:var(--fill-hover)}
@@ -2836,28 +2908,28 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 
 /* ---------- 9. Recruit progress ---------- */
 #recruitView.on{padding:28px 32px 56px;background:var(--ground)}
-.rp-head h2{font-size:28px;font-weight:650;letter-spacing:-.03em}
+.rp-head h2{font-size:calc(28px * var(--ui-fs, 1));font-weight:650;letter-spacing:-.03em}
 .rp-card,.rp-degree,.rp-health-card,.rp-wrap,.recruit-hero{background:var(--surface);
   border:0;border-radius:20px;box-shadow:0 0 0 1px var(--line)}
 .rp-card{padding:22px 24px}
 .rp-card::before{display:none}
-.rp-card .k{font-size:12.5px;color:var(--ink-3);font-weight:500;letter-spacing:.01em}
-.rp-card .v{font-size:36px;font-weight:650;letter-spacing:-.035em;margin-top:4px}
+.rp-card .k{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3);font-weight:500;letter-spacing:.01em}
+.rp-card .v{font-size:calc(36px * var(--ui-fs, 1));font-weight:650;letter-spacing:-.035em;margin-top:4px}
 .rp-degree{padding:18px 20px}
-.rp-degree .dt{font-size:15px;font-weight:600}
+.rp-degree .dt{font-size:calc(15px * var(--ui-fs, 1));font-weight:600}
 .recruit-hero{padding:28px 32px;border-radius:24px}
 .recruit-hero::after{display:none}
-.rh-ring-center b{font-size:40px;font-weight:650;letter-spacing:-.04em}
-.rh-ring-center span{font-size:12px;color:var(--ink-3)}
+.rh-ring-center b{font-size:calc(40px * var(--ui-fs, 1));font-weight:650;letter-spacing:-.04em}
+.rh-ring-center span{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3)}
 .rh-kpis{border-bottom-color:var(--line);padding-bottom:18px;margin-bottom:18px}
-.rh-v{font-size:30px;font-weight:650;letter-spacing:-.03em}
-.rh-k{font-size:11.5px;color:var(--ink-3);letter-spacing:.01em}
+.rh-v{font-size:calc(30px * var(--ui-fs, 1));font-weight:650;letter-spacing:-.03em}
+.rh-k{font-size:calc(11.5px * var(--ui-fs, 1));color:var(--ink-3);letter-spacing:.01em}
 .rh-degrees{border-top-color:var(--line);padding-top:16px}
 .rh-degree{border-left-color:var(--line)}
 .rh-dname{font-weight:600}
 .rp-tabs{display:inline-flex;gap:2px;border:0;background:var(--surface-2);
   border-radius:999px;padding:3px;margin-bottom:18px}
-.rp-tab{border:0;border-radius:999px;padding:7px 17px;font-size:13px;color:var(--ink-2);
+.rp-tab{border:0;border-radius:999px;padding:7px 17px;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-2);
   transition:background-color .2s var(--ease),color .2s var(--ease),
     box-shadow .2s var(--ease)}
 .rp-tab:hover{background:var(--fill-hover);color:var(--ink)}
@@ -2865,7 +2937,7 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
   box-shadow:var(--elev)}
 .rp-bar .btn,.rp-toolbar .btn{border-radius:999px}
 .rp-wrap{border-radius:18px}
-.rp-table th{background:var(--surface-2);color:var(--ink-3);font-size:11.5px;
+.rp-table th{background:var(--surface-2);color:var(--ink-3);font-size:calc(11.5px * var(--ui-fs, 1));
   font-weight:600;letter-spacing:.03em;padding:12px 10px;border-bottom:1px solid var(--line)}
 .rp-table th.plan{background:var(--surface-2);color:var(--warn)}
 .rp-table th.calc{background:var(--surface-2);color:var(--accent-ink)}
@@ -2877,7 +2949,7 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .rp-table tbody tr.unit-even.has-sign td.unit{background:var(--ok-hi)}
 .rp-table input.rp-num{border-radius:8px;border-color:transparent;background:var(--surface-2)}
 .rp-signee{background:var(--accent-soft);color:var(--accent-ink);border-radius:999px;
-  font-size:11.5px;padding:3px 9px}
+  font-size:calc(11.5px * var(--ui-fs, 1));padding:3px 9px}
 .rp-signee:hover{background:var(--accent-hi)}
 .rp-empty{border:1px dashed var(--line-2);background:var(--surface);border-radius:18px}
 .rp-health-card{padding:16px 18px}
@@ -2887,17 +2959,17 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 /* ---------- 10. Schedule ---------- */
 #scheduleView.on{padding:28px 32px 22px;background:var(--ground)}
 .sched-head{margin-bottom:16px}
-.sched-title{font-size:28px;font-weight:650;letter-spacing:-.03em}
-.sched-sub{font-size:12.5px;color:var(--ink-3)}
+.sched-title{font-size:calc(28px * var(--ui-fs, 1));font-weight:650;letter-spacing:-.03em}
+.sched-sub{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3)}
 .sched-tools .btn{border-radius:999px}
 .sched-month,.sched-week{border:0;border-radius:18px;background:var(--surface);
   box-shadow:0 0 0 1px var(--line);overflow:hidden}
-.sched-dow{background:var(--surface-2);color:var(--ink-3);font-size:11px;
+.sched-dow{background:var(--surface-2);color:var(--ink-3);font-size:calc(11px * var(--ui-fs, 1));
   font-weight:600;letter-spacing:.06em;border-color:var(--line);padding:10px 11px}
 .sched-cell{min-height:124px;border-color:var(--line);padding:7px 8px}
 .sched-cell.out{background:var(--surface-2)}
 .sched-cell.out .sched-daynum{color:var(--ink-3);opacity:.5}
-.sched-daynum{min-width:24px;height:24px;font-size:12.5px;font-weight:600}
+.sched-daynum{min-width:24px;height:24px;font-size:calc(12.5px * var(--ui-fs, 1));font-weight:600}
 .sched-cell.today .sched-daynum{background:var(--accent);color:#fff;
   box-shadow:0 2px 8px rgba(0,113,227,.35)}
 .sched-ev{border:0;border-left:0;border-radius:7px;background:var(--accent-soft);
@@ -2920,11 +2992,11 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .mform{padding:24px 28px 40px;background:var(--surface-2);
   border-right:1px solid var(--line)}
 .medit{padding:24px 30px 0;background:var(--surface)}
-.mform .sec > h3{font-size:15px}
-.mrow > label{font-size:12.5px;color:var(--ink-3)}
+.mform .sec > h3{font-size:calc(15px * var(--ui-fs, 1))}
+.mrow > label{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3)}
 .mrow input,.mrow select,.mrow > div > input,.mrow > div > select{
   height:38px;border-radius:10px;border-color:transparent;background:var(--surface);
-  font-size:13.5px}
+  font-size:calc(13.5px * var(--ui-fs, 1))}
 .mrow input:focus,.mrow select:focus,.mrow > div > input:focus,
 .mrow > div > select:focus{background:var(--surface);border-color:var(--accent);
   box-shadow:var(--ring)}
@@ -2936,7 +3008,7 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
   padding:16px 18px;line-height:1.75}
 .richeditor:focus,#mBody:focus{border-color:var(--accent);box-shadow:var(--ring)}
 .medit-actions{border-top:1px solid var(--line);background:var(--surface);padding:14px 0 18px}
-.tochip{font-size:14px;padding:5px 13px;border-radius:999px}
+.tochip{font-size:calc(14px * var(--ui-fs, 1));padding:5px 13px;border-radius:999px}
 .pv{border:0;border-radius:16px;box-shadow:0 0 0 1px var(--line)}
 .miss{border-radius:10px;background:var(--bad-soft);color:var(--bad)}
 .acList{border:0;border-radius:14px;box-shadow:var(--elev-2)}
@@ -2950,17 +3022,17 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 .orgleft .jobbar{border-top:1px solid var(--line);background:var(--surface)}
 #archView.on{grid-template-columns:400px 1fr;background:var(--surface)}
 #archBar{background:var(--surface);border-bottom:1px solid var(--line)}
-.jrowacts .btn{height:30px;padding:0 12px;font-size:12px}
+.jrowacts .btn{height:30px;padding:0 12px;font-size:calc(12px * var(--ui-fs, 1))}
 /* 岗位 JD：用满详情区宽度，短字段三列、长字段整行，标签在上方。 */
 .jdgroup{background:var(--surface-2);border-radius:16px;padding:16px 18px;margin-top:10px}
 .jdgrid{display:grid;grid-template-columns:1fr;gap:16px}
 .jdgrid-3{grid-template-columns:minmax(0,1.8fr) minmax(0,1fr) minmax(0,1fr)}
 .jdfield{display:flex;flex-direction:column;gap:7px;min-width:0;
-  font-size:12px;font-weight:500;color:var(--ink-3);letter-spacing:.01em}
+  font-size:calc(12px * var(--ui-fs, 1));font-weight:500;color:var(--ink-3);letter-spacing:.01em}
 .jdgroup .jdfield input,.jdgroup .jdfield select,.jdgroup .jdfield textarea{
   width:100%;min-width:0;height:40px;padding:0 12px;
   border:1px solid transparent;border-radius:10px;
-  background:var(--surface);color:var(--ink);font:inherit;font-size:14px;
+  background:var(--surface);color:var(--ink);font:inherit;font-size:calc(14px * var(--ui-fs, 1));
   outline:none;transition:background-color .2s var(--ease),border-color .2s var(--ease),
     box-shadow .2s var(--ease)}
 .jdgroup .jdfield textarea{height:auto;min-height:96px;padding:10px 12px;
@@ -2978,11 +3050,11 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
   box-shadow:none}
 .jdgroup .jdfield .jdinline:focus-within{border-color:var(--accent);
   box-shadow:var(--ring)}
-.jdinline i{font-style:normal;font-size:13px;color:var(--ink-3);white-space:nowrap;flex:none}
+.jdinline i{font-style:normal;font-size:calc(13px * var(--ui-fs, 1));color:var(--ink-3);white-space:nowrap;flex:none}
 .jdseg{display:flex;flex-wrap:wrap;gap:4px;padding:4px;border-radius:12px;
   background:var(--surface)}
 .jdseg-btn{border:0;border-radius:8px;background:transparent;padding:6px 10px;
-  font:inherit;font-size:12.5px;color:var(--ink-2);cursor:pointer;
+  font:inherit;font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-2);cursor:pointer;
   transition:background-color .15s var(--ease),color .15s var(--ease)}
 .jdseg-btn:hover{background:var(--fill-hover);color:var(--ink)}
 .jdseg-btn.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
@@ -3001,18 +3073,18 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
   background:var(--surface-2);cursor:pointer;transition:background-color .08s ease,border-color .08s ease}
 .tablepicker .tpc.on{background:var(--accent-soft);border-color:var(--accent)}
 .tablepicker .tpc.anchor{background:var(--accent);border-color:var(--accent)}
-.tablepicker .tplabel{font-size:12.5px;font-weight:600;color:var(--ink);margin-bottom:8px;
+.tablepicker .tplabel{font-size:calc(12.5px * var(--ui-fs, 1));font-weight:600;color:var(--ink);margin-bottom:8px;
   min-width:88px}
-.tablepicker .tphint{font-size:10.5px;color:var(--ink-3);margin-top:8px;line-height:1.4}
-.tblfield{display:flex;flex-direction:column;gap:7px;font-size:12.5px;
+.tablepicker .tphint{font-size:calc(10.5px * var(--ui-fs, 1));color:var(--ink-3);margin-top:8px;line-height:1.4}
+.tblfield{display:flex;flex-direction:column;gap:7px;font-size:calc(12.5px * var(--ui-fs, 1));
   color:var(--ink-3)}
 .tblfield input{height:40px;padding:0 12px;border:1px solid transparent;
-  border-radius:10px;background:var(--surface-2);font:inherit;font-size:14px;
+  border-radius:10px;background:var(--surface-2);font:inherit;font-size:calc(14px * var(--ui-fs, 1));
   color:var(--ink);outline:none}
 .tblfield input:focus{background:var(--surface);border-color:var(--accent);
   box-shadow:var(--ring)}
 .tblbar{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
-.tblhint{margin-top:16px;font-size:12.5px;line-height:1.75;color:var(--ink-3);
+.tblhint{margin-top:16px;font-size:calc(12.5px * var(--ui-fs, 1));line-height:1.75;color:var(--ink-3);
   white-space:normal}
 @media (max-width:720px){.tblform{grid-template-columns:1fr}}
 
@@ -3023,7 +3095,7 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
   box-shadow:0 0 0 1px var(--line)}
 .cfgsec > h3{border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:14px}
 .cfgsec .btn.sm{border-radius:999px}
-.crow > label{font-size:12.5px}
+.crow > label{font-size:calc(12.5px * var(--ui-fs, 1))}
 .crow input,.crow select,.crow textarea,.cinput input,.cinput select,.cinput textarea,
 .cval .ced{border-radius:10px;border-color:transparent;background:var(--surface-2);
   height:38px}
@@ -3037,8 +3109,8 @@ input[type=checkbox],input[type=radio]{accent-color:var(--accent)}
 #usersView{background:var(--ground)}
 .uwrap{max-width:980px;margin:28px 32px 48px;padding:24px 26px 32px;background:var(--surface);
   border-radius:20px;box-shadow:0 0 0 1px var(--line)}
-.uhead h3{font-size:20px;font-weight:600;letter-spacing:-.02em}
-.utable th{border-bottom:1px solid var(--line);color:var(--ink-3);font-size:11.5px;
+.uhead h3{font-size:calc(20px * var(--ui-fs, 1));font-weight:600;letter-spacing:-.02em}
+.utable th{border-bottom:1px solid var(--line);color:var(--ink-3);font-size:calc(11.5px * var(--ui-fs, 1));
   letter-spacing:.04em}
 .utable td{border-bottom:1px solid var(--line);padding:12px 10px}
 .utable tbody tr:hover td{background:var(--fill-hover)}
@@ -3059,10 +3131,10 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
 .prisk{border-radius:999px;background:var(--surface-2)}
 
 /* ---------- 15. Tables ---------- */
-.mdtable{border-collapse:separate;border-spacing:0;font-size:13px;
+.mdtable{border-collapse:separate;border-spacing:0;font-size:calc(13px * var(--ui-fs, 1));
   border-radius:12px;overflow:hidden;box-shadow:0 0 0 1px var(--line)}
 .mdtable th,.mdtable td{border:0;border-bottom:1px solid var(--line);padding:9px 12px}
-.mdtable th{background:var(--surface-2);color:var(--ink-3);font-size:11.5px;
+.mdtable th{background:var(--surface-2);color:var(--ink-3);font-size:calc(11.5px * var(--ui-fs, 1));
   font-weight:600;letter-spacing:.03em}
 .mdtable tr:last-child td{border-bottom:0}
 .mdtable tbody tr:nth-child(even){background:transparent}
@@ -3073,19 +3145,19 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
 #chatView.on{grid-template-columns:260px minmax(0,1fr) 320px;background:var(--surface)}
 .chatconv{background:var(--nav);border-right:1px solid var(--line)}
 .chatconv-head{padding:20px 16px 12px}
-.chatconv-head h3{font-size:13px;font-weight:600;color:var(--ink-3);letter-spacing:.02em}
+.chatconv-head h3{font-size:calc(13px * var(--ui-fs, 1));font-weight:600;color:var(--ink-3);letter-spacing:.02em}
 .chatconv-list{padding:0 10px 16px}
 .chatconv-item{border-radius:10px;padding:11px 32px 11px 11px;margin-bottom:2px;
   transition:background-color .18s var(--ease)}
 .chatconv-item:hover{background:var(--fill-hover)}
 .chatconv-item.on{background:var(--surface);box-shadow:var(--elev);color:var(--ink)}
 .chatconv-item.on .cc-title{color:var(--ink);font-weight:600}
-.cc-title{font-size:13px}
-.cc-meta{font-size:11px;color:var(--ink-3)}
+.cc-title{font-size:calc(13px * var(--ui-fs, 1))}
+.cc-meta{font-size:calc(11px * var(--ui-fs, 1));color:var(--ink-3)}
 .chatlog{padding:28px 32px}
 /* LLM 回复不套气泡、不限制宽度：像 Claude Code 一样直接铺满正文栏。 */
 .chatlog > *{max-width:none}
-.msg{border-radius:18px;padding:12px 17px;font-size:16px;line-height:1.72;
+.msg{border-radius:18px;padding:12px 17px;font-size:calc(16px * var(--ui-fs, 1));line-height:1.72;
   border:1px solid transparent}
 .msg.assistant{background:transparent;border-color:transparent;
   border-radius:0;box-shadow:none;padding:0 0 2px;margin-bottom:20px;
@@ -3097,39 +3169,39 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
 .msg:hover .msg-actions,.msg:focus-within .msg-actions{opacity:1}
 .msg.user .msg-actions{justify-content:flex-end}
 .msg.assistant .msg-actions{justify-content:flex-start}
-.msg-actions .mdt-btn{font-size:11.5px;padding:2px 9px}
+.msg-actions .mdt-btn{font-size:calc(11.5px * var(--ui-fs, 1));padding:2px 9px}
 .msg.user .msg-edit{width:min(560px,70vw);min-height:64px;padding:10px 12px;
   border:1px solid var(--accent);border-radius:14px;background:var(--surface);
-  color:var(--ink);font:inherit;font-size:14.5px;line-height:1.65;resize:vertical;
+  color:var(--ink);font:inherit;font-size:calc(14.5px * var(--ui-fs, 1));line-height:1.65;resize:vertical;
   outline:none;box-shadow:var(--ring)}
 .msg.user .msg-edit-actions{justify-content:flex-end}
-#chatView .msg h3{font-size:17px;font-weight:600;letter-spacing:-.015em}
-#chatView .msg h4{font-size:15.5px;font-weight:600}
+#chatView .msg h3{font-size:calc(17px * var(--ui-fs, 1));font-weight:600;letter-spacing:-.015em}
+#chatView .msg h4{font-size:calc(15.5px * var(--ui-fs, 1));font-weight:600}
 #chatView .msg code{background:var(--surface);border-radius:6px}
 #chatView .msg pre{background:var(--surface);border-radius:12px;padding:12px 14px}
 #chatView .msg blockquote{border-left:3px solid var(--line-2)}
 .chatwelcome{max-width:780px}
-#chatView .chatwelcome h2{font-size:32px;font-weight:700;letter-spacing:-.035em;
+#chatView .chatwelcome h2{font-size:calc(32px * var(--ui-fs, 1));font-weight:700;letter-spacing:-.035em;
   line-height:1.18;margin-bottom:10px}
-#chatView .chatwelcome p{font-size:14px;line-height:1.7;color:var(--ink-3)}
+#chatView .chatwelcome p{font-size:calc(14px * var(--ui-fs, 1));line-height:1.7;color:var(--ink-3)}
 #chatView .cw-mark{display:none}
 #chatView .cw-asks{gap:10px}
 /* AI 产出标记保持克制：灰底小标签，不用强调色。 */
 .projectsec .ai-tag{background:var(--surface-2);border-color:transparent;
-  color:var(--ink-3);font-weight:500;font-size:11px;padding:1px 8px}
+  color:var(--ink-3);font-weight:500;font-size:calc(11px * var(--ui-fs, 1));padding:1px 8px}
 #chatView .cw-card{background:var(--surface-2);border:0;border-radius:16px;
   padding:15px 17px;transition:background-color .22s var(--ease),
     box-shadow .22s var(--ease),transform .22s var(--ease)}
 #chatView .cw-card:hover{background:var(--surface);border-color:transparent;
   transform:translateY(-2px);box-shadow:var(--elev-card)}
-#chatView .cw-card .cw-q{font-size:13.5px;line-height:1.55}
-.cw-w{font-size:11.5px;color:var(--ink-3)}
+#chatView .cw-card .cw-q{font-size:calc(13.5px * var(--ui-fs, 1));line-height:1.55}
+.cw-w{font-size:calc(11.5px * var(--ui-fs, 1));color:var(--ink-3)}
 .cw-config .btn{background:transparent;color:var(--ink-3)}
 .cw-config .btn:hover{background:var(--fill-hover);color:var(--ink)}
 .chatinput{background:var(--surface);border-top:1px solid var(--line);
   padding:14px 32px 22px}
 .chatinput textarea{border:1px solid transparent;border-radius:20px;
-  background:var(--surface-2);padding:14px 64px 16px 16px;font-size:14.5px;
+  background:var(--surface-2);padding:14px 64px 16px 16px;font-size:calc(14.5px * var(--ui-fs, 1));
   line-height:1.7;transition:background-color .2s var(--ease),
     border-color .2s var(--ease),box-shadow .2s var(--ease)}
 .chatinput textarea:focus{background:var(--surface);border-color:var(--accent);
@@ -3157,13 +3229,13 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   background:var(--accent);margin-right:5px;vertical-align:1px}
 .chatside{background:var(--nav);border-left:1px solid var(--line);padding:20px}
 .chatside .sec{margin-top:24px}
-.chatside .sec > h3{font-size:14px;font-weight:600;letter-spacing:0;color:var(--ink-3);
+.chatside .sec > h3{font-size:calc(14px * var(--ui-fs, 1));font-weight:600;letter-spacing:0;color:var(--ink-3);
   border-bottom:0;padding-bottom:0;margin:0 0 9px}
-.chatside .sec > h3 .hint{font-size:11px;font-weight:400}
+.chatside .sec > h3 .hint{font-size:calc(11px * var(--ui-fs, 1));font-weight:400}
 .ctxbar{height:9px;border-radius:999px;background:var(--surface-2)}
-.ctxrow{font-size:12px}
+.ctxrow{font-size:calc(12px * var(--ui-fs, 1))}
 .ask{border:0;border-radius:999px;background:var(--surface-2);color:var(--ink-2);
-  font-size:12.5px;padding:6px 14px}
+  font-size:calc(12.5px * var(--ui-fs, 1));padding:6px 14px}
 .ask:hover{background:var(--fill-hover);border-color:transparent;color:var(--ink)}
 /* The assistant page now uses the same Apple Blue accent as the rest of the app. */
 #chatView .chatwrap{--accent:#0071e3;--accent-ink:#0066cc;--accent-soft:#eaf4ff;
@@ -3184,8 +3256,8 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
 .mask{background:rgba(0,0,0,.32)}
 .dlg{background:var(--surface);border:0;border-radius:22px;padding:26px 28px;
   box-shadow:0 30px 90px rgba(0,0,0,.28)}
-.dlg h3{font-size:20px;font-weight:600;letter-spacing:-.02em;margin-bottom:14px}
-.dlg .db{font-size:14px;line-height:1.72;color:var(--ink-2)}
+.dlg h3{font-size:calc(20px * var(--ui-fs, 1));font-weight:600;letter-spacing:-.02em;margin-bottom:14px}
+.dlg .db{font-size:calc(14px * var(--ui-fs, 1));line-height:1.72;color:var(--ink-2)}
 .dlg .dbar{margin-top:24px;gap:10px}
 .dlg .dbar .btn{height:36px;padding:0 18px}
 /* 弹窗内的自绘选项列表：和胶囊输入框同一套圆角、底色与强调色。 */
@@ -3193,7 +3265,7 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   padding:6px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}
 .pickrow{display:flex;align-items:center;gap:12px;width:100%;padding:12px 14px;
   border:0;border-radius:10px;background:transparent;text-align:left;font:inherit;
-  font-size:14px;color:var(--ink);cursor:pointer;
+  font-size:calc(14px * var(--ui-fs, 1));color:var(--ink);cursor:pointer;
   transition:background-color .15s var(--ease),color .15s var(--ease)}
 .pickrow:hover{background:var(--fill-hover)}
 .pickrow.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
@@ -3208,7 +3280,7 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   max-width:360px;outline:none}
 .selOpt{display:flex;align-items:center;gap:10px;width:100%;padding:9px 11px;
   border:0;border-radius:9px;background:transparent;text-align:left;font:inherit;
-  font-size:13px;color:var(--ink);cursor:pointer;white-space:nowrap;
+  font-size:calc(13px * var(--ui-fs, 1));color:var(--ink);cursor:pointer;white-space:nowrap;
   transition:background-color .14s var(--ease),color .14s var(--ease)}
 .selOpt > span:first-child{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .selOpt:hover{background:var(--fill-hover)}
@@ -3222,14 +3294,14 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
 .msel .msPanel,.morePanel,.acctMenu,.acList,.batchPanel{background:var(--surface);
   border:0;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.18),
     0 0 0 1px rgba(0,0,0,.04);padding:8px}
-.msItem{border-radius:9px;padding:7px 10px;font-size:12.5px}
+.msItem{border-radius:9px;padding:7px 10px;font-size:calc(12.5px * var(--ui-fs, 1))}
 .msItem:hover{background:var(--fill-hover)}
 .msItem input{accent-color:var(--accent)}
 .morePanel .clearRow{border-top:1px solid var(--line);padding-top:10px}
 #batchPanel .btn,#batchOpsPanel .btn{border-radius:8px;background:transparent}
 #batchPanel .btn:hover,#batchOpsPanel .btn:hover{background:var(--accent-soft);
   color:var(--accent-ink)}
-.toast{left:50%;bottom:30px;padding:11px 20px;border-radius:999px;font-size:13px;
+.toast{left:50%;bottom:30px;padding:11px 20px;border-radius:999px;font-size:calc(13px * var(--ui-fs, 1));
   background:rgba(29,29,31,.94);color:#fff;box-shadow:0 12px 32px rgba(0,0,0,.28);
   opacity:0;transform:translate(-50%,8px) scale(.98);
   transition:opacity .24s var(--ease),transform .24s var(--ease)}
@@ -3254,24 +3326,24 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   background:rgba(255,255,255,.9);border:1px solid rgba(255,255,255,.75);
   border-radius:26px;box-shadow:0 40px 100px rgba(0,0,0,.22),
     inset 0 1px 0 rgba(255,255,255,.85)}
-.loginbrand{font-size:20px;font-weight:600;letter-spacing:-.02em}
+.loginbrand{font-size:calc(20px * var(--ui-fs, 1));font-weight:600;letter-spacing:-.02em}
 .logindot{width:10px;height:10px;border-radius:3px;background:var(--accent);
   box-shadow:none}
-.loginlabel{font-size:12px;font-weight:500;color:var(--ink-3);margin-bottom:6px;
+.loginlabel{font-size:calc(12px * var(--ui-fs, 1));font-weight:500;color:var(--ink-3);margin-bottom:6px;
   letter-spacing:.01em}
 .logininput{height:44px;padding:0 14px;margin-bottom:16px;border-radius:12px;
-  background:rgba(0,0,0,.045);border:1px solid transparent;font-size:14px}
+  background:rgba(0,0,0,.045);border:1px solid transparent;font-size:calc(14px * var(--ui-fs, 1))}
 .logininput:focus{background:var(--surface);border-color:var(--accent);
   box-shadow:var(--ring)}
-.loginbtn{height:46px;border-radius:999px;font-size:15px;font-weight:600;
+.loginbtn{height:46px;border-radius:999px;font-size:calc(15px * var(--ui-fs, 1));font-weight:600;
   background:var(--accent-soft);border-color:transparent;color:var(--accent-ink);
   transition:background-color .2s var(--ease),transform .12s var(--ease)}
 .loginbtn:hover{background:var(--accent-hi)}
 .loginbtn:active{transform:scale(.985)}
 .loginremember{display:flex;align-items:center;gap:8px;margin:-4px 0 14px;
-  font-size:12.5px;color:var(--ink-3);cursor:pointer;user-select:none}
+  font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3);cursor:pointer;user-select:none}
 .loginremember input{width:15px;height:15px;margin:0;accent-color:var(--accent);flex:none}
-.loginhint{font-size:11.5px;color:var(--ink-3);margin-top:16px}
+.loginhint{font-size:calc(11.5px * var(--ui-fs, 1));color:var(--ink-3);margin-top:16px}
 #loginFirstHint{margin-top:16px}
 :root[data-theme="dark"] .loginbox{background:rgba(28,28,30,.76);
   border-color:rgba(255,255,255,.12);box-shadow:0 40px 100px rgba(0,0,0,.6),
@@ -3353,21 +3425,21 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
 }
 @media (max-width:720px){
   .dlg{padding:22px;border-radius:20px}
-  .dname{font-size:24px}
-  .rp-head h2,.sched-title,#chatView .chatwelcome h2{font-size:26px}
+  .dname{font-size:calc(24px * var(--ui-fs, 1))}
+  .rp-head h2,.sched-title,#chatView .chatwelcome h2{font-size:calc(26px * var(--ui-fs, 1))}
   .loginbox{padding:32px 24px 26px}
 }
 /* 输入框内置“+”上传：一个汉字大小、贴第一行左侧，不独占一行 */
 .chatwrap .chatinput textarea{padding-left:42px}
 .chatadd-inline{position:absolute;left:14px;top:14px;width:24px;height:24px;
   padding:0;border:0;background:transparent;color:var(--ink-3);
-  font-size:19px;line-height:22px;text-align:center;cursor:pointer;
+  font-size:calc(19px * var(--ui-fs, 1));line-height:22px;text-align:center;cursor:pointer;
   border-radius:8px;z-index:2}
 .chatadd-inline:hover{background:var(--fill-hover);color:var(--ink)}
 .chatadd-inline{user-select:none}
 .chatwrap .chatinput{padding-bottom:6px}
 /* 输入框下方的会话状态：居中一行（模式 / 对话轮数 / 整会话缓存命中率） */
-.chatstatus{padding:2px 24px 6px;text-align:center;font-size:13px;
+.chatstatus{padding:2px 24px 6px;text-align:center;font-size:calc(13px * var(--ui-fs, 1));
   color:var(--ink-3);line-height:1.5;min-height:19px}
 /* 上传卡片：图片即时预览；文档显示文件图标与解析进度 */
 .upload-card{display:flex;align-items:center;gap:10px;max-width:540px;
@@ -3375,11 +3447,11 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
   background:var(--surface-2)}
 .upload-thumb{width:56px;height:56px;border-radius:8px;object-fit:cover;flex:none;
   background:var(--surface)}
-.upload-file{display:flex;align-items:center;justify-content:center;font-size:24px}
+.upload-file{display:flex;align-items:center;justify-content:center;font-size:calc(24px * var(--ui-fs, 1))}
 .upload-info{min-width:0;flex:1}
-.upload-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;
+.upload-name{font-size:calc(13px * var(--ui-fs, 1));font-weight:600;white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}
-.upload-meta{font-size:12px;color:var(--ink-3);margin-top:2px}
+.upload-meta{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3);margin-top:2px}
 .upload-bar{height:4px;background:var(--fill-hover);border-radius:2px;
   margin-top:6px;overflow:hidden}
 .upload-bar i{display:block;height:100%;width:0;background:var(--accent);
@@ -3392,36 +3464,36 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
 #chatPending .upload-card{margin:0;max-width:300px;padding:5px 4px 5px 5px;
   border-radius:10px;gap:8px;background:var(--surface-2)}
 #chatPending .upload-thumb{width:38px;height:38px;border-radius:6px}
-#chatPending .upload-file{font-size:18px}
-#chatPending .upload-name{font-size:12px;max-width:180px}
-#chatPending .upload-meta{font-size:11px;margin-top:1px}
+#chatPending .upload-file{font-size:calc(18px * var(--ui-fs, 1))}
+#chatPending .upload-name{font-size:calc(12px * var(--ui-fs, 1));max-width:180px}
+#chatPending .upload-meta{font-size:calc(11px * var(--ui-fs, 1));margin-top:1px}
 #chatPending .upload-bar{height:3px;margin-top:3px}
-.upload-x{border:0;background:transparent;color:var(--ink-3);font-size:17px;
+.upload-x{border:0;background:transparent;color:var(--ink-3);font-size:calc(17px * var(--ui-fs, 1));
   line-height:1;padding:2px 5px;cursor:pointer;border-radius:6px;flex:none}
 .upload-x:hover{background:var(--fill-hover);color:var(--ink)}
 /* 发送后：附件缩略图跟在用户消息气泡内部，克制、不抢正文。 */
 .msg-atts{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
 .msg-att{display:inline-flex;align-items:center;gap:6px;max-width:240px;
   padding:3px 8px 3px 3px;border:1px solid var(--line);border-radius:10px;
-  background:var(--surface);font-size:12px;color:var(--ink-2)}
+  background:var(--surface);font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-2)}
 .msg-att img{width:34px;height:34px;border-radius:7px;object-fit:cover;flex:none}
 .msg-att .favi{width:34px;height:34px;display:flex;align-items:center;
   justify-content:center;border-radius:7px;background:var(--surface-2);
-  font-size:16px;flex:none}
+  font-size:calc(16px * var(--ui-fs, 1));flex:none}
 .msg-att .nm{max-width:175px;white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}
 /* 聊天附件「入库」：附件默认只解析、不入库，HR 点这个按钮才批准写入人才库。 */
 .upload-approve{flex:none;border:1px solid var(--line);border-radius:8px;
-  background:var(--surface);color:var(--ink-2);font-size:11.5px;line-height:1;
+  background:var(--surface);color:var(--ink-2);font-size:calc(11.5px * var(--ui-fs, 1));line-height:1;
   padding:5px 8px;cursor:pointer;white-space:nowrap}
 .upload-approve:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
 .upload-approve:disabled{opacity:.45;cursor:default}
 .upload-approve.ok{color:var(--ok);border-color:transparent;background:transparent}
 .msg-att-approve{flex:none;border:1px solid var(--line);border-radius:999px;
-  background:var(--surface-2);color:var(--ink-2);font-size:11px;line-height:1;
+  background:var(--surface-2);color:var(--ink-2);font-size:calc(11px * var(--ui-fs, 1));line-height:1;
   padding:3px 7px;cursor:pointer;white-space:nowrap}
 .msg-att-approve:hover{border-color:var(--accent);color:var(--accent)}
-.msg-att-ok{flex:none;font-size:11px;color:var(--ok);white-space:nowrap}
+.msg-att-ok{flex:none;font-size:calc(11px * var(--ui-fs, 1));color:var(--ok);white-space:nowrap}
 
 /* ---------- 22. Modern product UI refresh (2026-11-19) ----------
    目标：从“信息密集的后台表格”往现代产品界面靠 —— 更大的正文与控件、
@@ -3439,24 +3511,24 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){--ink-2:#d2d2d7;--ink-3:#98989d}
 }
-body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
+body{font-size:calc(15px * var(--ui-fs, 1));line-height:1.6;grid-template-columns:252px 1fr}
 .side{padding:16px 12px 12px}
-.sbrand{font-size:16px;padding:4px 10px 20px}
-.sgroup{font-size:11.5px;letter-spacing:.1em;padding:18px 12px 8px}
-.side button{height:42px;font-size:14px;gap:12px;border-radius:10px}
+.sbrand{font-size:calc(16px * var(--ui-fs, 1));padding:4px 10px 20px}
+.sgroup{font-size:calc(11.5px * var(--ui-fs, 1));letter-spacing:.1em;padding:18px 12px 8px}
+.side button{height:42px;font-size:calc(14px * var(--ui-fs, 1));gap:12px;border-radius:10px}
 .side button .ico{width:18px;height:18px}
 .acct{height:46px}
 .top{height:66px;padding:0 26px;gap:12px}
-.search{width:340px;height:40px;padding:0 16px;font-size:14px;
+.search{width:340px;height:40px;padding:0 16px;font-size:calc(14px * var(--ui-fs, 1));
   border-radius:var(--r-control)}
-.sel,.msel > .msbtn,.vsel,.stagesel{height:40px;padding:0 14px;font-size:14px;
+.sel,.msel > .msbtn,.vsel,.stagesel{height:40px;padding:0 14px;font-size:calc(14px * var(--ui-fs, 1));
   border-radius:var(--r-control)}
-.top .btn{height:38px;padding:0 18px;font-size:13.5px;border-radius:var(--r-control)}
-.count{font-size:13px}
-.count b{font-size:16px}
+.top .btn{height:38px;padding:0 18px;font-size:calc(13.5px * var(--ui-fs, 1));border-radius:var(--r-control)}
+.count{font-size:calc(13px * var(--ui-fs, 1))}
+.count b{font-size:calc(16px * var(--ui-fs, 1))}
 .vdiv{height:22px}
 .top2{padding:10px 22px;gap:7px;min-height:56px}
-.top2 .btn-lg{height:38px;padding:0 14px;font-size:14px;
+.top2 .btn-lg{height:38px;padding:0 14px;font-size:calc(14px * var(--ui-fs, 1));
   border-radius:var(--r-control)}
 /* 动作栏只保留两个“真主操作”的强调色，其余用中性按钮，减少一屏十几颗彩色胶囊。 */
 .top2 .btn{background:var(--surface);border:1px solid var(--line);
@@ -3475,7 +3547,7 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
 .top2-more{display:none}
 @media (max-width:1000px){
   .top2{padding:8px 12px;gap:5px}
-  .top2 .btn-lg{height:34px;padding:0 10px;font-size:13px}
+  .top2 .btn-lg{height:34px;padding:0 10px;font-size:calc(13px * var(--ui-fs, 1))}
   .top2 > .vdiv{display:none}
   .top2-more{display:block;flex:none}
   .top2-more > .morePanel{
@@ -3484,113 +3556,113 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
   }
   .top2-more > .morePanel .btn{
     width:100%;height:auto;justify-content:flex-start;text-align:left;
-    padding:8px 10px;font-size:13.5px;border:0;background:transparent;
+    padding:8px 10px;font-size:calc(13.5px * var(--ui-fs, 1));border:0;background:transparent;
   }
   .top2-more > .morePanel .allbox{width:100%;padding:8px 10px}
 }
-#topBar .btn.primary{font-size:14px}
-.allbox{font-size:13.5px;gap:7px}
+#topBar .btn.primary{font-size:calc(14px * var(--ui-fs, 1))}
+.allbox{font-size:calc(13.5px * var(--ui-fs, 1));gap:7px}
 .allbox input{width:16px;height:16px}
 .tabbar{padding:10px 24px}
 .tabs{gap:3px;padding:3px;border-radius:12px}
-.tabs button{padding:7px 16px;font-size:14px;border-radius:9px}
-.btn{height:36px;padding:0 16px;font-size:13.5px;border-radius:var(--r-control)}
-.btn.sm{height:30px;padding:0 12px;font-size:12.5px}
-.btn-lg{height:38px;padding:0 18px;font-size:14px}
+.tabs button{padding:7px 16px;font-size:calc(14px * var(--ui-fs, 1));border-radius:9px}
+.btn{height:36px;padding:0 16px;font-size:calc(13.5px * var(--ui-fs, 1));border-radius:var(--r-control)}
+.btn.sm{height:30px;padding:0 12px;font-size:calc(12.5px * var(--ui-fs, 1))}
+.btn-lg{height:38px;padding:0 18px;font-size:calc(14px * var(--ui-fs, 1))}
 .msel .msPanel{border-radius:12px;padding:6px}
-.msItem{font-size:14px;padding:8px 10px;border-radius:8px}
+.msItem{font-size:calc(14px * var(--ui-fs, 1));padding:8px 10px;border-radius:8px}
 .morePanel{border-radius:12px;gap:10px;padding:12px 14px}
-.morePanel .lbl{font-size:13.5px}
+.morePanel .lbl{font-size:calc(13.5px * var(--ui-fs, 1))}
 .morePanel .sel,.morePanel .msel > .msbtn{
-  width:180px;min-width:180px;max-width:180px;height:38px;font-size:14px}
+  width:180px;min-width:180px;max-width:180px;height:38px;font-size:calc(14px * var(--ui-fs, 1))}
 .morePanel .dateRange{height:38px}
-.morePanel .dateRange input{height:38px;font-size:14px}
+.morePanel .dateRange input{height:38px;font-size:calc(14px * var(--ui-fs, 1))}
 .wrap{grid-template-columns:392px 1fr}
 .list{padding:10px}
 .row{grid-template-columns:3px 18px 36px 1fr auto;gap:12px;
   padding:12px 14px 12px 0;border-radius:12px}
-.row .nm{font-size:15.5px}
-.row .sub{font-size:13px;line-height:1.5}
+.row .nm{font-size:calc(15.5px * var(--ui-fs, 1))}
+.row .sub{font-size:calc(13px * var(--ui-fs, 1));line-height:1.5}
 .row .sub .flagbad,.row .sub .flagwarn,.row .sub .flagneutral{
   margin-left:5px;vertical-align:1px}
 .row .rtags{display:flex;align-items:center;gap:4px;margin-top:4px;
   overflow:hidden;white-space:nowrap;min-width:0}
 .row .rtags .stg,.row .rtags .jchip,.row .rtags .ochip,
 .row .rtags .rtag-text{flex:none;margin:0}
-.row .rtags .rtag-text{font-size:12.5px;color:var(--ink-3);
+.row .rtags .rtag-text{font-size:calc(12.5px * var(--ui-fs, 1));color:var(--ink-3);
   overflow:hidden;text-overflow:ellipsis}
-.av{width:36px;height:36px;font-size:12px}
+.av{width:36px;height:36px;font-size:calc(12px * var(--ui-fs, 1))}
 .rowbar{min-height:42px}
-.tier{height:22px;min-width:24px;font-size:12px}
-.pager{font-size:13px;padding:12px 16px}
-.pager .btn{height:30px;font-size:12.5px}
+.tier{height:22px;min-width:24px;font-size:calc(12px * var(--ui-fs, 1))}
+.pager{font-size:calc(13px * var(--ui-fs, 1));padding:12px 16px}
+.pager .btn{height:30px;font-size:calc(12.5px * var(--ui-fs, 1))}
 .detail{padding:0 clamp(24px,3.2vw,44px) 64px}
 .detail > *{max-width:1200px}
 .detail-toolbar{padding:18px 0 14px}
-.dname{font-size:30px;letter-spacing:-.025em}
-.dmeta{font-size:15px;gap:8px 14px}
-#detail .dmeta .chipl{font-size:14.5px}
-.dmeta .edv{font-size:14px;padding:5px 13px}
+.dname{font-size:calc(30px * var(--ui-fs, 1));letter-spacing:-.025em}
+.dmeta{font-size:calc(15px * var(--ui-fs, 1));gap:8px 14px}
+#detail .dmeta .chipl{font-size:calc(14.5px * var(--ui-fs, 1))}
+.dmeta .edv{font-size:calc(14px * var(--ui-fs, 1));padding:5px 13px}
 .sec{margin-top:34px}
-.sec > h3,#detail .sec > h3{font-size:18px;padding-bottom:11px;margin-bottom:16px}
-.sec.tier-sec > h3{font-size:18px}
-.profile-layout{font-size:15px}
-#detail .ev{font-size:15px;line-height:1.8;padding:14px 16px}
-#detail .sum{font-size:16.5px;line-height:1.75}
-.kv{font-size:15px;grid-template-columns:104px 1fr;gap:9px 16px}
-.fgroup > h4{font-size:13px}
-.utable{font-size:14px}
-.utable th{font-size:13px}
+.sec > h3,#detail .sec > h3{font-size:calc(18px * var(--ui-fs, 1));padding-bottom:11px;margin-bottom:16px}
+.sec.tier-sec > h3{font-size:calc(18px * var(--ui-fs, 1))}
+.profile-layout{font-size:calc(15px * var(--ui-fs, 1))}
+#detail .ev{font-size:calc(15px * var(--ui-fs, 1));line-height:1.8;padding:14px 16px}
+#detail .sum{font-size:calc(16.5px * var(--ui-fs, 1));line-height:1.75}
+.kv{font-size:calc(15px * var(--ui-fs, 1));grid-template-columns:104px 1fr;gap:9px 16px}
+.fgroup > h4{font-size:calc(13px * var(--ui-fs, 1))}
+.utable{font-size:calc(14px * var(--ui-fs, 1))}
+.utable th{font-size:calc(13px * var(--ui-fs, 1))}
 .utable td{padding:11px 12px}
-.mdtable{font-size:14px}
+.mdtable{font-size:calc(14px * var(--ui-fs, 1))}
 .mdtable th,.mdtable td{padding:7px 10px}
-.rp-table{font-size:14.5px}
-.rp-table th{font-size:13px}
+.rp-table{font-size:calc(14.5px * var(--ui-fs, 1))}
+.rp-table th{font-size:calc(13px * var(--ui-fs, 1))}
 .rp-table td{padding:11px 10px}
 .dlg{padding:28px 30px;border-radius:18px}
-.dlg h3{font-size:21px}
-.dlg .db{font-size:15px;line-height:1.7}
-.toast{font-size:13.5px}
-.settingsbody{font-size:14.5px}
-.settingsbody .sec > h3{font-size:16px}
-.settingsnav h3{font-size:17px}
-.settingsnav button{font-size:14.5px;padding:11px 12px}
-.settingsclose{width:36px;height:36px;font-size:20px}
+.dlg h3{font-size:calc(21px * var(--ui-fs, 1))}
+.dlg .db{font-size:calc(15px * var(--ui-fs, 1));line-height:1.7}
+.toast{font-size:calc(13.5px * var(--ui-fs, 1))}
+.settingsbody{font-size:calc(14.5px * var(--ui-fs, 1))}
+.settingsbody .sec > h3{font-size:calc(16px * var(--ui-fs, 1))}
+.settingsnav h3{font-size:calc(17px * var(--ui-fs, 1))}
+.settingsnav button{font-size:calc(14.5px * var(--ui-fs, 1));padding:11px 12px}
+.settingsclose{width:36px;height:36px;font-size:calc(20px * var(--ui-fs, 1))}
 /* Mail composer form: same readable scale as the rest of the app. */
-.mform .sec > h3{font-size:16px}
-.mrow > label{width:72px;font-size:13.5px}
+.mform .sec > h3{font-size:calc(16px * var(--ui-fs, 1))}
+.mrow > label{width:72px;font-size:calc(13.5px * var(--ui-fs, 1))}
 .mrow input,.mrow select,.mrow > div > input,.mrow > div > select{
-  height:40px;font-size:14.5px}
-.mtool button{height:30px;font-size:13px}
-.richeditor,#mBody{font-size:15px;line-height:1.75}
-.tochip{font-size:14px}
+  height:40px;font-size:calc(14.5px * var(--ui-fs, 1))}
+.mtool button{height:30px;font-size:calc(13px * var(--ui-fs, 1))}
+.richeditor,#mBody{font-size:calc(15px * var(--ui-fs, 1));line-height:1.75}
+.tochip{font-size:calc(14px * var(--ui-fs, 1))}
 /* Overview labels were the smallest text left on the home screen. */
-.ovcol > h3{font-size:17px}
-.ov-jobs h3{font-size:15px}
-.ov-jobs .ov-jobs-note{font-size:13px}
-.rh-k{font-size:12.5px}
-.anaringtip{font-size:14px}
-.chatstatus{font-size:13.5px}
-.chatconv-head h3{font-size:15px;letter-spacing:0;color:var(--ink-2);flex:1}
-.cc-title{font-size:14px}
-.cc-meta{font-size:12.5px}
+.ovcol > h3{font-size:calc(17px * var(--ui-fs, 1))}
+.ov-jobs h3{font-size:calc(15px * var(--ui-fs, 1))}
+.ov-jobs .ov-jobs-note{font-size:calc(13px * var(--ui-fs, 1))}
+.rh-k{font-size:calc(12.5px * var(--ui-fs, 1))}
+.anaringtip{font-size:calc(14px * var(--ui-fs, 1))}
+.chatstatus{font-size:calc(13.5px * var(--ui-fs, 1))}
+.chatconv-head h3{font-size:calc(15px * var(--ui-fs, 1));letter-spacing:0;color:var(--ink-2);flex:1}
+.cc-title{font-size:calc(14px * var(--ui-fs, 1))}
+.cc-meta{font-size:calc(12.5px * var(--ui-fs, 1))}
 .cc-open{display:block;width:100%;padding:0;border:0;background:transparent;
   color:inherit;font:inherit;text-align:left;cursor:pointer}
 .cc-open .cc-title,.cc-open .cc-meta{display:block}
 .cc-open:focus-visible{outline:2px solid var(--accent);outline-offset:2px;
   border-radius:6px}
-.chatconv-empty{font-size:13px}
+.chatconv-empty{font-size:calc(13px * var(--ui-fs, 1))}
 .chatconv-item{padding:12px 32px 12px 12px;border-radius:10px}
 .chatconv-item:focus-within .cc-del,
 .chatconv-item:focus-within .cc-ren{opacity:1}
-.sgroup{font-size:12px}
-.acctMenu .ver{font-size:12px}
-.loginhint{font-size:12px}
-.tier{font-size:12.5px}
-.flagneutral,.flagbad,.flagwarn,.jchip,.ochip{font-size:12.5px}
-.sched-sub{font-size:13.5px}
-.sched-ev{font-size:13px}
-.sched-ev .meta{font-size:12px}
+.sgroup{font-size:calc(12px * var(--ui-fs, 1))}
+.acctMenu .ver{font-size:calc(12px * var(--ui-fs, 1))}
+.loginhint{font-size:calc(12px * var(--ui-fs, 1))}
+.tier{font-size:calc(12.5px * var(--ui-fs, 1))}
+.flagneutral,.flagbad,.flagwarn,.jchip,.ochip{font-size:calc(12.5px * var(--ui-fs, 1))}
+.sched-sub{font-size:calc(13.5px * var(--ui-fs, 1))}
+.sched-ev{font-size:calc(13px * var(--ui-fs, 1))}
+.sched-ev .meta{font-size:calc(12px * var(--ui-fs, 1))}
 /* 分区正文不再单独限宽：宽窗口下荣誉/备注/面试等 .ev 与项目卡片
    必须同宽；行长由外层 `.detail > *` 的 1200px 统一兜住。 */
 #detail .ev,#detail .sum{max-width:100%}
@@ -3610,14 +3682,14 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
   }
   .chatmobhead{display:flex;align-items:center;gap:8px;flex:none;
     padding:8px 14px;border-bottom:1px solid var(--line);background:var(--surface)}
-  .chatmobhead .btn{height:30px;font-size:12.5px}
+  .chatmobhead .btn{height:30px;font-size:calc(12.5px * var(--ui-fs, 1))}
   .chatconv-close{display:inline-flex;margin-left:0}
   .chatconvmask{position:absolute;inset:0;z-index:55;background:rgba(0,0,0,.24)}
   body.chatconv-open .chatconvmask{display:block}
 }
-.msg-att{font-size:12.5px}
-#chatView .chatwelcome h2{font-size:34px}
-#chatView .chatwelcome p{font-size:15px;line-height:1.7}
+.msg-att{font-size:calc(12.5px * var(--ui-fs, 1))}
+#chatView .chatwelcome h2{font-size:calc(34px * var(--ui-fs, 1))}
+#chatView .chatwelcome p{font-size:calc(15px * var(--ui-fs, 1));line-height:1.7}
 #selHint{display:none!important}
 /* 1173–1400 的常见窗口：搜索框的 340px 基础值会盖掉前面的 1280 响应式规则，
    把「概览·待办」和人数顶出右边界。这里统一收口：搜索框收窄，顶栏允许换行。 */
@@ -3640,7 +3712,7 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
   .top2 > .more,
   .top2 > .allbox{width:100%;min-width:0}
   .top2 > .btn{
-    height:auto;min-height:38px;padding:6px 10px;font-size:13.5px;
+    height:auto;min-height:38px;padding:6px 10px;font-size:calc(13.5px * var(--ui-fs, 1));
     line-height:1.25;white-space:normal;text-align:center;justify-content:center;
   }
   .top2 > .more > .btn{width:100%;justify-content:center}
@@ -3654,7 +3726,7 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
   body{grid-template-columns:220px 1fr}
   .wrap{grid-template-columns:360px 1fr}
   .side{padding:12px 8px 10px}
-  .sbrand{padding:4px 8px 16px;font-size:15px}
+  .sbrand{padding:4px 8px 16px;font-size:calc(15px * var(--ui-fs, 1))}
 }
 @media (max-width:1100px){
   body{grid-template-columns:64px 1fr}
@@ -3687,7 +3759,7 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
   position:static;width:32px;height:32px;min-width:32px;min-height:32px;
   margin:0 0 1px;padding:0;display:grid;place-items:center;
   border:0;border-radius:9px;background:transparent;color:var(--ink-3);
-  font-size:22px;line-height:1;font-weight:400;text-align:center;
+  font-size:calc(22px * var(--ui-fs, 1));line-height:1;font-weight:400;text-align:center;
   cursor:pointer;user-select:none;z-index:2;
   transition:background-color .16s var(--ease),color .16s var(--ease),
     transform .12s var(--ease);
@@ -3698,7 +3770,7 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
   flex:1;width:auto;min-height:calc(3 * 1.6em);
   max-height:calc(10 * 1.6em);
   padding:8px 2px 7px;border:0;border-radius:0;background:transparent;
-  box-shadow:none;font-size:15px;line-height:1.6;resize:none;
+  box-shadow:none;font-size:calc(15px * var(--ui-fs, 1));line-height:1.6;resize:none;
 }
 #chatView .ci-row textarea:focus{
   border:0;box-shadow:none;background:transparent;
@@ -3746,11 +3818,11 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
 }
 #chatView #chatPending .upload-info{min-width:0;width:100%}
 #chatView #chatPending .upload-name{
-  font-size:12px;font-weight:500;line-height:1.35;max-width:100%;
+  font-size:calc(12px * var(--ui-fs, 1));font-weight:500;line-height:1.35;max-width:100%;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 #chatView #chatPending .upload-meta{
-  font-size:10.5px;line-height:1.3;margin-top:1px;max-width:100%;
+  font-size:calc(10.5px * var(--ui-fs, 1));line-height:1.3;margin-top:1px;max-width:100%;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 #chatView #chatPending .upload-bar{
@@ -3759,12 +3831,12 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
 #chatView #chatPending .upload-x{
   position:absolute;top:3px;right:3px;width:18px;height:18px;padding:0;
   display:grid;place-items:center;border:0;border-radius:50%;
-  background:rgba(20,20,20,.55);color:#fff;font-size:13px;line-height:1;
+  background:rgba(20,20,20,.55);color:#fff;font-size:calc(13px * var(--ui-fs, 1));line-height:1;
   opacity:.9;z-index:3;
 }
 #chatView #chatPending .upload-x:hover{background:var(--bad);color:#fff}
 #chatView #chatPending .upload-approve{
-  width:100%;padding:3px 4px;font-size:10.5px;border-radius:7px;
+  width:100%;padding:3px 4px;font-size:calc(10.5px * var(--ui-fs, 1));border-radius:7px;
 }
 #chatView .msg-att .favi svg{
   width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;
@@ -3777,7 +3849,7 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
 @media (pointer:coarse){
   #chatView .chatadd-inline{width:40px;height:40px;min-width:40px;min-height:40px}
   #chatView .ci-row #chatSend{width:40px;height:40px;min-width:40px;min-height:40px}
-  #chatView #chatPending .upload-x{width:24px;height:24px;font-size:15px}
+  #chatView #chatPending .upload-x{width:24px;height:24px;font-size:calc(15px * var(--ui-fs, 1))}
 }
 
 /* ---------- 24. Assistant answer structure (2026-11-19) ----------
@@ -3794,8 +3866,8 @@ body{font-size:15px;line-height:1.6;grid-template-columns:252px 1fr}
   font-weight:650;
   line-height:1.45;
 }
-#chatView .msg h3{font-size:18px;letter-spacing:-.02em}
-#chatView .msg h4,#chatView .msg .md-sec{font-size:16.5px;letter-spacing:-.01em}
+#chatView .msg h3{font-size:calc(18px * var(--ui-fs, 1));letter-spacing:-.02em}
+#chatView .msg h4,#chatView .msg .md-sec{font-size:calc(16.5px * var(--ui-fs, 1));letter-spacing:-.01em}
 #chatView .msg h3::before,
 #chatView .msg h4::before,
 #chatView .msg .md-sec::before{

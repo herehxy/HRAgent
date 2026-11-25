@@ -28,10 +28,13 @@ import unicodedata
 from datetime import datetime, timedelta
 
 from . import univ as univ_mod  # noqa: PLC0415 — 院校层次识别（985/211/强势 标签）
+# 2026-11-23：院校的学科强项（如西电的通信/电子）。档案页只读权威名单，不调用模型。
+from . import school_subjects as subject_mod
 # v1.29：阶段与结论标签的唯一真源。顶层导入（`stages` 只依赖 paths，不反向依赖 db，无环）——
 # 阶段取值要在建表默认值、迁移、归档判定、统计口径里用到，延迟导入会变成"有时可用有时不可用"。
 from . import stages as stages_mod
 from . import tiers as tiers_mod
+from . import timeline as timeline_mod
 # v1.27：英语四六级归一。**顶层导入**（不延迟导入）——
 # `pipeline.extract` 只依赖 `net`/`normalize`，不反向依赖 db，不构成环；
 # 而延迟导入会让 `cet_level` 的口径在"有时可用有时不可用"之间摇摆。
@@ -71,6 +74,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     archived_at TEXT,                  -- 软归档时间戳（v1.4）：NULL=在库，非空=已归档
     note TEXT,                         -- 人工备注（v1.25.7）：HR 工作记录，不参与档位判定
     projects_json TEXT,                -- AI 提炼的项目经历（缓存；NULL=尚未提炼）
+    work_history_json TEXT,            -- 工作经历起止时间（v6.3.8；用于在读期间工作检查）
     created_at TEXT, updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_cand_bidx   ON candidates(phone_bidx, email_bidx);
@@ -1476,6 +1480,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             # 存 JSON 而不是建子表：一段教育经历只随简历抽取一次、只读不编辑，
             # 建表会带来主键/级联/合并不必要的复杂度；读时 `json.loads` 一次即可。
             "edu_history": "TEXT",
+            # v6.3.8：工作经历起止时间（LLM 抽取：org/title/start/end）。
+            # 只用于时间线检查（在读期间工作、教育断档期间是否工作），不参与评分。
+            "work_history_json": "TEXT",
         },
         # v1.5：待指定投递的「建议岗位」（轮询在招岗位取最适者，只建议不归岗）
         "applications": {
@@ -2221,9 +2228,9 @@ def insert_candidate(conn: sqlite3.Connection, rec: dict) -> int:
            (identity_key, name, gender, birth_year, phone_enc, email_enc, phone_bidx, email_bidx,
             edu_level, school, major, years_exp, current_org, source_first,
             first_seen_at, last_active_at, pool_status, pii_level, blind, grad_date, in_school, cet,
-            first_degree_school, edu_history,
+            first_degree_school, edu_history, work_history_json,
             created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (rec.get("identity_key"), rec.get("name"), rec.get("gender"), rec.get("birth_year"),
          rec.get("phone_enc"), rec.get("email_enc"), rec.get("phone_bidx"), rec.get("email_bidx"),
          rec.get("edu_level"), rec.get("school"), rec.get("major"), rec.get("years_exp"),
@@ -2244,6 +2251,7 @@ def insert_candidate(conn: sqlite3.Connection, rec: dict) -> int:
          rec.get("first_degree_school"),
          # v1.29.2：完整学历院校经历（本科/硕士/博士各一段）。JSON 字符串。
          rec.get("edu_history"),
+         rec.get("work_history_json"),
          stamp, stamp),
     )
     conn.commit()
@@ -2501,6 +2509,10 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
                     mail_from: str | None = None,
                     mail_body: str | None = None,
                     certificate: str | None = None,
+                    # 2026-11-25：性别下沉到这一层。部分工种明确要求男性/女性，
+                    # 名单导出、简历打包和 assistant 检索都必须能直接按性别筛；
+                    # 只在 server 层筛会出现"列表能筛、导出筛不了"。
+                    gender: str | None = None,
                     stage: str | None = None, pool_status: str | None = None,
                     needs_review: bool | None = None, include_merged: bool = False,
                     archived: bool | None = None, limit: int | None = None,
@@ -2525,6 +2537,14 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
     elif job_id:
         where.append("a.job_id = ?")
         args.append(job_id)
+    if gender:
+        _g = str(gender).strip()
+        if _g == "未标注":
+            # 与 `gender_matches` 同一口径：没写性别的档案不能因为筛选而消失。
+            where.append("COALESCE(TRIM(c.gender), '') = ''")
+        elif _g:
+            where.append("TRIM(c.gender) = ?")
+            args.append(_g)
     if stage:
         where.append("a.stage = ?")
         args.append(stage)
@@ -3023,6 +3043,13 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         "edu_history": _loads_edu_history(
             c.get("edu_history"),
             top_school=c.get("school"), top_degree=c.get("edu_level")),
+        # v6.3.8：工作经历起止时间 + 时间线问题（教育断档 / 在读期间工作）。
+        "work_history": _loads_work_history(c.get("work_history_json")),
+        "timeline_issues": timeline_mod.analyze_timeline(
+            _loads_edu_history(c.get("edu_history"),
+                               top_school=c.get("school"),
+                               top_degree=c.get("edu_level")),
+            _loads_work_history(c.get("work_history_json"))),
         # v1.29.4（业务方）：档案「教育经历」要标 985/211 —— 与列表层同一口径
         # （`list_candidates` 里早就有这两个字段，详情层此前漏了），
         # 最高学历院校与第一学历院校的层次在这里一并算好下发。
@@ -3039,6 +3066,12 @@ def candidate_detail(conn: sqlite3.Connection, cid: int) -> dict | None:
         "bachelor_qs": univ_mod.school_qs(c.get("first_degree_school") or ""),
         "uni_overseas": univ_mod.is_overseas(c.get("school") or ""),
         "bachelor_overseas": univ_mod.is_overseas(c.get("first_degree_school") or ""),
+        # 2026-11-23：院校的学科强项，**按对应的专业过滤**（最高学历按 major）。
+        # 只读权威名单，不在这里调用模型——档案页要快；模型补全只在分析时按需发生并缓存。
+        # 第一学历没有单独的专业字段，无法判断相关性，宁可不显示也不挂全校清单。
+        "school_subjects": subject_mod.subjects_for_major(
+            c.get("school") or "", c.get("major") or "")[:8],
+        "bachelor_subjects": [],
         # v1.29.4（业务方）：来源邮件（标题/发件人/收信时间）随档案下发，
         # 展示在「简历附件」上方；非邮件来源（文件夹/上传）为 None。
         "source_mail": _source_mail_of(conn, resume_docs),
@@ -4477,6 +4510,7 @@ AUDIT_FIELD_LABEL = {
     "cet": "英语四六级",
     "first_degree_school": "第一学历（本科）院校",
     "edu_history": "教育经历", "in_school": "在读状态",
+    "work_history_json": "工作经历",
 }
 
 
@@ -5137,6 +5171,32 @@ STAGE_ENDED = "已结束"
 _FINISHED_STAGES = tuple(stages_mod.terminal_stages()) or (STAGE_ENDED,)
 
 
+def _loads_work_history(raw) -> list:
+    """`candidates.work_history_json` → [{org,title,start,end}]；坏值给空列表。"""
+    if not raw:
+        return []
+    try:
+        v = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return []
+    out = []
+    for it in (v if isinstance(v, list) else []):
+        if not isinstance(it, dict):
+            continue
+        org = str(it.get("org") or "").strip()[:80]
+        title = str(it.get("title") or "").strip()[:60]
+        kind = str(it.get("kind") or "").strip()
+        if kind not in ("正式", "实习", "兼职", "不明"):
+            kind = "不明"
+        start = str(it.get("start") or "").strip()[:10]
+        end = str(it.get("end") or "").strip()[:10]
+        if org or title:
+            out.append({"org": org, "title": title, "kind": kind,
+                        "start": start, "end": end})
+    return out
+
+
+
 def _loads_edu_history(raw, *, top_school: str | None = None,
                        top_degree: str | None = None) -> list:
     """`candidates.edu_history`（JSON 字符串）→ 列表。坏值给空列表，绝不抛。
@@ -5179,6 +5239,11 @@ def _loads_edu_history(raw, *, top_school: str | None = None,
             # v2.23：境外院校补 QS 名次（软科主榜查不到海外校，会全部显示"无排名"）
             h["qs_no"] = univ_mod.school_qs(h.get("school") or "")
             h["overseas"] = univ_mod.is_overseas(h.get("school") or "")
+            # 2026-11-23：每段学历挂上**与这段专业相关**的学科强项。
+            # 不能下发全校强项清单：本科电子信息、硕士光学工程会显示同一串
+            # "电子/通信 A+"，看起来像专业被认错了（业务方反馈）。没有相关强项就不显示。
+            h["subjects"] = subject_mod.subjects_for_major(
+                h.get("school") or "", h.get("major") or "")[:6]
     # 清洗后同一段可能重名（"太原理工大学" 与 "在太原理工大学" 归一成同一条）→ 去重，
     # 按 (层次, 校名) 判；保留先出现的（简历里通常按时间倒序，前面那条更权威）。
     _top = univ_mod.clean_school_name(top_school) if top_school else ""

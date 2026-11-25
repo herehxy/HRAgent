@@ -723,6 +723,52 @@ def _edu_history_from_llm(raw, text: str) -> list[dict]:
     return out
 
 
+def _work_history_from_llm(raw, text: str) -> list[dict]:
+    """模型给的 `work_history` → [{org,title,kind,start,end}]。
+
+    只用于时间线检查（在读期间工作 / 教育断档期间是否在工作），不参与评分。
+    `kind` 由模型结合上下文判断（正式/实习/兼职/不明）；判断不出来时留“不明”，
+    交给界面提示 HR 复核，而不是用正则硬猜。
+    单位或岗位至少要有一个在原文里出现过；起止时间年份不在原文就留空，
+    不让模型编造时间段。
+    """
+    src = str(text or "")
+    src_norm = _norm_for_search(src)
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in (raw if isinstance(raw, list) else []):
+        if not isinstance(item, dict):
+            continue
+        org = str(item.get("org") or "").strip()[:80]
+        title = str(item.get("title") or "").strip()[:60]
+        if not org and not title:
+            continue
+        # 反幻觉：单位和岗位都不在原文里 → 整条丢掉
+        if org and org not in src and (not title or title not in src):
+            continue
+        if title and title not in src and (not org or org not in src):
+            continue
+        _k = str(item.get("kind") or "").strip()
+        kind = _k if _k in ("正式", "实习", "兼职", "不明") else "不明"
+        start = _norm_edu_date(item.get("start"))
+        end = _norm_edu_date(item.get("end"))
+        if start and start != "至今" and start[:4] not in src_norm:
+            start = ""
+        if end == "至今":
+            if not any(w in src_norm for w in ("至今", "现在", "目前", "迄今")):
+                end = ""
+        elif end and end[:4] not in src_norm:
+            end = ""
+        key = (org, start)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"org": org, "title": title, "kind": kind,
+                    "start": start, "end": end})
+    return out
+
+
+
 def _merge_edu_history(primary, fallback) -> list[dict]:
     """按「学历 + 学校」合并模型与规则结果；同项补空字段，不按学校粗暴去重。"""
     out: list[dict] = []
@@ -1115,6 +1161,9 @@ def extract_heuristic(text: str, jd: dict) -> dict:
             "first_degree_school": _find_first_degree_school(text),
             # v1.29.2：完整学历院校经历（规则通道兜底，模型不可用时至少给得出）
             "education_history": _edu_history_heuristic(text),
+            # 规则通道不强行解析工作经历（单位/职位写法太杂，容易误判）；
+            # 模型不可用时留空，时间线检查会明确标“缺工作经历时间”。
+            "work_history": [],
             "major": _find_major(text),
             "current_org": _find_org(text),
             "certificates": _find_certs(text),
@@ -1140,6 +1189,7 @@ _LLM_SYSTEM = (
     # v1.29.2（业务方要求）：学历院校经历要**完整**，不能只给最高那一所 ——
     # HR 看学校水平是从本科一路看到博士的，中间的研究生段丢了就没法判断。
     "education_history(数组，**教育经历里写了几段就给几段**，按时间先后；每项 {degree:大专/本科/硕士/博士, school:院校全名, major:专业, start:开始时间, end:结束时间}；start/end 统一写成 YYYY.MM，在读的结束时间写\"至今\"；简历原文没写起止时间就留空字符串，**不要按学制或推测补时间**；只写了一段就给一项，简历没写学历经历则输出空数组),\n"
+    "work_history(数组，**只列正式工作/实习经历**，按时间先后；每项 {org:单位全名, title:岗位/职位, kind:正式/实习/兼职/不明, start:开始时间, end:结束时间}；kind 必须结合简历上下文判断：暑期实习生、实习工程师等=实习，兼职=兼职，在职岗位=正式，看不出来=不明；start/end 统一写成 YYYY.MM，在职的结束时间写\"至今\"；简历原文没写起止时间就留空字符串，**不要推测**；没有工作经历则输出空数组),\n"
     "联合培养/合作办学/联合招生：education_history 每项的 school 必须填**学位授予/学籍所在单位**；联合培养单位放到 joint_school（可选）。"
     "同一学历同时出现「XX大学（联合培养硕士）」和「YY大学（硕士）」时，school 必须填 YY大学这种学位授予单位，"
     "绝不能因为 XX大学名气大/排名高就把它当 school。school 字段也遵守同一规则。\n"
@@ -1517,6 +1567,8 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
                 # v1.29.2：完整学历院校经历。**逐段校验校名在原文里**（与
                 # 其它基本信息同一道关）——编一个原文没有的院校比少抽一段严重。
                 "education_history": _edu_history_from_llm(clean.get("education_history"), text),
+                # v6.3.8：工作经历起止时间（只用于时间线检查，不参与评分）
+                "work_history": _work_history_from_llm(clean.get("work_history"), text),
                 "major": clean.get("major"),
                 "current_org": clean.get("current_org"),
                 "certificates": [c for c in (clean.get("certificates") or []) if isinstance(c, str)],
@@ -1543,6 +1595,7 @@ def extract(text: str, jd: dict, use_llm: bool = False, llm_conf: dict | None = 
             # 保留的只有：证据校验（反幻觉）、性别合规（不来自模型）、
             # 四六级证据自证、年限合理性质检 —— 这些是校验，不是另一套抽取。
             fields["education_history"] = _llm_fields.get("education_history") or []
+            fields["work_history"] = _llm_fields.get("work_history") or []
             fields["certificates"] = _llm_fields.get("certificates") or []
             fields["gender"] = _find_gender(text)
             fields["cet"] = cet_val

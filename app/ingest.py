@@ -36,6 +36,8 @@ import traceback
 import uuid
 from datetime import datetime
 
+from concurrent.futures import ThreadPoolExecutor
+
 from . import db
 from . import mailbox as mb
 from . import tiers as tiers_mod
@@ -503,6 +505,8 @@ def ensure_person(conn, cand: dict, channel: str, text: str,
         # 只随简历抽取一次、只读不编辑，建子表不划算（读时 loads 一次即可）。
         "edu_history": (json.dumps(_edu_hist or [], ensure_ascii=False)
                         if (_edu_hist := cand.get("education_history")) else None),
+        "work_history_json": (json.dumps(_wh or [], ensure_ascii=False)
+                              if (_wh := cand.get("work_history")) else None),
         "source_first": channel,
         "pii_level": classify_pii(text),
     }, insert_key)
@@ -1145,6 +1149,8 @@ def _apply_resume_fields(conn, cid: int, cand: dict, text: str) -> list[str]:
         "first_degree_school": (cand.get("first_degree_school")
                                 or (_bachelor.get("school") if _bachelor else None)),
         "edu_history": (json.dumps(edu_hist, ensure_ascii=False) if edu_hist else None),
+        "work_history_json": (json.dumps(cand.get("work_history"), ensure_ascii=False)
+                              if cand.get("work_history") else None),
     }
     # 联系方式也要随最新简历刷新（v6.0.0 审查 B10）。原白名单漏了
     # phone_enc/email_enc/phone_bidx/email_bidx：同一人换了手机或邮箱再投，
@@ -1312,7 +1318,9 @@ def reanalyze_full(conn, cfg: dict, jd_default: dict, tiers: dict, candidate_id:
             "first_degree_school": cand.get("first_degree_school"),
             # v1.29.2：完整学历院校经历同样重算（换了一份没写教育经历的简历就会空）
             "edu_history": (json.dumps(_eh or [], ensure_ascii=False)
-                            if (_eh := cand.get("education_history")) else None)}
+                            if (_eh := cand.get("education_history")) else None),
+            "work_history_json": (json.dumps(_wh2 or [], ensure_ascii=False)
+                                  if (_wh2 := cand.get("work_history")) else None)}
     changes: dict[str, list] = {}
     upd: dict = {}
     for k, v in want.items():
@@ -1940,6 +1948,117 @@ def resolve_source_dir(value: str | None, cfg: dict | None = None) -> str:
                      "（可在系统配置里改「导入文件夹」后再导入）")
 
 
+#: 入库/分析并发度（1–4）。默认 1 = 保留已验证的串行路径。
+#: 8GB 以上内存、SSD 的机器可在「系统配置 → 运行设置」调到 2–3；
+#: 并发只并行“解析 + 模型抽取”这类耗时等待，写库失败会自动退回串行。
+INGEST_CONCURRENCY_KEY = "ingest_concurrency"
+ANALYZE_CONCURRENCY_KEY = "analysis_concurrency"
+
+
+def _setting_int(db_path: str, key: str, default: int,
+                 lo: int = 1, hi: int = 4) -> int:
+    """读一个整数设置并夹到 [lo, hi]；读失败用默认值，绝不抛。"""
+    try:
+        conn = db.connect(db_path)
+        try:
+            v = int(db.get_setting(conn, key, default) or default)
+        finally:
+            conn.close()
+    except Exception:                                        # noqa: BLE001
+        v = default
+    return max(lo, min(hi, v))
+
+
+def ingest_concurrency(db_path: str) -> int:
+    return _setting_int(db_path, INGEST_CONCURRENCY_KEY, 1, 1, 4)
+
+
+def analyze_concurrency(db_path: str) -> int:
+    return _setting_int(db_path, ANALYZE_CONCURRENCY_KEY, 1, 1, 6)
+
+
+_DB_BUSY_MARKERS = ("locked", "readonly", "busy", "database is locked",
+                    "数据库", "无法访问")
+
+
+def _db_retry(fn, *args, **kwargs):
+    """执行一次写库操作；遇到 Windows WAL 常见的 locked/readonly 短暂冲突时重试。
+
+    并发入库时多个线程各自持连接写同一个库，偶发 `database is locked` /
+    `attempt to write a readonly database`。这类错误等几百毫秒就会恢复，
+    重试 3 次仍失败才交给上层（上层会把并发退回串行，不丢件）。
+    """
+    for attempt in range(3):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if attempt == 2 or not any(m in msg for m in _DB_BUSY_MARKERS):
+                raise
+            time.sleep(0.4 * (attempt + 1))
+
+
+def _ingest_dir_file(path: str, *, db_path: str, cfg: dict, jd: dict,
+                     tiers: dict, channel: str, job_id: int | None,
+                     use_llm: bool, llm_conf: dict | None, limit: int) -> dict:
+    """处理一个文件（**不共享连接**，每个并发线程自己开自己的）。
+
+    返回 `{"kind": added/merged/skipped_dup/oversize/failed, "detail": …,
+           "routed": bool, "parse_failed": bool}`，由调用方汇总，
+    这样串行与并发两条路共用同一份解析逻辑，不会长歪。
+    """
+    base = os.path.basename(path)
+    try:
+        size = _lp_size(path)
+    except OSError as exc:
+        return {"kind": "failed", "routed": False, "parse_failed": False,
+                "detail": {"file": base, "status": "failed",
+                           "notes": [f"读取文件失败：{exc}"]}}
+    if size > limit:
+        try:
+            _c = db.connect(db_path)
+            try:
+                db.add_audit(_c, "source_file", base, "oversize_skipped", "",
+                             f"{size} 字节 > {limit} 字节，未导入", "system", "system")
+            finally:
+                _c.close()
+        except Exception:                                    # noqa: BLE001
+            pass
+        return {"kind": "oversize", "routed": False, "parse_failed": False,
+                "detail": {"file": base, "status": "skipped_oversize", "size": size,
+                           "notes": [f"超过体积上限：{size / 1024 / 1024:.1f} MB > "
+                                     f"{limit // (1024 * 1024)} MB，未导入（文件仍在原处，未删）"]}}
+    conn = None
+    try:
+        conn = db.connect(db_path)
+        fj_id, fj_jd = _db_retry(db.match_job_by_subject, conn, base)
+        fmeta = subject_meta_mod.parse(base)
+        if not fj_id and fmeta["fields"].get("direction"):
+            fj_id, fj_jd = _db_retry(db.match_job_by_direction, conn,
+                                     fmeta["fields"]["direction"])
+        eff_job_id = fj_id if fj_id else job_id
+        eff_jd = fj_jd if fj_jd else jd
+        r = _db_retry(ingest_one, conn, cfg, eff_jd, tiers,
+                      filename=base, data=None, local_path=path,
+                      channel=channel, applied_at=db.now(), source_message_id=None,
+                      job_id=eff_job_id, use_llm=use_llm, llm_conf=llm_conf,
+                      subject_meta=fmeta)
+        kind = {"added": "added", "merged_version": "merged",
+                "skipped_dup": "skipped_dup"}.get(r["status"], "failed")
+        return {"kind": kind, "routed": bool(fj_id), "detail": r,
+                "parse_failed": bool(r.get("parse_failed"))}
+    except Exception as exc:                                 # noqa: BLE001
+        return {"kind": "failed", "routed": False, "parse_failed": False,
+                "detail": {"file": base, "status": "failed",
+                           "notes": [f"处理异常：{exc}"]}}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:                                # noqa: BLE001
+                pass
+
+
 def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
                cfg: dict | None = None, channel: str = "文件夹",
                job_id: int | None = None, use_llm: bool = False,
@@ -1953,19 +2072,50 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
     """
     cfg = cfg or mb.load_config()
     limit = int(cfg.get("max_attachment_mb", 20) or 20) * 1024 * 1024
-    conn = db.connect(db_path)
     files = sorted(f for f in glob.glob(os.path.join(folder, "*"))
                    if f.lower().endswith(parse_mod.SUPPORTED))
     report = {"scanned": len(files), "added": 0, "merged_versions": 0,
               "skipped_dup": 0, "skipped_oversize": 0, "failed": 0,
               "parse_failed": 0, "max_attachment_mb": limit // (1024 * 1024), "details": []}
+    # 并发度：1 = 老行为（逐份）；2–4 由系统配置开启。
+    # 每个文件独立连接，偶发 locked/readonly 由 `_db_retry` 吸收；
+    # 并发只影响解析/模型等待，不会让两个线程共用一条连接。
+    conc = ingest_concurrency(db_path) if progress_tid else 1
+    report["ingest_concurrency"] = conc
     # v1.29.4（业务方）：带 progress_tid 时 = "先报总数、再逐份推进 + 可停止"。
     # 停止是**读完当前文件**到下一个循环边界才停（不会把半份文件砍断）；
     # 不带进度的旧调用方（助手工具 / 自检）行为与原来完全一致。
     if progress_tid:
         update_progress(progress_tid, total=len(files),
                         message=f"已发现 {len(files)} 份文件，开始读取…")
-    try:
+
+    def _one(path: str) -> dict:
+        return _ingest_dir_file(
+            path, db_path=db_path, cfg=cfg, jd=jd, tiers=tiers,
+            channel=channel, job_id=job_id, use_llm=use_llm,
+            llm_conf=llm_conf, limit=limit)
+
+    def _apply(res: dict) -> None:
+        kind = res.get("kind")
+        if kind == "oversize":
+            report["skipped_oversize"] += 1
+        elif kind == "added":
+            report["added"] += 1
+        elif kind == "merged":
+            report["merged_versions"] += 1
+        elif kind == "skipped_dup":
+            report["skipped_dup"] += 1
+        else:
+            report["failed"] += 1
+        if res.get("parse_failed"):
+            report["parse_failed"] += 1
+        if res.get("routed"):
+            report["routed"] = int(report.get("routed") or 0) + 1
+        if res.get("detail"):
+            report["details"].append(res["detail"])
+
+    done = 0
+    if conc <= 1:
         for _i, path in enumerate(files):
             if stop_requested(progress_tid):
                 report["stopped"] = True
@@ -1973,68 +2123,38 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
                     update_progress(progress_tid,
                                     message=f"已停止：完成 {_i} / {len(files)} 份后按你的要求停下")
                 break
-            base = os.path.basename(path)
-            try:
-                size = _lp_size(path)
-            except OSError as exc:
-                report["failed"] += 1
-                report["details"].append({"file": base, "status": "failed",
-                                          "notes": [f"读取文件失败：{exc}"]})
-                if progress_tid:
-                    update_progress(progress_tid, done=_i + 1)
-                continue
-            if size > limit:
-                report["skipped_oversize"] += 1
-                report["details"].append({
-                    "file": base, "status": "skipped_oversize", "size": size,
-                    "notes": [f"超过体积上限：{size / 1024 / 1024:.1f} MB > "
-                              f"{limit // (1024 * 1024)} MB，未导入（文件仍在原处，未删）"],
-                })
-                db.add_audit(conn, "source_file", base, "oversize_skipped", "",
-                             f"{size} 字节 > {limit} 字节，未导入", "system", "system")
-                if progress_tid:
-                    update_progress(progress_tid, done=_i + 1)
-                continue
-            try:
-                # 文件名归岗（与邮件「标题归岗」同一口径）：
-                # 文件名里出现某个在招岗位名 → 归到该岗位，并按该岗位的 JD 评分。
-                # 为什么要这样：HR 的实际做法就是把投递岗位写进简历文件名
-                # （「张三-科学研究-校招-简历.pdf」），文件名本身就是投递意向的表达，
-                # 不认它，全员都会落到"待指定"、再按默认尺子算出一个错的分。
-                # 文件名里没有岗位名时仍为 None（待 HR 指定），不硬凑。
-                fj_id, fj_jd = db.match_job_by_subject(conn, base)
-                # v1.9：文件名若按「方向+学历+学校+专业+姓名+性别」的格式命名，
-                # 同一套解析器直接复用——这些字段是投递方填的，比正文抽取准。
-                fmeta = subject_meta_mod.parse(base)
-                if not fj_id and fmeta["fields"].get("direction"):
-                    fj_id, fj_jd = db.match_job_by_direction(
-                        conn, fmeta["fields"]["direction"])
-                eff_job_id = fj_id if fj_id else job_id
-                eff_jd = fj_jd if fj_jd else jd
-                if fj_id:
-                    report["routed"] = report.get("routed", 0) + 1
-                r = ingest_one(conn, cfg, eff_jd, tiers,
-                               filename=base, data=None, local_path=path,
-                               channel=channel, applied_at=db.now(), source_message_id=None,
-                               job_id=eff_job_id, use_llm=use_llm, llm_conf=llm_conf,
-                               subject_meta=fmeta)
-                report[{"added": "added", "merged_version": "merged_versions",
-                        "skipped_dup": "skipped_dup"}.get(r["status"], "failed")] += 1
-                # 同上：用字段判断，不匹配文案
-                if r.get("parse_failed"):
-                    report["parse_failed"] += 1
-                report["details"].append(r)
-            except Exception as exc:
-                report["failed"] += 1
-                report["details"].append({"file": base, "status": "failed",
-                                          "notes": [f"处理异常：{exc}"]})
+            _apply(_one(path))
+            done = _i + 1
             if progress_tid:
-                update_progress(progress_tid, done=_i + 1)
-        # 与邮件路径同一处钩子：文件夹导入同样"进门就有判断"
-        spawn_auto_analysis(db_path, report)
-        return report
-    finally:
-        conn.close()
+                update_progress(progress_tid, done=done)
+    else:
+        idx = 0
+        with ThreadPoolExecutor(max_workers=conc,
+                                thread_name_prefix="ingest-file") as ex:
+            while idx < len(files):
+                if stop_requested(progress_tid):
+                    report["stopped"] = True
+                    if progress_tid:
+                        update_progress(
+                            progress_tid,
+                            message=f"已停止：完成 {done} / {len(files)} 份后按你的要求停下")
+                    break
+                batch = files[idx:idx + conc]
+                futures = [ex.submit(_one, p) for p in batch]
+                for fut in futures:
+                    try:
+                        _apply(fut.result())
+                    except Exception as exc:                 # noqa: BLE001
+                        report["failed"] += 1
+                        report["details"].append({"file": "", "status": "failed",
+                                                  "notes": [f"处理异常：{exc}"]})
+                    done += 1
+                    if progress_tid:
+                        update_progress(progress_tid, done=done)
+                idx += len(batch)
+    # 与邮件路径同一处钩子：文件夹导入同样"进门就有判断"
+    spawn_auto_analysis(db_path, report)
+    return report
 
 
 def _cursor_load(raw, account: str) -> str:
@@ -2120,6 +2240,48 @@ def _email_retry_count(db_path: str, message_id: str) -> int:
             conn.close()
     except Exception:                                    # noqa: BLE001
         return 0
+
+
+def _empty_mail_report() -> dict:
+    return {"mails": 0, "attachments": 0, "added": 0, "merged_versions": 0,
+            "skipped_dup": 0, "failed": 0, "no_attachment": 0,
+            "parse_failed": 0, "routed": 0, "unassigned": 0,
+            "other_attachments": 0, "other_saved": 0, "other_failed": 0,
+            "other_reused": 0, "attachments_skipped": 0, "details": []}
+
+
+_MAIL_COUNT_KEYS = ("mails", "attachments", "added", "merged_versions",
+                    "skipped_dup", "failed", "no_attachment", "parse_failed",
+                    "routed", "unassigned", "other_attachments", "other_saved",
+                    "other_failed", "other_reused", "attachments_skipped",
+                    "dead_lettered")
+
+
+def _ingest_mail_item(item: dict, *, cfg: dict, jd: dict, tiers: dict,
+                      db_path: str, job_id: int | None, use_llm: bool,
+                      llm_conf: dict | None) -> dict:
+    """处理一封邮件；**用自己的一份局部报表**，便于并发后按顺序合并。"""
+    local = _empty_mail_report()
+    local["blocked_files"] = []
+    try:
+        ingest_mails([item], cfg, jd, tiers, db_path, job_id,
+                     use_llm, llm_conf, report=local, spawn=False)
+    except Exception as exc:                                 # noqa: BLE001
+        local["_exc"] = f"{type(exc).__name__}: {exc}"
+    return local
+
+
+def _merge_mail_report(dst: dict, src: dict) -> None:
+    for k in _MAIL_COUNT_KEYS:
+        if src.get(k):
+            dst[k] = int(dst.get(k) or 0) + int(src.get(k) or 0)
+    for k in ("batch_limit_hit", "retry_pending", "uidvalidity_reset"):
+        if src.get(k):
+            dst[k] = src[k]
+    if src.get("blocked_files"):
+        dst["blocked_files"] = list(src["blocked_files"])
+    if src.get("details"):
+        dst.setdefault("details", []).extend(src["details"])
 
 
 def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
@@ -2252,128 +2414,129 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                 progress_tid, total=total,
                 message=(f"已下载 {total} 封新邮件，开始入库…" if total
                          else "没有新邮件"))
-            for item in mails:
-                if stop_requested(progress_tid):
-                    stopped = True
-                    update_progress(progress_tid,
-                                    message=f"已停止：完成 {done} / {total} 封后按你的要求停下")
-                    break
-                _failed_before = int(report.get("failed") or 0)
-                _other_failed_before = int(report.get("other_failed") or 0)
-                # 死信文案只写当前这封的附件名，不能沿用上一封的。
-                report["blocked_files"] = []
-                try:
-                    ingest_mails([item], cfg, jd, tiers, db_path, job_id,
-                                 use_llm, llm_conf, report=report, spawn=False)
-                except Exception as exc:                     # noqa: BLE001
-                    # 单封入库异常不能把整批后续分析和最终游标保存一起炸掉；
-                    # 游标停在这封之前，下次重试（已写入的按 message_id 去重）。
+            conc = ingest_concurrency(db_path)
+            report["ingest_concurrency"] = conc
+
+            def _mail_failed(item: dict, local: dict, done_n: int,
+                             kind: str) -> tuple[str, int]:
+                """处理一封失败邮件：连续失败转死信（越过继续）或停在它之前。
+
+                返回 ("dead"|"stop", 新的 done 计数)。
+                kind = "exc"（入库抛异常）或 "att"（附件/补充附件失败）。
+                """
+                _mid = item.get("message_id") or ""
+                _err = str(local.get("_exc") or "")
+                if kind == "exc":
                     report["failed"] = int(report.get("failed") or 0) + 1
-                    _mid = item.get("message_id") or ""
                     if _mid:
                         try:
                             _c = db.connect(db_path)
                             try:
-                                db.bump_email_retry(
-                                    _c, _mid,
-                                    f"入库异常：{type(exc).__name__}: {exc}")
+                                db.bump_email_retry(_c, _mid, f"入库异常：{_err}")
                             finally:
                                 _c.close()
                         except Exception:                    # noqa: BLE001
                             pass
-                    _retry = _email_retry_count(db_path, _mid)
-                    _marked = False
-                    _names = report.get("blocked_files") or []
-                    _names_txt = ("：" + "、".join(_names[:5])) if _names else ""
-                    if _mid and _retry >= MAX_EMAIL_RETRIES:
+                _retry = _email_retry_count(db_path, _mid)
+                _names = local.get("blocked_files") or report.get("blocked_files") or []
+                _names_txt = ("：" + "、".join(_names[:5])) if _names else ""
+                _word = "入库异常" if kind == "exc" else "入库失败"
+                _marked = False
+                if _mid and _retry >= MAX_EMAIL_RETRIES:
+                    try:
+                        _c = db.connect(db_path)
                         try:
-                            _c = db.connect(db_path)
-                            try:
-                                _marked = bool(db.mark_email_dead(
-                                    _c, _mid,
-                                    f"连续 {_retry} 次入库异常{_names_txt}，已转入死信"))
-                            finally:
-                                _c.close()
-                        except Exception:                    # noqa: BLE001
-                            _marked = False
-                    if _marked:
-                        report["dead_lettered"] = int(
-                            report.get("dead_lettered") or 0) + 1
-                        report["details"].append({
-                            "file": item.get("subject") or f"UID {item.get('uid')}",
-                            "status": "dead_letter",
-                            "uid": item.get("uid"),
-                            "message_id": _mid,
-                            "notes": [f"连续 {_retry} 次入库异常{_names_txt}，"
-                                      "已跳过并保留为死信；可在邮件记录里手动重试"],
-                        })
-                        newest = item.get("uid") or newest
-                        done += 1
+                            _marked = bool(db.mark_email_dead(
+                                _c, _mid,
+                                f"连续 {_retry} 次{_word}{_names_txt}，已转入死信"))
+                        finally:
+                            _c.close()
+                    except Exception:                        # noqa: BLE001
+                        _marked = False
+                if _marked:
+                    report["dead_lettered"] = int(
+                        report.get("dead_lettered") or 0) + 1
+                    report["details"].append({
+                        "file": item.get("subject") or f"UID {item.get('uid')}",
+                        "status": "dead_letter",
+                        "uid": item.get("uid"),
+                        "message_id": _mid,
+                        "notes": [f"连续 {_retry} 次失败{_names_txt}，"
+                                  "已跳过并保留为死信；可在邮件记录里手动重试"],
+                    })
+                    done_n += 1
+                    if progress_tid:
                         update_progress(
-                            progress_tid, done=done,
-                            message=f"第 {done} 封连续异常，已转入死信并继续")
-                        continue
-                    report["error"] = (f"第 {done + 1} 封入库异常："
-                                       f"{type(exc).__name__}: {exc}")
-                    report["retry_pending"] = True
-                    report["blocked_uid"] = item.get("uid") or ""
-                    report["blocked_message_id"] = _mid
-                    report["retry_count"] = _retry
-                    break
-                if (int(report.get("failed") or 0) > _failed_before
-                        or int(report.get("other_failed") or 0) > _other_failed_before):
-                    # 这封有附件失败（简历附件或补充附件都算）：先看是不是同一封
-                    # 反复失败。连续失败达到
-                    # 上限就转死信、越过它继续收后面的邮件；否则停在它之前重试。
-                    _mid = item.get("message_id") or ""
-                    _retry = _email_retry_count(db_path, _mid)
-                    _marked = False
-                    _names = report.get("blocked_files") or []
-                    _names_txt = ("：" + "、".join(_names[:5])) if _names else ""
-                    if _mid and _retry >= MAX_EMAIL_RETRIES:
-                        try:
-                            _c = db.connect(db_path)
-                            try:
-                                _marked = bool(db.mark_email_dead(
-                                    _c, _mid,
-                                    f"连续 {_retry} 次入库失败{_names_txt}，已转入死信"))
-                            finally:
-                                _c.close()
-                        except Exception:                    # noqa: BLE001
-                            _marked = False
-                    if _marked:
-                        report["dead_lettered"] = int(
-                            report.get("dead_lettered") or 0) + 1
-                        report["details"].append({
-                            "file": item.get("subject") or f"UID {item.get('uid')}",
-                            "status": "dead_letter",
-                            "uid": item.get("uid"),
-                            "message_id": _mid,
-                            "notes": [f"连续 {_retry} 次失败{_names_txt}，"
-                                      "已跳过并保留为死信；可在邮件记录里手动重试"],
-                        })
-                        newest = item.get("uid") or newest
-                        done += 1
-                        update_progress(
-                            progress_tid, done=done,
-                            message=f"第 {done} 封连续失败，已转入死信并继续")
-                        continue
-                    report["retry_pending"] = True
-                    report["blocked_uid"] = item.get("uid") or ""
-                    report["blocked_message_id"] = _mid
-                    report["retry_count"] = _retry
+                            progress_tid, done=done_n,
+                            message=f"第 {done_n} 封连续失败，已转入死信并继续")
+                    return "dead", done_n
+                report["retry_pending"] = True
+                report["blocked_uid"] = item.get("uid") or ""
+                report["blocked_message_id"] = _mid
+                report["retry_count"] = _retry
+                if kind == "exc":
+                    report["error"] = f"第 {done_n + 1} 封入库异常：{_err}"
+                elif progress_tid:
                     update_progress(
                         progress_tid,
-                        message=(f"第 {done + 1} 封处理失败，已停在上一封"
+                        message=(f"第 {done_n + 1} 封处理失败，已停在上一封"
                                  f"（第 {_retry} 次；连续 {MAX_EMAIL_RETRIES} 次后自动跳过）"))
+                return "stop", done_n
+
+            # 按**有序批次**并发：一批 N 封并行解析，再按原顺序结算游标。
+            # 这样中途失败时游标只推进到失败那封之前，后面的邮件下次重扫，
+            # 已入库的按 message_id 去重——不丢件，最坏只是重复解析几封。
+            idx = 0
+            abort = False
+            while idx < len(mails) and not abort:
+                if stop_requested(progress_tid):
+                    stopped = True
+                    if progress_tid:
+                        update_progress(
+                            progress_tid,
+                            message=f"已停止：完成 {done} / {total} 封后按你的要求停下")
                     break
-                newest = item.get("uid") or newest
-                done += 1
-                update_progress(progress_tid, done=done)
-                # 长批次每 25 封落一次游标；被强杀后下次从断点继续。
-                if done % 25 == 0 and newest:
-                    _cursor_save(db_path, folder_name, account, newest,
-                                 cursor_uidvalidity)
+                batch = mails[idx:idx + conc]
+                if conc <= 1:
+                    outs = [_ingest_mail_item(
+                        it, cfg=cfg, jd=jd, tiers=tiers, db_path=db_path,
+                        job_id=job_id, use_llm=use_llm, llm_conf=llm_conf)
+                        for it in batch]
+                else:
+                    with ThreadPoolExecutor(
+                            max_workers=conc,
+                            thread_name_prefix="ingest-mail") as ex:
+                        outs = list(ex.map(
+                            lambda it: _ingest_mail_item(
+                                it, cfg=cfg, jd=jd, tiers=tiers,
+                                db_path=db_path, job_id=job_id,
+                                use_llm=use_llm, llm_conf=llm_conf),
+                            batch))
+                idx += len(batch)
+                for item, local in zip(batch, outs):
+                    _merge_mail_report(report, local)
+                    if local.get("_exc"):
+                        action, done = _mail_failed(item, local, done, "exc")
+                        if action == "dead":
+                            newest = item.get("uid") or newest
+                            continue
+                        abort = True
+                        break
+                    if int(local.get("failed") or 0) or int(local.get("other_failed") or 0):
+                        action, done = _mail_failed(item, local, done, "att")
+                        if action == "dead":
+                            newest = item.get("uid") or newest
+                            continue
+                        abort = True
+                        break
+                    newest = item.get("uid") or newest
+                    done += 1
+                    if progress_tid:
+                        update_progress(progress_tid, done=done)
+                    # 长批次每 25 封落一次游标；被强杀后下次从断点继续。
+                    if done % 25 == 0 and newest:
+                        _cursor_save(db_path, folder_name, account, newest,
+                                     cursor_uidvalidity)
         # 单封 FETCH/解析失败：已下载并在它之前的邮件已经入库，游标停在
         # 最后一封成功处；这一封及之后的邮件下次重试，不能静默越过。
         if fetch_error and not stopped and not report.get("error"):
@@ -2480,12 +2643,18 @@ def _insight_targets(report: dict) -> list[dict]:
     跳过重复件与失败件——它们没有新的候选人信息，分析也没有意义。
     """
     out: list[dict] = []
+    seen: set[tuple[int, int]] = set()
     for d in report.get("details") or []:
         if (d.get("status") in ("added", "merged_version")
                 and not d.get("reused_document")
                 and d.get("candidate_id") and d.get("application_id")):
-            out.append({"candidate_id": int(d["candidate_id"]),
-                        "application_id": int(d["application_id"])})
+            key = (int(d["candidate_id"]), int(d["application_id"]))
+            # 增量：同一人同一投递在同一批里只分析一次（重复解析同一份简历、
+            # 或多封邮件指向同一人时，不会把模型调用打两遍）。
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"candidate_id": key[0], "application_id": key[1]})
     return out
 
 
@@ -2597,8 +2766,9 @@ def spawn_auto_analysis(db_path: str, report: dict, limit: int = 0) -> int:
     「分析待分析的人」——HR 的原话是「我导入的全部分析就好了，反正我是有开关的」。
     关掉自动分析有专门的开关（`auto_insight_on_ingest`），不需要再用条数隐式截断。
 
-    现在是**并发**跑（`TP_ANALYZE_CONCURRENCY`，默认 6 路）：模型调用是网络等待型，
-    串行时每人 11 秒、1000 人要 3 小时；并发后同样的活能压到 40 分钟量级。
+    并发度由「系统配置 → 运行设置 → 分析并发」控制（`analysis_concurrency`，
+    默认 1，可设 1–6）。每个分析线程用自己的连接；偶发的 SQLite 锁冲突
+    由重试吸收，连续失败则记录并继续下一个人，不影响已入库结果。
 
     设计约束：
     1) **异步且不阻断**：分析再慢、模型再挂，入库结果都已返回，
@@ -2631,52 +2801,69 @@ def spawn_auto_analysis(db_path: str, report: dict, limit: int = 0) -> int:
     if not targets:
         return 0
 
+    # 先读并发度（主线程），报告里如实写出去；线程里不再改这个字段。
+    conc = analyze_concurrency(db_path)
+    report["insight_concurrency"] = conc
+
     def _work(tid: str) -> None:
-        # **串行，每人一条自己的连接**（v1.24.8 定案，与批量重跑一致）。
+        # 每人一条自己的连接；默认串行（v1.24.8 的稳定路径），
+        # 在「系统配置 → 运行设置」把分析并发调到 2–6 后走线程池。
+        # 并发时写库冲突由 `_one` 内的重试吸收；单条失败只记数，不影响其余。
         # 进度（v1.24.9）：每完成一人就 update_progress，前端轮询画进度条。
-        #
-        # 为什么放弃并发——两种方案都试过，都不稳：
-        #   ① 每个线程各自 db.connect() → 间歇 `attempt to write a readonly database`
-        #      （Windows 上多连接并发写同一 WAL 库，文件锁判定不稳）
-        #   ② 共享一条连接 + RLock → 写段稳了，但读段/游标仍触发
-        #      `InterfaceError: bad parameter or other API misuse`
-        #      （Connection 的游标是连接级共享状态，多线程交替 fetch 即误用）
-        #
-        # 串行的代价：N 份简历的模型调用排队，N×6~15 秒。
-        # 入库分析本来就是后台跑（HTTP 立即返回"已入队"），HR 不等它，
-        # 所以这个代价**落在后台、不挡界面**，比偶发失败划算得多。
-        #
-        # 以后要提速，正确方向是**多进程**（进程间不共享连接状态），
-        # 而不是多线程共享一条连接。
         done = {"ok": 0, "fail": 0}
-        try:
-            for t in targets:
-                conn = None
-                try:
-                    conn = db.connect(db_path)
-                    analyze_one(conn, t["candidate_id"], t["application_id"],
-                                source="auto_ingest")
-                    done["ok"] += 1
-                except Exception as exc:               # noqa: BLE001 — 单条失败不扩散
-                    done["fail"] += 1
-                    print(f"[auto_insight] 候选人#{t['candidate_id']} 分析失败："
-                          f"{type(exc).__name__}: {exc}", file=sys.stderr)
-                    traceback.print_exc()             # 堆栈落盘，便于定位
-                finally:
-                    if conn is not None:
-                        try:
-                            conn.close()
-                        except Exception:             # noqa: BLE001
-                            pass
+        _lock = threading.Lock()
+
+        def _one(t: dict) -> bool:
+            conn = None
+            try:
+                conn = db.connect(db_path)
+                # 并发写同一个 WAL 库时偶发 locked/readonly：重试一次即可。
+                for attempt in range(2):
+                    try:
+                        analyze_one(conn, t["candidate_id"], t["application_id"],
+                                    source="auto_ingest")
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if attempt == 1 or not any(
+                                m in str(exc).lower() for m in _DB_BUSY_MARKERS):
+                            raise
+                        time.sleep(0.6)
+                return True
+            except Exception as exc:                   # noqa: BLE001 — 单条失败不扩散
+                print(f"[auto_insight] 候选人#{t['candidate_id']} 分析失败："
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                traceback.print_exc()                  # 堆栈落盘，便于定位
+                return False
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:                  # noqa: BLE001
+                        pass
+
+        def _note(ok: bool) -> None:
+            with _lock:
+                done["ok" if ok else "fail"] += 1
                 update_progress(tid, done=done["ok"] + done["fail"],
                                 failed=done["fail"])
+
+        try:
+            if conc <= 1:
+                for t in targets:
+                    _note(_one(t))
+            else:
+                with ThreadPoolExecutor(
+                        max_workers=conc,
+                        thread_name_prefix="auto-insight") as ex:
+                    for ok in ex.map(_one, targets):
+                        _note(ok)
         finally:
             update_progress(tid, status="done",
                             message=(f"成功 {done['ok']} 人"
                                      + (f"，失败 {done['fail']} 人"
                                         if done["fail"] else "")))
         print(f"[auto_insight] 完成 {done['ok']} 条，失败 {done['fail']} 条"
-              f"（串行）", file=sys.stderr)
+              f"（并发 {conc}）", file=sys.stderr)
 
     # 登记进度任务，task_id 写进 report，前端轮询 /api/tasks/{task_id}（v1.24.9）
     # meta 带上 phase 与上一阶段 report：页面刷新/服务重启后能直接认出
@@ -2690,6 +2877,5 @@ def spawn_auto_analysis(db_path: str, report: dict, limit: int = 0) -> int:
                      args=(tid,)).start()
 
     report["insight_queued"] = len(targets)
-    # 串行（v1.24.8）：保留该字段只为兼容前端进度显示，值固定为 1。
-    report["insight_concurrency"] = 1
+    report["insight_concurrency"] = conc
     return len(targets)

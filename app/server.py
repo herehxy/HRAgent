@@ -55,6 +55,8 @@ import time as _time
 import re
 import secrets
 import shutil
+import subprocess
+import tempfile
 import hashlib
 import mimetypes
 import sys
@@ -66,7 +68,7 @@ import uuid
 import zipfile
 # 注：v1.24.8 起批量分析全部改串行，已不再使用 ThreadPoolExecutor，
 # 故此处不再 import —— 留着会让人以为"还能开并发"。
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request, Query
@@ -82,6 +84,7 @@ from . import mail_template as mail_template_mod
 from . import recruit as recruit_mod
 from . import recruit_export as recruit_export_mod
 from . import univ as univ_mod
+from . import school_subjects as subject_mod
 # v1.29：阶段/结论的唯一真源。服务端要下发阶段配置给前端（看板与下拉都从这里来），
 # 并对阶段流转做校验，所以是顶层导入。
 from . import stages as stages_mod
@@ -317,9 +320,25 @@ async def _guard_local_origin(request: Request, call_next):
 # 前端 `/api/tasks/{task_id}` 轮询，弹窗里画进度条。
 _PROGRESS: dict[str, dict] = {}
 _PROGRESS_LOCK = threading.Lock()
-# 上传入口与 /api/ingest 共用同一套“先查后写”逻辑；上传不登记进度任务，
-# 这里用进程内锁串行化，避免两个上传各自查到“无投递”后各建一条。
-_UPLOAD_INGEST_LOCK = threading.Lock()
+#: **所有入库流程共用的一把闸门**：邮箱收取、文件夹导入、上传、聊天附件入库。
+#: 它们各自会读写候选人/投递/附件，两个流程同时跑会在 SQLite 上互相等待，
+#: 极端情况下某封邮件会以 `database is locked` 失败、整批停在断点。
+#: 闸门保证同一时刻只有一个流程在写库；上传等排在后面时会在进度里显示“排队中”。
+_INGEST_GATE = threading.Lock()
+
+
+def _gate_acquire(wait: bool = False, timeout: float = 0.0) -> bool:
+    """拿入库闸门。wait=False 立即返回；wait=True 最多等 timeout 秒。"""
+    if wait:
+        return _INGEST_GATE.acquire(timeout=timeout)
+    return _INGEST_GATE.acquire(blocking=False)
+
+
+def _gate_release() -> None:
+    try:
+        _INGEST_GATE.release()
+    except RuntimeError:
+        pass
 #: `/api/ingest` 的“查有没有在跑 + 登记新任务”必须原子，否则两个并发
 #: 请求会同时通过检查，两个任务抢同一份邮件游标。
 _INGEST_TASK_LOCK = threading.Lock()
@@ -553,11 +572,29 @@ def _jd_tiers() -> tuple[dict, dict]:
 # 让他按自己的额度与节奏决定"入库就分析"还是"攒一批手动补"。
 # 关掉不影响任何其它功能：分析结论照样写 candidate_insights，只是改由 HR 点按钮触发。
 AUTO_INSIGHT_KEY = "auto_insight_on_ingest"
+#: v6.4.2：自动收取邮箱（默认关；开启后按分钟间隔在后台自动收）
+AUTO_MAIL_KEY = "auto_ingest_mail"
+AUTO_MAIL_EVERY_KEY = "auto_ingest_every"
+AUTO_MAIL_UNIT_KEY = "auto_ingest_unit"
+AUTO_MAIL_LAST_KEY = "auto_ingest_last"
 
 
 def _settings(conn) -> dict:
+    def _clamp(key, default, lo, hi):
+        try:
+            return max(lo, min(hi, int(db.get_setting(conn, key, default) or default)))
+        except (TypeError, ValueError):
+            return default
     return {"auto_insight_on_ingest": bool(db.get_setting(conn, AUTO_INSIGHT_KEY, True)),
-            "pipeline_overdue_days": int(db.get_setting(conn, "pipeline_overdue_days", 15) or 15)}
+            "pipeline_overdue_days": int(db.get_setting(conn, "pipeline_overdue_days", 15) or 15),
+            "auto_ingest_mail": bool(db.get_setting(conn, AUTO_MAIL_KEY, False)),
+            "auto_ingest_every": _clamp(AUTO_MAIL_EVERY_KEY, 1, 1, 999),
+            "auto_ingest_unit": (str(db.get_setting(conn, AUTO_MAIL_UNIT_KEY, "hour") or "hour")
+                                 if str(db.get_setting(conn, AUTO_MAIL_UNIT_KEY, "hour") or "hour")
+                                 in ("minute", "hour", "day") else "hour"),
+            # v6.2.7：入库/分析并发（默认 1 = 已验证的串行路径）
+            "ingest_concurrency": _clamp("ingest_concurrency", 1, 1, 4),
+            "analysis_concurrency": _clamp("analysis_concurrency", 1, 1, 6)}
 
 
 def _auth_enabled() -> bool:
@@ -1305,11 +1342,32 @@ def _save_upload(body: bytes, safe: str) -> tuple[str, str, str]:
 
 
 def _ingest_upload(upload_dir: str, jd, tiers, use_llm: bool,
-                   conf: dict | None) -> dict:
+                   conf: dict | None, *, wait: bool = True,
+                   progress_tid: str | None = None) -> dict:
+    """走统一的入库闸门；`wait=False` 时拿不到闸门立刻报 409。"""
     from . import ingest as _ing
-    with _UPLOAD_INGEST_LOCK:
+    got = False
+    if wait:
+        # 排队时每 5 秒报一次状态，避免界面看着像卡死。
+        _waited = 0
+        while not got:
+            got = _gate_acquire(wait=True, timeout=5)
+            _waited += 5
+            if not got and progress_tid:
+                _progress_set(progress_tid, message="排队中：正在等待其它收取/导入任务完成…")
+            if _waited > 1800:
+                break
+    else:
+        got = _gate_acquire()
+    if not got:
+        raise HTTPException(status_code=409,
+                            detail="正在收取或导入其它简历，请等当前任务完成后再上传")
+    try:
         return _ing.ingest_dir(upload_dir, jd, tiers, DB_PATH, job_id=None,
-                               use_llm=use_llm, llm_conf=conf)
+                               use_llm=use_llm, llm_conf=conf,
+                               progress_tid=progress_tid)
+    finally:
+        _gate_release()
 
 
 def _store_upload_and_ingest(body: bytes, safe: str, jd, tiers,
@@ -1318,7 +1376,7 @@ def _store_upload_and_ingest(body: bytes, safe: str, jd, tiers,
     import shutil as _shutil
     upload_dir, _dest, stored = _save_upload(body, safe)
     try:
-        rep = _ingest_upload(upload_dir, jd, tiers, use_llm, conf)
+        rep = _ingest_upload(upload_dir, jd, tiers, use_llm, conf, wait=False)
     finally:
         _shutil.rmtree(upload_dir, ignore_errors=True)
     return stored, rep
@@ -1336,7 +1394,9 @@ def _start_upload_task(body: bytes, safe: str, jd, tiers,
 
     def _work() -> None:
         try:
-            rep = _ingest_upload(upload_dir, jd, tiers, use_llm, conf)
+            _progress_set(tid, message="等待入库…")
+            rep = _ingest_upload(upload_dir, jd, tiers, use_llm, conf,
+                                 wait=True, progress_tid=tid)
             _progress_set(tid, done=1, status="done", message="解析完成",
                           extra={"result": rep})
         except Exception as exc:                           # noqa: BLE001
@@ -1491,7 +1551,7 @@ def api_chat_attachment_approve(token: str,
         _conf = {"api_key": _c.get("api_key"), "base_url": _c.get("base_url"),
                  "model": _c.get("model")}
     try:
-        rep = _ingest_upload(folder, jd, tiers, _use_llm, _conf)
+        rep = _ingest_upload(folder, jd, tiers, _use_llm, _conf, wait=False)
     except Exception as exc:                               # noqa: BLE001
         raise HTTPException(status_code=500,
                             detail=f"入库失败：{type(exc).__name__}: {exc}")
@@ -3721,6 +3781,7 @@ def _startup_purge_task() -> None:
 
     threading.Thread(target=_repair, name="startup-repair", daemon=True).start()
     threading.Thread(target=_loop, daemon=True, name="tp-purge").start()
+    threading.Thread(target=_auto_ingest_loop, name="auto-ingest", daemon=True).start()
 
 
 class AssignJobReq(BaseModel):
@@ -3952,7 +4013,7 @@ def api_set_stage(aid: int, req: StageReq, x_tp_token: str | None = Header(defau
 
 def _export_filters(overseas, bachelor, date_from, date_to,
                     interview_unit, cet, univ, stage, education, kw,
-                    interview_date=None, job_id=None) -> dict:
+                    interview_date=None, job_id=None, gender=None) -> dict:
     """把导出接口的筛选参数收成 `list_candidates` 的 kwargs —— **一处转换**。
 
     为什么不让导出接口自己拼：界面上能筛、导出不能筛是这类需求最常见的漏。
@@ -3983,6 +4044,10 @@ def _export_filters(overseas, bachelor, date_from, date_to,
         _f["stage"] = stage
     if job_id:
         _f["job_id"] = int(job_id)
+    # 性别与学历/院校一样，是**普通筛选条件**（业务方 2026-11-25：部分工种有性别要求）。
+    # 2026-11-25 起不再有"性别筛选开关"：列表、名单导出、简历打包口径一致。
+    if gender:
+        _f["gender"] = str(gender).strip()
     return _f
 
 
@@ -4026,7 +4091,7 @@ def api_export_roster(scope: str = "候选人名单",
                        interview_unit: str | None = None, cet: str | None = None,
                        univ: str | None = None, stage: str | None = None,
                        education: str | None = None, kw: str | None = None,
-                       job_id: int | None = None,
+                       job_id: int | None = None, gender: str | None = None,
                        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
     """导出候选人名单 —— **唯一的导出入口**（业务方 2026-10-15 定调）。
@@ -4049,7 +4114,7 @@ def api_export_roster(scope: str = "候选人名单",
             conn, operator=s["username"], role=s["role"], include_archived=True,
             **_export_filters(overseas, bachelor, date_from, date_to,
                               interview_unit, cet, univ, stage, education, kw,
-                              interview_date, job_id))
+                              interview_date, job_id, gender=gender))
     finally:
         conn.close()
     meta = xlsx_mod.meta_line(
@@ -4161,6 +4226,7 @@ def api_export_resume_bundle(job_id: int | None = None, stage: str | None = None
                              date_from: str | None = None, date_to: str | None = None,
                              keyword: str | None = None, education: str | None = None,
                              univ: str | None = None, candidate_ids: str | None = None,
+                             gender: str | None = None,
                              x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                              x_tp_role: str | None = Header(default=None, alias="X-TP-Role")):
     """按筛选条件打包**最新一份简历原件**（zip）。
@@ -4186,6 +4252,8 @@ def api_export_resume_bundle(job_id: int | None = None, stage: str | None = None
         filters["education"] = education
     if univ:
         filters["univ"] = univ
+    if gender:
+        filters["gender"] = str(gender).strip()
     if candidate_ids:
         _ids: list[int] = []
         for _part in str(candidate_ids).replace(" ", ",").split(","):
@@ -4840,10 +4908,19 @@ def api_ingest(req: IngestReq | None = Body(default=None),
             raise HTTPException(
                 status_code=409,
                 detail="已有导入/收取任务在进行中，请等待完成或先停止再发起新的任务")
+        # 与上传/聊天入库共用一把闸门：拿到才允许开始，否则可能两个流程同时写库。
+        if not _gate_acquire():
+            raise HTTPException(
+                status_code=409,
+                detail="有上传文件正在入库，请等它完成后再开始收取或导入")
         # EML 演练路径是整批解析，没有逐封停止点；别显示一个点了没用的停止按钮。
         _stoppable = (req.source == "folder") or (cfg.get("mode") == "imap")
-        tid = ingest_mod.register_progress(title, 0, stoppable=_stoppable,
-                                           db_path=DB_PATH)
+        try:
+            tid = ingest_mod.register_progress(title, 0, stoppable=_stoppable,
+                                               db_path=DB_PATH)
+        except Exception:
+            _gate_release()
+            raise
     threading.Thread(target=_run_ingest_task, name="ingest-fetch", daemon=True,
                      args=(tid, req.source, folder, s.get("username") or "hr",
                            req.use_llm)).start()
@@ -4916,6 +4993,72 @@ def _run_ingest_task(tid: str, source: str, folder: str | None,
         traceback.print_exc()
         ingest_mod.update_progress(tid, status="error",
                                    message=f"导入任务出错：{type(exc).__name__}: {exc}")
+    finally:
+        _gate_release()
+
+
+#: 自动收取的间隔单位 → 秒。最短 5 分钟，避免把邮箱服务器打爆。
+_AUTO_UNIT_SECONDS = {"minute": 60, "hour": 3600, "day": 86400}
+
+
+def _auto_ingest_due() -> tuple[bool, int]:
+    conn = db.connect(DB_PATH)
+    try:
+        on = bool(db.get_setting(conn, AUTO_MAIL_KEY, False))
+        every = max(1, int(db.get_setting(conn, AUTO_MAIL_EVERY_KEY, 1) or 1))
+        unit = str(db.get_setting(conn, AUTO_MAIL_UNIT_KEY, "hour") or "hour")
+        last = str(db.get_setting(conn, AUTO_MAIL_LAST_KEY, "") or "")
+    finally:
+        conn.close()
+    secs = max(300, every * _AUTO_UNIT_SECONDS.get(unit, 3600))
+    if not on:
+        return False, secs
+    if not last:
+        return True, secs
+    try:
+        last_dt = datetime.fromisoformat(last)
+    except ValueError:
+        return True, secs
+    return (datetime.now() - last_dt).total_seconds() >= secs, secs
+
+
+def _auto_ingest_loop() -> None:
+    """后台自动收取邮箱：按设置的小时/天间隔跑，默认关闭。
+
+    · 与手动收取共用同一把入库闸门：手动任务在跑时自动任务跳过，绝不并发写库；
+    · 没有 IMAP 配置/邮箱关闭时不重复报错；
+    · 每次尝试后写 `auto_ingest_last`，失败也按间隔重试，不会 30 秒一次刷屏。
+    """
+    while True:
+        try:
+            due, _secs = _auto_ingest_due()
+            if due:
+                cfg = mb.load_config()
+                if cfg.get("mode") != "off":
+                    if _gate_acquire():
+                        tid = None
+                        try:
+                            tid = ingest_mod.register_progress(
+                                "自动收取邮箱", 0, stoppable=False, db_path=DB_PATH)
+                        except Exception:                    # noqa: BLE001
+                            _gate_release()
+                            tid = None
+                        if tid:
+                            try:
+                                _run_ingest_task(tid, "mailbox", None,
+                                                 "system:auto", None)
+                            except Exception:                # noqa: BLE001
+                                traceback.print_exc()
+                            finally:
+                                conn = db.connect(DB_PATH)
+                                try:
+                                    db.set_setting(conn, AUTO_MAIL_LAST_KEY,
+                                                   datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                                finally:
+                                    conn.close()
+        except Exception:                                    # noqa: BLE001
+            traceback.print_exc()
+        time.sleep(30)
 
 
 def _auto_index() -> dict:
@@ -5157,6 +5300,115 @@ _FILE_SAFE_HEADERS = {"Referrer-Policy": "no-referrer",
                       "X-Content-Type-Options": "nosniff"}
 
 
+#: Word 原件「在线打开」时转 PDF 预览；下载仍给原始 .doc/.docx。
+_WORD_EXTS = {".doc", ".docx"}
+_PDF_CACHE_CLEANED = [0.0]
+#: 同一份 Word 同时被点两次时只转一次：按缓存路径加锁，后到的等前一个完成
+#: 后直接读缓存，不重复启动 Word/LibreOffice。
+_PDF_LOCKS: dict[str, threading.Lock] = {}
+_PDF_LOCKS_GUARD = threading.Lock()
+
+
+def _pdf_lock(path: str) -> threading.Lock:
+    with _PDF_LOCKS_GUARD:
+        lk = _PDF_LOCKS.get(path)
+        if lk is None:
+            lk = threading.Lock()
+            _PDF_LOCKS[path] = lk
+        return lk
+
+
+def _pdf_cache_dir() -> str:
+    d = os.path.join(DATA_DIR, "pdf_cache")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _cleanup_pdf_cache(days: int = 30) -> None:
+    """顺手清理过期缓存；每小时最多扫一次，避免每次预览都遍历目录。"""
+    now = time.time()
+    if now - _PDF_CACHE_CLEANED[0] < 3600:
+        return
+    _PDF_CACHE_CLEANED[0] = now
+    cutoff = now - days * 86400
+    try:
+        for name in os.listdir(_pdf_cache_dir()):
+            p = os.path.join(_pdf_cache_dir(), name)
+            try:
+                if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
+                    os.remove(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _soffice_path() -> str:
+    for p in (shutil.which("soffice"), shutil.which("soffice.exe"),
+              r"C:\Program Files\LibreOffice\program\soffice.exe",
+              r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"):
+        if p and os.path.isfile(p):
+            return p
+    return ""
+
+
+def _word_com_to_pdf(src: str, dst: str) -> bool:
+    """用本机 Word（COM）转 PDF。没有 Word 返回 False，绝不弹窗。"""
+    if sys.platform != "win32":
+        return False
+    ps = (
+        "$ErrorActionPreference='Stop';"
+        "$w=New-Object -ComObject Word.Application;"
+        "$w.Visible=$false;$w.DisplayAlerts=0;"
+        # 3 = msoAutomationSecurityForceDisable：禁止打开时执行任何宏
+        "$w.AutomationSecurity=3;"
+        "try{"
+        "$d=$w.Documents.Open($env:TP_SRC,$false,$true);"
+        "$d.ExportAsFixedFormat($env:TP_DST,17);"
+        "$d.Close(0)"
+        "}finally{$w.Quit()}"
+    )
+    env = dict(os.environ, TP_SRC=src, TP_DST=dst)
+    try:
+        # CREATE_NO_WINDOW：PowerShell 不弹黑色命令行窗口。
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-Command", ps],
+            env=env, capture_output=True, timeout=120,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:                                        # noqa: BLE001
+        return False
+    return r.returncode == 0 and os.path.isfile(dst) and os.path.getsize(dst) > 0
+
+
+def _docx_to_pdf(src: str, dst: str) -> tuple[bool, str]:
+    """把 Word 转成 PDF；返回 (成功, 失败原因)。结果由调用方缓存。"""
+    soffice = _soffice_path()
+    if soffice:
+        # 每次转换用独立临时目录：soffice 的输出文件名跟源文件同名，
+        # 两个同名简历同时预览会互相覆盖。
+        outdir = tempfile.mkdtemp(prefix="conv_", dir=os.path.dirname(dst))
+        try:
+            r = subprocess.run(
+                [soffice, "--headless", "--norestore", "--convert-to", "pdf",
+                 "--outdir", outdir, src],
+                capture_output=True, timeout=120,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            produced = os.path.join(
+                outdir, os.path.splitext(os.path.basename(src))[0] + ".pdf")
+            if r.returncode == 0 and os.path.isfile(produced):
+                os.replace(produced, dst)
+                return True, ""
+        except Exception:                                    # noqa: BLE001
+            pass
+        finally:
+            shutil.rmtree(outdir, ignore_errors=True)
+    if _word_com_to_pdf(src, dst):
+        return True, ""
+    return False, ("这台电脑没有检测到可用的 Word 或 LibreOffice，"
+                   "无法把 Word 转成 PDF 预览；请点「下载」获取 Word 原文件")
+
+
 @app.get("/api/documents/{did}/file")
 def api_document_file(did: int, inline: int = 0, ticket: str | None = None,
                       x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
@@ -5196,6 +5448,32 @@ def api_document_file(did: int, inline: int = 0, ticket: str | None = None,
         raise HTTPException(status_code=404, detail=f"原件不在磁盘上：{path}")
 
     name = d.get("file_name") or os.path.basename(real)
+    # Word 原件「在线打开」：先转 PDF 再内联预览（浏览器不能直接渲染 doc/docx）。
+    # 「下载」仍走下面的原文件分支，拿到的就是 Word 源文件。
+    if inline and os.path.splitext(name)[1].lower() in _WORD_EXTS:
+        _cleanup_pdf_cache()
+        try:
+            _st = os.stat(real)
+            cache = os.path.join(
+                _pdf_cache_dir(),
+                f"doc_{did}_{int(_st.st_mtime)}_{_st.st_size}.pdf")
+        except OSError:
+            cache = ""
+        if not cache or not os.path.isfile(cache):
+            if not cache:
+                raise HTTPException(status_code=500, detail="无法读取原件信息，转换失败")
+            # 同一份文件并发点击只转一次；后到的等锁，再检查缓存。
+            with _pdf_lock(cache):
+                if not os.path.isfile(cache):
+                    ok, why = _docx_to_pdf(real, cache)
+                    if not ok:
+                        raise HTTPException(status_code=503, detail=why)
+        return FileResponse(
+            _paths.long_path(cache),
+            filename=os.path.splitext(name)[0] + ".pdf",
+            content_disposition_type="inline",
+            media_type="application/pdf",
+            headers=_FILE_SAFE_HEADERS)
     # 安全：类型只按扩展名推导，**绝不回退到邮件里声明的 Content-Type**。
     # 否则“成绩单.xlsx”可以声明 text/html，HR 点在线打开时被内联渲染成脚本。
     _INLINE_SAFE = {"application/pdf", "text/plain", "text/markdown",
@@ -6617,6 +6895,13 @@ class SettingsReq(BaseModel):
     auto_insight_on_ingest: bool | None = None
     # v1.25.7：投递管道的"超期"标红阈值（天），默认 15。
     pipeline_overdue_days: int | None = None
+    # v6.2.7：并发度。默认 1；8GB 以上内存可调到 2–3。
+    ingest_concurrency: int | None = None
+    analysis_concurrency: int | None = None
+    # v6.4.2：自动收取邮箱
+    auto_ingest_mail: bool | None = None
+    auto_ingest_every: int | None = None
+    auto_ingest_unit: str | None = None
 
 
 @app.get("/api/settings")
@@ -6636,6 +6921,71 @@ def api_settings_get(x_tp_token: str | None = Header(default=None, alias="X-TP-T
         conn.close()
 
 
+@app.get("/api/school-subjects")
+def api_school_subjects_get(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                            x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """院校学科强项：权威名单规模 + 模型补全缓存（供设置页复核）。
+
+    权威名单已覆盖 380+ 所院校、近 3000 条，不再整份下发——
+    设置页只用它的院校数；明细请看安装目录 `config/school_subjects.json`。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "read")
+    return {
+        "authoritative_count": len(subject_mod.authoritative()),
+        "llm": subject_mod.list_cache(),
+        "note": "权威名单来自 config/school_subjects.json；模型补全只对名单没覆盖的"
+                "「学校 × 学科」发生一次，结果缓存在 data/school_subjects_llm.json。"
+                "分析时岗位方向命中才参与校实力判断，最多抬一档。",
+    }
+
+
+class SubjectOverrideReq(BaseModel):
+    school: str
+    discipline: str
+    grade: str
+    reason: str | None = None
+    confidence: float = 1.0
+
+
+@app.post("/api/school-subjects")
+def api_school_subjects_put(req: SubjectOverrideReq,
+                            x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                            x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """人工复核/覆盖一条模型判断（写入缓存，source=manual）。"""
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
+    try:
+        e = subject_mod.put_manual(req.school, req.discipline, req.grade,
+                                   reason=req.reason or "", confidence=req.confidence)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    conn = db.connect(DB_PATH)
+    try:
+        db.add_audit(conn, "settings", "school-subject", "update",
+                     f"{req.school} / {req.discipline} → {req.grade}",
+                     s["username"], s["role"])
+    finally:
+        conn.close()
+    return {"ok": True, "entry": e}
+
+
+@app.post("/api/school-subjects/delete")
+def api_school_subjects_delete(key: str | None = Query(default=None),
+                               x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                               x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
+    n = subject_mod.delete_cache(key)
+    conn = db.connect(DB_PATH)
+    try:
+        db.add_audit(conn, "settings", "school-subject", "delete",
+                     key or "全部模型判断", s["username"], s["role"])
+    finally:
+        conn.close()
+    return {"ok": True, "deleted": n}
+
+
 class ModelCfgReq(BaseModel):
     """模型配置保存。api_key 传空/缺省 = 不修改（前端"留空不改"）。"""
     base_url: str | None = None
@@ -6644,6 +6994,8 @@ class ModelCfgReq(BaseModel):
     enabled: bool | None = None      # 启用/关闭模型（None = 不改）
     # 上下文窗口：空串 = 清除人工值回到自动探测；None = 不改。
     context_window: str | None = None
+    # 思考模式：None = 不改；False = 请求里关闭思维链（Qwen3 等）。
+    thinking: bool | None = None
 
 
 @app.get("/api/model-config")
@@ -6670,6 +7022,7 @@ def api_model_config_get(x_tp_token: str | None = Header(default=None, alias="X-
     return {"base_url": c.get("base_url") or "", "model": c.get("model") or "",
             "enabled": bool(c.get("enabled", True)),
             "context_window": c.get("context_window") or "",
+            "thinking": bool(c.get("thinking", True)),
             "key_masked": llm.mask_key(key), "key_set": bool(key),
             "key_source": src, "env_override": env_set,
             "note": "API Key 只显示掩码；保存写 config/secrets.json（0600，不入库不提交），"
@@ -6692,7 +7045,8 @@ def api_model_config_set(req: ModelCfgReq,
     try:
         r = llm.save_cfg(base_url=req.base_url, model=req.model,
                          api_key=req.api_key, enabled=req.enabled,
-                         context_window=req.context_window)
+                         context_window=req.context_window,
+                         thinking=req.thinking)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not r["changed"]:
@@ -6700,7 +7054,8 @@ def api_model_config_set(req: ModelCfgReq,
     conn = db.connect(DB_PATH)
     try:
         # 审计只记字段名：base_url/model 属配置可记，api_key 只记"已更新"
-        _label = {"enabled": "模型启用状态", "context_window": "上下文窗口"}
+        _label = {"enabled": "模型启用状态", "context_window": "上下文窗口",
+                  "thinking": "思考模式"}
         fields = "、".join(("api_key（值不记录）" if f == "api_key"
                             else _label.get(f, f)) for f in r["changed"])
         db.add_audit(conn, "settings", "model-config", "update",
@@ -6716,6 +7071,25 @@ def api_model_config_set(req: ModelCfgReq,
     return {"ok": True, "changed": r["changed"],
             "key_masked": llm.mask_key(c2.get("api_key")), "key_set": bool(c2.get("api_key")),
             "env_override": r["env_override"], "note": note}
+
+
+@app.post("/api/model/test")
+def api_model_test(x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
+                   x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> dict:
+    """测试对话模型连通性：返回可达性、实际窗口、错误原因与下一步建议。
+
+    不会修改任何配置，也不消耗生成 token（只请求 `/models` 列表）。
+    """
+    s = _session(x_tp_token, x_tp_role)
+    require(s, "settings")
+    st = llm.status()
+    _win, _src = llm.model_context_window(llm.load_cfg())
+    return {"ok": bool(st.get("reachable")),
+            "reachable": bool(st.get("reachable")),
+            "model": st.get("model"), "base_url": st.get("base_url"),
+            "error": st.get("error"), "hint": st.get("hint"),
+            "context_window": _win, "window_source": _src,
+            "route": st.get("route")}
 
 
 class EmbeddingCfgReq(BaseModel):
@@ -6820,14 +7194,48 @@ def api_settings_set(req: SettingsReq,
             if not (1 <= _od <= 365):
                 raise HTTPException(status_code=422, detail="超期天数应在 1-365 之间")
             db.set_setting(conn, "pipeline_overdue_days", _od)
+        if getattr(req, "ingest_concurrency", None) is not None:
+            _ic = int(req.ingest_concurrency)
+            if not (1 <= _ic <= 4):
+                raise HTTPException(status_code=422, detail="入库并发应在 1-4 之间")
+            db.set_setting(conn, "ingest_concurrency", _ic)
+        if getattr(req, "analysis_concurrency", None) is not None:
+            _ac = int(req.analysis_concurrency)
+            if not (1 <= _ac <= 6):
+                raise HTTPException(status_code=422, detail="分析并发应在 1-6 之间")
+            db.set_setting(conn, "analysis_concurrency", _ac)
+        if getattr(req, "auto_ingest_mail", None) is not None:
+            db.set_setting(conn, AUTO_MAIL_KEY, bool(req.auto_ingest_mail))
+        if getattr(req, "auto_ingest_every", None) is not None:
+            _ae = int(req.auto_ingest_every)
+            if not (1 <= _ae <= 999):
+                raise HTTPException(status_code=422, detail="自动收取间隔应在 1-999 之间")
+            db.set_setting(conn, AUTO_MAIL_EVERY_KEY, _ae)
+        if getattr(req, "auto_ingest_unit", None) is not None:
+            _au = str(req.auto_ingest_unit or "").strip()
+            if _au not in ("minute", "hour", "day"):
+                raise HTTPException(status_code=422,
+                                    detail="自动收取单位只能是 minute / hour / day")
+            db.set_setting(conn, AUTO_MAIL_UNIT_KEY, _au)
         after = _settings(conn)
         _ai_before = bool(before.get("auto_insight_on_ingest"))
         _ai_after = bool(after.get("auto_insight_on_ingest"))
         _od_b = int(before.get("pipeline_overdue_days") or 15)
         _od_a = int(after.get("pipeline_overdue_days") or 15)
         if before != after:
-            for _k, _b, _a in (("auto_insight_on_ingest", _ai_before, _ai_after),
-                               ("pipeline_overdue_days", _od_b, _od_a)):
+            for _k, _b, _a in (
+                    ("auto_insight_on_ingest", _ai_before, _ai_after),
+                    ("pipeline_overdue_days", _od_b, _od_a),
+                    ("ingest_concurrency", before.get("ingest_concurrency"),
+                     after.get("ingest_concurrency")),
+                    ("analysis_concurrency", before.get("analysis_concurrency"),
+                     after.get("analysis_concurrency")),
+                    ("auto_ingest_mail", before.get("auto_ingest_mail"),
+                     after.get("auto_ingest_mail")),
+                    ("auto_ingest_every", before.get("auto_ingest_every"),
+                     after.get("auto_ingest_every")),
+                    ("auto_ingest_unit", before.get("auto_ingest_unit"),
+                     after.get("auto_ingest_unit"))):
                 if _b != _a:
                     db.add_audit(conn, "settings", _k, "update",
                                  f"{_k}={_b}", f"{_k}={_a}",
@@ -6840,6 +7248,22 @@ def api_settings_set(req: SettingsReq,
                                  "可在人才库点「分析待分析的人」批量补上（已写入审计）。")
         if _od_a != _od_b:
             _changed.append(f"超期天数已改为 {_od_a} 天。")
+        if int(before.get("ingest_concurrency") or 1) != int(
+                after.get("ingest_concurrency") or 1):
+            _changed.append(f"入库并发已改为 {after.get('ingest_concurrency')} 路"
+                            "（下一次收取/导入生效）。")
+        if int(before.get("analysis_concurrency") or 1) != int(
+                after.get("analysis_concurrency") or 1):
+            _changed.append(f"分析并发已改为 {after.get('analysis_concurrency')} 路"
+                            "（下一次自动分析生效）。")
+        if (before.get("auto_ingest_mail") != after.get("auto_ingest_mail")
+                or before.get("auto_ingest_every") != after.get("auto_ingest_every")
+                or before.get("auto_ingest_unit") != after.get("auto_ingest_unit")):
+            _unit = {"minute": "分钟", "hour": "小时", "day": "天"}.get(
+                after.get("auto_ingest_unit"), "小时")
+            _changed.append("自动收取邮箱已" +
+                            (f"开启：每 {after.get('auto_ingest_every')} {_unit}一次。"
+                             if after.get("auto_ingest_mail") else "关闭。"))
         note = " ".join(_changed) if _changed else "设置未变化。"
         return {"ok": True, **after, "changed": before != after, "note": note}
     finally:
@@ -8011,8 +8435,15 @@ def _startup_daily_task() -> None:
             print(f"[daily] 巡检失败（不影响使用）：{exc}", file=sys.stderr)
 
     def _loop() -> None:
+        # 每天 **09:00** 刷新（业务方 2026-11-23）：以前是“启动后每 24 小时”，
+        # 结果刷新时间跟着启动时间漂移。现在固定到下一个 09:00；
+        # 启动时仍先跑一次，保证当天首次打开就有摘要。
         while True:
-            time.sleep(24 * 3600)
+            now = datetime.now()
+            target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            time.sleep(max(60.0, (target - now).total_seconds()))
             _run_once()
 
     threading.Thread(target=_loop, name="daily-task", daemon=True).start()
