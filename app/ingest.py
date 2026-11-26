@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import html as _html
 import json
 import os
 import re
@@ -193,6 +194,65 @@ def get_progress(tid: str) -> dict | None:
     with _PROGRESS_LOCK:
         p = _PROGRESS.get(tid)
         return dict(p) if p else None
+
+
+#: 进度事件里带给界面的计数项（导入 / 收取共用一套名字，前端只维护一份映射）。
+_PROGRESS_COUNT_KEYS = (
+    "mails", "scanned", "attachments", "added", "merged_versions",
+    "skipped_dup", "skipped_oversize", "failed", "no_attachment",
+    "from_mail_body", "parse_failed", "other_saved", "other_failed",
+    "attachments_skipped", "dead_lettered",
+)
+
+
+def _progress_counts(report: dict) -> dict:
+    return {k: int(report.get(k) or 0) for k in _PROGRESS_COUNT_KEYS
+            if k in report}
+
+
+def _progress_item(detail: dict | None, fallback: str = "") -> dict:
+    d = detail if isinstance(detail, dict) else {}
+    return {
+        "file": str(d.get("file") or d.get("name") or fallback or "")[:160],
+        "status": str(d.get("status") or "")[:40],
+        "notes": [str(x)[:160] for x in (d.get("notes") or [])[:2]],
+    }
+
+
+def _emit_progress(on_progress, *, phase: str, message: str = "",
+                   done: int | None = None, total: int | None = None,
+                   current: str = "", status: str = "running",
+                   report: dict | None = None,
+                   items: list[dict] | None = None,
+                   started: float | None = None) -> None:
+    """把一条进度推给调用方（助手 SSE / 进度窗口）。
+
+    这是**旁路**：任何异常都不能影响导入本身。没传回调时什么也不做。
+    """
+    if on_progress is None:
+        return
+    ev: dict = {"phase": phase, "status": status, "message": message}
+    if done is not None:
+        ev["done"] = int(done)
+    if total is not None:
+        ev["total"] = int(total)
+    if current:
+        ev["current"] = str(current)[:160]
+    if report is not None:
+        ev["counts"] = _progress_counts(report)
+        # 明细直接取报表尾部：前端因此能画出“最近处理了哪几份”，
+        # 不需要自己猜或只看到最后一个文件。
+        _details = [d for d in (report.get("details") or []) if isinstance(d, dict)]
+        if _details:
+            items = [_progress_item(d) for d in _details[-8:]]
+    if items:
+        ev["items"] = [x for x in items[-8:] if x]
+    if started is not None:
+        ev["elapsed"] = max(0, int(time.time() - started))
+    try:
+        on_progress(ev)
+    except Exception:                                       # noqa: BLE001
+        pass
 
 
 def list_running() -> list[dict]:
@@ -1595,6 +1655,62 @@ def _attachment_skip_meta(items: list[dict]) -> list[dict]:
     return out
 
 
+def _mail_body_text(mail: dict) -> str:
+    """邮件正文纯文本。优先 body_text；只有 HTML 时去标签、反转义。"""
+    txt = str(mail.get("body_text") or "").strip()
+    if not txt:
+        raw = str(mail.get("body_html") or "")
+        if raw:
+            raw = re.sub(r"(?is)<(script|style).*?</\1>", " ", raw)
+            raw = re.sub(r"(?s)<[^>]+>", " ", raw)
+            txt = _html.unescape(raw)
+    txt = re.sub(r"[ \t\r\f\v]+", " ", txt)
+    txt = re.sub(r"\n{3,}", "\n\n", txt)
+    return txt.strip()[:30000]
+
+
+def _mail_profile_text(mail: dict) -> str:
+    """把主题/发件人/正文拼成一份可分析的“简历文本”。"""
+    subj = str(mail.get("subject") or "").strip()
+    body = _mail_body_text(mail)
+    _from = str(mail.get("from_addr") or "").strip()
+    _when = str(mail.get("received_at") or "").strip()
+    head = [f"邮件主题：{subj}" if subj else "",
+            f"发件人：{_from}" if _from else "",
+            f"收件时间：{_when}" if _when else ""]
+    return "\n".join(x for x in head if x) + "\n\n" + body
+
+
+def _looks_like_application(subject: str, body: str, meta: dict) -> bool:
+    """没有附件时，只有“看起来像投递”的邮件才按正文建档。
+
+    不把通知、简报、系统告警也建成候选人：主题解析出姓名/方向，或正文同时出现
+    “应聘/求职/简历”与“姓名/电话/邮箱/学校/专业”两类信号，才算投递。
+    """
+    fields = (meta or {}).get("fields") or {}
+    if fields.get("name") or fields.get("direction"):
+        return True
+    text = f"{subject or ''}\n{body or ''}"
+    intent = re.search(r"(应聘|求职|报名|投递|申请|简历)", text)
+    info = re.search(r"(姓\s*名|电\s*话|手\s*机|邮\s*箱|毕业|学\s*校|专\s*业)", text)
+    return bool(intent and info)
+
+
+def _has_mail_identity(subject: str, body: str, meta: dict) -> bool:
+    """至少能识别出一种身份信息，避免把“您好，我想应聘”建成一个空档案。"""
+    fields = (meta or {}).get("fields") or {}
+    if fields.get("name"):
+        return True
+    text = f"{subject or ''}\n{body or ''}"
+    if re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text):
+        return True
+    if re.search(r"(?<!\d)1[3-9]\d{9}(?!\d)", text):
+        return True
+    if re.search(r"姓\s*名\s*[:：]\s*[一-龥A-Za-z]{2,}", text):
+        return True
+    return False
+
+
 def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: str,
                  job_id: int | None = None, use_llm: bool = False,
                  llm_conf: dict | None = None, report: dict | None = None,
@@ -1616,7 +1732,7 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
     if report is None:
         report = {"mails": 0, "attachments": 0, "added": 0, "merged_versions": 0,
                   "skipped_dup": 0, "failed": 0, "no_attachment": 0, "parse_failed": 0,
-                  "routed": 0, "unassigned": 0,
+                  "routed": 0, "unassigned": 0, "from_mail_body": 0,
                   # v1.27：非简历附件计数（收到几个 / 归档成功几个）
                   "other_attachments": 0, "other_saved": 0, "other_failed": 0,
                   "other_reused": 0,
@@ -1686,14 +1802,58 @@ def ingest_mails(mails: list[dict], cfg: dict, jd: dict, tiers: dict, db_path: s
                     })
                 else:
                     report["no_attachment"] += 1
-                    # 让完成弹窗能列出"哪封邮件没有附件"，而不是只给一个数字。
-                    report["details"].append({
-                        "file": mail.get("subject") or "（无附件邮件）",
-                        "status": "no_attachment",
-                        "name": None,
-                        "notes": [f"发件人：{mail.get('from_addr') or '未知'}；"
-                                  f"{mail.get('error') or '没有简历附件'}"],
-                    })
+                    _body = _mail_body_text(mail)
+                    _subj = str(mail.get("subject") or "")
+                    _created = False
+                    # 没有附件 ≠ 没有投递信息。邮件标题/正文里常写着姓名、电话、
+                    # 学校、专业 —— 这类“正文投递”也建档，否则 HR 只看到“无附件”，
+                    # 人却永远进不了人才库。通知/简报不满足投递特征，不会误建。
+                    if (_looks_like_application(_subj, _body, meta)
+                            and _has_mail_identity(_subj, _body, meta)):
+                        _fname = re.sub(r'[\\/:*?"<>|]+', "_", _subj).strip()[:80]
+                        _fname = (_fname or "无附件邮件") + ".txt"
+                        _text = _mail_profile_text(mail)
+                        try:
+                            _r = ingest_one(
+                                conn, cfg, eff_jd, tiers, filename=_fname,
+                                data=_text.encode("utf-8"), local_path=None,
+                                channel="邮件正文",
+                                applied_at=mail.get("received_at") or db.now(),
+                                source_message_id=mid, job_id=eff_job_id,
+                                use_llm=use_llm, llm_conf=llm_conf,
+                                subject_meta=meta,
+                                preparsed=(_text, "邮件正文", True))
+                            if _r.get("status") in ("added", "merged_version"):
+                                _created = True
+                                report["from_mail_body"] = int(
+                                    report.get("from_mail_body") or 0) + 1
+                                if _r["status"] == "added":
+                                    report["added"] += 1
+                                else:
+                                    report["merged_versions"] += 1
+                                _r.setdefault("notes", []).append(
+                                    "无简历附件：已按邮件主题与正文建档，建议 HR 复核")
+                                report["details"].append(_r)
+                            else:
+                                report["skipped_dup"] += 1
+                                report["details"].append(_r)
+                                _created = True  # 已按正文处理过，不再重复记“无附件”
+                        except Exception as exc:              # noqa: BLE001
+                            report["failed"] += 1
+                            report["details"].append({
+                                "file": _subj or "（无附件邮件）",
+                                "status": "failed",
+                                "notes": [f"按邮件正文建档失败：{exc}"],
+                            })
+                    if not _created:
+                        # 让完成弹窗能列出"哪封邮件没有附件"，而不是只给一个数字。
+                        report["details"].append({
+                            "file": _subj or "（无附件邮件）",
+                            "status": "no_attachment",
+                            "name": None,
+                            "notes": [f"发件人：{mail.get('from_addr') or '未知'}；"
+                                      f"{mail.get('error') or '没有简历附件'}"],
+                        })
                 db.update_email(
                     conn, mid, processed=1, processed_at=db.now(),
                     attachment_skipped_json=(
@@ -2062,7 +2222,8 @@ def _ingest_dir_file(path: str, *, db_path: str, cfg: dict, jd: dict,
 def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
                cfg: dict | None = None, channel: str = "文件夹",
                job_id: int | None = None, use_llm: bool = False,
-               llm_conf: dict | None = None, progress_tid: str | None = None) -> dict:
+               llm_conf: dict | None = None, progress_tid: str | None = None,
+               on_progress=None) -> dict:
     """手工导入文件夹中的简历（离线可用，不依赖邮箱）。
 
     体积上限与邮件附件**同一口径**（`max_attachment_mb`）。此前这条校验只在
@@ -2071,6 +2232,7 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
     超限的文件**不导入、也不删**，只在明细里说明原因（HR 自己决定怎么处理）。
     """
     cfg = cfg or mb.load_config()
+    started = time.time()
     limit = int(cfg.get("max_attachment_mb", 20) or 20) * 1024 * 1024
     files = sorted(f for f in glob.glob(os.path.join(folder, "*"))
                    if f.lower().endswith(parse_mod.SUPPORTED))
@@ -2088,6 +2250,11 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
     if progress_tid:
         update_progress(progress_tid, total=len(files),
                         message=f"已发现 {len(files)} 份文件，开始读取…")
+    _emit_progress(
+        on_progress, phase="scan", total=len(files), report=report,
+        started=started,
+        message=(f"已发现 {len(files)} 份简历，开始导入…" if files
+                 else "导入目录里没有可导入的简历"))
 
     def _one(path: str) -> dict:
         return _ingest_dir_file(
@@ -2122,11 +2289,27 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
                 if progress_tid:
                     update_progress(progress_tid,
                                     message=f"已停止：完成 {_i} / {len(files)} 份后按你的要求停下")
+                _emit_progress(
+                    on_progress, phase="done", done=_i, total=len(files),
+                    status="stopped", report=report, started=started,
+                    message=f"已停止：完成 {_i} / {len(files)} 份")
                 break
-            _apply(_one(path))
+            _base = os.path.basename(path)
+            _emit_progress(
+                on_progress, phase="parse", done=_i, total=len(files),
+                current=_base, report=report, started=started,
+                message=f"正在解析第 {_i + 1}/{len(files)} 份：{_base}")
+            _res = _one(path)
+            _apply(_res)
             done = _i + 1
             if progress_tid:
                 update_progress(progress_tid, done=done)
+            _emit_progress(
+                on_progress, phase="item", done=done, total=len(files),
+                current=_base, status=str(_res.get("kind") or "failed"),
+                report=report, started=started,
+                items=[_progress_item(_res.get("detail"), _base)],
+                message=f"已处理 {done}/{len(files)} 份：{_base}")
     else:
         idx = 0
         with ThreadPoolExecutor(max_workers=conc,
@@ -2138,22 +2321,48 @@ def ingest_dir(folder: str, jd: dict, tiers: dict, db_path: str,
                         update_progress(
                             progress_tid,
                             message=f"已停止：完成 {done} / {len(files)} 份后按你的要求停下")
+                    _emit_progress(
+                        on_progress, phase="done", done=done, total=len(files),
+                        status="stopped", report=report, started=started,
+                        message=f"已停止：完成 {done} / {len(files)} 份")
                     break
                 batch = files[idx:idx + conc]
+                _bases = [os.path.basename(p) for p in batch]
+                _emit_progress(
+                    on_progress, phase="parse", done=done, total=len(files),
+                    current="、".join(_bases[:3]), report=report,
+                    started=started,
+                    message=(f"正在解析 {len(batch)} 份（第 {idx + 1}–"
+                             f"{idx + len(batch)} 份）：{'、'.join(_bases[:3])}"))
                 futures = [ex.submit(_one, p) for p in batch]
-                for fut in futures:
+                for pth, fut in zip(batch, futures):
+                    _base = os.path.basename(pth)
                     try:
-                        _apply(fut.result())
-                    except Exception as exc:                 # noqa: BLE001
-                        report["failed"] += 1
-                        report["details"].append({"file": "", "status": "failed",
-                                                  "notes": [f"处理异常：{exc}"]})
+                        _res = fut.result()
+                    except Exception as exc:                # noqa: BLE001
+                        _res = {"kind": "failed", "detail": {
+                            "file": _base, "status": "failed",
+                            "notes": [f"处理异常：{exc}"]}}
+                    _apply(_res)
                     done += 1
                     if progress_tid:
                         update_progress(progress_tid, done=done)
+                    _emit_progress(
+                        on_progress, phase="item", done=done, total=len(files),
+                        current=_base, status=str(_res.get("kind") or "failed"),
+                        report=report, started=started,
+                        items=[_progress_item(_res.get("detail"), _base)],
+                        message=f"已处理 {done}/{len(files)} 份：{_base}")
                 idx += len(batch)
     # 与邮件路径同一处钩子：文件夹导入同样"进门就有判断"
     spawn_auto_analysis(db_path, report)
+    _emit_progress(
+        on_progress, phase="done", done=done, total=len(files),
+        status="stopped" if report.get("stopped") else "done",
+        report=report, started=started,
+        message=(f"导入结束：扫描 {report['scanned']} 份，新增 {report['added']} 人，"
+                 f"同人新版本 {report['merged_versions']} 份，"
+                 f"重复 {report['skipped_dup']} 份，失败 {report['failed']} 份"))
     return report
 
 
@@ -2244,14 +2453,15 @@ def _email_retry_count(db_path: str, message_id: str) -> int:
 
 def _empty_mail_report() -> dict:
     return {"mails": 0, "attachments": 0, "added": 0, "merged_versions": 0,
-            "skipped_dup": 0, "failed": 0, "no_attachment": 0,
+            "skipped_dup": 0, "failed": 0, "no_attachment": 0, "from_mail_body": 0,
             "parse_failed": 0, "routed": 0, "unassigned": 0,
             "other_attachments": 0, "other_saved": 0, "other_failed": 0,
             "other_reused": 0, "attachments_skipped": 0, "details": []}
 
 
 _MAIL_COUNT_KEYS = ("mails", "attachments", "added", "merged_versions",
-                    "skipped_dup", "failed", "no_attachment", "parse_failed",
+                    "skipped_dup", "failed", "no_attachment", "from_mail_body",
+                    "parse_failed",
                     "routed", "unassigned", "other_attachments", "other_saved",
                     "other_failed", "other_reused", "attachments_skipped",
                     "dead_lettered")
@@ -2287,7 +2497,7 @@ def _merge_mail_report(dst: dict, src: dict) -> None:
 def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                  use_llm: bool = False, llm_conf: dict | None = None,
                  cfg: dict | None = None, progress_tid: str | None = None,
-                 limit: int = 200) -> dict:
+                 limit: int = 200, on_progress=None) -> dict:
     """拉取邮箱 → 入库。统一的"收简历"动作。
 
     v1.29.4（业务方）：带 `progress_tid`（且 imap 模式）时按**逐封**处理 ——
@@ -2299,6 +2509,7 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
     不带 progress_tid 时行为与旧版一致（一次性拉全再入库，分析钩子在 ingest_mails 里）。
     """
     cfg = cfg or mb.load_config()
+    started = time.time()
     if cfg.get("mode") == "off":
         return {"mode": "off", "mails": 0, "added": 0,
                 "message": "邮箱抓取已在 config/mailbox.json 中关闭"}
@@ -2317,11 +2528,16 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
 
     newest = cursor or ""
     stopped = False
+    _emit_progress(
+        on_progress, phase="download", started=started,
+        message=("正在连接邮箱并下载新邮件…"
+                 if cfg.get("mode") == "imap" else "正在读取演练目录中的邮件…"))
 
-    if cfg.get("mode") == "imap" and progress_tid:
+    if cfg.get("mode") == "imap" and (progress_tid or on_progress):
         # ---- 逐封模式：先总数、再逐封（可停止、可接力分析）----
         report: dict = {"mails": 0, "attachments": 0, "added": 0, "merged_versions": 0,
                         "skipped_dup": 0, "failed": 0, "no_attachment": 0,
+                        "from_mail_body": 0,
                         "parse_failed": 0, "routed": 0, "unassigned": 0,
                         "other_attachments": 0, "other_saved": 0, "other_failed": 0,
                         "other_reused": 0, "attachments_skipped": 0, "details": []}
@@ -2344,6 +2560,8 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
         while True:
             try:
                 update_progress(progress_tid, message="正在连接邮箱并下载新邮件…")
+                _emit_progress(on_progress, phase="download", started=started,
+                               message="正在连接邮箱并下载新邮件…")
                 _meta: dict = {}
                 mails, _downloaded_upto = mb.fetch_imap(
                     cfg, cursor, limit,
@@ -2414,8 +2632,39 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                 progress_tid, total=total,
                 message=(f"已下载 {total} 封新邮件，开始入库…" if total
                          else "没有新邮件"))
+            _emit_progress(
+                on_progress, phase="parse", done=0, total=total,
+                report=report, started=started,
+                message=(f"已下载 {total} 封新邮件，开始逐封解析…" if total
+                         else "没有新邮件"))
             conc = ingest_concurrency(db_path)
             report["ingest_concurrency"] = conc
+
+            def _mail_subject(item: dict) -> str:
+                return str(item.get("subject") or item.get("file_name")
+                           or f"UID {item.get('uid') or '?'}")[:120]
+
+            def _mail_items(local: dict, item: dict) -> list[dict]:
+                rows = [_progress_item(d) for d in (local.get("details") or [])]
+                if rows:
+                    return rows
+                if local.get("_exc") or local.get("failed") or local.get("other_failed"):
+                    st = "failed"
+                elif int(local.get("added") or 0):
+                    st = "added"
+                elif int(local.get("merged_versions") or 0):
+                    st = "merged_version"
+                elif int(local.get("skipped_dup") or 0):
+                    st = "skipped_dup"
+                elif int(local.get("no_attachment") or 0):
+                    st = "no_attachment"
+                else:
+                    st = "ok"
+                return [{"file": _mail_subject(item), "status": st, "notes": []}]
+
+            def _mail_status(local: dict, item: dict) -> str:
+                rows = _mail_items(local, item)
+                return str(rows[0].get("status") or "ok") if rows else "ok"
 
             def _mail_failed(item: dict, local: dict, done_n: int,
                              kind: str) -> tuple[str, int]:
@@ -2469,6 +2718,14 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                         update_progress(
                             progress_tid, done=done_n,
                             message=f"第 {done_n} 封连续失败，已转入死信并继续")
+                    _emit_progress(
+                        on_progress, phase="item", done=done_n, total=total,
+                        current=_mail_subject(item), status="dead_letter",
+                        report=report, started=started,
+                        items=[{"file": _mail_subject(item),
+                                "status": "dead_letter",
+                                "notes": [f"连续 {_retry} 次失败，已转入死信"]}],
+                        message=f"第 {done_n} 封连续失败，已转入死信并继续")
                     return "dead", done_n
                 report["retry_pending"] = True
                 report["blocked_uid"] = item.get("uid") or ""
@@ -2481,6 +2738,14 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                         progress_tid,
                         message=(f"第 {done_n + 1} 封处理失败，已停在上一封"
                                  f"（第 {_retry} 次；连续 {MAX_EMAIL_RETRIES} 次后自动跳过）"))
+                _emit_progress(
+                    on_progress, phase="item", done=done_n, total=total,
+                    current=_mail_subject(item), status="failed",
+                    report=report, started=started,
+                    items=[{"file": _mail_subject(item), "status": "failed",
+                            "notes": [f"第 {done_n + 1} 封处理失败，已停在上一封"]}],
+                    message=(f"第 {done_n + 1} 封处理失败，已停在上一封"
+                             f"（第 {_retry} 次；连续 {MAX_EMAIL_RETRIES} 次后自动跳过）"))
                 return "stop", done_n
 
             # 按**有序批次**并发：一批 N 封并行解析，再按原顺序结算游标。
@@ -2497,6 +2762,13 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                             message=f"已停止：完成 {done} / {total} 封后按你的要求停下")
                     break
                 batch = mails[idx:idx + conc]
+                _subjects = [_mail_subject(it) for it in batch]
+                _emit_progress(
+                    on_progress, phase="parse", done=done, total=total,
+                    current="、".join(_subjects[:2]), report=report,
+                    started=started,
+                    message=(f"正在解析第 {idx + 1}–{idx + len(batch)} 封"
+                             f"（共 {total} 封）：{_subjects[0] if _subjects else ''}"))
                 if conc <= 1:
                     outs = [_ingest_mail_item(
                         it, cfg=cfg, jd=jd, tiers=tiers, db_path=db_path,
@@ -2533,6 +2805,12 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                     done += 1
                     if progress_tid:
                         update_progress(progress_tid, done=done)
+                    _emit_progress(
+                        on_progress, phase="item", done=done, total=total,
+                        current=_mail_subject(item),
+                        status=_mail_status(local, item), report=report,
+                        started=started, items=_mail_items(local, item),
+                        message=f"已处理 {done}/{total} 封：{_mail_subject(item)}")
                     # 长批次每 25 封落一次游标；被强杀后下次从断点继续。
                     if done % 25 == 0 and newest:
                         _cursor_save(db_path, folder_name, account, newest,
@@ -2598,16 +2876,33 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
                                    "已停在它之前，下次会重试")
                 report["retry_pending"] = True
         # 整批结束后挂一次分析（中途停止时分析"已收到的这批"）
+        _emit_progress(
+            on_progress, phase="done", done=done, total=total,
+            status=("stopped" if stopped else ("error" if report.get("error") else "done")),
+            report=report, started=started,
+            message=(f"邮箱收取结束：新邮件 {total} 封，新增 {report.get('added', 0)} 人，"
+                     f"同人新版本 {report.get('merged_versions', 0)} 份，"
+                     f"重复 {report.get('skipped_dup', 0)} 份，"
+                     f"失败 {report.get('failed', 0)} 份"))
         spawn_auto_analysis(db_path, report)
     else:
         # ---- 旧路径（eml 演练模式 / 不带进度的调用）----
         try:
-            mails, new_cursor = mb.incoming(cfg, cursor)
+            if cfg.get("mode") == "imap":
+                # 无进度条调用（助手 / CLI）也要尊重 limit：
+                # 旧版走 mb.incoming()，它内部固定 fetch_imap(limit=200)，
+                # 于是助手传 limit=0（全部）也只会收 200 封，和界面口径不一致。
+                mails, new_cursor = mb.fetch_imap(cfg, cursor, limit)
+            else:
+                mails, new_cursor = mb.incoming(cfg, cursor)
         except Exception as exc:
             return {"mode": cfg.get("mode"), "mails": 0, "added": 0, "error": str(exc)}
         if progress_tid:
             update_progress(progress_tid, total=len(mails),
                             message=f"已发现 {len(mails)} 封邮件，开始收取…")
+        _emit_progress(on_progress, phase="parse", done=0, total=len(mails),
+                       started=started,
+                       message=f"已发现 {len(mails)} 封邮件，正在收取…")
         report = ingest_mails(mails, cfg, jd, tiers, db_path, job_id, use_llm, llm_conf)
         # 旧路径（CLI / 助手收信工具，没有逐封进度）也要遵守同一条规则：
         # 这一批里只要有附件失败，游标就停在原处，下次整批重扫；已入库的
@@ -2618,6 +2913,15 @@ def sync_mailbox(jd: dict, tiers: dict, db_path: str, job_id: int | None = None,
             report["retry_pending"] = True
         if progress_tid:
             update_progress(progress_tid, done=len(mails))
+        _emit_progress(
+            on_progress, phase="done", done=len(mails), total=len(mails),
+            status=("error" if report.get("error") else "done"),
+            report=report, started=started,
+            message=(f"邮箱收取结束：新邮件 {len(mails)} 封，"
+                     f"新增 {report.get('added', 0)} 人，"
+                     f"同人新版本 {report.get('merged_versions', 0)} 份，"
+                     f"重复 {report.get('skipped_dup', 0)} 份，"
+                     f"失败 {report.get('failed', 0)} 份"))
 
     report["mode"] = cfg.get("mode")
     if stopped:

@@ -15,12 +15,20 @@ function disableAutofill(root){
   Array.prototype.forEach.call(nodes, function(el){
     if(el.getAttribute('data-af') === '1') return;
     el.setAttribute('data-af', '1');
-    el.setAttribute('autocomplete', 'off');
+    /* 密码框用 new-password：Chrome 对 current-password 的“保存/自动填入”
+       会跟整站表单关联，正是搜索框被灌 admin 的来源。 */
+    if(el.tagName === 'INPUT' && el.type === 'password'){
+      el.setAttribute('autocomplete', 'new-password');
+    }else{
+      el.setAttribute('autocomplete', 'off');
+    }
     el.setAttribute('autocorrect', 'off');
     el.setAttribute('autocapitalize', 'off');
     if(el.tagName !== 'SELECT') el.setAttribute('spellcheck', 'false');
     el.setAttribute('data-form-type', 'other');
     el.setAttribute('data-lpignore', 'true');
+    el.setAttribute('data-1p-ignore', 'true');
+    el.setAttribute('data-bwignore', 'true');
     if(!el.getAttribute('name') && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')){
       el.setAttribute('name', 'nofill_' + (++_AF_N));
     }
@@ -45,7 +53,20 @@ if(window.MutationObserver){
     _afTimer = setTimeout(function(){ disableAutofill(); }, 200);
   }).observe(document.documentElement, {childList: true, subtree: true});
 }
-document.addEventListener('DOMContentLoaded', function(){ disableAutofill(); });
+document.addEventListener('DOMContentLoaded', function(){
+  disableAutofill();
+  var _lw = document.getElementById('loginWrap');
+  if(_lw && _lw.hidden) _loginFieldsEnable(false);
+});
+/* 搜索框等“易被 Chrome 当成账号框”的输入先在 HTML 里 readonly，聚焦时再解锁：
+   readonly 期间浏览器不会往里灌保存的账号；解锁后仍可正常输入。 */
+document.addEventListener('focusin', function(ev){
+  var el = ev.target;
+  if(el && el.removeAttribute && el.hasAttribute('readonly') &&
+     el.getAttribute('data-af-unlock') === '1'){
+    el.removeAttribute('readonly');
+  }
+}, true);
 
 /* ---------- 登录态（2026-10-20 补齐） ----------
    v2 之前**只声明了"不支持"**：页面里没有 AUTH_ENABLED、没有 TOKEN，
@@ -190,6 +211,31 @@ async function api(path, opt){
     }
     return j;
   }catch(e){ return {__err: String(e)}; }
+}
+
+/* 带超时的只读请求：设置页一次性并发拉 7 个配置接口，
+   任何一个后端/网络卡住都不能让整页永远停在「读取配置…」。
+   超时只影响这一个配置块，页面必须给出可重试的结果。 */
+function apiT(path, ms, opt){
+  return new Promise(function(resolve){
+    var done = false;
+    var timer = setTimeout(function(){
+      if(done) return;
+      done = true;
+      resolve({__err: '读取超时'});
+    }, ms || 6000);
+    api(path, opt).then(function(r){
+      if(done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(r);
+    }, function(e){
+      if(done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({__err: String(e)});
+    });
+  });
 }
 
 /* ---------- 顶栏下拉 / 频道 ---------- */
@@ -3045,10 +3091,11 @@ function ingestFetchDone(label, fr){
 function ingestFinal(label, rep, ar){
   __ingestTask = null; __ingesting = false;
   setIngestBusy(false);
-  load();
+  refreshAfterIngest();
   var num = function(k){ return (rep[k] == null ? 0 : rep[k]); };
   var summary = '新增 ' + num('added') + '，新版本 ' + num('merged_versions') +
     '，跳过重复 ' + num('skipped_dup') + '，无附件 ' + num('no_attachment') +
+    '，正文建档 ' + num('from_mail_body') +
     '，解析失败(仍入库) ' + num('parse_failed') + '，异常 ' + num('failed') +
     '，附件未收 ' + num('attachments_skipped') +
     (num('other_failed') ? ('，补充附件失败 ' + num('other_failed')) : '') +
@@ -3856,9 +3903,31 @@ var LOGIN_SHOWN = false;
 /* 退场动画（v3.2）跑完之前不再弹回来：登录成功后 bootAfterLogin() 会连发几个
    请求，其中任何一个 401 都会把登录页叫回来 —— 那会盖在"正在进去"的动画上。 */
 var LOGIN_LEAVING = false;
+/* 隐藏的登录表单如果还留着 enabled 的密码框，Chrome/密码管理器会把保存的
+   账号自动灌到页面里任意一个文本框（截图：候选人搜索框被填成 admin）。
+   登录页关着时把两个输入框 disabled，需要登录时再打开。 */
+function _loginFieldsEnable(on){
+  var u = document.getElementById('loginUser');
+  var p = document.getElementById('loginPass');
+  if(u) u.disabled = !on;
+  if(p){
+    p.disabled = !on;
+    try{ p.type = on ? 'password' : 'text'; }catch(_e){}
+    if(!on) p.value = '';
+  }
+  if(!on && u) u.value = '';
+}
+/* 脚本在页面底部时 DOMContentLoaded 可能已经过去，不能只靠监听：
+   这里再主动收一次，保证隐藏的登录密码框在任何模式下都不是 password 类型。 */
+(function(){
+  if(document.readyState === 'loading') return;
+  var w = document.getElementById('loginWrap');
+  if(w && w.hidden) _loginFieldsEnable(false);
+})();
 function showLogin(msg){
   var w = document.getElementById('loginWrap');
   if(!w || LOGIN_LEAVING) return;
+  _loginFieldsEnable(true);
   LOGIN_SHOWN = true;
   /* 从 hidden 打开时重播入场。**只在这一刻播**：401 把登录页叫回来时
      w.hidden 本来就是 false，这里不会加 enter，用户不必再等一次淡入。 */
@@ -3925,6 +3994,7 @@ function hideLogin(){
   if(w) w.classList.remove('enter','leaving');
   var box = document.querySelector('#loginWrap .loginbox');
   if(box) box.classList.remove('shake','leaving');
+  _loginFieldsEnable(false);
   setLoginBtn('idle');                 /* 下次被 401 弹回来时按钮是干净的 */
   LOGIN_SHOWN = false;
   LOGIN_LEAVING = false;
@@ -4444,6 +4514,19 @@ function stopLoginNet(){
 
 /* ---------- 取数 ---------- */
 var LOAD_SEQ = 0;
+/* 助手/后台导入完成后，人才库列表要自己刷新出来，不能等用户按 F5。
+   导入在服务端是异步任务，SSE 的 tool_result 是“已经落库”的时刻，
+   这里做一次轻量刷新：列表、概览、待确认提案同步更新。 */
+var _AFTER_INGEST_T = null;
+function refreshAfterIngest(){
+  if(_AFTER_INGEST_T) clearTimeout(_AFTER_INGEST_T);
+  _AFTER_INGEST_T = setTimeout(function(){
+    _AFTER_INGEST_T = null;
+    try{ load({push:false}); }catch(e){}
+    try{ if(typeof MODE !== 'undefined' && MODE === 'overview') showOverview(); }catch(e){}
+    try{ loadProps(); }catch(e){}
+  }, 600);
+}
 async function load(opts){
   var seq = ++LOAD_SEQ;
   setListBusy(true);
@@ -7345,6 +7428,10 @@ async function userResetPassword(username){
    不新增一个主页面：复用原来的系统配置卡片，按 data-g / 标题分成模块。
    UI 颜色、圆角、输入框全部沿用现有 token；这里只负责“装进弹窗 + 分栏”。 */
 var SETTINGS_CAT = 'model';
+/* 设置页读配置的代际号：连续打开/切换时，只让最后一次请求渲染。 */
+var _INIT_SYS_SEQ = 0;
+/* 防止账号菜单点击和路由回调同时触发 openSettings，导致设置层反复重建。 */
+var _SETTINGS_OPENING = false;
 /* 设置里的**必填项**：字段名后标「必填」，不再用灰色 placeholder 提示。
    只标“不填就用不了”的项；API Key、显示名、目录、白名单等可选项不标。 */
 var CFG_REQUIRED = {
@@ -7431,7 +7518,9 @@ function ensureSettingsExtras(){
     body.insertAdjacentHTML('beforeend',
       '<div id="settingsSchoolSubjects" class="sec cfgsec" data-g="settings" style="display:none">' +
         '<h3>院校学科评估</h3>' +
-        '<div id="subjList"></div>' +
+        '<div class="hint" style="padding:4px 0 2px">' +
+          '参考第四轮学科评估（部分院校含第五轮公开结果），仅用于专业方向匹配，不作为录取依据。' +
+        '</div>' +
       '</div>');
   }
   syncAppearanceUI();
@@ -7489,7 +7578,6 @@ function applySettingsCat(){
     if(subj && subj.parentNode === body && runSec && runSec !== subj){
       body.insertBefore(subj, runSec);
     }
-    loadSchoolSubjects();
   }
 }
 
@@ -7556,16 +7644,22 @@ async function delSchoolSubject(i){
 
 async function openSettings(cat){
   if(!can('settings')){ toast('没有设置权限'); return; }
+  if(_SETTINGS_OPENING) return;
+  _SETTINGS_OPENING = true;
   SETTINGS_CAT = cat || 'model';
   if(SETTINGS_CAT === 'users' &&
      !(ME && (ME.permissions || []).indexOf('manage_users') >= 0)) SETTINGS_CAT = 'model';
   var mask = document.getElementById('settingsMask');
-  if(!mask) return;
+  if(!mask){ _SETTINGS_OPENING = false; return; }
   mask.classList.add('on');
-  await initSys('settingsBody');
-  ensureSettingsExtras();
-  buildSettingsNav();
-  applySettingsCat();
+  try{
+    await initSys('settingsBody');
+    ensureSettingsExtras();
+    buildSettingsNav();
+    applySettingsCat();
+  }finally{
+    _SETTINGS_OPENING = false;
+  }
 }
 
 function closeSettings(){
@@ -7589,12 +7683,29 @@ async function initSys(target){
   if(target) SYS_TARGET = target;
   var box = document.getElementById(SYS_TARGET) || document.getElementById('sysView');
   if(!box) return;
+  var seq = ++_INIT_SYS_SEQ;
   box.innerHTML = '<div class="hint" style="padding:20px">读取配置…</div>';
   var r = await Promise.all([
-    api('/api/model-config'), api('/api/mail/smtp'), api('/api/mailbox/config'),
-    api('/api/mailbox/presets'), api('/api/interview-dict'), api('/api/mail/templates'),
-    api('/api/embedding-config')
+    apiT('/api/model-config'), apiT('/api/mail/smtp'), apiT('/api/mailbox/config'),
+    apiT('/api/mailbox/presets'), apiT('/api/interview-dict'), apiT('/api/mail/templates'),
+    apiT('/api/embedding-config')
   ]);
+  /* 连续打开/切换设置时，只让最后一次渲染；旧请求晚回来不能把页面盖回旧内容。 */
+  if(seq !== _INIT_SYS_SEQ) return;
+  var _names = ['模型配置', '发信配置', '收信配置', '邮箱预设', '面试字典',
+                '邮件模板', '向量模型'];
+  var _bad = [];
+  r.forEach(function(x, i){ if(x && x.__err) _bad.push(_names[i] + '：' + x.__err); });
+  if(_bad.length){
+    /* 不能把空值当真实配置渲染出来：否则用户点保存会把整组配置覆盖掉。 */
+    box.innerHTML = '<div class="dhead" style="margin-bottom:8px"><div class="dname">系统配置</div></div>' +
+      '<div class="hint" style="padding:16px 0;line-height:1.9">' +
+      '配置读取失败，已停止渲染，避免误保存覆盖原配置。<br>' +
+      esc(_bad.join('\n')) +
+      '<br><button class="btn sm" style="margin-top:12px" onclick="initSys()">重试</button>' +
+      '</div>';
+    return;
+  }
   CFG = {model: r[0] || {}, smtp: r[1] || {}, mailbox: r[2] || {},
          presets: (r[3] || {}).presets || [], dict: r[4] || {}, tpl: (r[5] || {}).items || [],
          embed: r[6] || {}};
@@ -9985,6 +10096,11 @@ function renderTraceLive(t, question){
   if(state) state.textContent = '运行中';
   var steps = [traceStepHtml('m', '模型', '正在思考…')];
   groupTrace(t.trace || []).forEach(function(x){ steps.push(traceToolStep(x)); });
+  if(t.progress && t.progress.message){
+    steps.push(traceStepHtml('a', t.progress.tool_label || '处理进度',
+      (t.progress.total ? (Number(t.progress.done || 0) + '/' + Number(t.progress.total) + ' · ') : '') +
+      t.progress.message));
+  }
   steps.push('<div class="tp-step tp-running"><span class="tp-dot t"></span>' +
     '<div class="tp-box"><div class="tp-title">运行中</div><div class="tp-meta">' +
     esc(question ? ('问题：' + question) : '等待下一步') + '</div></div></div>');
@@ -10007,8 +10123,18 @@ function startTracePoll(question, holder, passive){
     var t = await api('/api/agent/trace?session_id=' + encodeURIComponent(CHAT_CONV_ID));
     if(t && !t.__err){
       if(!CHAT_CTRL){
-        /* 页面刷新/切走后回来：SSE 已经不在了，但服务端留了半成品答案和思考，
-           贴回当前气泡，至少能看到“正在写什么”。 */
+        /* 页面刷新/切走后回来：SSE 已经不在了，但服务端留了半成品答案、
+           思考和长任务进度，贴回当前气泡，至少能看到“做到哪一份了”。 */
+        if(t.progress && holder){
+          renderTaskProgress(holder, t.progress);
+          var _ps = holder.querySelector('.stream-status');
+          if(_ps){
+            _ps.textContent = (t.progress.tool_label || '正在处理') +
+              (t.progress.total ? (' · ' + Number(t.progress.done || 0) +
+                '/' + Number(t.progress.total)) : '') +
+              (t.progress.elapsed ? ' · ' + Number(t.progress.elapsed) + 's' : '');
+          }
+        }
         if(t.answer && holder){
           var a = holder.querySelector('.stream-answer');
           if(a) a.innerHTML = mdLite(t.answer);
@@ -10185,6 +10311,7 @@ async function openConversation(cid, quiet){
     if(tb) tb.textContent = RUN_STATE.liveThink;
     var ae = ph.querySelector('.stream-answer');
     if(ae) ae.innerHTML = RUN_STATE.liveAns ? mdLite(RUN_STATE.liveAns) : '';
+    if(RUN_STATE.progress) renderTaskProgress(ph, RUN_STATE.progress);
     RUN_HOLDER = ph;
     renderTraceRunning(RUN_Q);
     startTracePoll(RUN_Q, ph);
@@ -10196,7 +10323,7 @@ async function openConversation(cid, quiet){
     var _hl = _hm[_hm.length - 1] || {};
     if(_hl.role === 'user' && _hl.status === 'running'){
       var ph2 = pushMsg('assistant', '');
-      ph2.innerHTML = '<div class="stream-status hint">回答仍在生成…</div>' +
+      ph2.innerHTML = '<div class="stream-status hint">正在处理，等待进度…</div>' +
         '<div class="stream-answer"></div>';
       startTracePoll('', ph2, true);
       startHistoryPoll(cid);
@@ -11011,6 +11138,78 @@ async function uploadChatFile(file){
     }
   }, 1200);
 }
+var TASKP_STATUS = {
+  added:['新增','ok'], merged_version:['同人新版本','ok'], merged:['同人新版本','ok'],
+  skipped_dup:['重复跳过','warn'], skipped_oversize:['超大跳过','warn'],
+  no_attachment:['无简历附件','warn'], dead_letter:['死信','bad'],
+  failed:['失败','bad'], ok:['已处理','ok']
+};
+var TASKP_COUNTS = [
+  ['mails','邮件'], ['scanned','扫描'], ['added','新增'],
+  ['merged_versions','同人新版本'], ['skipped_dup','重复跳过'],
+  ['skipped_oversize','超大跳过'], ['failed','失败'],
+  ['no_attachment','无附件'], ['from_mail_body','正文建档'],
+  ['dead_lettered','死信']
+];
+function _taskpLabel(st){
+  var x = TASKP_STATUS[st] || [st || '已处理',''];
+  return x[0];
+}
+function _taskpClass(st){
+  var x = TASKP_STATUS[st] || ['',''];
+  return x[1];
+}
+/* 长任务进度卡：当前文件、完成数、分项计数、最近处理明细。
+   服务端每次把最近 8 条明细一起带来，刷新后轮询轨迹也能看到同一份进度。 */
+function renderTaskProgress(holder, p){
+  if(!holder) return;
+  var el = holder.querySelector('.taskprog');
+  if(!p){
+    if(el) el.remove();
+    return;
+  }
+  if(!el){
+    el = document.createElement('div');
+    el.className = 'taskprog';
+    holder.insertBefore(el, holder.querySelector('.stream-answer'));
+  }
+  var done = Number(p.done || 0), total = Number(p.total || 0);
+  var state = p.phase === 'done'
+    ? (p.status === 'error' ? 'error' : 'done')
+    : (p.status === 'error' ? 'error' : 'running');
+  el.setAttribute('data-state', state);
+  var pct = total > 0 ? Math.max(0, Math.min(100, Math.round(done * 100 / total)))
+    : (state === 'done' ? 100 : 0);
+  var count = total > 0 ? (done + '/' + total) : '';
+  var chips = '';
+  var c = p.counts || {};
+  TASKP_COUNTS.forEach(function(it){
+    var n = Number(c[it[0]] || 0);
+    if(!n) return;
+    var cls = (it[0] === 'failed' || it[0] === 'dead_lettered') ? 'bad'
+      : ((it[0] === 'skipped_dup' || it[0] === 'skipped_oversize'
+          || it[0] === 'no_attachment') ? 'warn' : 'ok');
+    chips += '<span class="taskprog-chip ' + cls + '">' + it[1] + ' ' + n + '</span>';
+  });
+  var files = '';
+  (p.items || []).slice(-8).forEach(function(it){
+    var cls = _taskpClass(it.status);
+    files += '<li class="taskprog-file"><span class="fn">' +
+      esc(it.file || '') + '</span><span class="st ' + cls + '">' +
+      esc(_taskpLabel(it.status)) + '</span></li>';
+  });
+  var title = p.tool_label || '正在处理';
+  if(state === 'done') title += ' · 已完成';
+  el.innerHTML =
+    '<div class="taskprog-h"><span class="taskprog-title">' + esc(title) + '</span>' +
+      (count ? '<span class="taskprog-count">' + esc(count) +
+        (p.elapsed ? ' · ' + Number(p.elapsed) + 's' : '') + '</span>' : '') + '</div>' +
+    '<div class="taskprog-bar' + (total > 0 ? '' : ' indet') + '">' +
+      '<i style="width:' + pct + '%"></i></div>' +
+    '<div class="taskprog-msg">' + esc(p.message || (state === 'done' ? '已完成' : '正在处理…')) + '</div>' +
+    (chips ? '<div class="taskprog-chips">' + chips + '</div>' : '') +
+    (files ? '<ul class="taskprog-files">' + files + '</ul>' : '');
+}
 async function askAgent(override){
   var inp = document.getElementById('chatIn');
   var sendQ = override ? String(override.send || '') : (inp.value || '').trim();
@@ -11045,7 +11244,7 @@ async function askAgent(override){
     '<div class="stream-answer"></div>';
   /* 这一轮的状态放在全局：切到别的会话时 DOM 换掉，但内容继续累积；
      切回来时 openConversation 会把 RUN_HOLDER 重新绑到新的气泡上。 */
-  var run = {liveThink:'', liveAns:'', statusBase:'正在思考…'};
+  var run = {liveThink:'', liveAns:'', statusBase:'正在思考…', progress:null};
   RUN_CONV_ID = convId; RUN_Q = q; RUN_HOLDER = holder; RUN_STATE = run;
   var answerTimer = null;
   var sawAny = false;
@@ -11105,10 +11304,23 @@ async function askAgent(override){
       run.liveAns = '';
       flushAnswer();
     } else if(ev.type === 'tool_start'){
+      run.progress = null;
+      renderTaskProgress(RUN_HOLDER, null);
       setStatus('正在调用：' + (ev.tool_label || ev.tool || '工具') + '…');
+    } else if(ev.type === 'tool_progress'){
+      run.progress = ev;
+      run.statusBase = (ev.tool_label || '正在处理') +
+        (ev.total ? (' · ' + Number(ev.done || 0) + '/' + Number(ev.total)) : '');
+      if(viewing()){
+        renderTaskProgress(RUN_HOLDER, ev);
+        setStatus();
+        chatAutoScroll();
+      }
     } else if(ev.type === 'tool_result'){
       setStatus((ev.ok === false ? '工具返回错误：' : '已完成：') +
         (ev.tool_label || ev.tool || '工具'));
+      /* ingest_resumes 已经完成落库：立刻刷新人才库，用户不用手动点刷新。 */
+      if(ev.tool === 'ingest_resumes' && ev.ok !== false) refreshAfterIngest();
     } else if(ev.type === 'answer_complete'){
       setStatus('回答已生成，正在收尾…');
     } else if(ev.type === 'error'){
@@ -12347,7 +12559,9 @@ var _KILL_T = null;
 function killAutofill(){
   Array.prototype.forEach.call(
     document.querySelectorAll('input,textarea,select'), function(el){
-      if(el.getAttribute('autocomplete') !== 'off') el.setAttribute('autocomplete','off');
+      var ac = (el.tagName === 'INPUT' && el.type === 'password')
+        ? 'new-password' : 'off';
+      if(el.getAttribute('autocomplete') !== ac) el.setAttribute('autocomplete', ac);
     });
 }
 function killAutofillSoon(){

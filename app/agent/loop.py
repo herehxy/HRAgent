@@ -135,7 +135,8 @@ SYSTEM_PROMPT = (
     "严禁凭印象编造姓名、数字或经历；工具返回为空就如实说没有。\n"
     # v1.24.17：检索是**字面匹配**，而 HR 说的是简称、库里存的是全称。
     "1b) 检索工具是**字面匹配**。HR 说的往往是简称（『西电』『北邮』『人大』），"
-    "库里存的是全称（『西安电子科技大学』）。搜不到时**先怀疑检索词**："
+    "库里存的是全称（『西安电子科技大学』）。**院校优先用 search_candidates 的 school 参数**"
+    "（系统会自动展开常见简称）；用 keyword 搜其他字段时，先怀疑检索词："
     "把简称展开成全称再搜一次；技能同理（先过一遍同义说法）。"
     "两种写法都搜过仍然为空，才回答『没有』。\n"
     "   同理，HR 问『有没有会X的人』时，技能检索（search_by_skills）结果为空，"
@@ -259,8 +260,52 @@ SYSTEM_PROMPT = (
     "最后集中汇总，让 HR 一次「全部同意」。不要只做第一个动作就收尾。\n"
     "12) 需要分析/对比多个候选人时，把多个 `analyze_fit` 或 `compare_candidates` "
     "调用**放在同一条回复里一次性发出**（系统会并行执行），不要一人一轮逐个调用；"
-    "这样更快，也不浪费工具轮次。"
+    "这样更快，也不浪费工具轮次。\n"
+    # 2026-11-25（业务方截图「导入邮箱最新简历 → 待导入目录为空」）：
+    # 根因不是模型不会，而是路由把 ingest_resumes 藏掉了，模型只能扫目录。
+    # 这里把“导入是能做的”说死，并要求用真实 counts 汇报。
+    "13) **导入/收取简历是你能直接做的事**：HR 说『导入邮箱最新简历』"
+    "『收一下简历』『抓取新邮件』『把文件夹里的简历导进来』时，"
+    "立刻调用 `ingest_resumes`（source=auto/mailbox/folder），它会真的执行。"
+    "**不要用 list_source_files 代替导入**，也不要回答『系统不接受对话触发』——"
+    "那是旧口径。只有 ingest_resumes 返回 0 或报错时，才用 import_diagnostics 解释原因。\n"
+    "14) 汇报导入结果必须用工具返回的 counts 分项说："
+    "新增 / 同人新版本 / 重复跳过 / 超大 / 失败；有新增姓名就列出来（最多 10 个）。"
+    "不要只报一个总数，也不要把“重复跳过”说成“失败”。\n"
+    "15) **只读的下一步不要问。** 查导入历史、看邮箱状态、看某人投了几次、"
+    "看最近错误——这些直接查完再汇报。只有写操作、或真正需要 HR 做选择时才征求确认。"
+    "禁止用『需要我帮您查看…吗』把已经能做的只读动作推回去。\n"
+    "16) 被问『你能做什么』『你会什么』『有什么功能』时，先调 "
+    "`assistant_capabilities`，按返回的能力清单回答；不要凭印象编造能力或限制。"
+    "任何“你能不能…”的问题，先看本轮工具清单：清单里有对应工具就直接做。\n"
+    "17) 工具返回 `next_actions` 时优先照做；用户上传的**聊天附件**尚未入库时，"
+    "告诉用户点附件上的「入库」按钮批准，不要调用 ingest_resumes 处理聊天临时文件。\n"
+    "18) 检索候选人时，院校/专业优先用 `search_candidates` 的 `school` / `major` "
+    "显式参数（支持简称），不要用 keyword 代替——keyword 会把备注、邮件正文里"
+    "提到该校名的人也带出来。"
 )
+
+#: 27B 级别小参数模型的执行纪律。只在参数量 ≤32B 时注入。
+#: 不是“看不起小模型”，而是把弱模型最容易犯的几类错（多工具乱撞、改写数字、
+#: 参数枚举写错、没查就下结论）提前钉死；强模型看到也无害，但没必要占 token。
+_SMALL_MODEL_PROMPT = (
+    "【小参数模型执行纪律】\n"
+    "1) 每轮只调用 1–3 个**必要**工具；按当前 SOP 的顺序走，不要同时猜多个参数。\n"
+    "2) 先读工具返回的 summary / counts / verdict，再决定下一步；"
+    "**回复里的数字必须原样来自工具**，不要自己加减或四舍五入。\n"
+    "3) 参数名、枚举值、日期格式严格照工具说明；不确定岗位名/模板名时，"
+    "先用 list_jobs / list_mail_templates 取真实名称，不要编。\n"
+    "4) 工具报错时按 hint 修正一次；仍失败就如实说明，不要换个说法掩盖。\n"
+    "5) 多步任务先在脑内列步骤（筛选→核对→提案/导出），每一步完成后再进下一步；"
+    "不要只做第一步就收尾。\n"
+    "6) 没有工具返回的姓名/数量/经历一律不许写；查不到就说查不到。"
+)
+
+
+def _param_billions(value: str) -> float:
+    """把 '27B' / '7b' / '1.5B' 解析成以 B 为单位的数字；解析不了返回 0。"""
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*[bB]\s*$", str(value or ""))
+    return float(m.group(1)) if m else 0.0
 
 
 #: v1.24.18：模型声称"已提交/已生成待确认提案"的措辞。
@@ -624,7 +669,8 @@ _LIVE_TRACES: dict[str, dict] = {}
 
 def _live_update(ctx: ToolCtx, trace: list[dict], status: str = "running",
                  mode: str | None = None, rounds: int = 0,
-                 thinking: str = "", answer: str | None = None) -> None:
+                 thinking: str = "", answer: str | None = None,
+                 progress: dict | None = None) -> None:
     sid = str(ctx.session_id or "").strip()
     if not sid:
         return
@@ -645,6 +691,10 @@ def _live_update(ctx: ToolCtx, trace: list[dict], status: str = "running",
         "answer": (str(answer) if answer is not None
                    else str(_prev.get("answer") or ""))[-20000:],
         "route": list(getattr(ctx, "route", []) or []),
+        # 长任务（导入/收取）正在处理到哪一份：刷新页面/切回会话后，
+        # 右侧轨迹和消息气泡都能从这里把进度接回来。
+        "progress": dict(progress if progress is not None
+                         else (getattr(ctx, "progress", {}) or {})),
         "ts": now_ts,
         "trace": [{
             "tool": t.get("tool"),
@@ -720,6 +770,7 @@ def live_trace(session_id: str, operator: str) -> dict | None:
             "rounds": v.get("rounds"), "thinking": v.get("thinking") or "",
             "answer": v.get("answer") or "",
             "route": list(v.get("route") or []),
+            "progress": dict(v.get("progress") or {}),
             "trace": list(v.get("trace") or [])}
 
 
@@ -983,6 +1034,11 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         _win, max_output_tokens=cfg.get("max_tokens"),
         configured_budget=cfg.get("context_budget_tokens"),
         cap=cfg.get("context_budget_cap"))
+    # 27B 级别：可见工具再收紧一点，并注入执行纪律。参数量拿不到时不做任何假设。
+    _model_params = llm.model_parameter_count(cfg)
+    _small_model = 0 < _param_billions(_model_params) <= 32
+    if _small_model:
+        _budget_info["max_tools"] = min(int(_budget_info.get("max_tools") or 30), 18)
 
     # 模型无关的工具路由：近百个工具按意图收成 10~22 个（小窗口再自动减少）。
     # 没有命中任何关键词时给一组覆盖面最广的读工具，避免"问什么都缺工具"。
@@ -1034,6 +1090,8 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
             marker="\n…（SOP 过长，已截断）…\n")
 
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if _small_model:
+        messages.append({"role": "system", "content": _SMALL_MODEL_PROMPT})
     _wd = "一二三四五六日"[datetime.now().weekday()]
     messages.append({"role": "system", "content":
                      f"【当前时间】{datetime.now():%Y-%m-%d %H:%M:%S}（星期{_wd}）。"
@@ -1091,7 +1149,6 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         messages, budget=_budget_info["budget"],
         tool_limit=_budget_info["tool_result_tokens"],
         history_message_tokens=_budget_info["history_message_tokens"])
-    _model_params = llm.model_parameter_count(cfg)
     _msgs_text = "\n".join(
         str(m.get("content") or "") for m in messages
         if m.get("role") in ("user", "assistant"))
@@ -1120,6 +1177,8 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
         "context_trimmed_max": 0,
         "rounds_detail": [],
         "max_rounds": 0,
+        "model_params": _model_params,
+        "small_model": _small_model,
         "alert_thresholds": dict(cfg.get("context_alerts") or {}),
     }
 
@@ -1220,6 +1279,20 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                 emit(ev)
             except Exception:                                # noqa: BLE001
                 pass          # 前端断开不该拖垮后端
+
+    def _tool_progress(p: dict, ev: dict) -> None:
+        """把工具内部的长任务进度转成 SSE 事件，并留一份给刷新后还原。"""
+        if not isinstance(ev, dict):
+            return
+        payload = {"type": "tool_progress",
+                   "id": p.get("tc", {}).get("id", ""),
+                   "tool": p.get("fn"),
+                   "tool_label": _TOOL_LABEL.get(p.get("fn"), p.get("fn"))}
+        payload.update({k: v for k, v in ev.items() if k != "type"})
+        ctx.progress = dict(payload)
+        _emit(payload)
+        _live_update(ctx, trace, thinking=_thinking_text(),
+                     progress=ctx.progress)
 
     def _cancelled() -> bool:
         try:
@@ -1357,6 +1430,7 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
             prepared.append({"tc": tc, "fn": fn, "args": args, "result": result})
 
         def _start(p: dict) -> None:
+            ctx.progress = {}
             _emit({"type": "tool_start", "id": p["tc"].get("id", ""),
                    "tool": p["fn"], "tool_label": _TOOL_LABEL.get(p["fn"], p["fn"]),
                    "args": p["args"]})
@@ -1403,7 +1477,11 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
             for p in prepared:
                 _start(p)
             with ThreadPoolExecutor(max_workers=min(6, len(runnable))) as ex:
-                futs = {ex.submit(execute, p["fn"], p["args"], ctx): p for p in runnable}
+                futs = {ex.submit(
+                    lambda p=p: execute(
+                        p["fn"], p["args"], ctx,
+                        progress=lambda ev, _p=p: _tool_progress(_p, ev))): p
+                    for p in runnable}
                 for f in as_completed(futs):
                     p = futs[f]
                     try:
@@ -1419,7 +1497,9 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                 _start(p)
                 if p["result"] is None:
                     try:
-                        p["result"] = execute(p["fn"], p["args"], ctx)
+                        p["result"] = execute(
+                            p["fn"], p["args"], ctx,
+                            progress=lambda ev, _p=p: _tool_progress(_p, ev))
                     except Exception as exc:                 # noqa: BLE001
                         p["result"] = json.dumps(
                             {"error": f"{type(exc).__name__}: {exc}"},
@@ -2569,20 +2649,46 @@ def _rule_answer(question: str, ctx: ToolCtx, reason: str = "",
                              f"｜{j.get('department') or '—'}"
                              + ("｜" + "；".join(tail) if tail else ""))
 
-    # 0b) 执行类意图：如实说明"这里不能直接执行"，并给出界面路径（v1.6）
-    # 不假装能做，也不静默忽略——用户问得出"帮我抓取最新简历"，就说明这个入口不好找。
+    # 0a) 能力说明：离线规则也以工具清单为准，不凭印象编。
+    if any(k in q for k in ("你能做什么", "你会什么", "能帮我做什么",
+                            "有什么功能", "能力清单")):
+        handled = True
+        r = call("assistant_capabilities", {})
+        lines.append("\n我能做的事：")
+        for g in (r.get("groups") or []):
+            items = [x.get("name") for x in (g.get("items") or []) if x.get("name")]
+            if items:
+                lines.append(f"- {g.get('group')}：" + "、".join(items))
+        if r.get("limits"):
+            lines.append("- 边界：" + "；".join(r["limits"]))
+
+    # 0b) 执行类意图：真的执行导入（v6.6.0）
+    # 旧版这里回答“本工作台不接受由对话直接触发抓取”，与真实工具能力矛盾：
+    # ingest_resumes 本来就是直接执行入口。现在离线规则模式也走同一条工具。
     _exec_words = ("抓取", "拉取", "导入", "收取", "同步", "采集")
     _exec_objs = ("简历", "邮件", "收件箱", "文件夹", "邮箱")
     if any(k in q for k in _exec_words) and any(k in q for k in _exec_objs) \
             and not any(k in q for k in ("能不能", "可以吗", "支持吗", "怎么", "如何")):
         handled = True
-        lines.append("\n关于『抓取/导入简历』：")
-        lines.append("- 本工作台**不接受由对话直接触发抓取**：抓取会真实落盘并入库，"
-                     "属于有副作用的操作，按设计只由 HR 在界面上点击执行（界面就是凭证，操作会写审计）。")
-        lines.append("- 具体入口：「导入与来源」页 —— 「收邮件」按当前邮箱配置抓取；"
-                     "「导入文件夹」按『本地简历文件夹』路径导入。")
-        lines.append("- 我可以帮你**查状态**：说『邮箱抓取状态』看收信情况，说『最近一次导入』看导入明细。")
-        lines.append("- 改邮箱账号/文件夹路径也请在「邮箱配置」页改（涉及密码，不进对话留痕）。")
+        r = call("ingest_resumes", {"source": "auto"})
+        lines.append("\n简历导入：")
+        if r.get("error") and not r.get("summary"):
+            lines.append(f"- 导入失败：{r.get('error')}")
+        else:
+            lines.append("- " + str(r.get("summary") or "导入完成"))
+            _c = r.get("counts") or {}
+            if _c:
+                lines.append("- 分项：" + "，".join(
+                    f"{k} {v}" for k, v in _c.items() if v))
+            _new = [x for x in (r.get("new_candidates") or []) if x.get("name")]
+            if _new:
+                lines.append("- 新增：" + "、".join(
+                    str(x.get("name")) for x in _new[:10])
+                    + ("…" if len(_new) > 10 else ""))
+            _diag = r.get("diagnosis") or {}
+            if _diag.get("verdict"):
+                lines.append("- 诊断：" + str(_diag.get("verdict")))
+        lines.append("- 新人默认进「待指定」；需要归岗/分析可以直接继续说。")
 
     # 1) 统计 / 概览（问的是岗位时跳过，避免和岗位分支各答一半）
     if not job_q and not recruit_q and any(

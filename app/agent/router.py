@@ -47,6 +47,7 @@ GROUPS: dict[str, list[str]] = {
     "recruit": [
         # 读（招聘进度统一走 recruit_overview 的 view）
         "pipeline_overview", "recruit_overview", "list_recruit_plans",
+        "job_detail",
         # 办公：名单下载
         "export_roster",
         "list_applications", "recruit_analytics", "sql_schema", "sql_query",
@@ -61,6 +62,21 @@ GROUPS: dict[str, list[str]] = {
         "mailbox_status", "list_mail_templates", "get_mail_template",
         "preview_mail", "draft_email", "get_mail_config", "save_mail_config",
         "manage_mail_template", "manage_mail",
+        # 2026-11-25：导入/收取也是“邮件”主意图的一部分。此前只在 admin 组，
+        # 「导入邮箱最新简历」被路由到 mail 时模型根本看不到执行工具，
+        # 只能扫本地目录并回答“目录为空”。
+        "ingest_resumes", "import_diagnostics", "list_source_files",
+        "list_import_history",
+    ],
+    "import": [
+        "ingest_resumes", "import_diagnostics", "list_source_files",
+        "list_import_history", "mailbox_status",
+    ],
+    "help": [
+        "assistant_capabilities",
+    ],
+    "brief": [
+        "daily_brief", "list_proposals", "pool_stats",
     ],
     "govern": [
         "list_proposals", "list_audit", "list_import_history", "list_agent_runs",
@@ -69,13 +85,15 @@ GROUPS: dict[str, list[str]] = {
         "scan_duplicate_candidates", "remember_preference",
         "get_feedback_report", "export_feedback", "list_conversations",
         "restore_chat_history", "truncate_chat", "manage_system",
+        "daily_brief",
     ],
     "admin": [
         "create_job", "update_job_jd", "regrade_job", "ingest_resumes",
         "list_import_history", "export_resumes", "list_source_files",
+        "import_diagnostics",
         "get_settings", "save_settings",
         "get_model_config", "save_model_config", "update_interview_dict",
-        "route_pending", "compare_channel", "manage_job",
+        "route_pending", "compare_channel", "manage_job", "job_detail",
     ],
     "system": [
         # v5.1：账号 / 部门 / 计划 / 岗位启停 / 领域包（此前只有界面能操作）
@@ -135,6 +153,21 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
         "邮件", "发信", "写信", "通知", "邀请", "邀约", "婉拒", "模板",
         "草稿", "收件", "收信", "收简历", "新邮件", "附件", "smtp", "imap", "邮箱",
     ),
+    "import": (
+        "导入", "导进", "收取", "抓取", "同步", "采集",
+        "导入简历", "导简历", "导入邮箱", "导入文件夹", "收取简历", "收简历",
+        "抓取简历", "抓简历", "同步简历", "采集简历", "收邮件", "抓取邮件",
+        "收取邮件", "最新简历", "待导入", "没导入", "没收到简历", "导入记录",
+        "导入历史", "重复检测",
+    ),
+    "help": (
+        "能做什么", "会什么", "会做什么", "有什么功能", "能帮我做什么",
+        "怎么用", "使用说明", "能力清单", "你的能力", "帮助",
+    ),
+    "brief": (
+        "今天先做什么", "今天做什么", "今天要做什么", "今日待办", "每日摘要",
+        "今日摘要", "待办摘要", "今天的待办", "待办",
+    ),
     "govern": (
         "提案", "待确认", "审计", "操作记录", "巡检", "扫描", "待办",
         "跟进", "今天要做", "今天先做什么", "摘要", "周报", "恢复", "清理", "删除会话", "运行记录",
@@ -159,9 +192,16 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+#: 次组也允许补进来的**直接执行类**工具（不是写库提案，也不是只读）。
+#: 目前只有简历导入：HR 说“导入邮箱最新简历”时，即使 mail 组排在第一，
+#: 也不能让 ingest_resumes 消失——这正是 2026-11-25 截图的根因。
+SECONDARY_ACTION_TOOLS = {"ingest_resumes"}
+
 #: 默认（没有命中任何组）：覆盖面最广的一组读工具，避免"问什么都缺工具"
 DEFAULT_NAMES = CORE_MIN + [
     "analyze_fit", "explain_grade", "pipeline_overview", "recruit_overview",
+    # 模糊问题也能回答“你能做什么”“今天先做什么”
+    "assistant_capabilities", "daily_brief",
 ]
 
 
@@ -203,6 +243,13 @@ def route_tools(message: str, history: list[dict] | None = None,
     # 招聘域，退到默认读工具集。
     if re.search(r"\d{4}\s*届", text):
         scores["recruit"] = scores.get("recruit", 0) + 2
+    # “帮我收一下简历”“把邮件收一下”这类中间夹了量词/补语的写法，
+    # 固定关键词匹配不到。只要动词和对象在 8 个字内共现，就算导入意图。
+    if re.search(r"(?:导入|导进|收取|收一下|收个|抓取|抓一下|同步|采集)"
+                 r".{0,8}(?:简历|邮件|收件箱|邮箱)", text) \
+            or re.search(r"(?:简历|邮件|收件箱|邮箱)"
+                         r".{0,8}(?:导入|导进|收取|收一下|抓取|同步|采集)", text):
+        scores["import"] = scores.get("import", 0) + 2
     groups = [g for g, _ in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))]
 
     if not groups:
@@ -216,7 +263,8 @@ def route_tools(message: str, history: list[dict] | None = None,
         for g in groups[1:]:
             extra = [n for n in GROUPS.get(g, [])
                      if n not in names and n not in HIDDEN_TOOLS
-                     and (n in READ_TOOLS or n in COMPUTE_TOOLS)]
+                     and (n in READ_TOOLS or n in COMPUTE_TOOLS
+                          or n in SECONDARY_ACTION_TOOLS)]
             if len(names) + len(extra) <= max_tools:
                 names.extend(extra)
 

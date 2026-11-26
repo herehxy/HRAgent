@@ -84,6 +84,32 @@ def _tiers() -> dict[str, str]:
 _STRONG_LIST: list[str] = []
 
 
+@lru_cache(maxsize=1)
+def _aliases() -> dict[str, str]:
+    """常用简称 → 全称。加载失败返回空表（调用方退回原名）。"""
+    out: dict[str, str] = {}
+    try:
+        with open(_CFG, encoding="utf-8") as f:
+            cfg = json.load(f)
+        for section in ("aliases", "strong_aliases"):
+            for alias, canonical in (cfg.get(section) or {}).items():
+                out[_norm(alias)] = str(canonical)
+    except Exception:  # noqa: BLE001
+        return {}
+    return out
+
+
+def canonical_school(school: str | None) -> str:
+    """把「西电」「北邮」这类简称展开成全称；认不出就返回清洗后的原名。
+
+    只用于**检索参数归一**，不用于展示 —— 所以不会改动库里的数据。
+    """
+    raw = clean_school_name(school)
+    if not raw:
+        return ""
+    return _aliases().get(_norm(raw), raw)
+
+
 def uni_tier(school: str | None) -> str | None:
     """院校名 → '985' / '211' / '强势' / None。
 

@@ -27,7 +27,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
-from .. import auth, db, stages as stages_mod, tiers as tiers_mod
+from .. import auth, db, stages as stages_mod, tiers as tiers_mod, univ
 from .. import export as export_mod
 from .. import recruit as recruit_mod
 from .. import search as search_mod
@@ -124,7 +124,8 @@ DISABLED_TOOLS = {"send_email", "send_message", "export_external", "delete_candi
 READ_TOOLS = {"search_candidates", "get_candidate", "get_candidates", "pool_stats", "search_by_skills",
               "semantic_search", "similar_candidates", "pipeline_overview",
               "mailbox_status", "list_audit", "list_import_history", "list_proposals",
-              "explain_grade",
+              "explain_grade", "import_diagnostics", "daily_brief",
+              "assistant_capabilities", "job_detail",
               "list_jobs",
               # v1.25：邮件模板与配置（读只回掩码，绝不回明文密钥）
               "list_mail_templates", "get_mail_template", "get_mail_config",
@@ -177,6 +178,8 @@ class ToolCtx:
     metrics: dict = field(default_factory=dict)
     #: 提问时预写的 agent_runs 行 id；收尾时回填答案，断线也能在历史里看到
     run_id: int | None = None
+    #: 当前长任务（导入/收取）的最新进度快照，供右侧轨迹与刷新后页面还原
+    progress: dict = field(default_factory=dict)
 
 
 #: SQL 能力只允许这些只读视图；与 db.py 的 CREATE VIEW 保持同源。
@@ -241,7 +244,8 @@ TOOL_SPECS = [
           "keyword=按条件/关键词/技能（默认）；semantic=按自然语言描述找相似经历；"
           "skills=按技能本体精确召回；similar=找和某人相似的人。"
           "返回真实库内数据，找不到就返回空，不要编造。"
-          "**keyword 是字面匹配**：院校请用全称，遇到简称先展开成全称再搜）。"
+          "**院校/专业请优先用 school / major 显式参数**（支持西电/北邮等简称）；"
+          "`keyword` 是全字段包含匹配，会把备注/邮件正文里提到校名的人也带出来。"
           "**问『某岗位有哪些候选人』用 job 参数**：它按**归岗关系**筛（只返回已归到该岗位下的人），"
           "不是技能匹配——不要用 skill/keyword 拼一个『岗位人选』出来。",
           {"mode": {"type": "string",
@@ -278,6 +282,30 @@ TOOL_SPECS = [
            "stage": {"type": "string", "description": "投递阶段，取值：" + "/".join(STAGES)},
            "gender": {"type": "string",
                       "description": "性别：男 / 女 / 未标注（部分工种有性别要求时用这个参数，不要用 keyword 去猜）"},
+           "school": {"type": "string",
+                      "description": "就读院校（显式字段筛选，支持简称：西电/北邮/华科等；"
+                                     "多个用逗号分隔=并集）。不要用 keyword 代替，"
+                                     "keyword 会把备注/邮件里提到校名的人也带出来。"},
+           "major": {"type": "string",
+                     "description": "专业（显式字段筛选；多个用逗号分隔=并集）"},
+           "strong": {"type": "string",
+                      "description": "特定强势院校（具体校名，逗号分隔=并集），如『西安电子科技大学,北京邮电大学』"},
+           "cet": {"type": "string",
+                   "description": "英语四六级：CET-4/CET-6/未提供，多个用逗号分隔"},
+           "overseas": {"type": "string",
+                        "description": "海外院校：1=名单内 / 0=名单外 / 未识别"},
+           "bachelor": {"type": "string",
+                        "description": "第一学历层次：985/211/特殊/未识别"},
+           "date_from": {"type": "string", "description": "投递开始日期 YYYY-MM-DD（支持今天/本周等相对说法）"},
+           "date_to": {"type": "string", "description": "投递结束日期 YYYY-MM-DD（含当天）"},
+           "interview_date": {"type": "string", "description": "面试日期 YYYY-MM-DD"},
+           "interview_unit": {"type": "string", "description": "面试单位（逗号分隔=并集）"},
+           "outcome": {"type": "string",
+                       "description": "面试结论：拟录用/不录用/已签约/拒签，逗号分隔=并集"},
+           "pool_status": {"type": "string", "description": "人才库状态（如 在库/已归档，按库内枚举）"},
+           "needs_review": {"type": "boolean", "description": "只看信息缺失/待人工判读的人"},
+           "archived": {"type": "string",
+                        "description": "归档范围：false=只看在库（默认）/ true=只看已归档 / all=两者都看"},
            "limit": {"type": "integer", "description": "最多返回条数，默认 20"}}),
     _spec("get_candidate",
           "取某候选人的完整档案：基本信息、联系方式、来源邮件、全部投递/面试/签约记录、"
@@ -376,10 +404,18 @@ TOOL_SPECS = [
           "找出与某候选人最相似的其他人才（向量相似），用于岗位适配替换、人才盘点。",
           {"candidate_id": {"type": "integer"}, "top_k": {"type": "integer", "description": "默认 5"}},
           ["candidate_id"]),
+    _spec("job_detail",
+          "查看**单个岗位**的完整信息：部门、在招状态、学历/年限门槛、必需/加分技能、"
+          "完整 JD（职责/要求原文）、已收投递数、各阶段人数、最近投递的候选人。"
+          "回答『这个岗位要求是什么』『某岗位进展怎么样』时用这个；"
+          "只问岗位列表用 list_jobs。",
+          {"job": {"type": "string",
+                   "description": "岗位 id 或岗位名（可模糊，必须唯一匹配）"}},
+          ["job"]),
     _spec("list_jobs",
           "列出岗位：名称、部门、状态（在招/停用）、必需技能、加分技能、学历与年限门槛、已收投递数。"
           "回答『现在招哪些岗位』『发布了几个岗位』『某岗位要求是什么』一律用这个工具，"
-          "不要凭印象说岗位名称或数量。", 
+          "不要凭印象说岗位名称或数量。",
           {"include_inactive": {"type": "boolean",
                                 "description": "是否包含已停用岗位，默认 false（只看在招）"}}),
     _spec("pipeline_overview",
@@ -486,10 +522,36 @@ TOOL_SPECS = [
 
     # ------------------------------ 写（提案） ------------------------------
     _spec("ingest_resumes",
-          "收取/导入简历（邮箱或本地文件夹）。会真的读文件、真的入库。",
-          {"source": {"type": "string", "description": "mailbox（收邮箱）/ folder（本地目录）"},
-           "folder": {"type": "string", "description": "source=folder 时的目录路径，可空（用配置的）"}},
-          ["source"]),
+          "**真正执行**简历收取/导入（邮箱或本地文件夹），会读文件、解析、入库。"
+          "HR 说『导入邮箱最新简历』『收一下简历』『把文件夹里的简历导进来』"
+          "『抓取新邮件』时，**直接调用这个工具**，不要用 list_source_files 代替，"
+          "也不要回答『系统不支持对话触发』——这个工具就是用来做这件事的。"
+          "返回新增/同人新版本/重复跳过/超大/失败的分项计数和新候选人姓名；"
+          "结果为 0 时会自动附带诊断。",
+          {"source": {"type": "string",
+                      "description": "auto（默认，按邮箱配置自动选）/ mailbox（收邮箱）/ folder（本地目录）"},
+           "folder": {"type": "string",
+                      "description": "source=folder 时的目录路径，可空（用系统配置的导入文件夹）"},
+           "limit": {"type": "integer",
+                     "description": "邮箱最多处理多少封；0=全部（默认 0，与界面「收邮件」一致）"},
+           "diagnose_if_empty": {"type": "boolean",
+                                 "description": "默认 true：没有新简历时自动诊断原因"}}),
+    _spec("import_diagnostics",
+          "诊断『为什么没有导入/收到简历』：邮箱模式、账号与密钥是否就绪、"
+          "来源目录是否有待导入文件、是否有超大文件、最近导入是否全部被判重复、"
+          "最近收信错误。只读，不触发收取。"
+          "HR 问『怎么没收到简历』『导入没反应』，或 ingest_resumes 返回 0 时用这个。",
+          {"days": {"type": "integer", "description": "回看导入历史的天数，默认 14"},
+           "folder": {"type": "string", "description": "要检查的来源目录，可空=用配置"}}),
+    _spec("daily_brief",
+          "读取今天的待办摘要与优先级（待确认档位、停滞投递、缺字段、待归岗、"
+          "A 档未确认），带具体姓名。用于回答『今天先做什么』『今日待办』『每日摘要』。"
+          "只读；不调用模型，结果稳定。",
+          {"stuck_days": {"type": "integer", "description": "停留多少天算停滞，默认 7"}}),
+    _spec("assistant_capabilities",
+          "返回智能助手**当前真实可用**的能力清单、例句和明确限制。"
+          "HR 问『你能做什么』『你会什么』『有什么功能』时先调这个，"
+          "不要凭印象列能力或编造限制。"),
     _spec("assign_job",
           "把某人的投递归到指定岗位（未归岗=归岗，已归岗=改岗位），并按该岗位 JD 重算建议档位。",
           {"candidate_id": {"type": "string", "description": "候选人 id 或姓名"},
@@ -561,6 +623,10 @@ TOOL_SPECS = [
            "univ": {"type": "string", "description": "985 或 211"},
            "gender": {"type": "string", "description": "性别：男 / 女 / 未标注"},
            "keyword": {"type": "string", "description": "姓名/院校/专业关键词"},
+           "school": {"type": "string", "description": "就读院校（显式字段，支持简称，逗号分隔=并集）"},
+           "major": {"type": "string", "description": "专业（显式字段，逗号分隔=并集）"},
+           "strong": {"type": "string", "description": "特定强势院校（具体校名，逗号分隔=并集）"},
+           "outcome": {"type": "string", "description": "面试结论（拟录用/不录用/已签约/拒签）"},
            "date_from": {"type": "string", "description": "投递开始日期 YYYY-MM-DD"},
            "date_to": {"type": "string", "description": "投递结束日期 YYYY-MM-DD（含当天）"}},
           []),
@@ -579,6 +645,19 @@ TOOL_SPECS = [
                       "description": "性别：男 / 女 / 未标注；按性别筛选时直接用这个参数，"
                                      "不要拿关键词去匹配姓名或岗位"},
            "keyword": {"type": "string", "description": "姓名/院校/专业关键词"},
+           "school": {"type": "string",
+                      "description": "就读院校（显式字段筛选，支持简称，逗号分隔=并集）"},
+           "major": {"type": "string",
+                     "description": "专业（显式字段筛选，逗号分隔=并集）"},
+           "strong": {"type": "string",
+                      "description": "特定强势院校（具体校名，逗号分隔=并集）"},
+           "cet": {"type": "string",
+                   "description": "英语四六级：CET-4/CET-6/未提供"},
+           "overseas": {"type": "string", "description": "海外院校：1/0/未识别"},
+           "bachelor": {"type": "string", "description": "第一学历：985/211/特殊/未识别"},
+           "interview_unit": {"type": "string", "description": "面试单位（逗号分隔=并集）"},
+           "outcome": {"type": "string",
+                       "description": "面试结论：拟录用/不录用/已签约/拒签，逗号分隔=并集"},
            "date_from": {"type": "string", "description": "投递开始日期 YYYY-MM-DD"},
            "date_to": {"type": "string", "description": "投递结束日期 YYYY-MM-DD（含当天）"},
            "interview_date": {"type": "string",
@@ -1077,10 +1156,26 @@ def _brief(c: dict) -> dict:
         # 工艺技术，却被列进科学研究名单，还编了"缓存问题"来解释）。数据打底，
         # 模型就不用猜"这个人属于哪个岗位"。
         "job_title": c.get("job_title") or "",
+        "archived": bool(c.get("archived_at")),
         "need_review": bool(c.get("needs_review")),
         "hit": c.get("hits") or [], "miss": c.get("miss") or [],
         "skills": (c.get("skills") or [])[:10],
     }
+
+
+def _submission_summary(rows: list[dict]) -> dict:
+    """重复投递汇总：几次投递、几份不同原件、几次是同一份。"""
+    times = sorted(str(s.get("submitted_at") or "") for s in rows
+                   if s.get("submitted_at"))
+    docs = {s.get("document_id") or s.get("file_hash") or s.get("file_name")
+            for s in rows if (s.get("document_id") or s.get("file_hash")
+                              or s.get("file_name"))}
+    dup = sum(1 for s in rows if s.get("duplicate"))
+    return {"times": len(rows), "distinct_documents": len(docs),
+            "duplicate_times": dup,
+            "first_at": times[0] if times else "",
+            "last_at": times[-1] if times else "",
+            "all_times": times}
 
 
 def _detail_brief(cid: int, d: dict) -> dict:
@@ -1128,6 +1223,7 @@ def _detail_brief(cid: int, d: dict) -> dict:
         "app_note": d.get("app_note"),
         "certificates": d.get("certificates") or [],
         "pool_status": d.get("pool_status"), "pii_level": d.get("pii_level"),
+        "archived_at": d.get("archived_at"),
         "tier_suggested": d.get("tier_suggested"), "tier_final": d.get("tier_final"),
         "score": d.get("score"), "stage": d.get("stage"),
         "status": d.get("status"), "application_id": d.get("application_id"),
@@ -1155,6 +1251,19 @@ def _detail_brief(cid: int, d: dict) -> dict:
                           "interview_date": a.get("interview_date"),
                           "interview_unit": a.get("interview_unit"),
                           "score": a.get("score")} for a in d.get("applications", [])],
+        # 2026-11-25：把“同一份简历投了几次”的时间线交给助手。
+        # 档案详情里一直有 submissions，但工具层没带，导致 HR 问
+        # “这个人投了几次、每次是否同一份”时助手只能看到 applications（按岗位），
+        # 看不到重复投递。这里与界面同一口径，并给出汇总。
+        "submissions": [{"submission_id": s.get("id"),
+                         "application_id": s.get("application_id"),
+                         "document_id": s.get("document_id"),
+                         "file": s.get("file_name"),
+                         "channel": s.get("channel"),
+                         "submitted_at": s.get("submitted_at"),
+                         "duplicate": bool(s.get("duplicate")),
+                         "note": s.get("note")} for s in d.get("submissions", [])],
+        "submission_summary": _submission_summary(d.get("submissions") or []),
         "skills": [{"name": s["name"], "category": s.get("category"),
                     "level": s.get("level"), "verified": s.get("verified"),
                     "evidence": s.get("evidence")} for s in d.get("skills", [])],
@@ -1462,10 +1571,11 @@ def _data_dir() -> str:
     return _os.path.join(base, "data")
 
 
-def _source_files_snapshot(conn, ctx) -> dict:
+def _source_files_snapshot(conn, ctx, folder: str | None = None) -> dict:
     """来源目录里的文件清单（待导入的简历）。
 
     与界面 `/api/sources` 同口径：只列支持的扩展名，标出超大被跳过的。
+    `folder` 显式传入时用它（导入诊断/指定目录），否则用系统配置的导入文件夹。
     """
     import os as _os
     try:
@@ -1474,7 +1584,15 @@ def _source_files_snapshot(conn, ctx) -> dict:
     except Exception:
         supported = (".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg", ".txt")
     cfg = _read_json_or(_repo_config_path("mailbox.json"), {}) or {}
-    folder = cfg.get("folder_dir") or _os.path.join(_data_dir(), "resumes")
+    folder = folder or cfg.get("folder_dir") or _os.path.join(_data_dir(), "resumes")
+    # 与 sync_mailbox / 界面同一条路径解析：`data/...` 走 DATA_DIR，
+    # `config/...` 走 CONFIG_DIR。以前直接 abspath 会按进程 CWD 解析，
+    # 打包后可能指向 _internal/data 而不是用户数据目录。
+    try:
+        from .. import mailbox as _mb
+        folder = _mb.resolve_dir(folder)
+    except Exception:
+        pass
     abs_folder = _os.path.abspath(_os.path.expanduser(folder))
     files: list[dict] = []
     if _os.path.isdir(abs_folder):
@@ -1492,6 +1610,359 @@ def _source_files_snapshot(conn, ctx) -> dict:
             "max_attachment_mb": int(cfg.get("max_attachment_mb", 20) or 20),
             "note": ("这些是**还没导入**的简历；导入用 ingest_resumes(source='folder')。"
                      if files else "来源目录里没有待导入的简历文件。")}
+
+
+def _import_diagnostics(conn, ctx, args: dict | None = None) -> dict:
+    """导入体检：把“为什么没收到简历”拆成可核对的项，而不是让模型猜。
+
+    只读：不连 IMAP、不触发收取。检查邮箱配置/密钥是否就绪、来源目录有什么、
+    最近导入是不是全被判重复、最近收信有没有报错。
+    """
+    import os as _os
+    from .. import mailbox as mb
+
+    args = args or {}
+    days = max(1, min(int(args.get("days") or 14), 365))
+    cfg = mb.load_config()
+    mode = str(cfg.get("mode") or "off").strip().lower()
+    ic = cfg.get("imap") or {}
+    folder = str(args.get("folder") or "").strip()
+    if folder:
+        try:
+            from .. import ingest as _ing
+            folder = _ing.resolve_source_dir(folder, cfg)
+        except Exception:
+            pass
+    snap = _source_files_snapshot(conn, ctx, folder)
+    pending_files = list(snap.get("files") or [])
+    oversize = [f for f in pending_files if f.get("oversize")]
+
+    # 密钥只判断“有没有”，绝不返回内容。
+    secret_ok = False
+    env_key = str(ic.get("password_env") or "TP_IMAP_PASSWORD")
+    if _os.environ.get(env_key):
+        secret_ok = True
+    else:
+        pf = str(ic.get("password_file") or "").strip()
+        if pf:
+            try:
+                secret_ok = bool(_os.path.exists(mb.resolve_dir(pf)))
+            except Exception:
+                secret_ok = False
+        if not secret_ok:
+            try:
+                secret_ok = bool(mb.read_secret())
+            except Exception:
+                secret_ok = False
+
+    emails = db.list_emails(conn, limit=12)
+    s = db.pool_stats(conn)
+    errs = [m for m in emails if str(m.get("error") or "").strip()]
+    last_mail = emails[0] if emails else {}
+    last_err = errs[0] if errs else {}
+    eml_dir = str(cfg.get("eml_dir") or "")
+    eml_full = ""
+    if mode == "eml" and eml_dir:
+        try:
+            eml_full = mb.resolve_dir(eml_dir)
+        except Exception:
+            eml_full = eml_dir
+
+    # 导入历史含文件名/候选人名：与 list_import_history 同一道权限。
+    hist_rows: list[dict] = []
+    hist_note = ""
+    if str(ctx.role or "") == "admin" or (ctx.cfg or {}).get("local"):
+        try:
+            hist_rows = db.list_import_history(conn, days=days, limit=100)
+        except Exception as exc:                            # noqa: BLE001
+            hist_note = f"读取导入历史失败：{type(exc).__name__}: {exc}"
+    else:
+        hist_note = "当前角色不是系统管理员，未展开导入历史明细（不影响邮箱/目录诊断）。"
+    hist_counts: dict[str, int] = {}
+    for r in hist_rows:
+        lbl = str(r.get("action_label") or r.get("action") or "其他")
+        hist_counts[lbl] = hist_counts.get(lbl, 0) + 1
+    only_dup = bool(hist_rows) and all(
+        str(r.get("action") or "") == "duplicate_skipped" for r in hist_rows)
+
+    checks: list[dict] = []
+
+    def add_check(key: str, ok: bool, detail: str, fix: str = "") -> None:
+        checks.append({"key": key, "ok": bool(ok), "detail": detail, "fix": fix})
+
+    add_check(
+        "mailbox_mode", mode != "off",
+        {"imap": "IMAP 只读增量抓取", "eml": "本地 .eml 演练目录",
+         "off": "邮箱抓取已关闭"}.get(mode, f"未知模式：{mode}"),
+        "在「邮箱配置」把抓取模式设为 imap，或改用 source=folder 导入文件夹")
+    if mode == "imap":
+        add_check("imap_account", bool(ic.get("host") and ic.get("user")),
+                  f"服务器 {ic.get('host') or '未配置'} / 账号 {ic.get('user') or '未配置'}",
+                  "在「邮箱配置」填写 IMAP 服务器和完整邮箱账号")
+        add_check("imap_secret", secret_ok,
+                  "IMAP 授权码已配置" if secret_ok else "未找到 IMAP 授权码",
+                  "在「邮箱配置」重新填写授权码（只写不读，界面不会显示明文）")
+    elif mode == "eml":
+        add_check("eml_dir", bool(eml_full and _os.path.isdir(eml_full)),
+                  f"演练目录：{eml_full or '未配置'}",
+                  "把 .eml 文件放进该目录，或把抓取模式改为 imap")
+
+    add_check("source_folder", bool(_os.path.isdir(str(snap.get("folder") or ""))),
+              f"导入文件夹：{snap.get('folder')}",
+              "目录会在导入时自动创建；请确认路径正确")
+    # 邮箱模式下本地文件夹不是“待导入来源”，空目录不是异常；
+    # 只有显式检查文件夹（或当前就是文件夹模式）时才把空/超大当成问题。
+    _folder_relevant = bool(args.get("folder")) or mode not in ("imap", "eml")
+    if _folder_relevant:
+        add_check("pending_files", bool(pending_files),
+                  (f"待导入 {len(pending_files)} 份（其中超大 {len(oversize)} 份）"
+                   if pending_files else "导入文件夹里没有可导入的简历"),
+                  "把 PDF/Word/图片放进该目录，或直接说『收邮箱最新简历』")
+        if oversize:
+            add_check("oversize_files", False,
+                      "、".join(f"{f.get('name')}" for f in oversize[:5])
+                      + ("…" if len(oversize) > 5 else "")
+                      + f"，超过 {snap.get('max_attachment_mb')} MB 会被跳过",
+                      "压缩文件或调大「单附件上限」，再重新导入")
+    else:
+        add_check("pending_files", True,
+                  f"当前是邮箱模式，以邮箱为准；本地文件夹另有 {len(pending_files)} 份（不影响收信）")
+    if errs:
+        add_check("recent_mail_error", False,
+                  f"最近有 {len(errs)} 封邮件报错；最新：{last_err.get('subject') or '（无主题）'}"
+                  f" — {last_err.get('error')}",
+                  "在「邮件」页查看该邮件错误；连续失败的会转死信，可手动重试")
+    else:
+        add_check("recent_mail_error", True, "最近没有收信错误")
+
+    if only_dup:
+        verdict = (f"最近的导入记录全部是「重复跳过」（{len(hist_rows)} 条）："
+                   "这些简历之前已经入过库，系统按 SHA256 去重，不会重复建档。")
+        next_actions = ["确认是不是同一批简历重复投递；同一个人重复投递会在档案的投递记录里累加次数。"]
+    elif args.get("folder"):
+        # 显式检查文件夹时，以文件夹为准，不被邮箱模式遮住。
+        if not _os.path.isdir(str(snap.get("folder") or "")):
+            verdict = f"导入文件夹不存在：{snap.get('folder')}"
+            next_actions = ["确认路径，或让我用默认导入文件夹。"]
+        elif oversize:
+            verdict = f"导入文件夹里有 {len(oversize)} 份文件超过体积上限，会被跳过。"
+            next_actions = ["压缩或调大单附件上限后再导入。"]
+        elif pending_files:
+            verdict = f"导入文件夹里有 {len(pending_files)} 份待导入简历，直接执行导入即可。"
+            next_actions = ["说『把文件夹里的简历导进来』，我会立即执行。"]
+        else:
+            verdict = f"导入文件夹是空的：{snap.get('folder')}"
+            next_actions = ["把 PDF/Word/图片放进该目录后再导入，或说『收邮箱最新简历』。"]
+    elif mode == "off":
+        verdict = "邮箱抓取当前是关闭状态，所以不会收到新简历。"
+        next_actions = ["在「邮箱配置」开启 imap 抓取；或让我从本地文件夹导入（source=folder）。"]
+    elif mode == "imap" and not (ic.get("host") and ic.get("user")):
+        verdict = "邮箱抓取模式是 imap，但服务器或账号没有配置完整。"
+        next_actions = ["先在「邮箱配置」补全 IMAP 服务器与账号，再让我收简历。"]
+    elif mode == "imap" and not secret_ok:
+        verdict = "邮箱账号已配置，但缺少 IMAP 授权码，无法登录收信。"
+        next_actions = ["在「邮箱配置」重新填写授权码（保存后不会回显明文），再让我收简历。"]
+    elif mode == "eml" and not (eml_full and _os.path.isdir(eml_full)):
+        verdict = "演练邮件目录不存在或没有配置。"
+        next_actions = ["把 .eml 放进演练目录，或改用 imap / 本地文件夹导入。"]
+    elif mode == "imap" and last_err:
+        verdict = f"邮箱配置看起来正常，但最近一封邮件处理失败：{last_err.get('error')}"
+        next_actions = ["先在「邮件」页处理这封报错邮件，再重新收取。"]
+    else:
+        last_at = str(last_mail.get("received_at") or "")
+        verdict = ("邮箱配置正常，最近没有新邮件需要收取。"
+                   + (f"最近一次收信：{last_at}。" if last_at else ""))
+        next_actions = ["有新邮件时再说『收邮箱最新简历』即可；也可以先看『今天先做什么』。"]
+
+    return {
+        "verdict": verdict,
+        "checks": checks,
+        "mailbox": {
+            "mode": mode,
+            "mode_note": {"imap": "IMAP 只读增量抓取", "eml": "本地 .eml 演练目录",
+                          "off": "抓取已关闭"}.get(mode, mode),
+            "imap_host": ic.get("host") or "",
+            "imap_user": ic.get("user") or "",
+            "imap_folder": ic.get("folder") or "INBOX",
+            "imap_readonly": bool(ic.get("readonly", True)),
+            "imap_secret_present": secret_ok,
+            "eml_dir": eml_full,
+            "emails_total": s.get("emails"),
+            "emails_pending": s.get("emails_pending"),
+            "last_received_at": last_mail.get("received_at") or "",
+            "last_subject": last_mail.get("subject") or "",
+            "last_error": ({"subject": last_err.get("subject") or "",
+                            "error": last_err.get("error") or "",
+                            "received_at": last_err.get("received_at") or ""}
+                           if last_err else None),
+        },
+        "folder": {
+            "path": snap.get("folder"),
+            "exists": bool(_os.path.isdir(str(snap.get("folder") or ""))),
+            "pending_count": len(pending_files),
+            "oversize_count": len(oversize),
+            "max_attachment_mb": snap.get("max_attachment_mb"),
+            "files": [{"name": f.get("name"), "size": f.get("size"),
+                       "oversize": bool(f.get("oversize"))}
+                      for f in pending_files[:20]],
+        },
+        "history": {
+            "days": days,
+            "counts": hist_counts,
+            "latest": [{"ts": r.get("ts"), "action": r.get("action"),
+                        "action_label": r.get("action_label"),
+                        "candidate_name": r.get("candidate_name") or "",
+                        "readable": r.get("readable") or ""}
+                       for r in hist_rows[:10]],
+            "note": hist_note,
+        },
+        "next_actions": next_actions,
+    }
+
+
+def _ingest_payload(src: str, rep: dict, folder: str = "",
+                    diagnosis: dict | None = None) -> dict:
+    """把 ingest 的原始报表压成模型能直接复述的固定结构。
+
+    27B 不需要看 200 条明细；它需要 `summary` + 分项 counts + 新增姓名。
+    完整 details 仍在审计/运行记录里，这里只保留前 20 条关键项。
+    """
+    details = [d for d in (rep.get("details") or []) if isinstance(d, dict)]
+
+    def _item(d: dict) -> dict:
+        return {"file": d.get("file") or "",
+                "name": d.get("name") or "",
+                "candidate_id": d.get("candidate_id"),
+                "status": d.get("status") or "",
+                "notes": [str(x) for x in (d.get("notes") or [])[:2]]}
+
+    new = [_item(d) for d in details
+           if str(d.get("status") or "") in ("added", "merged_version")]
+    skipped = [_item(d) for d in details
+               if str(d.get("status") or "") in ("skipped_dup", "skipped_oversize")]
+    failures = [_item(d) for d in details
+                if str(d.get("status") or "") == "failed" or d.get("parse_failed")]
+
+    if src == "mailbox":
+        counts = {k: int(rep.get(k) or 0) for k in (
+            "mails", "added", "merged_versions", "skipped_dup", "failed",
+            "no_attachment", "parse_failed", "other_saved", "other_failed",
+            "attachments_skipped", "unassigned", "dead_lettered",
+            "from_mail_body")}
+        if rep.get("error"):
+            summary = f"邮箱收取失败：{rep.get('error')}"
+        elif counts["mails"] == 0:
+            summary = "这次没有拉到新邮件（已扫描到邮箱最新位置）。"
+        else:
+            summary = (f"邮箱收取完成：新邮件 {counts['mails']} 封，"
+                       f"新增候选人 {counts['added']} 人，"
+                       f"同人新版本 {counts['merged_versions']} 份，"
+                       f"重复跳过 {counts['skipped_dup']} 份，"
+                       f"失败 {counts['failed']} 份。")
+            _tail = []
+            if counts["no_attachment"]:
+                _tail.append(f"无简历附件 {counts['no_attachment']} 封")
+            if counts.get("from_mail_body"):
+                _tail.append(f"其中 {counts['from_mail_body']} 封已按正文建档")
+            if counts["attachments_skipped"]:
+                _tail.append(f"其他附件未收 {counts['attachments_skipped']} 个")
+            if _tail:
+                summary += "（" + "；".join(_tail) + "）"
+    else:
+        counts = {k: int(rep.get(k) or 0) for k in (
+            "scanned", "added", "merged_versions", "skipped_dup",
+            "skipped_oversize", "failed", "parse_failed", "routed")}
+        if counts["scanned"] == 0:
+            summary = f"导入文件夹里没有可导入的简历（目录：{folder or '未配置'}）。"
+        else:
+            summary = (f"文件夹导入完成：扫描 {counts['scanned']} 份，"
+                       f"新增候选人 {counts['added']} 人，"
+                       f"同人新版本 {counts['merged_versions']} 份，"
+                       f"重复跳过 {counts['skipped_dup']} 份，"
+                       f"超大跳过 {counts['skipped_oversize']} 份，"
+                       f"失败 {counts['failed']} 份。")
+
+    empty = (counts.get("mails", counts.get("scanned", 0)) == 0)
+    payload: dict = {
+        "ok": not bool(rep.get("error")),
+        "source": src,
+        "summary": summary,
+        "counts": counts,
+        "new_candidates": new[:20],
+        "skipped": skipped[:20],
+        "failures": failures[:20],
+        "truncated": (len(new) > 20 or len(skipped) > 20 or len(failures) > 20),
+        "next_actions": (
+            ["新人默认在「待指定」：可以说『把刚收的人归到 XX 岗』，"
+             "我会生成待确认提案；也可以先看『今天先做什么』。"]
+            if counts.get("added") or counts.get("merged_versions")
+            else ["需要的话我可以用 import_diagnostics 继续查原因。"]),
+    }
+    if rep.get("error"):
+        payload["error"] = str(rep.get("error"))
+    if rep.get("empty_hint"):
+        payload["empty_hint"] = rep.get("empty_hint")
+    if diagnosis and (empty or rep.get("error")):
+        payload["diagnosis"] = {
+            "verdict": diagnosis.get("verdict"),
+            "checks": [c for c in (diagnosis.get("checks") or []) if not c.get("ok")],
+            "next_actions": diagnosis.get("next_actions") or [],
+        }
+        if diagnosis.get("next_actions"):
+            payload["next_actions"] = diagnosis["next_actions"]
+    return payload
+
+
+def _capabilities_payload() -> dict:
+    """能力清单：这是助手回答“你能做什么”的**唯一权威来源**。
+
+    只写真实存在的工具能力；限制也写清楚，避免 27B 凭印象扩大/缩小能力边界。
+    """
+    groups = [
+        {"group": "找人选人", "items": [
+            {"name": "多维筛选", "example": "筛 985 硕士、材料专业、3 年以上、CET-6 的人"},
+            {"name": "院校/专业筛选", "example": "西电通信工程的人有哪些"},
+            {"name": "语义/技能检索", "example": "找做过钙钛矿表征的人"},
+            {"name": "岗位适配分析", "example": "分析陈志远和工艺技术岗的匹配度"},
+            {"name": "多人对比", "example": "把这 5 个人横向对比一下"},
+            {"name": "档位解释", "example": "他为什么是 B 档"},
+        ]},
+        {"group": "招聘流程", "items": [
+            {"name": "招聘进度/缺口", "example": "2027 届还差多少人"},
+            {"name": "阶段推进/批量初筛", "example": "把这批人推进到初筛通过"},
+            {"name": "归岗/建议岗位", "example": "把刚收的人归到工艺技术岗"},
+            {"name": "签约登记", "example": "登记张三已签约"},
+            {"name": "面试安排", "example": "给李四安排 11 月 28 日下午面试"},
+        ]},
+        {"group": "简历导入", "items": [
+            {"name": "收邮箱简历", "example": "导入邮箱最新简历"},
+            {"name": "导入本地文件夹", "example": "把导入文件夹里的简历导进来"},
+            {"name": "导入诊断", "example": "为什么没收到新简历"},
+            {"name": "导入历史/重复检测", "example": "刚才那批谁被判重复了"},
+        ]},
+        {"group": "邮件与名单", "items": [
+            {"name": "按模板起草邮件", "example": "用面试邀请模板给王五写一封"},
+            {"name": "导出名单", "example": "导出待面试名单"},
+            {"name": "打包简历原件", "example": "把这 10 个人的简历打个包"},
+            {"name": "面试日程 Excel", "example": "导出下周的面试日程"},
+        ]},
+        {"group": "数据与系统", "items": [
+            {"name": "今日待办", "example": "今天先做什么"},
+            {"name": "数据体检", "example": "哪些人缺联系方式"},
+            {"name": "重复档案扫描", "example": "库里有哪些疑似重复的人"},
+            {"name": "提案/审计", "example": "有哪些待确认提案"},
+            {"name": "岗位/部门/招聘计划", "example": "现在在招哪些岗位"},
+        ]},
+    ]
+    limits = [
+        "不能代替 HR 直接发邮件：只能起草，发送必须由 HR 在邮件编辑器里确认。",
+        "不能物理删除候选人/简历：只能归档或移入回收站，随时可恢复。",
+        "聊天里上传的附件不会自动进人才库：需要 HR 点附件上的「入库」按钮批准。",
+        "写操作（改档/改阶段/加标签/合并/登记）只生成待确认提案，HR 确认后才生效。",
+        "不能替 HR 做录用/淘汰决定，只给建议和依据。",
+    ]
+    return {"groups": groups, "limits": limits,
+            "how_to_use": "直接用自然语言说你要做什么；涉及写操作时我会先给待确认提案。"}
 
 
 def _removed_month_dir():
@@ -1678,6 +2149,58 @@ def _resolve_date_arg(value) -> str:
     return s[:10]
 
 
+def _school_terms(value) -> str:
+    """把检索里的校名参数归一：简称展开为全称，保留逗号分隔的并集语义。"""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    terms = [x.strip() for x in re.split(r"[,，、;；]+", raw) if x.strip()]
+    return ",".join(univ.canonical_school(x) for x in terms if x)
+
+
+def _search_extra_filters(args: dict) -> dict:
+    """`search_candidates` 的扩展筛选 → `db.list_candidates` 的 kwargs。
+
+    **全部下沉到 db 层**（与界面、导出共用同一口径）。只在这里做日期归一
+    和院校简称展开；不做任何“猜条件”。
+    """
+    out: dict = {}
+    school = _school_terms(args.get("school"))
+    if school:
+        out["school"] = school
+    major = str(args.get("major") or "").strip()
+    if major:
+        out["major"] = major
+    strong = _school_terms(args.get("strong"))
+    if strong:
+        out["strong"] = strong
+    for k in ("cet", "overseas", "bachelor", "interview_unit", "outcome",
+              "pool_status"):
+        v = str(args.get(k) or "").strip()
+        if v:
+            out[k] = v
+    df = _resolve_date_arg(args.get("date_from"))
+    dt = _resolve_date_arg(args.get("date_to"))
+    if df:
+        out["date_from"] = df
+    if dt:
+        out["date_to"] = dt
+    idt = _resolve_date_arg(args.get("interview_date"))
+    if idt:
+        out["interview_date"] = idt
+    if args.get("needs_review") is not None:
+        out["needs_review"] = bool(args.get("needs_review"))
+    # 归档三态：默认只看在库（与人才库/界面一致）；all 才包含已归档。
+    _arch = str(args.get("archived") or "").strip().lower()
+    if _arch in ("true", "1", "yes", "已归档"):
+        out["archived"] = True
+    elif _arch in ("all", "全部", "含归档"):
+        out["archived"] = None
+    else:
+        out["archived"] = False
+    return out
+
+
 def _candidate_distribution(conn, field: str) -> dict | None:
     """按单一维度统计未归档候选人分布（v4.3.3）。
 
@@ -1783,8 +2306,12 @@ def _permission_error(name: str, ctx: ToolCtx) -> str | None:
         hint="只读账号只能检索与查看；导出、导入或改动请使用 HR 账号。")
 
 
-def execute(name: str, args: dict, ctx: ToolCtx) -> str:
-    """执行工具，返回 JSON 字符串。任何异常都转成可读错误，绝不让循环崩掉。"""
+def execute(name: str, args: dict, ctx: ToolCtx, progress=None) -> str:
+    """执行工具，返回 JSON 字符串。任何异常都转成可读错误，绝不让循环崩掉。
+
+    `progress` 是可选的长任务进度回调（助手 SSE 用）。只做旁路上报，
+    回调抛异常不能影响工具本身。
+    """
     args = args or {}
     if name in DISABLED_TOOLS:
         return _err(
@@ -1807,7 +2334,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
         if not isinstance(payload, dict):
             payload = {k: v for k, v in args.items()
                        if k not in ("action", "payload")}
-        return execute(target, payload, ctx)
+        return execute(target, payload, ctx, progress=progress)
 
     conn = db.connect(ctx.db_path)
     try:
@@ -1840,9 +2367,12 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
 
                 # 语义/技能/相似结果只带候选人 id；用同一份 list_candidates
                 # 回填完整字段，并应用 job/stage/education 等硬筛选。
-                all_items = {c["id"]: c for c in db.list_candidates(conn, archived=False)}
+                _extra = _search_extra_filters(args)
+                _archived = _extra.pop("archived", False)
+                all_items = {c["id"]: c for c in db.list_candidates(
+                    conn, archived=_archived)}
                 allowed = None
-                if any(args.get(k) for k in ("job", "education", "stage", "tier",
+                if _extra or any(args.get(k) for k in ("job", "education", "stage", "tier",
                                              "univ", "mail_subject", "mail_from",
                                              "mail_body", "certificate", "gender")):
                     _job_id = ctx.job_id
@@ -1858,7 +2388,7 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                         mail_body=args.get("mail_body"),
                         certificate=args.get("certificate"),
                         gender=args.get("gender"),
-                        job_id=_job_id, archived=False)}
+                        job_id=_job_id, archived=_archived, **_extra)}
                 out = []
                 for r in (res.get("results") or []):
                     try:
@@ -1904,6 +2434,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 job_id, _jerr = _resolve_job_id(conn, job_key)
                 if _jerr:
                     return _err(_jerr)
+            _extra = _search_extra_filters(args)
+            _archived = _extra.pop("archived", False)
             items = db.list_candidates(
                 conn, tier=args.get("tier"), keyword=args.get("keyword"),
                 skill=skill_terms, min_years=args.get("min_years"),
@@ -1915,9 +2447,12 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 certificate=args.get("certificate"),
                 gender=args.get("gender"),
                 job_id=job_id,
-                # 归档的人不在人才库里，助手也就不该把他们列出来（与界面同一口径）
-                archived=False)
-            limit = int(args.get("limit") or 20)
+                # 默认 false=只看在库（与界面同一口径）；显式传 archived=true/all 才查归档
+                archived=_archived, **_extra)
+            try:
+                limit = max(1, min(int(args.get("limit") or 20), 200))
+            except (TypeError, ValueError):
+                limit = 20
             return _ok({"count": len(items), "returned": min(limit, len(items)),
                         "mode": "keyword",
                         "candidates": [_brief(c) for c in items[:limit]]})
@@ -2316,7 +2851,47 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                                         top_k=int(args.get("top_k") or 5))
             return _ok(res)
 
-        if name == "list_jobs":
+        if name == "job_detail":
+            jid, jerr = _resolve_job_id(conn, args.get("job") or "")
+            if jerr:
+                return _err(jerr, hint="岗位名以 list_jobs 的返回为准")
+            j = db.get_job(conn, jid)
+            if not j:
+                return _err(f"未找到岗位 #{jid}")
+            jd = j.get("jd_json") or {}
+            must = jd.get("must") or {}
+            pref = jd.get("preferred") or {}
+            apps = db.list_applications(conn, job_id=jid)
+            by_stage: dict[str, int] = {s: 0 for s in STAGES}
+            for a in apps:
+                st = stages_mod.normalize_stage(a.get("stage"))
+                if st in by_stage:
+                    by_stage[st] += 1
+            recent = [{"candidate_id": a.get("candidate_id"),
+                       "name": a.get("candidate_name") or "",
+                       "stage": a.get("stage"), "tier": a.get("tier_final")
+                       or a.get("tier_suggested"),
+                       "applied_at": a.get("applied_at")}
+                      for a in apps[:10]]
+            return _ok({
+                "job_id": jid, "title": j.get("title"),
+                "department": j.get("department_name") or j.get("dept"),
+                "active": bool(j.get("active", 1)), "status": j.get("status"),
+                "education_min": must.get("education_min"),
+                "years_min": must.get("years_min"),
+                "must_skills": list(must.get("skills_required") or []),
+                "preferred_skills": list(pref.get("skills") or []),
+                "responsibilities": jd.get("responsibilities") or jd.get("duty") or "",
+                "requirements": jd.get("requirements") or jd.get("must_text") or "",
+                "jd": jd,
+                "applications_count": len(apps),
+                "by_stage": by_stage,
+                "recent_candidates": recent,
+                "summary": (f"岗位「{j.get('title')}」：{len(apps)} 条投递"
+                            + ("，当前在招" if j.get("active", 1) else "，已停用")),
+            })
+
+
             inc = bool(args.get("include_inactive"))
             rows = db.list_jobs(conn, include_inactive=True)
             # 在招 = 岗位本身启用 且 所属部门未停用（与归岗用的 routable 口径一致：
@@ -2445,6 +3020,21 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                            for k, v in p["stages"].items()},
                 "stage_order": STAGES,
             })
+
+        if name == "assistant_capabilities":
+            return _ok(_capabilities_payload())
+
+        if name == "import_diagnostics":
+            return _ok(_import_diagnostics(conn, ctx, args))
+
+        if name == "daily_brief":
+            from . import brief as _brief_mod
+            try:
+                _stuck = int(args.get("stuck_days") or 7)
+            except (TypeError, ValueError):
+                _stuck = 7
+            return _ok(_brief_mod.build(conn, stuck_days=max(1, min(_stuck, 60)),
+                                        use_llm=False))
 
         if name == "mailbox_status":
             from .. import mailbox as mb
@@ -3171,18 +3761,33 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             # 于是这个工具在清单里"一直都在"、却**从来没被真正调用过一次**。
             # 教训：延迟导入的路径错误不会在启动时暴露 —— 新工具必须真跑一遍。
             from .. import ingest as _ing
-            src = (args.get("source") or "mailbox").strip()
-            if src not in ("mailbox", "folder"):
-                return _err(f"source 只能是 mailbox 或 folder（收到的是 {src}）")
+            import os as _os
+            from .. import mailbox as _mb
+            src = str(args.get("source") or "auto").strip().lower()
+            if src not in ("auto", "mailbox", "folder"):
+                return _err(f"source 只能是 auto / mailbox / folder（收到的是 {src}）")
+            _mbcfg = _mb.load_config()
+            if src == "auto":
+                # 与界面「收邮件」同一口径：配置为 imap/eml 就收邮箱，
+                # 关闭或未配置邮箱时回落到配置好的本地文件夹。
+                src = "mailbox" if str(_mbcfg.get("mode") or "off") in ("imap", "eml") \
+                    else "folder"
             _conn_jd = _jd_tiers()
+            folder = ""
+
+            def _on_prog(ev: dict) -> None:
+                if progress is not None:
+                    try:
+                        progress(ev)
+                    except Exception:                       # noqa: BLE001
+                        pass
+
             if src == "folder":
                 folder = (args.get("folder") or "").strip()
                 # 没给路径就用**系统配置里的「导入文件夹」**——
                 # 界面上「导入简历」就是这么做的（server 端同口径）。
                 # 原来这里直接报错要求 HR 手打路径，而路径本来就配好了、
                 # 界面上也有，让 HR 再抄一遍纯属多余。
-                import os as _os
-                _mbcfg = _read_json_or(_repo_config_path("mailbox.json"), {}) or {}
                 if not folder:
                     folder = _mbcfg.get("folder_dir") or _os.path.join(_data_dir(), "resumes")
                 else:
@@ -3198,14 +3803,33 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                     except OSError as exc:
                         return _err(f"导入目录不存在也建不出来：{folder}（{exc}）")
                 rep = _ing.ingest_dir(folder, _conn_jd[0], _conn_jd[1], ctx.db_path,
-                                      job_id=None, use_llm=False)
+                                      cfg=_mbcfg, job_id=None, use_llm=False,
+                                      on_progress=_on_prog)
             else:
-                rep = _ing.sync_mailbox(_conn_jd[0], _conn_jd[1], ctx.db_path, job_id=None,
-                                        use_llm=False)
-            return _ok({"source": src, "index": rep.get("index"),
-                        "note": "已入库。新人默认进「待指定」，可在人才库点「指定岗位」，"
-                                "或让我帮你判断（suggest_job）。"
-                                "是否自动分析由「入库即分析」开关控制。"})
+                try:
+                    _limit = int(args.get("limit") or 0)
+                except (TypeError, ValueError):
+                    _limit = 0
+                rep = _ing.sync_mailbox(_conn_jd[0], _conn_jd[1], ctx.db_path,
+                                        job_id=None, use_llm=False, cfg=_mbcfg,
+                                        limit=max(0, _limit),
+                                        on_progress=_on_prog)
+                ic = _mbcfg.get("imap") or {}
+                folder = (f"邮箱 {ic.get('user') or '（未配置账号）'} @ "
+                          f"{ic.get('host') or '（未配置服务器）'} / "
+                          f"{ic.get('folder') or 'INBOX'}"
+                          if str(_mbcfg.get("mode")) == "imap"
+                          else f"演练目录 {_mbcfg.get('eml_dir') or ''}")
+            diag = None
+            _empty = (src == "mailbox" and int(rep.get("mails") or 0) == 0) or \
+                     (src == "folder" and int(rep.get("scanned") or 0) == 0)
+            if args.get("diagnose_if_empty", True) and (_empty or rep.get("error")):
+                try:
+                    diag = _import_diagnostics(
+                        conn, ctx, {"folder": folder if src == "folder" else ""})
+                except Exception:                            # noqa: BLE001
+                    diag = None
+            return _ok(_ingest_payload(src, rep, folder=folder, diagnosis=diag))
 
         if name == "assign_job":
             cid, cerr = _resolve_cid(conn, args.get("candidate_id"))
@@ -3406,7 +4030,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 if _jerr:
                     return _err(_jerr)
                 filters["job_id"] = _jid
-            for _k in ("education", "univ", "keyword", "gender"):
+            for _k in ("education", "univ", "keyword", "gender",
+                       "school", "major", "strong", "outcome"):
                 _v = str(args.get(_k) or "").strip()
                 if _v:
                     filters[_k] = _v
@@ -3426,7 +4051,8 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 qs.append("job_id=" + str(filters["job_id"]))
             if stage:
                 qs.append("stage=" + urllib.parse.quote(stage))
-            for _k in ("education", "univ", "keyword", "gender"):
+            for _k in ("education", "univ", "keyword", "gender",
+                       "school", "major", "strong", "outcome"):
                 if filters.get(_k):
                     qs.append(_k + "=" + urllib.parse.quote(str(filters[_k])))
             if df:
@@ -3463,6 +4089,14 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
             kw = str(args.get("keyword") or "").strip()
             edu = str(args.get("education") or "").strip()
             univ = str(args.get("univ") or "").strip()
+            _school = _school_terms(args.get("school"))
+            _major = str(args.get("major") or "").strip()
+            _strong = _school_terms(args.get("strong"))
+            _cet = str(args.get("cet") or "").strip()
+            _overseas = str(args.get("overseas") or "").strip()
+            _bachelor = str(args.get("bachelor") or "").strip()
+            _interview_unit = str(args.get("interview_unit") or "").strip()
+            _outcome = str(args.get("outcome") or "").strip()
             # 性别是普通筛选条件（业务方 2026-11-25）。以前这里没有参数，
             # 助手只能拿"男"去匹配关键词，筛不准还要附一段限制说明——不再这么干。
             gender = str(args.get("gender") or "").strip()
@@ -3483,6 +4117,22 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 filters["education"] = edu
             if univ:
                 filters["univ"] = univ
+            if _school:
+                filters["school"] = _school
+            if _major:
+                filters["major"] = _major
+            if _strong:
+                filters["strong"] = _strong
+            if _cet:
+                filters["cet"] = _cet
+            if _overseas:
+                filters["overseas"] = _overseas
+            if _bachelor:
+                filters["bachelor"] = _bachelor
+            if _interview_unit:
+                filters["interview_unit"] = _interview_unit
+            if _outcome:
+                filters["outcome"] = _outcome
             if gender:
                 filters["gender"] = gender
             if df:
@@ -3501,6 +4151,22 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 parts.append(edu)
             if univ:
                 parts.append(univ + "院校")
+            if _school:
+                parts.append(_school)
+            if _major:
+                parts.append(_major)
+            if _strong:
+                parts.append("特定院校")
+            if _cet:
+                parts.append(_cet)
+            if _overseas:
+                parts.append("海外" if _overseas == "1" else "非海外")
+            if _bachelor:
+                parts.append("第一学历" + _bachelor)
+            if _interview_unit:
+                parts.append(_interview_unit)
+            if _outcome:
+                parts.append(_outcome)
             if gender:
                 parts.append(gender)
             if kw:
@@ -3530,6 +4196,13 @@ def execute(name: str, args: dict, ctx: ToolCtx) -> str:
                 qs.append("education=" + urllib.parse.quote(edu))
             if univ:
                 qs.append("univ=" + urllib.parse.quote(univ))
+            for _k, _v in (("school", _school), ("major", _major),
+                           ("strong", _strong), ("cet", _cet),
+                           ("overseas", _overseas), ("bachelor", _bachelor),
+                           ("interview_unit", _interview_unit),
+                           ("outcome", _outcome)):
+                if _v:
+                    qs.append(_k + "=" + urllib.parse.quote(str(_v)))
             if gender:
                 qs.append("gender=" + urllib.parse.quote(gender))
             if df:

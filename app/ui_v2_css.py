@@ -416,6 +416,42 @@ button{cursor:pointer}
 /* 流式阶段先按纯文本追加（逐字可见），完成后再用 mdLite 渲染成排版 */
 .think-live .think-body{white-space:pre-wrap}
 .stream-answer{min-height:8px}
+/* 长任务进度卡：导入/收取每处理一份都更新，刷新或切回会话后也能接回 */
+.taskprog{margin:0 0 10px;padding:10px 12px;border:1px solid var(--line);
+  border-radius:10px;background:var(--surface-2)}
+.taskprog[data-state="done"]{background:var(--accent-soft);border-color:var(--accent-line)}
+.taskprog[data-state="error"]{background:var(--bad-soft);border-color:var(--bad-line)}
+.taskprog-h{display:flex;align-items:center;gap:8px;
+  font-size:calc(13px * var(--ui-fs, 1));color:var(--ink)}
+.taskprog-title{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.taskprog-count{margin-left:auto;flex:none;color:var(--ink-3);
+  font-variant-numeric:tabular-nums}
+.taskprog-bar{height:6px;margin:8px 0 7px;border-radius:99px;background:var(--line);
+  overflow:hidden}
+.taskprog-bar>i{display:block;height:100%;width:0;border-radius:99px;
+  background:var(--accent);transition:width .25s ease}
+.taskprog[data-state="done"] .taskprog-bar>i{background:var(--ok)}
+.taskprog[data-state="error"] .taskprog-bar>i{background:var(--bad)}
+.taskprog-bar.indet>i{width:35%;animation:taskprogMove 1.15s ease-in-out infinite}
+@keyframes taskprogMove{0%{transform:translateX(-110%)}100%{transform:translateX(320%)}}
+.taskprog-msg{font-size:calc(12.5px * var(--ui-fs, 1));line-height:1.55;color:var(--ink-2);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.taskprog-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.taskprog-chip{font-size:calc(11.5px * var(--ui-fs, 1));line-height:1.7;padding:0 7px;
+  border-radius:99px;background:var(--surface);border:1px solid var(--line);
+  color:var(--ink-3);font-variant-numeric:tabular-nums}
+.taskprog-chip.ok{color:var(--ok);border-color:var(--ok-line);background:var(--ok-soft)}
+.taskprog-chip.bad{color:var(--bad);border-color:var(--bad-line);background:var(--bad-soft)}
+.taskprog-chip.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-soft)}
+.taskprog-files{list-style:none;margin:7px 0 0;padding:0;max-height:150px;overflow:auto}
+.taskprog-file{display:flex;align-items:baseline;gap:8px;padding:2px 0;
+  font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-2)}
+.taskprog-file .fn{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.taskprog-file .st{margin-left:auto;flex:none;font-size:calc(11.5px * var(--ui-fs, 1));
+  color:var(--ink-3)}
+.taskprog-file .st.ok{color:var(--ok)}
+.taskprog-file .st.bad{color:var(--bad)}
+.taskprog-file .st.warn{color:var(--warn)}
 /* Mermaid 图表：饼图 / 折线图 / 柱状图，直接内联 SVG，不依赖外部库 */
 .mchart{margin:10px 0;padding:8px;border:1px solid var(--line);border-radius:8px;
   background:var(--surface);overflow-x:auto}

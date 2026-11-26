@@ -4013,7 +4013,8 @@ def api_set_stage(aid: int, req: StageReq, x_tp_token: str | None = Header(defau
 
 def _export_filters(overseas, bachelor, date_from, date_to,
                     interview_unit, cet, univ, stage, education, kw,
-                    interview_date=None, job_id=None, gender=None) -> dict:
+                    interview_date=None, job_id=None, gender=None,
+                    school=None, major=None, strong=None, outcome=None) -> dict:
     """把导出接口的筛选参数收成 `list_candidates` 的 kwargs —— **一处转换**。
 
     为什么不让导出接口自己拼：界面上能筛、导出不能筛是这类需求最常见的漏。
@@ -4048,6 +4049,16 @@ def _export_filters(overseas, bachelor, date_from, date_to,
     # 2026-11-25 起不再有"性别筛选开关"：列表、名单导出、简历打包口径一致。
     if gender:
         _f["gender"] = str(gender).strip()
+    # 2026-11-25：显式院校/专业/特定院校/面试结论与检索同一口径，
+    # 避免“检索筛得到、导出筛不了”。
+    if school:
+        _f["school"] = str(school).strip()
+    if major:
+        _f["major"] = str(major).strip()
+    if strong:
+        _f["strong"] = str(strong).strip()
+    if outcome:
+        _f["outcome"] = str(outcome).strip()
     return _f
 
 
@@ -4092,6 +4103,8 @@ def api_export_roster(scope: str = "候选人名单",
                        univ: str | None = None, stage: str | None = None,
                        education: str | None = None, kw: str | None = None,
                        job_id: int | None = None, gender: str | None = None,
+                       school: str | None = None, major: str | None = None,
+                       strong: str | None = None, outcome: str | None = None,
                        x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                        x_tp_role: str | None = Header(default=None, alias="X-TP-Role")) -> Response:
     """导出候选人名单 —— **唯一的导出入口**（业务方 2026-10-15 定调）。
@@ -4114,7 +4127,9 @@ def api_export_roster(scope: str = "候选人名单",
             conn, operator=s["username"], role=s["role"], include_archived=True,
             **_export_filters(overseas, bachelor, date_from, date_to,
                               interview_unit, cet, univ, stage, education, kw,
-                              interview_date, job_id, gender=gender))
+                              interview_date, job_id, gender=gender,
+                              school=school, major=major, strong=strong,
+                              outcome=outcome))
     finally:
         conn.close()
     meta = xlsx_mod.meta_line(
@@ -4227,6 +4242,8 @@ def api_export_resume_bundle(job_id: int | None = None, stage: str | None = None
                              keyword: str | None = None, education: str | None = None,
                              univ: str | None = None, candidate_ids: str | None = None,
                              gender: str | None = None,
+                             school: str | None = None, major: str | None = None,
+                             strong: str | None = None, outcome: str | None = None,
                              x_tp_token: str | None = Header(default=None, alias="X-TP-Token"),
                              x_tp_role: str | None = Header(default=None, alias="X-TP-Role")):
     """按筛选条件打包**最新一份简历原件**（zip）。
@@ -4254,6 +4271,10 @@ def api_export_resume_bundle(job_id: int | None = None, stage: str | None = None
         filters["univ"] = univ
     if gender:
         filters["gender"] = str(gender).strip()
+    for _k, _v in (("school", school), ("major", major),
+                   ("strong", strong), ("outcome", outcome)):
+        if _v:
+            filters[_k] = str(_v).strip()
     if candidate_ids:
         _ids: list[int] = []
         for _part in str(candidate_ids).replace(" ", ",").split(","):

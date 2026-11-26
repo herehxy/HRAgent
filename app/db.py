@@ -2477,6 +2477,10 @@ def _attach_skills(conn: sqlite3.Connection, items: list[dict],
 
 
 def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: str | None = None,
+                    # 2026-11-25：显式院校/专业筛选。关键词是“全字段包含”，
+                    # 会把备注、邮件正文里提到校名的人也带出来；HR 说“西电的人”
+                    # 要的是**就读院校**是西电，不是备注里提过西电。两者分开。
+                    school: str | None = None, major: str | None = None,
                     skill: str | list[str] | None = None, min_years: int | None = None,
                     education: str | None = None, job_id: int | None = None,
                     univ: str | None = None,
@@ -2654,6 +2658,20 @@ def list_candidates(conn: sqlite3.Connection, tier: str | None = None, keyword: 
                 "            WHERE cs3.candidate_id = c.id"
                 "              AND LOWER(COALESCE(s3.canonical_name,'')) LIKE ?))")
             args.extend([like] * 13)
+    # 显式院校 / 专业筛选：逗号、顿号、分号分隔 = 并集。
+    # 用 LIKE 而不是等值：库里校名常带校区/括号后缀（“西安电子科技大学(南校区)”），
+    # HR 说“西安电子科技大学”时应当能命中；显式字段也不会误伤备注里提到校名的人。
+    for _col, _val in (("c.school", school), ("c.major", major)):
+        if not _val:
+            continue
+        _terms = [x.strip() for x in re.split(r"[,，、;；]+", str(_val)) if x.strip()]
+        if not _terms:
+            continue
+        _cl = []
+        for _t in _terms:
+            _cl.append(f"LOWER(COALESCE({_col},'')) LIKE ?")
+            args.append("%" + _t.lower() + "%")
+        where.append("(" + " OR ".join(_cl) + ")")
     # 只取指定 id（技能检索命中的那批）：避免 `search_candidates_by_skills`
     # 把全库装配一遍再在 Python 里过滤。空列表直接返回空集。
     if ids is not None:
@@ -5919,11 +5937,14 @@ TOOL_LABEL = {
     # 读类工具（v4.0.17：右侧调用轨迹要显示中文名，不能只露函数标识符）
     "pool_stats": "人才库统计", "search_candidates": "检索候选人",
     "get_candidate": "读取档案", "get_candidates": "批量读取档案",
-    "list_jobs": "岗位列表", "recruit_overview": "招聘进度总览",
+    "list_jobs": "岗位列表", "job_detail": "岗位详情", "recruit_overview": "招聘进度总览",
     "pipeline_overview": "招聘管道", "search_by_skills": "技能检索",
     "semantic_search": "语义检索", "similar_candidates": "相似人才",
     "mailbox_status": "邮箱状态", "list_audit": "审计记录",
     "list_proposals": "提案列表",
+    "ingest_resumes": "导入 / 收取简历", "import_diagnostics": "导入诊断",
+    "list_source_files": "待导入文件", "list_import_history": "导入记录",
+    "daily_brief": "今日待办", "assistant_capabilities": "能力清单",
     "recruit_progress": "招聘进度", "recruit_gaps": "招聘缺口",
     "recruit_roster": "面试名单",
     "set_stage": "推进阶段", "set_tier": "调整档位", "add_tag": "添加标签",

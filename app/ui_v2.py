@@ -128,6 +128,7 @@ _PAGE = r"""<!DOCTYPE html>
   <input id="kw" class="search" placeholder="搜索姓名 / 院校 / 专业 / 技能"
          aria-label="搜索候选人" role="searchbox" autocomplete="off"
          name="candidate-search" data-form-type="other"
+         data-lpignore="true" data-1p-ignore="true" readonly data-af-unlock="1"
          onkeydown="if(event.key==='Enter'){doSearch()}">
   <!-- 搜索就是**一个输入框 + 一个按钮**，与原版一致（`ui.py:1787-1793`）：
        原来这里有个「关键词 / 按技能 / 语义」下拉，还有一个「具备其一/全部具备」下拉 —
@@ -269,13 +270,15 @@ _PAGE = r"""<!DOCTYPE html>
   <!-- 人才星图（v3.2）：canvas 必须在 .loginbox **之前**，这样它自然落在下面；
        CSS 里再给它 z-index:0 / 登录框 z-index:1 兜一层。 -->
   <canvas id="loginNet" aria-hidden="true"></canvas>
-  <form class="loginbox" id="loginForm" autocomplete="on">
+  <form class="loginbox" id="loginForm" autocomplete="off">
     <div class="loginbrand"><i class="logindot"></i>人才库智能体</div>
     <!-- 副标题「西北有色院 · 人事」已删（2026-10-28）：同一句话不再出现在界面上 -->
     <label class="loginlabel" for="loginUser">账号</label>
-    <input id="loginUser" class="logininput" autocomplete="username" required>
+    <input id="loginUser" class="logininput" autocomplete="off" disabled
+           data-lpignore="true" data-1p-ignore="true" data-form-type="other" required>
     <label class="loginlabel" for="loginPass">密码</label>
-    <input id="loginPass" class="logininput" type="password" autocomplete="current-password" required>
+    <input id="loginPass" class="logininput" type="password" autocomplete="new-password" disabled
+           data-lpignore="true" data-1p-ignore="true" data-form-type="other" required>
     <label class="loginremember"><input type="checkbox" id="loginRemember" checked>
       记住我（7 天内免登录，期间自动续期）</label>
     <div class="loginerr" id="loginErr"></div>
