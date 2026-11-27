@@ -90,7 +90,9 @@ def render(text: str, ctx: dict) -> dict:
         if key not in used:
             used.append(key)
         s = str(val)
-        return _html.escape(s, quote=False) if _is_html else s
+        # quote=True：变量可能出现在 HR 模板的属性里（href/src），
+        # 只转义 <>& 不够，双引号会闭合属性造成注入。
+        return _html.escape(s, quote=True) if _is_html else s
 
     # 顺序很重要：先删掉不满足的条件块，再替换 {} 变量——
     # 否则被删掉的块里的变量还会被算成"待填"。

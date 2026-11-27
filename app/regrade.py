@@ -242,7 +242,7 @@ def route_pending(conn: sqlite3.Connection, tiers: dict, apply: bool = True,
         if cand is None:
             no_text += 1
             items.append({"application_id": r["id"], "candidate_id": r["candidate_id"],
-                          "name": None, "cannot_route": "简历原文不可用（解析失败）"})
+                          "name": None, "cannot_route": "简历原文不可用（未上传或解析失败）"})
             continue
         _mjc = _major_of(conn, r["candidate_id"])
         if _mjc.get("major_canonical"):
@@ -360,7 +360,7 @@ def suggest_job_for_application(conn: sqlite3.Connection, candidate_id: int,
         return {"ok": False, "error": "还没有在招岗位，请先到「岗位管理」建一个岗位"}
     cand = _reprofile(conn, row["resume_doc_id"], jobs[0].get("jd") or {})
     if cand is None:
-        return {"ok": False, "error": "简历原文不可用（解析失败），无法判断建议岗位"}
+        return {"ok": False, "error": "简历原文不可用（未上传或解析失败），无法判断建议岗位"}
     _mj = _major_of(conn, candidate_id)
     if _mj.get("major_canonical"):
         cand["major_canonical"] = _mj["major_canonical"]
@@ -552,7 +552,7 @@ def assign_job(conn: sqlite3.Connection, application_id: int, job_id: int,
         conn.execute("UPDATE applications SET job_id = ?, suggested_job_id = NULL, "
                      "needs_review = 1, updated_at = ? WHERE id = ?",
                      (job_id, db.now(), application_id))
-        note = "简历原文不可用（解析失败），已归岗但未重算，请查看原件或重新导入"
+        note = "简历原文不可用（未上传或解析失败），已归岗但未重算，请查看原件或重新导入"
         after = f"归到 {jrow['title']}（未重算：原文不可用）"
     else:
         # 归岗后重算：岗位是 HR 明确指定的 -> 学历门槛照常判
@@ -626,7 +626,7 @@ def refresh_skills(conn: sqlite3.Connection, operator: str = "hr", role: str = "
             continue
         cand = _reprofile(conn, r["resume_doc_id"], jd)
         if cand is None:
-            skipped.append({"application_id": r["id"], "why": "简历原文不可用（解析失败）"})
+            skipped.append({"application_id": r["id"], "why": "简历原文不可用（未上传或解析失败）"})
             continue
         if apply:
             from . import ingest as _ingest

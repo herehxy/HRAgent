@@ -293,7 +293,8 @@ async def _guard_local_origin(request: Request, call_next):
 
     - DNS rebinding：浏览器把 evil.com 解析到 127.0.0.1 后，请求带 `Host: evil.com`，
       据此拒绝（Host 缺失时不拦——真实浏览器必带 Host，缺失只发生在测试/畸形请求）。
-    - 本地 CSRF：跨站表单 POST 会带 `Origin: https://evil.com`，据此拒绝。
+    - 本地 CSRF：跨站表单 POST 会带 `Origin: https://evil.com`；少数浏览器/隐私设置
+      只带 `Referer`，所以两者都要看，不能只看 Origin。
     """
     # Host 校验必须覆盖 **所有方法**：本机模式下 GET 也会返回全库 PII，
     # 只拦非 GET 挡不住 DNS rebinding（2026-11-16 安全修复）。
@@ -301,12 +302,12 @@ async def _guard_local_origin(request: Request, call_next):
     if host and not _is_local_host(host):
         return Response(status_code=403, content="Forbidden: 仅接受本机请求")
     if request.method not in ("GET", "HEAD", "OPTIONS"):
-        # 若带了 Origin/Referer，其主机也必须是本机（跨站表单会带外部 Origin）
-        origin = request.headers.get("origin")
-        if origin:
+        # 若带了 Origin/Referer，其主机也必须是本机（跨站表单会带外部来源）
+        source = request.headers.get("origin") or request.headers.get("referer")
+        if source:
             try:
                 from urllib.parse import urlparse
-                ohost = urlparse(origin).hostname or ""
+                ohost = urlparse(source).hostname or ""
                 if not _is_local_host(ohost):
                     return Response(status_code=403, content="Forbidden: 跨站来源被拒绝")
             except Exception:
@@ -639,7 +640,11 @@ def require(session: dict, perm: str) -> None:
         raise HTTPException(status_code=403,
                             detail="首次登录或密码已被重置，请先修改初始密码")
     if not auth.can(session["role"], perm):
-        raise HTTPException(status_code=403, detail=f"当前角色（{session['role']}）无 {perm} 权限")
+        # 本机模式是单机自用，没有真实登录账号；账号管理仍应可用，
+        # 否则设置里的「账号与权限」只显示一句 403。登录模式继续按角色校验。
+        if not (session.get("mode") == "local" and perm == "manage_users"):
+            raise HTTPException(status_code=403,
+                                detail=f"当前角色（{session['role']}）无 {perm} 权限")
 
 
 def _ctx(session: dict, conn=None) -> ToolCtx:
@@ -4770,17 +4775,25 @@ def api_interview_info(aid: int, req: dict,
         _ap_now = db.get_application(conn, aid) or {}
         _stage_now = stages_mod.normalize_stage(_ap_now.get("stage"))
         _order = stages_mod.all_stages()
-        _promoted = False
-        if (_ap_now.get("interview_unit") or "").strip():
-            if (_stage_now in _order and "待面试" in _order
-                    and _order.index(_stage_now) < _order.index("待面试")):
-                _promoted = True
-        if _promoted:
+        _promoted_to = None
+        # 签约情况改成「已签约」时，阶段从「已发放offer」自动进入最后的「待入职」。
+        # 拒签/毁约不改阶段，停在 offer 阶段由进度条画红 ×。
+        if (str(patch.get("sign_status") or "") == "已签约"
+                and _stage_now == "已发放offer" and "待入职" in _order):
+            db.set_application_stage(conn, aid, "待入职", sign_status="已签约",
+                                     operator=s["username"], role=s["role"],
+                                     skip_auto_archive=True,
+                                     expected_stage=str(_ap_now.get("stage") or ""))
+            _promoted_to = "待入职"
+        elif (_stage_now in _order and "待面试" in _order
+              and _order.index(_stage_now) < _order.index("待面试")
+              and (_ap_now.get("interview_unit") or "").strip()):
             db.set_application_stage(conn, aid, "待面试", operator=s["username"],
                                      role=s["role"], skip_auto_archive=True,
                                      expected_stage=str(_ap_now.get("stage") or ""))
+            _promoted_to = "待面试"
         _changed = sorted(patch) + (["stage", "outcome"] if advanced else [])
-        if _promoted:
+        if _promoted_to:
             _changed = sorted(set(_changed) | {"stage"})
         if advanced:
             _note = "已保存：面试结论 + 阶段已推进到「已面试」。"
@@ -4788,12 +4801,12 @@ def api_interview_info(aid: int, req: dict,
             _note = ("已保存：" + "、".join(
                          db.APPLICATION_FIELD_LABEL.get(k, k) for k in sorted(patch))
                      if patch else "已清除面试结论")
-            _note += ("。阶段已自动推进到「待面试」（面试单位已登记，已写审计）。"
-                      if _promoted else "（改前改后都记在操作审计里）。")
+            _note += ("。阶段已自动推进到「" + _promoted_to + "」（已写审计）。"
+                      if _promoted_to else "（改前改后都记在操作审计里）。")
         return {"ok": True, "id": aid,
                 "changed": _changed,
                 "advanced": advanced,
-                "advanced_to": "待面试" if _promoted else None,
+                "advanced_to": _promoted_to,
                 "application": {k: r.get(k) for k in patch},
                 "note": _note}
     finally:
@@ -6287,7 +6300,7 @@ def api_agent_chat_stream(req: ChatReq,
         except Exception as exc:                              # noqa: BLE001
             _abort_agent_run(getattr(ctx, "run_id", None),
                              f"{type(exc).__name__}: {exc}")
-            q.put({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+            q.put({"type": "error", "message": llm.friendly_error(exc)})
         finally:
             _chat_release(ctx.session_id)
 

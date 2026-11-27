@@ -270,6 +270,17 @@ class ReviewFixTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_cross_site_referer_is_blocked_without_origin(self):
+        """少数浏览器只带 Referer、不带 Origin；写请求仍必须拒绝。"""
+        bad, _ = _asgi(server.app, "POST", "/api/candidates/999999/archive",
+                       {"host": "127.0.0.1",
+                        "referer": "http://evil.example/attack"}, b"")
+        self.assertEqual(bad, 403)
+        local, _ = _asgi(server.app, "POST", "/api/candidates/999999/archive",
+                         {"host": "127.0.0.1",
+                          "referer": "http://127.0.0.1:8877/"}, b"")
+        self.assertNotEqual(local, 403, "本机来源不能被 CSRF 门误伤")
+
     def test_auth_boundaries(self):
         conn = db.connect(_DB)
         try:

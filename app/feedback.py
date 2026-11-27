@@ -165,6 +165,13 @@ def decision_report(conn, days: int = 90) -> dict:
     }
 
 
+def _csv_text(v):
+    """CSV 单元格消毒：候选人姓名/岗位名以公式前缀开头时按文本处理。"""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return "" if v is None else v
+
+
 def export_csv(conn, days: int = 90) -> str:
     """导出明细 CSV，供 HR 自己在 Excel 里做进一步分析。"""
     import csv
@@ -187,7 +194,8 @@ def export_csv(conn, days: int = 90) -> str:
                  AND COALESCE(a.applied_at, a.created_at) >= ?
                ORDER BY a.id""", (threshold,)).fetchall():
         d = _deviation(r["tier_suggested"], r["tier_final"])
-        w.writerow([r["name"] or "未识别", r["job_title"] or "待指定",
+        w.writerow([_csv_text(r["name"] or "未识别"),
+                    _csv_text(r["job_title"] or "待指定"),
                     r["edu_level"] or "", r["years_exp"] if r["years_exp"] is not None else "",
                     r["tier_suggested"] or "", r["tier_final"] or "",
                     r["score"] if r["score"] is not None else "",

@@ -1029,12 +1029,99 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 /* 右：详情 */
 /* 上内边距挪进 `.detail-toolbar`（见那里的说明）：否则 sticky 贴边后
    顶部会留一条露出滚动内容的缝。 */
-.detail{overflow-y:auto;padding:0 24px 40px}
+.detail{overflow-y:auto;scrollbar-gutter:stable;padding:0 24px 40px}
 .detail.comparing{padding-top:0}
 /* 右栏限宽：1600px 下内容只占左侧 60%，右边一大片空白会把视线拉散。
    限到 960px 后行宽落在舒适区（中文 ~45 字/行）。 */
 .detail > *{max-width:1280px}
 .detail > .detail-toolbar{max-width:none;width:auto;margin:0 -24px;padding:20px 24px 12px}
+/* 候选人详情的工作台 + 右侧检查器：只加布局，不移除任何原有区块。 */
+.cockpit-on{display:grid;grid-template-columns:minmax(0,1fr) 272px;
+  gap:0;align-content:start}
+.cockpit-on > .cockpit-main{grid-column:1;grid-row:1;min-width:0;max-width:none}
+.cockpit-on > .cockpit-main > .detail-toolbar{
+  max-width:none;width:auto;margin:0;padding:20px 0 12px}
+.cockpit-on > .cockpit-side{grid-column:2;grid-row:1;align-self:start;
+  position:sticky;top:0;min-width:0;max-width:none;
+  margin-right:-24px;padding:20px 24px 30px 18px;
+  border-left:1px solid var(--line)}
+/* 对比页顶部有固定标签条，检查器避让，避免盖住标签。 */
+.comparing .cockpit-on > .cockpit-side{top:54px}
+/* 右侧「问 AI」独立入口：唯一一个实心强调按钮，和普通操作明显分开。 */
+.cockpit-askai{display:flex;width:100%;align-items:center;justify-content:center;gap:8px;
+  height:42px;padding:0 12px;margin:0 0 14px;border:1px solid var(--accent);
+  border-radius:8px;background:var(--accent);color:#fff;cursor:pointer;
+  font-size:calc(13.5px * var(--ui-fs, 1));font-weight:600;
+  transition:background .15s,border-color .15s}
+.cockpit-askai svg{width:17px;height:17px;flex:none}
+.cockpit-askai:hover{background:var(--accent-ink);border-color:var(--accent-ink)}
+.cockpit-askai:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.cockpit-askai{transition:none}}
+.cockpit-side-h{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:0 0 12px;border-bottom:1px solid var(--line)}
+.cockpit-side-h h2{margin:0;font-size:calc(15px * var(--ui-fs, 1));font-weight:600}
+.cockpit-next{display:flex;align-items:baseline;gap:8px;padding:12px 0 0;
+  border-bottom:1px solid var(--line);padding-bottom:11px}
+.cockpit-next span{font-size:calc(12px * var(--ui-fs, 1));color:var(--ink-3)}
+.cockpit-next b{font-size:calc(13.5px * var(--ui-fs, 1));font-weight:600;color:var(--ink)}
+.cockpit-sum{margin:14px 0 0;font-size:calc(13px * var(--ui-fs, 1));
+  line-height:1.7;color:var(--ink-2)}
+.cockpit-ai.has-more .cockpit-sum{display:-webkit-box;-webkit-line-clamp:5;
+  -webkit-box-orient:vertical;overflow:hidden}
+.cockpit-ai.expanded .cockpit-sum{display:block;overflow:visible}
+.cockpit-risk{margin-top:12px;padding:8px 9px;border:1px solid var(--warn-line);
+  border-radius:6px;background:var(--warn-soft);color:var(--warn);
+  font-size:calc(12px * var(--ui-fs, 1));line-height:1.6}
+.cockpit-risk b{font-weight:600;margin-right:4px}
+.cockpit-ai.has-more:not(.expanded) .cockpit-risk{display:-webkit-box;
+  -webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.cockpit-expand{margin-top:8px;padding:0;border:0;background:transparent;
+  color:var(--accent-ink);font-size:calc(12px * var(--ui-fs, 1));cursor:pointer;
+  text-align:left}
+.cockpit-expand:hover{text-decoration:underline;text-underline-offset:2px}
+.cockpit-ai-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;
+  padding-top:12px;border-top:1px solid var(--line)}
+.cockpit-ai-actions .btn{height:30px;padding:0 10px;font-size:calc(12px * var(--ui-fs, 1))}
+/* 检查器收起时，AI 动作回落到主区，避免窄屏功能消失。 */
+.ai-fallback{display:none}
+@media (max-width:1399px){ .ai-fallback{display:inline-flex} }
+.cockpit-side-sec{padding:16px 0;border-bottom:1px solid var(--line)}
+.cockpit-side-sec h3{margin:0 0 10px;font-size:calc(12px * var(--ui-fs, 1));
+  font-weight:600;color:var(--ink-3)}
+.cockpit-actions{display:flex;flex-direction:column;gap:7px}
+.cockpit-actions .btn{justify-content:center}
+.cockpit-kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px 12px;
+  font-size:calc(12.5px * var(--ui-fs, 1));line-height:1.5}
+.cockpit-kv span{color:var(--ink-3)}
+.cockpit-kv b{font-weight:500;color:var(--ink-2);min-width:0;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+/* 页签：只做滚动定位，内容仍在页面上，功能一个不少。 */
+/* 页签恢复原来的紧凑排布；所有页签同字重，切换时不会因加粗而挪位。 */
+.cockpit-tabs{grid-column:1/-1;display:flex;gap:24px;
+  border-bottom:1px solid var(--line);padding:0 2px;margin:0 0 2px}
+.cockpit-tab{flex:none;border:0;background:transparent;color:var(--ink-3);
+  height:44px;padding:0 1px;position:relative;text-align:left;
+  white-space:nowrap;font-weight:600;font-size:calc(13px * var(--ui-fs, 1))}
+.cockpit-tab:hover{color:var(--ink)}
+.cockpit-tab.on{color:var(--ink)}
+.cockpit-tab.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;
+  height:2px;background:var(--accent)}
+/* 流程记录按“档位 → 面试与录用 → 备注 → 更多操作 → 邮件记录”顺序整行排列。 */
+.cockpit-on [data-cockpit-pane="flow"]{grid-column:1/-1}
+.cockpit-on .profile-head,
+.cockpit-on .hireprog,
+.cockpit-on .sec,
+.cockpit-on .srcbar{scroll-margin-top:72px}
+/* 真实应用左侧导航比原型宽：1440/1600 下把检查器收起，优先保证主内容可读。
+   宽度足够（约 1700+）时再显示右侧检查器。 */
+@media (max-width:1600px){
+  .cockpit-on{grid-template-columns:1fr}
+  .cockpit-on > .cockpit-side{display:none}
+  .cockpit-on .profile-layout{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:1380px){
+  .cockpit-on .profile-layout{grid-template-columns:1fr}
+}
 /* 切换候选人时的右栏骨架屏：先给反馈，不让旧档案一直挂着、
    等请求回来再"突然跳过去"。 */
 .detail-loading{padding:28px 0 40px;max-width:980px}
@@ -1082,6 +1169,19 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
    窄窗口下允许换行，动作组整体掉到第二行右对齐 —— 不允许把姓名挤成竖排。 */
 .namerow{display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap}
 .namerow .dname{min-width:0}
+/* 姓名旁的「问 AI」小入口：图标按钮，收在姓名右侧，不和主操作抢位。 */
+.askai{width:28px;height:28px;padding:0;margin-top:4px;flex:none;
+  display:inline-flex;align-items:center;justify-content:center;
+  border:1px solid var(--accent-line);border-radius:8px;
+  background:var(--accent-soft);color:var(--accent-ink);cursor:pointer;
+  transition:background .15s,color .15s,border-color .15s}
+.askai svg{width:16px;height:16px}
+.askai:hover{background:var(--accent);border-color:var(--accent);color:#fff}
+.askai:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){
+  .askai{transition:none}
+  .hp-dot{transition:none}
+}
 .dhead-act{margin-left:auto;display:flex;gap:8px;align-items:center;flex:none;flex-wrap:wrap;
   padding-top:2px}
 .profile-layout{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
@@ -1455,6 +1555,36 @@ body.v-schedule .top,body.v-schedule .top2,body.v-schedule .tabbar,body.v-schedu
 .iv-col{min-width:0;padding:2px 0}
 .iv-col + .iv-col{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
 .iv-col > h4{margin:0 0 8px;font-size:calc(13px * var(--ui-fs, 1));font-weight:600;color:var(--ink-2)}
+/* 招聘进度：节点 + 连线，蓝色表示已经走过的阶段 */
+.hireprog{display:flex;align-items:flex-start;margin:4px 0 10px;padding:0 2px}
+.hp-steps{display:flex;align-items:flex-start;width:100%}
+.hp-step{position:relative;flex:1;min-width:0;display:flex;flex-direction:column;
+  align-items:center;text-align:center;padding-top:2px}
+.hp-step::before{content:'';position:absolute;top:7px;right:50%;width:100%;height:2px;
+  background:var(--line-2);z-index:0}
+.hp-step.first::before{right:50%;width:50%}
+.hp-step.done::before{background:var(--accent)}
+.hp-dot{position:relative;z-index:1;width:12px;height:12px;border-radius:50%;
+  background:var(--line-2);transition:transform .2s ease}
+.hp-step.done .hp-dot{background:var(--accent)}
+/* 放大用 transform：不改变节点占位，所有阶段名才会落在同一条基线上。 */
+.hp-step.current .hp-dot{transform:scale(1.33);box-shadow:0 0 0 4px var(--accent-soft)}
+/* 面试不通过 / 拒签 / 毁约：停在当前节点，红点里画 × */
+.hp-step.rejected .hp-dot{display:flex;align-items:center;justify-content:center;
+  background:var(--bad);transform:scale(1.33);box-shadow:0 0 0 4px var(--bad-soft)}
+.hp-step.rejected .hp-dot::after{content:'×';color:#fff;
+  font-size:calc(11px * var(--ui-fs, 1));line-height:1;margin-top:-1px}
+.hp-step.rejected.current .hp-dot{transform:scale(1.5)}
+.hp-step.rejected .hp-label{color:var(--bad);font-weight:600}
+.hp-label{margin-top:8px;max-width:100%;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;font-size:calc(12.5px * var(--ui-fs, 1));line-height:1.4;
+  color:var(--ink-3)}
+.hp-step.done .hp-label{color:var(--ink-2)}
+.hp-step.current .hp-label{color:var(--accent-ink);font-weight:600}
+.hp-step.rejected .hp-label,.hp-step.rejected.current .hp-label{color:var(--bad);font-weight:600}
+@media (max-width:720px){
+  .hp-label{font-size:calc(11.5px * var(--ui-fs, 1))}
+}
 /* 教育经历紧贴姓名展示，不做折叠；第一学历与最高学历都保留编辑入口。 */
 .edu-band{margin-top:12px;padding:11px 0 12px;border-top:1px solid var(--line);
   border-bottom:1px solid var(--line)}
@@ -3268,6 +3398,13 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
 .chatside .sec > h3{font-size:calc(14px * var(--ui-fs, 1));font-weight:600;letter-spacing:0;color:var(--ink-3);
   border-bottom:0;padding-bottom:0;margin:0 0 9px}
 .chatside .sec > h3 .hint{font-size:calc(11px * var(--ui-fs, 1));font-weight:400}
+/* 档案带入的候选人资料：右侧只读参考，滚动区域固定高度，避免把产出区推走。 */
+.chat-side-cand[hidden]{display:none}
+.candctxbox{margin:0;max-height:210px;overflow:auto;padding:1px 2px 2px;
+  white-space:pre-wrap;font-size:calc(15px * var(--ui-fs, 1));line-height:1.55;
+  font-weight:600;color:var(--ink);word-break:break-word}
+.candctxbox::-webkit-scrollbar{width:6px}
+.candctxbox::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:3px}
 .ctxbar{height:9px;border-radius:999px;background:var(--surface-2)}
 .ctxrow{font-size:calc(12px * var(--ui-fs, 1))}
 .ask{border:0;border-radius:999px;background:var(--surface-2);color:var(--ink-2);
@@ -3497,6 +3634,18 @@ body.v-recruit .propbox,body.v-schedule .propbox{display:none!important}
 /* 发送前：附件小预览停在输入框上方，不再占用会话记录顶部。 */
 .chatpending{display:flex;flex-wrap:wrap;gap:8px;padding:0 2px 8px}
 .chatpending[hidden]{display:none}
+/* 从档案带进对话的上下文提示：一行，可移除；只用主题色，不抢输入框。 */
+.chataskctx{display:flex;align-items:center;gap:8px;margin:0 2px 8px;
+  padding:7px 10px;border:1px solid var(--accent-line);border-radius:8px;
+  background:var(--accent-soft);color:var(--accent-ink);
+  font-size:calc(12.5px * var(--ui-fs, 1))}
+.cac-txt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cac-txt b{font-weight:600}
+.cac-x{margin-left:auto;flex:none;border:0;background:transparent;color:var(--accent-ink);
+  font-size:calc(16px * var(--ui-fs, 1));line-height:1;padding:1px 5px;border-radius:4px;
+  cursor:pointer}
+.cac-x:hover{background:var(--accent-hi)}
+.cac-x:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 #chatPending .upload-card{margin:0;max-width:300px;padding:5px 4px 5px 5px;
   border-radius:10px;gap:8px;background:var(--surface-2)}
 #chatPending .upload-thumb{width:38px;height:38px;border-radius:6px}
@@ -3831,48 +3980,59 @@ body{font-size:calc(15px * var(--ui-fs, 1));line-height:1.6;grid-template-column
   stroke-linecap:round;stroke-linejoin:round;
 }
 #chatView .chatpending{
-  display:flex;flex-wrap:nowrap;gap:8px;overflow-x:auto;overflow-y:hidden;
-  padding:2px 1px 4px;margin:0;scrollbar-width:thin;
+  display:flex;flex-wrap:wrap;gap:6px;overflow-x:hidden;overflow-y:auto;
+  max-height:168px;padding:2px 1px 4px;margin:0;scrollbar-width:thin;
 }
 #chatView .chatpending[hidden]{display:none}
+/* 发送前的附件条：横向文件 chip，贴近 DSH 的紧凑上传区，不再做 96px 竖卡。 */
 #chatView #chatPending .upload-card{
-  width:96px;max-width:96px;flex:0 0 96px;
-  flex-direction:column;align-items:stretch;gap:4px;
-  margin:0;padding:5px;position:relative;
-  border:1px solid var(--line);border-radius:12px;background:var(--surface-2);
+  width:auto;max-width:300px;min-height:54px;
+  flex:0 1 auto;flex-direction:row;align-items:center;gap:8px;
+  margin:0;padding:6px 7px;position:relative;
+  border:1px solid var(--line);border-radius:10px;background:var(--surface-2);
 }
 #chatView #chatPending .upload-thumb{
-  width:84px;height:64px;border-radius:8px;object-fit:cover;
+  width:38px;height:38px;border-radius:6px;object-fit:cover;flex:none;
 }
 #chatView #chatPending .upload-file{
   display:grid;place-items:center;background:var(--surface);color:var(--ink-3);
   font-size:0;
 }
 #chatView #chatPending .upload-file svg{
-  width:26px;height:26px;fill:none;stroke:currentColor;stroke-width:1.6;
+  width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.6;
   stroke-linecap:round;stroke-linejoin:round;
 }
-#chatView #chatPending .upload-info{min-width:0;width:100%}
+#chatView #chatPending .upload-info{min-width:0;width:auto;flex:1 1 auto}
 #chatView #chatPending .upload-name{
-  font-size:calc(12px * var(--ui-fs, 1));font-weight:500;line-height:1.35;max-width:100%;
+  font-size:calc(12.5px * var(--ui-fs, 1));font-weight:600;line-height:1.35;max-width:180px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 #chatView #chatPending .upload-meta{
-  font-size:calc(10.5px * var(--ui-fs, 1));line-height:1.3;margin-top:1px;max-width:100%;
+  font-size:calc(10.8px * var(--ui-fs, 1));line-height:1.3;margin-top:1px;max-width:180px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 #chatView #chatPending .upload-bar{
   height:2px;border-radius:999px;margin-top:4px;overflow:hidden;
 }
-#chatView #chatPending .upload-x{
-  position:absolute;top:3px;right:3px;width:18px;height:18px;padding:0;
-  display:grid;place-items:center;border:0;border-radius:50%;
-  background:rgba(20,20,20,.55);color:#fff;font-size:calc(13px * var(--ui-fs, 1));line-height:1;
-  opacity:.9;z-index:3;
-}
-#chatView #chatPending .upload-x:hover{background:var(--bad);color:#fff}
 #chatView #chatPending .upload-approve{
-  width:100%;padding:3px 4px;font-size:calc(10.5px * var(--ui-fs, 1));border-radius:7px;
+  width:auto;height:26px;padding:0 8px;flex:none;
+  font-size:calc(10.8px * var(--ui-fs, 1));border-radius:6px;
+}
+#chatView #chatPending .upload-x{
+  position:static;width:18px;height:18px;padding:0;flex:none;
+  display:grid;place-items:center;border:0;border-radius:4px;
+  background:transparent;color:var(--ink-3);
+  font-size:calc(14px * var(--ui-fs, 1));line-height:1;opacity:1;z-index:auto;
+}
+#chatView #chatPending .upload-x:hover{background:var(--bad-soft);color:var(--bad)}
+/* 拖拽文件到助手页：整块内容区给出虚线投放提示。 */
+#chatView{position:relative}
+#chatView.dragging-files::after{
+  content:"松开导入文件";position:absolute;inset:10px;z-index:30;
+  display:grid;place-items:center;pointer-events:none;
+  border:2px dashed var(--accent);border-radius:14px;
+  background:var(--accent-soft);color:var(--accent-ink);
+  font-size:calc(14px * var(--ui-fs, 1));font-weight:600;
 }
 #chatView .msg-att .favi svg{
   width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;
@@ -3947,4 +4107,79 @@ body{font-size:calc(15px * var(--ui-fs, 1));line-height:1.6;grid-template-column
   display:inline-block;vertical-align:top;max-width:100%;overflow-x:auto;
 }
 #chatView .msg .mdtable{min-width:0;max-width:100%}
+
+/* ============================================================
+   2026-11-27：全局导航收成 76px 图标栏（与布局预览一致）
+   颜色、按钮、账号菜单和所有入口都保留，只改排列方式。
+   ============================================================ */
+@media (min-width:1101px){
+  body{grid-template-columns:76px minmax(0,1fr)}
+  .side{padding:12px 6px 10px;align-items:center}
+  .sbrand{justify-content:center;padding:2px 0 16px}
+  .sbrand span{display:none}
+  .sbrand img{width:32px;height:32px}
+  .sgroup{display:none}
+  .side button{width:64px;height:54px;padding:0;gap:4px;flex-direction:column;
+    justify-content:center;border-radius:8px;font-size:calc(10.5px * var(--ui-fs, 1));
+    line-height:1.1}
+  .side button .ico{width:19px;height:19px;opacity:.74}
+  .side button span{display:block;max-width:64px;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap}
+  .side .sfoot{width:64px;flex-direction:column;gap:4px;padding:8px 0 0;align-items:center}
+  .side .acct{width:42px;height:42px;flex:none;justify-content:center;padding:0}
+  .side .acct .txt,.side .acct .chev{display:none}
+  .side .acct .av{width:27px;height:27px}
+  .side .acctgear{width:42px;height:42px;margin:0}
+  .acctMenu{left:calc(100% + 8px);right:auto;bottom:0;width:190px}
+  .wrap{grid-template-columns:330px minmax(0,1fr)}
+}
+/* 真实内容区够宽时显示右侧检查器；窄屏优先保证主内容。 */
+@media (min-width:1400px){
+  .cockpit-on{grid-template-columns:minmax(0,1fr) 272px}
+  .cockpit-on > .cockpit-side{display:block}
+  .cockpit-on .profile-layout{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+
+/* 账号菜单改成固定弹层：它原来挂在 76px 侧栏里，会被侧栏滚动容器裁掉。 */
+.side .sfoot{position:relative}
+.acctMenu{position:fixed;left:84px;bottom:14px;right:auto;width:190px;z-index:80}
+@media (max-width:1100px){
+  .acctMenu{left:72px;bottom:14px}
+  .side .sfoot{width:54px;flex-direction:column;gap:4px;padding:8px 0 0;align-items:center}
+  .side .acct{width:42px;height:42px;flex:none;justify-content:center;padding:0}
+  .side .acctgear{width:38px;height:38px;margin:0}
+}
+
+/* 账号菜单不能继承 76px 图标栏的竖排大按钮样式。 */
+.side .acctMenu button{display:block;width:100%;height:32px;padding:0 10px;
+  flex-direction:row;justify-content:flex-start;text-align:left;border-radius:6px;
+  font-size:calc(13px * var(--ui-fs, 1));line-height:32px}
+.side .acctMenu .ver{height:auto;line-height:1.5}
+
+/* 宽屏由右侧独立按钮承担；窄屏检查器收起时才显示姓名旁图标。 */
+.namerow .askai.ai-fallback{display:none}
+@media (max-width:1399px){ .namerow .askai.ai-fallback{display:inline-flex} }
+
+/* 归档操作条允许换行，不再用固定 44px 高度把按钮裁掉。 */
+#archBar{height:auto;min-height:44px;padding-top:7px;padding-bottom:7px;row-gap:7px}
+
+/* 对比档案的内容容器不再被 1200px 上限截断，让右侧检查器贴住详情区右边。 */
+.detail > .pinned-profile.cockpit-on{max-width:none;width:100%}
+
+/* 助手页头部：默认收起右侧运行信息，主对话区拉宽（DSH 风格）；按钮可展开。 */
+.chathead{flex:none;height:52px;padding:0 24px;display:flex;align-items:center;
+  justify-content:space-between;border-bottom:1px solid var(--line);background:var(--surface)}
+.chathead b{font-size:calc(15px * var(--ui-fs, 1));font-weight:600;color:var(--ink)}
+.chathead .btn{height:28px;padding:0 10px;font-size:calc(12px * var(--ui-fs, 1))}
+#chatView.on.side-off{grid-template-columns:260px minmax(0,1fr)}
+#chatView.on.side-off .chatside{display:none}
+@media (max-width:1280px){
+  #chatView.on.side-off{grid-template-columns:220px minmax(0,1fr)}
+}
+@media (max-width:900px){
+  #chatView.on.side-off{grid-template-columns:1fr}
+  .chathead{padding:0 14px}
+}
+
+@media (max-width:1280px){ #chatSideToggle{display:none} }
 """

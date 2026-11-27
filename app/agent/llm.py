@@ -826,9 +826,42 @@ def error_detail(exc: Exception, limit: int = 600) -> str:
     只显示 `HTTP Error 400` 时，HR 无法知道是模型名、参数还是权限问题；
     把 body 里的 `detail` 带出来，才能直接定位（例如 vLLM 的
     `"model not found"` / `"enable_thinking is not supported"`）。
+
+    这是**诊断信息**，只放在「系统设置 → 模型与密钥」和运行日志里；
+    聊天正文不要直接用它，见 `friendly_error()`。
     """
     text = _exception_text(exc).strip()
     return text[:limit]
+
+
+def friendly_error(exc: Exception) -> str:
+    """给聊天正文用的短原因：只说人话，不带服务端原始 body / 密钥细节。
+
+    原始报错仍然通过 `error_detail()` 暴露给系统设置页，排查不受影响；
+    聊天正文只保留「哪一类问题、下一步怎么办」。
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        code = int(getattr(exc, "code", 0) or 0)
+        if code in (401, 403):
+            return f"模型服务拒绝访问（{code}）：密钥无效或没有调用权限"
+        if code == 404:
+            return "模型服务地址或模型名不对（404）"
+        if code == 429:
+            return "模型服务限流（429），请稍后再试"
+        if 500 <= code < 600:
+            return f"模型服务暂时不可用（{code}）"
+        return f"模型服务返回错误（{code}）"
+    text = str(exc).lower()
+    if "timed out" in text or "timeout" in text:
+        return "连接模型服务超时"
+    if ("refused" in text or "unreachable" in text or "connection" in text
+            or "getaddrinfo" in text or "name or service" in text):
+        return "连不上模型服务（网络或地址不通）"
+    if "未配置" in text or "not configured" in text:
+        return "还没有配置模型"
+    if "空答复" in text or "empty" in text:
+        return "模型没有返回内容，请再试一次"
+    return f"模型调用失败（{type(exc).__name__}）"
 
 
 def context_overflow_limit(exc: Exception, cfg: dict | None = None,

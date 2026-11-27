@@ -33,10 +33,13 @@ _FALLBACK: dict = {
     #   而是**已面试阶段直接打的标签**，通过后进入「已发放offer」；
     #   「新投递」改名为「新投递」—— 业务方要的是"还没进流程的所有简历"这个视角，
     #   而不是一个叫"新投递"的阶段（收到就是新投递，进流程后才分档）。
-    "order": ["新投递", "初筛通过", "待面试", "已面试", "已发放offer", "已结束"],
-    "pipeline": ["新投递", "初筛通过", "待面试", "已面试", "已发放offer"],
+    "order": ["新投递", "初筛通过", "待面试", "已面试", "已发放offer", "待入职", "已结束"],
+    "pipeline": ["新投递", "初筛通过", "待面试", "已面试", "已发放offer", "待入职"],
+    # 待入职 = 签约后的最后阶段（仍算在流程内，等待入职）；
+    # 已结束保留为历史数据的兼容终态，不再作为新流程的目标阶段。
     "terminal": ["已结束"],
     "auto_archive_on": ["已结束"],
+    "legacy": ["已结束"],
     # 结论标签（业务方 2026-10-16 定稿）：
     #   待面试   → 拟录用 / 不录用   ← 结论**产生**在这个环节，所以也挂在这里。
     #              业务方要求：在「待面试」打结论标签会**自动推进到「已面试」**，
@@ -52,21 +55,23 @@ _FALLBACK: dict = {
         # 2026-11-16 业务方：进入待面试不再强制先填面试单位；
         # 面试单位仍可在档案里补，发面试邀请/导出时再用。
         "初筛通过": [{"label": "加入待面试", "to": "待面试"}],
-        "待面试": [{"label": "面试完成", "to": "已面试"}],
-        # ⚠️ v1.29.2（业务方 2026-10-16 定稿）：「拟录用」**只是人事处打的标签**，
-        #   **不自动进入「已发放offer」** —— 拟录用之后还要走"发录用函"这一步，
-        #   由 HR 真的把函发出去（或至少确认要发）才进下一档。
-        #   所以这里是**自环**（已面试 → 已面试）：只写 outcome，不动阶段。
+        "待面试": [{"label": "面试完成", "to": "已面试"},
+                   {"label": "不录用（拒绝面试）", "to": "已面试", "outcome": "不录用"}],
+        # 「拟录用 / 不录用」都停在「已面试」并只写结论；
+        # 不录用由进度条画红 ×，不再把阶段推去「已结束」。
         "已面试": [{"label": "拟录用", "to": "已面试", "outcome": "拟录用"},
-                   {"label": "不录用", "to": "已结束", "outcome": "不录用"},
+                   {"label": "不录用", "to": "已面试", "outcome": "不录用"},
                    {"label": "发出录用函", "to": "已发放offer"}],
-        "已发放offer": [{"label": "已签约", "to": "已发放offer", "outcome": "已签约"},
-                        {"label": "拒签", "to": "已结束", "outcome": "拒签"},
-                        {"label": "毁约", "to": "已结束", "outcome": "毁约"}],
+        # 签约 = 进入最后的「待入职」；拒签/毁约留在 offer 阶段并画红 ×。
+        "已发放offer": [{"label": "已签约", "to": "待入职", "outcome": "已签约"},
+                        {"label": "拒签", "to": "已发放offer", "outcome": "拒签"},
+                        {"label": "毁约", "to": "已发放offer", "outcome": "毁约"}],
+        "待入职": [],
     },
     "colors": {
         "新投递": "#8a94a6", "初筛通过": "#3370ff", "待面试": "#7b61ff",
-        "已面试": "#0f8a6a", "已发放offer": "#d97706", "已结束": "#86909c",
+        "已面试": "#0f8a6a", "已发放offer": "#d97706", "待入职": "#16a34a",
+        "已结束": "#86909c",
     },
     "default_stage": "新投递",
     "thresholds": {"pass": 60, "hold": 45},
@@ -155,10 +160,35 @@ def load_cfg(force: bool = False) -> dict:
             print(f"[stages] 回写 stages.json 失败（不影响本次运行）：{exc}")
     if not cfg.get("order"):
         cfg["order"] = list(_FALLBACK["order"])
+    # 老配置（还没有「待入职」）自动升级：保留历史「已结束」兼容态，
+    # 但新流程的目标阶段改为「待入职」；旧动作也换成“拒签/毁约留在 offer”。
+    if "待入职" not in cfg["order"]:
+        _old_order = list(cfg["order"])
+        _new_order = [s for s in _old_order if s != "已结束"]
+        if "待入职" not in _new_order:
+            _new_order.append("待入职")
+        _new_order.append("已结束")
+        cfg["order"] = _new_order
+        _pipe = [s for s in (cfg.get("pipeline") or []) if s != "已结束"]
+        if "待入职" not in _pipe:
+            _pipe.append("待入职")
+        cfg["pipeline"] = _pipe
+        cfg["terminal"] = ["已结束"]
+        cfg["legacy"] = ["已结束"]
+        _acts = dict(cfg.get("actions") or {})
+        for _k in ("待面试", "已面试", "已发放offer"):
+            _acts[_k] = _FALLBACK["actions"][_k]
+        cfg["actions"] = _acts
+        _colors = dict(cfg.get("colors") or {})
+        _colors.setdefault("待入职", _FALLBACK["colors"]["待入职"])
+        cfg["colors"] = _colors
+        self_healed = True
     if not cfg.get("pipeline"):
         cfg["pipeline"] = [s for s in cfg["order"] if s not in (cfg.get("terminal") or [])]
     if not cfg.get("terminal"):
         cfg["terminal"] = ["已结束"]
+    if not cfg.get("legacy"):
+        cfg["legacy"] = ["已结束"]
     _cached = cfg
     return _cached
 

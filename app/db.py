@@ -3590,9 +3590,9 @@ def set_application_stage(conn: sqlite3.Connection, aid: int, stage: str,
     # 转成 sign_status，**不再覆盖面试结论**（outcome 留拟录用/不录用）。
     _legacy_sign = oc in ("已签约", "拒签", "毁约")
     if _legacy_sign:
-        if st not in ("已发放offer", "已结束"):
-            raise ValueError("「已签约 / 拒签 / 毁约」只能在「已发放offer」"
-                             "或「已结束」阶段登记")
+        if st not in ("已发放offer", "待入职", "已结束"):
+            raise ValueError("「已签约 / 拒签 / 毁约」只能在「已发放offer」、"
+                             "「待入职」或「已结束」阶段登记")
         ss = oc
         oc = None
     if ss and ss not in SIGN_STATUSES:

@@ -111,7 +111,14 @@ def _tls_connect(host: str, port: int, use_ssl: bool, timeout: int = 30):
     return s
 
 
-def connect_smtp(conf: dict, password: str, timeout: int = 30):
+#: 登录阶段被服务器直接断开。QQ 邮箱在授权码错误时经常不回 535，而是直接
+#: 关闭连接；必须和"端口/网络不通"区分开，否则 HR 会一直去改端口。
+class SMTPLoginDisconnected(smtplib.SMTPServerDisconnected):
+    pass
+
+
+def connect_smtp(conf: dict, password: str, timeout: int = 30,
+                 tried_out: list | None = None):
     """连上并登录，返回 (连接, 实际使用的 {host, port, ssl} 及是否自动纠正)。
 
     **为什么要"自动识别"**：`[SSL: WRONG_VERSION_NUMBER]` 这个错误专门表示
@@ -123,6 +130,9 @@ def connect_smtp(conf: dict, password: str, timeout: int = 30):
     所以这里按**从最标准到次标准**的顺序试，成功后回传实际用的组合，
     让上层能明确告诉 HR「已自动改用 587 + STARTTLS，建议保存」。
     安全底线不变：**只有 STARTTLS 成功后才登录**，绝不发明文凭据。
+
+    `tried_out`：调用方传入的空列表。失败时把实际试过的组合留在里面，
+    否则错误提示只能显示“已试过：—”（原实现的真实 bug）。
     """
     host, port = conf["host"], int(conf["port"])
     want_ssl = bool(conf["ssl"])
@@ -132,7 +142,8 @@ def connect_smtp(conf: dict, password: str, timeout: int = 30):
     if alt:
         candidates.append((host, alt, alt == 465))           # 3) 标准备选端口
 
-    tried, last_exc = [], None
+    tried = tried_out if tried_out is not None else []
+    last_exc = None
     for h, p, use_ssl in candidates:
         mode = "SSL" if use_ssl else "STARTTLS"
         if (h, p, use_ssl) in tried:
@@ -142,14 +153,16 @@ def connect_smtp(conf: dict, password: str, timeout: int = 30):
             s = _tls_connect(h, p, use_ssl, timeout=timeout)
             try:
                 s.login(conf["user"], password)
-            except Exception:
+            except Exception as exc:
                 s.close()
+                if isinstance(exc, smtplib.SMTPServerDisconnected):
+                    raise SMTPLoginDisconnected(str(exc)) from exc
                 raise
             used = {"host": h, "port": p, "ssl": use_ssl, "mode": mode}
             corrected = (p != port) or (use_ssl != want_ssl)
             return s, used, corrected, tried
-        except smtplib.SMTPAuthenticationError:
-            raise                                            # 认证错不再试别的组合
+        except (smtplib.SMTPAuthenticationError, SMTPLoginDisconnected):
+            raise                                            # 凭据问题，不再试端口
         except Exception as exc:                              # noqa: BLE001
             last_exc = exc
             continue
@@ -162,6 +175,14 @@ def _explain_conn_error(exc: Exception, conf: dict, tried: list) -> dict:
     txt = str(exc)
     tried_txt = "、".join("%s:%d %s" % (h, p, "SSL" if u else "STARTTLS")
                          for h, p, u in tried) if tried else "—"
+    if isinstance(exc, SMTPLoginDisconnected):
+        return {"ok": False,
+                "error": "发信服务器已连上，但登录阶段被断开；最常见原因是"
+                         "保存的不是邮箱授权码（QQ 邮箱授权码通常 16 位，"
+                         "不是登录密码），或该账号未开启 SMTP 服务。",
+                "hint": "请到邮箱「设置 → 账号 → POP3/SMTP/IMAP」重新生成授权码，"
+                        "把完整的 16 位授权码填到「发信配置 → 授权码」并保存；"
+                        "账号要填完整邮箱地址。已试过：" + tried_txt + "。"}
     if "WRONG_VERSION_NUMBER" in txt or "UNEXPECTED_EOF" in txt:
         return {"ok": False,
                 "error": f"发信的**端口与加密方式不匹配**：按 "
@@ -322,7 +343,8 @@ def send_mail(to: str, subject: str, body: str,
     tried: list = []
     used: dict = {}
     try:
-        s, used, corrected, tried = connect_smtp(conf, pwd, timeout=30)
+        s, used, corrected, tried = connect_smtp(conf, pwd, timeout=30,
+                                                 tried_out=tried)
     except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
         return _explain_conn_error(exc, conf, tried)
     try:
@@ -401,7 +423,8 @@ def check_smtp(cfg: dict | None = None, password: str | None = None) -> dict:
     s = None
     tried: list = []
     try:
-        s, used, corrected, tried = connect_smtp(conf, pwd, timeout=20)
+        s, used, corrected, tried = connect_smtp(conf, pwd, timeout=20,
+                                                 tried_out=tried)
     except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
         return _explain_conn_error(exc, conf, tried)
     finally:

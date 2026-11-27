@@ -66,6 +66,13 @@ def write_sheet(rows: list[list], headers: list[str], *,
     tcols = text_cols or set()
     for r in rows:
         ws.append([("" if v is None else v) for v in r])
+        # Excel 公式注入：openpyxl 会把以 "=" 开头的字符串写成 <f> 公式。
+        # 候选人姓名/备注来自简历，属于不可信输入；强制回文本类型，
+        # 显示内容不变，但 Excel 不再执行。
+        for cell in ws[ws.max_row]:
+            if isinstance(cell.value, str) and cell.value.startswith(
+                    ("=", "+", "-", "@", "\t", "\r")):
+                cell.data_type = "s"
 
     # 文本格式：必须在**写完值之后**设，且序号从 1 开始（openpyxl 是 1 基）
     for idx in tcols:
@@ -107,14 +114,24 @@ def csv_bytes(rows: list[list], headers: list[str]) -> bytes:
 
     同样带 BOM：没有 BOM 的话 Excel 会按本地编码猜，中文变乱码。
     ⚠️ CSV **无法**解决科学计数法与列宽问题 —— 那正是 xlsx 存在的理由。
+
+    CSV 打开时 Excel 会把 `=`/`+`/`-`/`@` 开头的单元格当公式执行；
+    这些值来自简历（不可信），统一加一个前导单引号按文本处理。
     """
     import csv
     out = io.StringIO()
     w = csv.writer(out, lineterminator="\r\n")
     w.writerow(headers)
     for r in rows:
-        w.writerow(["" if v is None else v for v in r])
+        w.writerow([_csv_text(v) for v in r])
     return ("﻿" + out.getvalue()).encode("utf-8")
+
+
+def _csv_text(v):
+    """CSV 单元格消毒：不可信文本以公式前缀开头时强制按文本处理。"""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return "" if v is None else v
 
 
 def meta_line(scope: str, filters: str, n: int) -> str:

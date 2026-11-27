@@ -198,6 +198,24 @@ _SQL_FORBIDDEN = re.compile(
     r"\b(?:insert|update|delete|replace|drop|alter|create|attach|detach|pragma|"
     r"vacuum|reindex|analyze|load_extension|readfile|writefile|explain)\b", re.I)
 
+#: SQLite 层白名单：视图 + 视图底层用到的业务表。比正则解析更可靠——
+#: `select * from v_candidates, users` 这类逗号连接、CTE、子查询都绕不过它。
+_SQL_ALLOWED_TABLES = set(SQL_VIEWS) | {
+    "candidates", "applications", "documents", "email_messages", "jobs",
+}
+
+
+def _sql_read_authorizer(action, arg1, arg2, dbname, trigger):
+    """只读 SQL 的第二道闸：非业务表白名单一律拒绝读取。"""
+    if action in (sqlite3.SQLITE_PRAGMA, sqlite3.SQLITE_ATTACH,
+                  sqlite3.SQLITE_DETACH):
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_READ:
+        name = str(arg1 or "").lower()
+        if name not in _SQL_ALLOWED_TABLES:
+            return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
 
 def _safe_sql(sql: str) -> str:
     """只读 SQL 的最低成本护栏。
@@ -2567,6 +2585,8 @@ def execute(name: str, args: dict, ctx: ToolCtx, progress=None) -> str:
             try:
                 _ro.row_factory = sqlite3.Row
                 _ro.execute("PRAGMA query_only = ON")
+                # 必须在 PRAGMA 之后设置：authorizer 会连 PRAGMA 一起拒绝。
+                _ro.set_authorizer(_sql_read_authorizer)
                 _deadline = time.time() + 5
                 _ro.set_progress_handler(
                     lambda: 1 if time.time() > _deadline else 0, 10000)

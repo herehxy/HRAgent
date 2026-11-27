@@ -1662,12 +1662,10 @@ def run_agent(user_message: str, ctx: ToolCtx, history: list[dict] | None = None
                          thinking=_thinking_text())
     except Exception as exc:
         # 模型不可用 → 规则路由兜底（不是罢工）
-        st = llm.status()
-        # 优先用**本次请求**的错误详情（含服务端 body）；status 只是补充。
-        # 只看 status 时，配置刚改好但进程内缓存/瞬时错误会掩盖真实原因。
-        reason = (llm.error_detail(exc)
-                  or st.get("error")
-                  or f"{type(exc).__name__}: {exc}")
+        # 聊天正文只放人话原因；原始报错（含服务端 body）留在系统设置页诊断，
+        # 同时写进运行指标，后续复盘时能看到模型到底报了什么。
+        ctx.metrics["model_error_detail"] = llm.error_detail(exc)
+        reason = llm.friendly_error(exc)
         ctx.metrics["stop_reason"] = "rule"
         answer = _rule_answer(user_message, ctx, reason=reason, trace=trace)
         if emit and _stream_answer:
@@ -2314,6 +2312,8 @@ def _finalize(ctx: ToolCtx, question: str, answer: str, trace: list[dict], mode:
         "context_trimmed_max": _trimmed_max,
         "governance": _gov,
         "rounds_detail": list(_metrics.get("rounds_detail") or []),
+        # 模型降级时的原始报错：只进运行指标，不进聊天正文。
+        "model_error_detail": str(_metrics.get("model_error_detail") or ""),
     }
 
     # 有真实 usage 时，用 prompt_tokens 校准上下文总量；分项按比例缩放。
@@ -2556,13 +2556,13 @@ def _rule_answer(question: str, ctx: ToolCtx, reason: str = "",
     q = question or ""
     lower = q.lower()
     lines: list[str] = []
-    header = "【规则模式】模型未就绪，已改用确定性规则应答（数据仍来自真实库）。"
+    header = "【规则应答】模型暂时不可用，本次由本地规则直接回答，数据同样来自真实库。"
     if reason:
         header += f"\n原因：{reason}"
     lines.append(header)
     if reason:
-        lines.append("启用模型后可用自然语言追问、生成面试提纲与深度分析。"
-                     "配置方式见 config/model.json（Ollama / 内网 vLLM / DeepSeek 均可）。")
+        lines.append("模型恢复后会自动切回自然语言对话。"
+                     "可在「系统设置 → 模型与密钥」里检查模型地址、模型名和密钥。")
 
     def call(name: str, args: dict) -> dict:
         raw = ""

@@ -18,7 +18,7 @@ from unittest.mock import patch
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
-from app import db, ingest, mailbox as mb  # noqa: E402
+from app import db, ingest, mailbox as mb, stages  # noqa: E402
 from app.agent import loop, router, skills, tools  # noqa: E402
 
 
@@ -393,6 +393,73 @@ class MailBodyProfileTest(unittest.TestCase):
         self.assertEqual(rep["no_attachment"], 1)
         self.assertEqual(rep["from_mail_body"], 0)
         self.assertEqual(rows, [])
+
+
+class StageModelTest(unittest.TestCase):
+    def test_signed_offer_moves_to_onboarding(self):
+        tmp = tempfile.mkdtemp(prefix="stage-onboard-")
+        conn = db.connect(os.path.join(tmp, "t.db"))
+        try:
+            cid = db.insert_candidate(conn, {"identity_key": "stage-1", "name": "张三"})
+            aid = db.insert_application(conn, {"candidate_id": cid,
+                                               "stage": "已发放offer"})
+            r = db.set_application_stage(conn, aid, "待入职", outcome="已签约")
+            self.assertEqual(r["stage"], "待入职")
+            self.assertEqual(r["sign_status"], "已签约")
+        finally:
+            conn.close()
+
+    def test_negative_offer_outcome_stays_at_offer(self):
+        acts = stages.actions_of("已发放offer")
+        targets = {(a.get("outcome"), a.get("to")) for a in acts}
+        self.assertIn(("拒签", "已发放offer"), targets)
+        self.assertIn(("毁约", "已发放offer"), targets)
+        self.assertIn(("已签约", "待入职"), targets)
+
+    def test_interview_rejection_stays_at_interview(self):
+        self.assertEqual(stages.auto_advance_stage("待面试", "待面试", "不录用"),
+                         "已面试")
+        targets = {(a.get("outcome"), a.get("to"))
+                   for a in stages.actions_of("已面试")}
+        self.assertIn(("不录用", "已面试"), targets)
+
+
+class ModelErrorTextTest(unittest.TestCase):
+    """模型不可用时，聊天正文只出现人话；原始 body 留给系统设置诊断。"""
+
+    def _http_error(self, code: int, body: str):
+        import urllib.error
+        exc = urllib.error.HTTPError("https://model.example/v1/chat", code,
+                                     "Unauthorized", {}, None)
+        exc._hr_body = body
+        return exc
+
+    def test_auth_error_is_readable_and_not_raw(self):
+        from app.agent import llm
+        exc = self._http_error(401, '{"error": {"message": "Invalid API Key"}}')
+        text = llm.friendly_error(exc)
+        self.assertIn("401", text)
+        self.assertIn("密钥", text)
+        self.assertNotIn("Invalid API Key", text)
+        self.assertNotIn("{", text)
+        # 诊断信息仍然保留原始 body，便于系统设置页定位
+        self.assertIn("Invalid API Key", llm.error_detail(exc))
+
+    def test_network_and_empty_answer_are_readable(self):
+        import urllib.error
+        from app.agent import llm
+        self.assertIn("连不上", llm.friendly_error(
+            urllib.error.URLError("Connection refused")))
+        self.assertIn("没有返回内容", llm.friendly_error(
+            ValueError("模型返回了空答复")))
+
+    def test_rule_answer_header_has_no_raw_error_body(self):
+        reason = "模型服务拒绝访问（401）：密钥无效或没有调用权限"
+        text = loop._rule_answer("人才库有多少人？", None, reason=reason)
+        self.assertIn("【规则应答】", text)
+        self.assertIn(reason, text)
+        self.assertNotIn("Invalid API Key", text)
+        self.assertNotIn("config/model.json", text)
 
 
 if __name__ == "__main__":

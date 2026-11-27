@@ -345,7 +345,19 @@ def semantic(conn, query: str, top_k: int = 10, cfg: dict | None = None) -> dict
     qvec, qmodel, err = embed_one(query, cfg)
     # 模型对不上就退回哈希向量——宁可精度低，也不能拿 A 的查询向量比B 的库向量。
     if qmodel != model or len(qvec) != len(next(iter(vectors.values()))):
-        qvec = hash_embed(query)
+        # 典型场景：真 embedding 服务挂了，查询退化为 local-hash-v1，但库里
+        # 仍只有真模型索引。此时若维持原索引，384 维查询 vs 1024 维索引全部
+        # 相似度 -1，界面只会看到“0 条结果”，比降级本身更糟。
+        # 只要库里有哈希索引，就整轮切到哈希索引；没有则明确说明原因。
+        hvecs, hmodel = _load_vectors(conn, prefer=_HASH_MODEL)
+        if hvecs and hmodel == _HASH_MODEL:
+            vectors, model = hvecs, hmodel
+            if qmodel != _HASH_MODEL:
+                qvec = hash_embed(query)
+        else:
+            return {"model": model, "results": [],
+                    "error": ((err + "；") if err else "")
+                             + "本地未建哈希索引，暂时无法做语义检索"}
     scored = [(cid, _cosine(qvec, vec)) for cid, vec in vectors.items()]
     scored = [s for s in scored if s[1] >= 0]
     scored.sort(key=lambda t: -t[1])
@@ -375,7 +387,13 @@ def similar_to(conn, cid: int, top_k: int = 5, cfg: dict | None = None) -> dict:
     cfg = cfg or load_cfg()
     vectors, model = _load_vectors(conn, prefer=cfg.get("model", ""))
     if cid not in vectors:
-        return {"model": model, "results": [], "note": f"#{cid} 尚未建立索引"}
+        # 真模型索引只覆盖部分人（新增/变更的人还没重跑），但哈希索引通常全量。
+        # 对没进真模型索引的人退回哈希索引，别让「相似候选人」整块空着。
+        hvecs, hmodel = _load_vectors(conn, prefer=_HASH_MODEL)
+        if cid in hvecs:
+            vectors, model = hvecs, hmodel
+        else:
+            return {"model": model, "results": [], "note": f"#{cid} 尚未建立索引"}
     base = vectors[cid]
     scored = [(oid, _cosine(base, v)) for oid, v in vectors.items() if oid != cid]
     scored.sort(key=lambda t: -t[1])

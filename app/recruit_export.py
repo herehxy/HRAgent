@@ -40,7 +40,7 @@ _LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True)
 def _safe_write(ws, row: int, col: int, value):
     """写值；以 = + - @ 开头的文本强制按字符串写，防 Excel 公式注入。"""
     c = ws.cell(row=row, column=col)
-    if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
         c.value = value
         c.data_type = "s"
     else:

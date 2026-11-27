@@ -339,16 +339,20 @@ def get_ui_asset(name: str):
 
 def render_page_v2(auth_enabled: bool = False) -> str:
     """渲染 v2 预览页（注入阶段/档位配置，与旧版同一份真源）。"""
+    _stage_cfg = stages_mod.load_cfg()
     stages_json = json.dumps({
         "order": stages_mod.all_stages(),
+        "pipeline": (_stage_cfg.get("pipeline") or []),
+        "terminal": (_stage_cfg.get("terminal") or []),
+        "legacy": (_stage_cfg.get("legacy") or []),
         "default_stage": stages_mod.DEFAULT_STAGE,
         "colors": {s: stages_mod.stage_color(s) for s in stages_mod.all_stages()},
         # v2.19：结论标签是**按阶段限定**的（待面试/已面试→拟录用·不录用，已发放offer→已签约·拒签），
         # 而「拟录用/不录用/已签约」这些结论在原版里是**阶段动作**的一部分。
         # 不注入 actions/outcomes，界面就只能给出一个固定的、未判/拟录用/不录用 下拉 ——
         # 那正是"改了不生效"的根因：服务端按阶段校验值域，前端给的选项压根不合法。
-        "outcomes": (stages_mod.load_cfg().get("outcomes") or {}),
-        "actions": (stages_mod.load_cfg().get("actions") or {}),
+        "outcomes": (_stage_cfg.get("outcomes") or {}),
+        "actions": (_stage_cfg.get("actions") or {}),
     }, ensure_ascii=False)
     tiers_json = json.dumps({
         "order": tiers_mod.all_tiers(),
